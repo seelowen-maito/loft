@@ -91,7 +91,7 @@ struct LoftMacApp: App {
         .defaultSize(width: 1400, height: 860)
         .commands { LoftCommands(nav: nav) }
 
-        MenuBarExtra { MenuBarContent(voicePanel: voicePanel).tint(Theme.accent).environment(store).environment(nav) } label: { MenuBarLabel(alerts: alerts, quickSearch: quickSearch).environment(store) }
+        MenuBarExtra { MenuBarContent(voicePanel: voicePanel).tint(Theme.accent).environment(store).environment(nav) } label: { MenuBarLabel(alerts: alerts, quickSearch: quickSearch, voicePanel: voicePanel).environment(store) }
             .menuBarExtraStyle(.window)
 
         Settings {
@@ -138,6 +138,8 @@ final class MacNav {
     var section: MacSection = .agents
     var agentId: String?
     var picksRecipient = false
+    /// Text from the voice panel's Edit in chat, for that agent's message box.
+    var voiceDraft: (agentId: String, text: String)?
     /// The issue pages open in the Issues section, from the board's card on.
     var issuePath: [String] = []
 

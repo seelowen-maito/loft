@@ -9,6 +9,7 @@ struct MenuBarLabel: View {
     @Environment(\.openWindow) private var openWindow
     var alerts: MacAlerts?
     var quickSearch: QuickSearchController?
+    var voicePanel: VoicePanelController?
 
     var body: some View {
         let count = MenuBarSummary(store).needsCount
@@ -19,6 +20,7 @@ struct MenuBarLabel: View {
         .onAppear {
             alerts?.showWindow = { openWindow(id: "main") }
             quickSearch?.showWindow = { openWindow(id: "main") }
+            voicePanel?.showWindow = { openWindow(id: "main") }
         }
     }
 }

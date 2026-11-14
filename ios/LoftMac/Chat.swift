@@ -117,6 +117,12 @@ struct ChatView: View {
                 }
             }
         }
+        .onChange(of: nav.voiceDraft?.text, initial: true) {
+            guard let d = nav.voiceDraft, d.agentId == agent.id else { return }
+            draft = d.text
+            draftByVoice = true
+            nav.voiceDraft = nil
+        }
         .task(id: askingMessage?.id) {
             guard let m = askingMessage, suggested?.messageId != m.id else { return }
             let replies = await OnDeviceFeatures.chatReplies(to: m.displayContent)

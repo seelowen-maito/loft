@@ -51,4 +51,11 @@ final class VoicePanelTests: XCTestCase {
         XCTAssertNil(VoicePanel.suggestion(guess: agents[1], current: "qa"))
         XCTAssertNil(VoicePanel.suggestion(guess: nil, current: "qa"))
     }
+
+    /// Send while listening goes straight out, unless the on-device model thinks someone else should get it.
+    func testSendWaitsOnlyForAnotherRecipient() {
+        XCTAssertTrue(VoicePanel.sendsAtOnce(guess: nil, current: "dev"))
+        XCTAssertTrue(VoicePanel.sendsAtOnce(guess: agents[0], current: "dev"))
+        XCTAssertFalse(VoicePanel.sendsAtOnce(guess: agents[1], current: "dev"))
+    }
 }

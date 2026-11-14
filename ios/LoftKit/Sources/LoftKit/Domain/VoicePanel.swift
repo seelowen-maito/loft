@@ -1,6 +1,6 @@
 import Foundation
 
-/// The Mac's floating voice panel (spec #456): what it shows as the shared voice session moves on, who it sends to,
+/// The Mac's voice UI, the floating voice panel (spec #456) and the Talk sheet: what it shows as the shared voice session moves on, who it sends to,
 /// and when to offer "Send to …?". Kept pure so its steps can be tested without a microphone.
 public enum VoicePanel {
     public enum Step: Equatable {
@@ -35,6 +35,12 @@ public enum VoicePanel {
         let ids = Set(agents.map(\.id))
         return [openChat, last, orchestratorId].compactMap { $0 }.first(where: ids.contains)
             ?? agents.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }.first?.id
+    }
+
+    /// Send while listening: once tidied, the text goes out at once, unless the on-device model points at another
+    /// agent; then the panel waits on Ready, with "Send to …?", for you to pick.
+    public static func sendsAtOnce(guess: Agent?, current: String?) -> Bool {
+        suggestion(guess: guess, current: current) == nil
     }
 
     /// "Send to …?" for the on-device guess, unless it's already the recipient.

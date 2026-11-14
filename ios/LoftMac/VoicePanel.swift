@@ -9,7 +9,7 @@ private final class VoicePanelWindow: NSPanel {
     var onKey: ((NSEvent) -> Bool)?
 
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 460, height: 300), styleMask: [.borderless, .nonactivatingPanel],
+        super.init(contentRect: NSRect(origin: .zero, size: VoicePanelView.size), styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: true)
         isFloatingPanel = true
         level = .floating
@@ -29,38 +29,37 @@ private final class VoicePanelWindow: NSPanel {
     }
 }
 
-/// The floating voice panel (spec #456): ⇧⌥Space or the menu bar opens it over any app and it starts listening. Done
-/// has Loft tidy the text up, the on-device model may offer "Send to …?", and Send delivers it. Esc or × stops and
-/// sends nothing. It drives the app's one `VoiceSession`, as the Talk sheet does.
+/// The floating voice panel (spec #456): ⇧⌥Space or the menu bar opens it over any app and it starts listening. It
+/// shows the same `VoiceCard` as the chat's Talk sheet: Send (↵) has Loft tidy the text up and sends it, Edit in chat
+/// opens it in the agent's chat, and Cancel (esc) stops and sends nothing.
 @MainActor
-@Observable
 final class VoicePanelController {
-    let voice: VoiceSession
-    @ObservationIgnored private let store: LoftStore
-    @ObservationIgnored private let nav: MacNav
-    /// This opening has started listening (see `VoicePanel.step`).
-    var listened = false
-    /// "Send to …?" from the on-device model, once the text is tidied.
-    var suggested: Agent?
+    let flow: VoiceFlow
+    private let store: LoftStore
+    private let nav: MacNav
+    /// Opens or raises the main window, for Edit in chat; set by the menu bar item, which is there for the app's whole life.
+    var showWindow: (() -> Void)?
     /// Off while drawing screenshots, so Sent stays on screen.
-    @ObservationIgnored var closesWhenSent = true
-    @ObservationIgnored private var panel: VoicePanelWindow?
-    @ObservationIgnored private var binding: ShortcutBinding!
+    var closesWhenSent = true
+    private var panel: VoicePanelWindow?
+    private var binding: ShortcutBinding!
 
     init(store: LoftStore, nav: MacNav, voice: VoiceSession) {
         self.store = store
         self.nav = nav
-        self.voice = voice
+        flow = VoiceFlow(voice: voice, store: store, listensAgain: false)
         binding = ShortcutBinding(.voicePanel) { [weak self] in self?.toggle() }
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-render-voice-panel"), i + 2 < args.count {
             Task { await renderVoicePanel(self, store: store, fixture: args[i + 1], to: args[i + 2]) }
         }
+        if let i = args.firstIndex(of: "-render-talk-sheet"), i + 2 < args.count {
+            Task { await renderTalkSheet(store: store, voice: voice, fixture: args[i + 1], to: args[i + 2]) }
+        }
         #endif
     }
 
-    var step: VoicePanel.Step { VoicePanel.step(phase: voice.phase, needsPermission: voice.failureNeedsPermission, listened: listened) }
     var shortcutLabel: String? { binding.current?.label }
 
     func toggle() {
@@ -80,46 +79,26 @@ final class VoicePanelController {
 
     /// A fresh dictation to the open chat's agent, or the last one's.
     func listen() {
-        // One microphone: whatever the session was doing (a Talk, an old reply being read) stops.
-        if voice.phase != .idle { voice.discard() }
-        voice.listensAgain = false
-        listened = false
-        suggested = nil
         let to = VoicePanel.recipient(openChat: nav.section == .agents ? nav.agentId : nil,
                                       last: UserDefaults.standard.string(forKey: "voiceLastAgent"),
                                       agents: store.agents, orchestratorId: store.orchestratorId)
         guard let to else { return }
-        Task {
-            await voice.start(agentId: to)
-            if voice.phase == .listening { listened = true }
-        }
+        Task { await flow.start(agentId: to) }
     }
 
-    /// Esc or ×: stops listening and sends nothing. After a send the session goes on reading the reply.
+    /// Cancel or esc: stops listening and sends nothing. After a send the session goes on reading the reply.
     func close() {
         panel?.orderOut(nil)
-        if TalkHandOff.discardsOnClose(voice.phase) { voice.discard() }
-        listened = false
+        flow.cancel()
     }
 
-    func done() {
-        guard step == .listening, !voice.raw.isEmpty else { return }
-        Task {
-            await voice.finish(.review)
-            await suggest()
-        }
-    }
-
-    func send() {
-        guard step == .ready else { return }
-        Task {
-            await voice.send(voice.cleaned ?? voice.raw)
-        }
-    }
-
-    func pick(_ agentId: String) {
-        voice.switchAgent(agentId)
-        if suggested?.id == agentId { suggested = nil }
+    /// Edit in chat: the main window opens on the agent's chat with the text in its message box.
+    func toChat(_ agentId: String, _ text: String) {
+        panel?.orderOut(nil)
+        nav.openChat(agentId)
+        nav.voiceDraft = (agentId, text)
+        showWindow?()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// The step moved on: Sent shows for a moment, then the panel gets out of the way.
@@ -127,18 +106,8 @@ final class VoicePanelController {
         guard step == .sent, closesWhenSent else { return }
         Task {
             try? await Task.sleep(for: .seconds(1.5))
-            if self.step == .sent { panel?.orderOut(nil) }
+            if flow.step == .sent { panel?.orderOut(nil) }
         }
-    }
-
-    private func suggest() async {
-        guard step == .ready else { return }
-        #if canImport(FoundationModels)
-        if #available(macOS 26.0, *) {
-            let guess = await OnDeviceFeatures.routeGuess(for: voice.cleaned ?? voice.raw, agents: store.agents, orchestratorId: store.orchestratorId)
-            if step == .ready { suggested = VoicePanel.suggestion(guess: guess, current: voice.agentId) }
-        }
-        #endif
     }
 
     private func makePanel() -> VoicePanelWindow {
@@ -149,11 +118,12 @@ final class VoicePanelController {
         return p
     }
 
-    /// ↵ finishes, then sends; esc closes.
+    /// ↵ sends, esc cancels: Loft stays in the background, so the panel takes these keys itself.
     private func handle(_ e: NSEvent) -> Bool {
         switch Int(e.keyCode) {
         case kVK_Return, kVK_ANSI_KeypadEnter:
-            if step == .listening { done() } else if step == .ready { send() } else { return false }
+            guard flow.canSend else { return false }
+            Task { await flow.send() }
         case kVK_Escape: close()
         default: return false
         }
@@ -161,162 +131,20 @@ final class VoicePanelController {
     }
 }
 
+/// The panel's card: the shared `VoiceCard` on the web's page colour, floating with a shadow.
 struct VoicePanelView: View {
-    @Environment(LoftStore.self) private var store
+    static let size = CGSize(width: 520, height: 400)
     let controller: VoicePanelController
-    private var voice: VoiceSession { controller.voice }
 
     var body: some View {
-        let step = controller.step
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: Self.symbol(step)).foregroundStyle(Self.tint(step)).accessibilityHidden(true)
-                Text(step == .sent ? "Sent to \(store.agent(voice.agentId)?.name ?? "the agent")" : Self.title(step)).font(.headline).accessibilityIdentifier("voicePanelState")
-                Spacer()
-                Button { controller.close() } label: { Image(systemName: "xmark").padding(4).contentShape(Rectangle()) }
-                    .buttonStyle(.plain).foregroundStyle(WebTheme.fg3)
-                    .help("Close (esc): nothing is sent")
-                    .accessibilityLabel("Close")
-                    .accessibilityIdentifier("voicePanelClose")
-            }
-            toRow(step)
-            content(step).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            footer(step)
-        }
-        .padding(16)
-        .background(WebTheme.canvas, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(WebTheme.fg3.opacity(0.25)))
-        .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
-        .padding(20)
-        .frame(width: 460, height: 300)
-        .onChange(of: step) { _, s in controller.stepChanged(s) }
-    }
-
-    // MARK: To: row and "Send to …?"
-
-    @ViewBuilder
-    private func toRow(_ step: VoicePanel.Step) -> some View {
-        let current = voice.agentId
-        HStack(spacing: 8) {
-            Text("To").foregroundStyle(WebTheme.fg3)
-            Picker("To", selection: Binding(get: { current }, set: { if let id = $0 { controller.pick(id) } })) {
-                ForEach(store.sortedAgents) { Text($0.name).tag(Optional($0.id)) }
-            }
-            .labelsHidden()
-            .fixedSize()
-            .disabled(step == .sent || step == .tidying)
-            .accessibilityIdentifier("voicePanelRecipient")
-            if let s = controller.suggested, step == .ready {
-                Button { controller.pick(s.id) } label: { Label("Send to \(s.name)?", systemImage: "arrow.turn.up.right") }
-                    .buttonStyle(.plain).foregroundStyle(Theme.accent)
-                    .accessibilityIdentifier("voicePanelSuggestion")
-            }
-        }
-    }
-
-    // MARK: The step's content
-
-    @ViewBuilder
-    private func content(_ step: VoicePanel.Step) -> some View {
-        switch step {
-        case .starting:
-            Text("Getting ready…").foregroundStyle(WebTheme.fg3)
-        case .listening:
-            VStack(alignment: .leading, spacing: 10) {
-                transcript
-                Spacer(minLength: 0)
-                TalkBars(level: voice.level, active: voice.phase == .listening).frame(maxWidth: .infinity)
-            }
-        case .tidying:
-            VStack(alignment: .leading, spacing: 10) {
-                Text(voice.raw).foregroundStyle(WebTheme.fg3).lineLimit(5).truncationMode(.head)
-                ProgressView().controlSize(.small)
-            }
-        case .ready, .sent:
-            ScrollView {
-                Text(voice.cleaned ?? voice.raw).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-            }
-            .accessibilityIdentifier("voicePanelText")
-        case .error(let reason, _):
-            Text(reason).foregroundStyle(WebTheme.fg2).accessibilityIdentifier("voicePanelError")
-        }
-    }
-
-    private var transcript: some View {
-        Group {
-            if voice.committed.isEmpty && voice.live.isEmpty {
-                Text("Start talking…").foregroundStyle(WebTheme.fg3)
-            } else {
-                Text(voice.committed) + Text(voice.committed.isEmpty || voice.live.isEmpty ? "" : " ") + Text(voice.live).foregroundStyle(Theme.accent)
-            }
-        }
-        .font(.title3.weight(.medium))
-        .lineLimit(3)
-        .truncationMode(.head)
-        .fixedSize(horizontal: false, vertical: true)
-        .accessibilityIdentifier("voicePanelTranscript")
-    }
-
-    // MARK: Buttons
-
-    @ViewBuilder
-    private func footer(_ step: VoicePanel.Step) -> some View {
-        HStack {
-            switch step {
-            case .listening:
-                Text("Listening · \(Int(voice.elapsed))s").font(.caption.monospacedDigit()).foregroundStyle(WebTheme.fg3)
-                Spacer()
-                Button("Done") { controller.done() }.buttonStyle(.accent).disabled(voice.raw.isEmpty)
-                    .accessibilityIdentifier("voicePanelDone")
-            case .ready:
-                Text("↵ Send   esc Discard").font(.caption.monospaced()).foregroundStyle(WebTheme.fg3)
-                Spacer()
-                Button { controller.send() } label: { Label("Send", systemImage: "arrow.up.circle.fill") }.buttonStyle(.accent)
-                    .accessibilityIdentifier("voicePanelSend")
-            case .error(let reason, let needsPermission):
-                Spacer()
-                if needsPermission {
-                    Button("Open System Settings") { NSWorkspace.shared.open(TalkPermission.settingsURL(for: reason)) }
-                        .accessibilityIdentifier("voicePanelOpenSettings")
-                }
-                if voice.failedSend != nil {
-                    Button("Retry sending") { Task { await voice.retrySend() } }.buttonStyle(.accent)
-                } else {
-                    Button("Try again") { controller.listen() }.buttonStyle(.accent).accessibilityIdentifier("voicePanelRetry")
-                }
-            case .starting, .tidying, .sent:
-                Spacer()
-            }
-        }
-    }
-
-    private static func title(_ s: VoicePanel.Step) -> String {
-        switch s {
-        case .starting: "Getting ready"
-        case .listening: "Listening"
-        case .tidying: "Tidying up…"
-        case .ready: "Ready to send"
-        case .sent: "Sent"
-        case .error(_, let permission): permission ? "Loft can't use the microphone" : "Voice stopped"
-        }
-    }
-
-    private static func symbol(_ s: VoicePanel.Step) -> String {
-        switch s {
-        case .starting, .listening: "mic.fill"
-        case .tidying: "wand.and.stars"
-        case .ready: "text.bubble"
-        case .sent: "checkmark.circle.fill"
-        case .error: "mic.slash"
-        }
-    }
-
-    private static func tint(_ s: VoicePanel.Step) -> Color {
-        switch s {
-        case .error: WebTheme.bad
-        case .sent: WebTheme.good
-        default: Theme.accent
-        }
+        VoiceCard(flow: controller.flow, cancel: controller.close, toChat: controller.toChat)
+            .padding(20)
+            .background(WebTheme.canvas, in: RoundedRectangle(cornerRadius: WebTheme.panelRadius))
+            .overlay(RoundedRectangle(cornerRadius: WebTheme.panelRadius).strokeBorder(WebTheme.line))
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
+            .padding(20)
+            .frame(width: Self.size.width, height: Self.size.height)
+            .onChange(of: controller.flow.step) { _, s in controller.stepChanged(s) }
     }
 }
 
@@ -339,9 +167,9 @@ func renderVoicePanel(_ c: VoicePanelController, store: LoftStore, fixture: Stri
     for _ in 0..<80 where store.agents.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
     c.closesWhenSent = false
     c.show(listening: false)
-    c.voice.applyFixture(fixture, agentId: store.orchestratorId ?? store.agents.first?.id ?? "")
-    c.listened = true
-    if fixture == "review" { c.suggested = store.agents.first { $0.id != store.orchestratorId } }
+    c.flow.voice.applyFixture(fixture, agentId: store.orchestratorId ?? store.agents.first?.id ?? "")
+    c.flow.listened = true
+    if fixture == "review" { c.flow.suggested = store.agents.first { $0.id != store.orchestratorId } }
     try? await Task.sleep(for: .seconds(1.5))
     if let view = NSApp.windows.first(where: { $0 is NSPanel && $0.isVisible })?.contentView,
        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
