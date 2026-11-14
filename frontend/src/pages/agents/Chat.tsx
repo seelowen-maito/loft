@@ -1071,7 +1071,7 @@ function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => voi
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] text-fg">{l.prompt}</div>
         <div className="truncate font-mono text-[11px] text-fg-3">
-          Looping {fmtInterval(l.interval_minutes)} · next {timeAgo(l.next_at)}
+          Looping {fmtInterval(l.interval_minutes)} · {new Date(l.next_at).getTime() > Date.now() ? `next ${timeAgo(l.next_at)}` : agent.running ? "next: when this run ends" : "next: any moment"}
         </div>
       </div>
       <button className="btn shrink-0" onClick={stop} disabled={busy}>
