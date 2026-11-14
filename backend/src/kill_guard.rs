@@ -142,11 +142,11 @@ impl Dirs {
 
 /// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
 /// (see the module docs), each folder once. A folder the guard can't tell (`cd "$dir"`) lets the commands after it run.
-/// A command that may unset or change the ceiling, or point git at a repository (`GIT_DIR`, `--git-dir`), has none.
+/// A command that may unset or change the ceiling, or point git at a repository, has none (`may_move_ceiling`).
 pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<Change> {
     let mut found = vec![];
     let start = Some(cwd.to_path_buf());
-    let ceiling = if ["GIT_CEILING_DIRECTORIES", "GIT_DIR", "--git-dir"].iter().any(|w| command.contains(w)) {
+    let ceiling = if may_move_ceiling(command, 0) {
         vec![]
     } else {
         ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect()
@@ -179,8 +179,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             saved.push((s, dirs.clone()));
         }
         let all = &cmds[i].words;
-        let mut bypass = false;
-        let words = match unwrap(all, &mut bypass) {
+        let words = match unwrap(all, &mut false) {
             Run::Words(words) => words,
             Run::Text(text) => {
                 changes(&text, dirs, depth + 1, out);
@@ -230,8 +229,6 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 changes(&args.join(" "), dirs, depth + 1, out);
                 continue;
             }
-            // `sudo` and `env -i` drop the ceiling from git's environment.
-            "git" if bypass => git_changes(&Dirs { ceiling: vec![], ..dirs.clone() }, &vars, args),
             "git" => git_changes(dirs, &vars, args),
             "cargo" => match flags(args, &["--manifest-path"]) {
                 (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
@@ -277,6 +274,30 @@ fn flags<'a>(args: &'a [String], options: &[&str]) -> (Option<&'a str>, Option<&
         }
     }
     (value, sub)
+}
+
+/// Commands that can change or drop a variable of git's environment, or run git without it.
+const MOVES_CEILING: &[&str] = &[
+    "unset", "export", "declare", "typeset", "local", "readonly", "integer", "float", "read", "mapfile", "readarray", "printf",
+    "getopts", "vared", "let", "alias", "for", "select", "env", "exec", "sudo", "doas", "eval", "source", ".", "--git-dir",
+];
+
+/// Whether `text` may run git with GIT_CEILING_DIRECTORIES changed or dropped, or with another repository. Fails closed:
+/// any expansion (`$`, backticks, globs, braces, arithmetic), any command in `MOVES_CEILING`, any GIT_ word, or any of
+/// those in a word that is itself shell text (`sh -c '…'`, `watch '…'`, a heredoc), quotes removed at each level.
+fn may_move_ceiling(text: &str, depth: usize) -> bool {
+    if depth > MAX_DEPTH || text.contains(['$', '`']) || text.contains("((") {
+        return true;
+    }
+    parse(text).iter().any(|c| {
+        (!c.stdin.is_empty() && may_move_ceiling(&c.stdin, depth + 1))
+            || c.words.iter().any(|w| {
+                MOVES_CEILING.contains(&base(w))
+                    || w.contains("GIT_")
+                    || (w != "{" && w != "}" && w.contains(['*', '?', '[', '{']))
+                    || (w.contains(|ch: char| ch.is_whitespace() || ";&|<>()".contains(ch)) && may_move_ceiling(w, depth + 1))
+            })
+    })
 }
 
 /// The folders a git command changes, past its global options: its work tree (`--work-tree`, `GIT_WORK_TREE`) and
@@ -1697,6 +1718,32 @@ mod tests {
         // The ceiling unset or changed, or a repository named: git can reach the user's checkout, so the user is asked.
         for cmd in [
             "GIT_CEILING_DIRECTORIES= git checkout main",
+            // Wrappers and other shells that drop the ceiling before git runs.
+            "env -i bash -c 'git checkout main'",
+            "sudo sh -c 'git checkout main'",
+            "env -u GIT_CEILING_DIRECTORIES sh -c 'git stash'",
+            "exec -c git checkout main",
+            "env -i watch 'git checkout main'",
+            "env -i eval 'git checkout main'",
+            "env -i script -c 'git checkout main'",
+            "bash <<EOF\nunset GIT_CEILING_DIRECTORIES\ngit checkout main\nEOF",
+            "echo 'unset GIT_CEILING_DIRECTORIES; git checkout main' | sh",
+            // Names hidden by quoting, globs or expansion.
+            "unset GIT_CEILING_DIRECT\"\"ORIES; git checkout main",
+            "un''set GIT_CEILING_DIRECTORIES; git checkout main",
+            "unset -m 'GIT_CEIL*'; git checkout main",
+            "unset ${!GIT_CEIL*}; git checkout main",
+            "v=GIT_CEILING; unset ${v}_DIRECTORIES; git checkout main",
+            "export GIT_D\"\"IR=../../.git; git checkout main",
+            "G\"\"IT_DIR=../../.git git checkout main",
+            "read GIT_CEILING_DIRECT''ORIES <<< ''; git checkout main",
+            "for GIT_CEILING_DIRECTORIES in ''; do git checkout main; done",
+            "let GIT_CEILING_DIRECTORIES=0; git checkout main",
+            "x=GIT_CEILING_DIRECTORIES; (( x = 0 )); git checkout main",
+            "sh -c 'un\"\"set GIT_CEILING_DIRECTORIES; git checkout main'",
+            "trap 'unset GIT_CEILING_DIRECTORIES' DEBUG; git checkout main",
+            "alias git='env -i git'; git checkout main",
+            "source ./unceil.sh; git checkout main",
             "unset GIT_CEILING_DIRECTORIES; git checkout main",
             "export GIT_CEILING_DIRECTORIES=/tmp && git stash",
             "env -u GIT_CEILING_DIRECTORIES git checkout main",
