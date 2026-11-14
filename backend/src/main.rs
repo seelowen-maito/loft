@@ -20,6 +20,7 @@ mod guard;
 mod herdr;
 mod kill_guard;
 mod chat_commands;
+mod login;
 mod loops;
 mod schedules;
 mod mac_access;
@@ -77,6 +78,8 @@ fn api_routes() -> Router<AppState> {
         .route("/info", get(api::info))
         .route("/update", get(api::update_status))
         .route("/usage", get(api::usage))
+        .route("/claude/login", get(login::get))
+        .route("/claude/login/terminal", post(login::open_terminal))
         .route("/system", get(system::get))
         .route("/system/mac-access", post(mac_access::check))
         .route("/settings", get(api::get_settings).put(api::put_settings))

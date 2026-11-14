@@ -606,6 +606,9 @@ export type SettingsView = {
   running_agents: number;
 };
 
+/** Whether the claude CLI is logged in (`GET /claude/login`). */
+export type ClaudeLogin = { logged_in: boolean; account: string | null; plan: string | null; note: string | null; steps: string };
+
 /** Claude plan limits, as in Claude Code's /usage. percent is 0–100. */
 export type UsageWindow = { key: string; label: string; percent: number; resets_at: string | null };
 export type Usage = { windows: UsageWindow[]; error: string | null };
@@ -668,6 +671,8 @@ export const api = {
   usage: () => req<Usage>("GET", "/usage"),
   system: () => req<SystemReading>("GET", "/system"),
   /** Lists a fixed set of macOS-guarded folders; can show macOS's prompts on the Mac. */
+  claudeLogin: () => req<ClaudeLogin>("GET", "/claude/login"),
+  claudeLoginTerminal: () => req<{ ok: boolean }>("POST", "/claude/login/terminal"),
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */

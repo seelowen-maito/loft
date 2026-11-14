@@ -37,7 +37,7 @@ pub struct Command {
 }
 
 /// Loft's own: they run in Loft, not in the CLI, even where the CLI has one of the same name.
-const LOFT: [(&str, &str); 11] = [
+const LOFT: [(&str, &str); 12] = [
     ("clear", "Clear the conversation context and start fresh. Memory is kept."),
     ("compact", "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary."),
     ("resume", "Go back to one of this agent's past sessions."),
@@ -48,6 +48,7 @@ const LOFT: [(&str, &str); 11] = [
     ("effort", "Show or set how hard the model thinks: /effort high. Choices: low, medium, high, xhigh, max, default."),
     ("cost", "Show this agent's tokens and spend, and the week's spend across agents."),
     ("status", "Show usage like /cost, plus the plan limits."),
+    ("login", "Show whether Claude is logged in and how to log in."),
     ("grill", "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it."),
 ];
 
@@ -251,7 +252,7 @@ mod tests {
         let tags: Vec<_> = list.iter().map(|c| (c.name.as_str(), c.tag)).collect();
         assert_eq!(
             tags,
-            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/loop", "loft"), ("/schedule", "loft"), ("/model", "loft"), ("/effort", "loft"), ("/cost", "loft"), ("/status", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
+            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/loop", "loft"), ("/schedule", "loft"), ("/model", "loft"), ("/effort", "loft"), ("/cost", "loft"), ("/status", "loft"), ("/login", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
             "the CLI's internal __ commands are left out"
         );
         let doctor = list.iter().find(|c| c.name == "/doctor").unwrap();

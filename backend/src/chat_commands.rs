@@ -75,6 +75,7 @@ pub async fn run(State(state): State<AppState>, Path(id): Path<String>, Json(b):
     let text = match b.name.as_str() {
         "model" => setting(&state, &id, "Model", &b.arg, &MODELS, a.model, |a, v| a.model = v)?,
         "effort" => setting(&state, &id, "Effort", &b.arg, &EFFORTS, a.effort, |a, v| a.effort = v)?,
+        "login" => crate::login::text().await,
         "cost" => usage_text(&state, &id, false).await?,
         "status" => usage_text(&state, &id, true).await?,
         _ => return Err(bad("Unknown command.")),

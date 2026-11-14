@@ -1693,8 +1693,9 @@ async fn run_process(
                 }
                 if ev["is_error"].as_bool().unwrap_or(false) {
                     let msg = ev["result"].as_str().or(ev["subtype"].as_str()).unwrap_or("run failed");
-                    run_msg(quiet, state, agent_id, rid, "system", "error", msg, json!({}));
-                    run_error = Some(msg.to_string());
+                    let msg = crate::login::with_fix(msg);
+                    run_msg(quiet, state, agent_id, rid, "system", "error", &msg, json!({}));
+                    run_error = Some(msg);
                 }
                 let end = json!({
                     "cost_usd": cost,
@@ -3064,7 +3065,7 @@ esac
     async fn a_run_stores_the_commands_its_cli_reports_and_the_api_lists_them_tagged() {
         let (st, a) = fake_claude_state();
         let none = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
-        assert_eq!(none.as_array().unwrap().len(), 11, "before a run: Loft's own commands only");
+        assert_eq!(none.as_array().unwrap().len(), 12, "before a run: Loft's own commands only");
         let _ = send(&st, &a.id, "hello").await.ok().unwrap();
         idle(&st, &a.id).await;
         let list = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;

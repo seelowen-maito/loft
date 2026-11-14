@@ -25,7 +25,7 @@ const WINDOWS: &[(&str, &str)] = &[
 ];
 
 /// Claude Code's stored login: the macOS keychain, else `.credentials.json` in its config dir.
-async fn credentials() -> Result<Value> {
+pub async fn credentials() -> Result<Value> {
     let out = tokio::process::Command::new("security")
         .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
         .output()
