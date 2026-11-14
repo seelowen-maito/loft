@@ -60,6 +60,11 @@ public struct Agent: Codable, Identifiable, Hashable {
     /// The label it goes by, in place of the Title agents used to have.
     public var roleLabel: String { Agent.roleLabel(role) }
 
+    /// "loft · Lead": its main project and role, as the web's agents list and ⌘K search show them.
+    public var projectAndRole: String {
+        [project, roleLabel].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · ")
+    }
+
     /// Its team: the group; empty when it has none (backend `Agent::team`).
     public var team: String { (group ?? "").trimmingCharacters(in: .whitespaces) }
 

@@ -257,7 +257,7 @@ struct QuickSearchView: View {
                 if let agent {
                     AgentSticker(agent: agent, size: 40)
                         .overlay(alignment: .bottomTrailing) {
-                            Circle().fill(status.map(Self.dot) ?? WebTheme.fg3).frame(width: 11, height: 11)
+                            Circle().fill(status?.dot ?? WebTheme.fg3).frame(width: 11, height: 11)
                                 .overlay(Circle().strokeBorder(WebTheme.surface, lineWidth: 2))
                         }
                 } else {
@@ -275,7 +275,7 @@ struct QuickSearchView: View {
             Spacer(minLength: 8)
             Group {
                 if let status {
-                    Text(status.label).foregroundStyle(Self.text(status))
+                    Text(status.label).foregroundStyle(status.text)
                 } else {
                     Text(r.kind.label).foregroundStyle(WebTheme.fg3)
                 }
@@ -292,22 +292,6 @@ struct QuickSearchView: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    /// The status dot's colour, as the web's `statusOf`.
-    private static func dot(_ s: QuickSearch.AgentStatus) -> Color {
-        switch s {
-        case .needsYou: WebTheme.warn
-        case .waiting: WebTheme.info
-        case .working: Theme.accent
-        case .error: WebTheme.bad
-        case .sleeping: WebTheme.info.opacity(0.7)
-        case .idle: WebTheme.fg3
-        }
-    }
-
-    private static func text(_ s: QuickSearch.AgentStatus) -> Color {
-        s == .sleeping ? WebTheme.fg2 : dot(s)
     }
 
     private static func symbol(_ k: QuickSearch.Kind) -> String {
@@ -363,3 +347,20 @@ func renderQuickSearch(_ controller: QuickSearchController, query: String, to fi
     NSApp.terminate(nil)
 }
 #endif
+
+extension QuickSearch.AgentStatus {
+    /// The status dot's colour, as the web's `statusOf`.
+    var dot: Color {
+        switch self {
+        case .needsYou: WebTheme.warn
+        case .waiting: WebTheme.info
+        case .working: Theme.accent
+        case .error: WebTheme.bad
+        case .sleeping: WebTheme.info.opacity(0.7)
+        case .idle: WebTheme.fg3
+        }
+    }
+
+    /// The status label's colour, as the web's `statusOf`.
+    var text: Color { self == .sleeping ? WebTheme.fg2 : dot }
+}

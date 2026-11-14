@@ -92,7 +92,7 @@ public enum QuickSearch {
     /// An agent as a result, with its main project and role.
     static func result(for a: Agent) -> Result {
         Result(kind: .agent, target: a.id, title: a.name, webPath: "/agents/\(a.id)",
-               detail: [a.project, a.roleLabel].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · "))
+               detail: a.projectAndRole)
     }
 
     /// An issue as a result: a spec, a spec's ticket, or a plain issue.

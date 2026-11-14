@@ -366,9 +366,10 @@ struct RecipientPicker: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("recipientSearch")
                 .onSubmit { if let a = agents.first { pick(a) } }
-            List(agents) { a in
-                Button { pick(a) } label: { AgentRow(agent: a).contentShape(Rectangle()) }
-                    .buttonStyle(.plain)
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(agents) { a in AgentListRow(agent: a) { pick(a) } }
+                }
             }
             .frame(height: 280)
             HStack {
