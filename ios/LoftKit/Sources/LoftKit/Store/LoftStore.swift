@@ -227,6 +227,8 @@ public final class LoftStore {
             return true
         }
         guard let url = LiveLoftAPI.normalize(address) else { return false }
+        // A real address typed during the demo leaves it.
+        isDemo = false
         UserDefaults.standard.set(url.absoluteString, forKey: Prefs.serverURL)
         UserDefaults.standard.removeObject(forKey: "serverURL-override")
         configure(LiveLoftAPI(baseURL: url))

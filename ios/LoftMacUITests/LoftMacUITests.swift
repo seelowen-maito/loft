@@ -41,6 +41,22 @@ final class LoftMacUITests: XCTestCase {
         XCTAssertTrue(field.exists, "Still on the address screen")
     }
 
+    /// #484: the demo address opens the bundled demo with its banner, and Exit goes back to the address screen.
+    func testDemoAddressOpensTheDemoAndExitLeavesIt() {
+        launch(["-ui-onboarding"])
+        let field = app.textFields["serverAddressField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.click()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText("demo-loft-dev.get-loft.com\r")
+        XCTAssertTrue(app.otherElements["demoBanner"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["section-Agents"].exists, "the main window, on sample data")
+        shot("Demo")
+        app.buttons["exitDemo"].click()
+        XCTAssertTrue(field.waitForExistence(timeout: 10), "back on the address screen")
+        XCTAssertFalse(app.otherElements["demoBanner"].exists)
+    }
+
     /// Leads first, then groups; an agent's settings save.
     func testAgentsLeadsFirstAndSettingsSave() {
         launch(["-ui-testing", "-fixture-lead"])

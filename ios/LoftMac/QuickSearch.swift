@@ -128,6 +128,11 @@ final class QuickSearchController {
 
     private func open(_ r: QuickSearch.Result, _ flags: NSEvent.ModifierFlags) {
         close()
+        // The demo has no web Loft to open, and its pull requests aren't real: everything else opens here.
+        if model.store.isDemo {
+            if r.kind != .pullRequest { go(r.kind, r.target, webPath: r.webPath) }
+            return
+        }
         if r.kind == .pullRequest {
             if let url = r.link(loftHost: model.store.api?.baseURL.host()) { NSWorkspace.shared.open(url) }
             return

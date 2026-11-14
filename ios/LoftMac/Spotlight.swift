@@ -29,6 +29,8 @@ final class MacSpotlight {
     }
 
     private func sync() {
+        // The demo's sample data stays out of Spotlight; the real Loft's items stay in.
+        guard !store.isDemo else { return }
         let results = SpotlightIndex.entries(agents: store.agents, tasks: store.tasks, deliveries: Array(store.deliverySummaries.values))
         guard UserDefaults.standard.bool(forKey: Prefs.spotlight) else {
             if indexed != [] { enqueue(clear: true) }

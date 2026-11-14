@@ -20,6 +20,10 @@ struct LoftMacApp: App {
         let store = LoftStore(api: Self.makeAPI())
         // Live from launch: the menu bar item needs it with the window closed.
         store.activate()
+        #if DEBUG
+        // Screenshots of the demo, as if its address was typed.
+        if ProcessInfo.processInfo.arguments.contains("-demo") { store.enterDemo() }
+        #endif
         _store = State(initialValue: store)
         let nav = MacNav()
         _nav = State(initialValue: nav)
@@ -212,6 +216,36 @@ struct MacRootView: View {
     }
 }
 
+/// Above every section in the demo, like the iPhone's: it's sample data, and Exit leaves it.
+struct DemoBanner: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(MacNav.self) private var nav
+
+    var body: some View {
+        HStack {
+            Label("Demo · sample data", systemImage: "play.circle.fill").font(.callout.weight(.semibold))
+            Spacer()
+            Button("Exit") {
+                nav.section = .agents
+                nav.agentId = nil
+                nav.issuePath = []
+                store.exitDemo()
+            }
+            .buttonStyle(.plain)
+            .font(.callout.weight(.semibold))
+            .underline()
+            .help("Leaves the demo. Nothing from it is kept.")
+            .accessibilityIdentifier("exitDemo")
+        }
+        .foregroundStyle(.black)
+        .padding(.horizontal, 14).padding(.vertical, 6)
+        // Only behind the banner, not up under the toolbar.
+        .background(Theme.attention, ignoresSafeAreaEdges: [])
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("demoBanner")
+    }
+}
+
 /// Loft didn't answer at the saved address and nothing is cached: why, and what to try.
 struct UnreachableScreen: View {
     @Environment(LoftStore.self) private var store
@@ -266,13 +300,17 @@ struct MainWindow: View {
                     .accessibilityIdentifier("connectionLabel")
             }
         } detail: {
-            switch nav.section {
-            case .overview: OverviewSection()
-            case .agents: AgentsSection()
-            case .issues: IssuesSection()
-            case .needsYou: NeedsYouScreen()
-            case .settings: SettingsSection()
+            Group {
+                switch nav.section {
+                case .overview: OverviewSection()
+                case .agents: AgentsSection()
+                case .issues: IssuesSection()
+                case .needsYou: NeedsYouScreen()
+                case .settings: SettingsSection()
+                }
             }
+            // Over every section in the demo, under the toolbar.
+            .safeAreaInset(edge: .top, spacing: 0) { if store.isDemo { DemoBanner() } }
         }
         // The web's page, cards and text colours behind every section.
         .webPage()
