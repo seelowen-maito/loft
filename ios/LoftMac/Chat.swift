@@ -100,6 +100,11 @@ struct ChatView: View {
                 }
             }
         }
+        .onChange(of: nav.talkIn, initial: true) { _, id in
+            guard id == agent.id else { return }
+            nav.talkIn = nil
+            talking = true
+        }
         .task(id: askingMessage?.id) {
             guard let m = askingMessage, suggested?.messageId != m.id else { return }
             let replies = await OnDeviceFeatures.chatReplies(to: m.displayContent)

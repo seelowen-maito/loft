@@ -2,6 +2,7 @@ import Foundation
 import Network
 import Observation
 import UserNotifications
+import WidgetKit
 
 public enum ConnectionState: Equatable {
     case notConfigured
@@ -123,9 +124,14 @@ public final class LoftStore {
 
     public var supportsNeedsYou: Bool { info?.supports(.needsYou) == true }
 
+    /// Redraws the widgets; called when Needs you changes, so an item answered here leaves the widget too (spec #462).
+    public var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
+
     public func refreshNeedsYou() async {
         guard let api, supportsNeedsYou, let list = try? await api.needsYou() else { return }
+        let changed = list.items.map(\.id) != needsYou?.items.map(\.id) || list.count != needsYou?.count
         needsYou = list
+        if changed { reloadWidgets() }
         // The app icon's badge follows what needs you. Not awaited: refresh() runs this before the app counts
         // as connected, and a slow notification service (seen on a busy Simulator) held it at "Connecting…".
         // Only what hasn't been seen, here or on the web.
