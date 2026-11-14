@@ -138,6 +138,7 @@ fn api_routes() -> Router<AppState> {
         .route("/needs-you/{id}/dismiss", post(needs_you::dismiss_item))
         .route("/voice/clean", post(voice::clean))
         .route("/voice/brief", post(voice::brief))
+        .route("/voice/transcribe", post(voice::transcribe))
         .route("/devices", get(devices::list).post(devices::register))
         .route("/devices/{token}", axum::routing::patch(devices::update).delete(devices::remove))
         .route("/devices/{token}/test", post(devices::test))

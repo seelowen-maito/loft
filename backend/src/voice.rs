@@ -2,12 +2,14 @@
 //! about once a minute, so a long session arrives as joined segments with
 //! rough seams; one Claude pass fixes those before the user reviews and sends.
 //! `brief` turns a long dictation into a short brief (goal, context, done when) the same way.
+//! `transcribe` turns the web's recorded audio into text on this Mac (spec #493), with LoftKit's `loft-transcribe`.
 
 use std::process::Stdio;
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::State;
+use axum::body::Bytes;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -202,6 +204,91 @@ async fn run(state: &AppState, text: &str, prompt: &str, effort: Option<&str>, t
     Ok(s.to_string())
 }
 
+/// A voice session's audio: 16 kHz mono 16-bit PCM, so about 19 MB for ten minutes.
+const MAX_AUDIO_BYTES: u64 = 10 * 60 * 16_000 * 2;
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(60);
+/// A session nobody finished (the page closed mid-talk) is deleted after this long.
+const ABANDONED: Duration = Duration::from_secs(3600);
+
+/// LoftKit's transcribe helper, built beside the backend (`swift build -c release --product loft-transcribe`).
+fn helper(state: &AppState) -> std::path::PathBuf {
+    let root = state.cfg.storage_dir.parent().unwrap_or(std::path::Path::new("."));
+    root.join("ios/LoftKit/.build/release/loft-transcribe")
+}
+
+#[derive(Deserialize)]
+pub struct TranscribeQuery {
+    session: String,
+    #[serde(default, rename = "final")]
+    last: bool,
+}
+
+/// `POST /api/voice/transcribe?session=<id>[&final=true]`, body: the next chunk of the session's audio, raw 16 kHz
+/// mono 16-bit little-endian PCM → `{ text, final }`, the text of all the session's audio so far. Send each chunk
+/// after the previous answer; the final one ends the session and deletes its audio. Where it can't run here
+/// (not a Mac, macOS before 26, no helper, no speech model) it answers 503 with `{ error }`, a reason to show.
+pub async fn transcribe(State(state): State<AppState>, Query(q): Query<TranscribeQuery>, audio: Bytes) -> Result<Json<Value>, ApiError> {
+    if q.session.is_empty() || q.session.len() > 64 || !q.session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(bad("session must be 1 to 64 letters, digits or dashes"));
+    }
+    if !audio.len().is_multiple_of(2) {
+        return Err(bad("audio must be 16-bit PCM: an even number of bytes"));
+    }
+    let unavailable = |reason: &str| ApiError(StatusCode::SERVICE_UNAVAILABLE, reason.to_string());
+    if !cfg!(target_os = "macos") {
+        return Err(unavailable("Voice is transcribed on a Mac, and this Loft doesn't run on one."));
+    }
+    let helper = helper(&state);
+    if !helper.is_file() {
+        return Err(unavailable("This Mac hasn't built Loft's transcriber yet: run ./setup.sh, or let Loft update."));
+    }
+    let dir = std::env::temp_dir().join("loft-voice");
+    forget_abandoned(&dir);
+    let file = TempFile(dir.join(format!("{}.pcm", q.session)));
+    let size = append(&file.0, &audio)?;
+    if size > MAX_AUDIO_BYTES {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "Voice sessions stop at ten minutes.".into()));
+    }
+    let out = Command::new(&helper).arg(&file.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).output();
+    let out = tokio::time::timeout(TRANSCRIBE_TIMEOUT, out).await.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Transcribing timed out.".into()))?;
+    let out = out.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("Couldn't start the transcriber: {e}")))?;
+    let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    match out.status.code() {
+        Some(0) => {}
+        Some(2) => return Err(unavailable(&reason)),
+        _ => return Err(ApiError(StatusCode::BAD_GATEWAY, format!("Transcribing failed: {reason}"))),
+    }
+    // Keep the audio for the next chunk, unless this was the last one.
+    if !q.last {
+        std::mem::forget(file);
+    }
+    Ok(Json(json!({ "text": String::from_utf8_lossy(&out.stdout).trim(), "final": q.last })))
+}
+
+/// Adds `audio` to the session's file, readable only by this user; returns its size.
+fn append(file: &std::path::Path, audio: &[u8]) -> Result<u64, ApiError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let open = || std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(file);
+    let mut f = open().or_else(|_| {
+        std::fs::create_dir_all(file.parent().unwrap())?;
+        open()
+    }).map_err(anyhow::Error::from)?;
+    f.write_all(audio).map_err(anyhow::Error::from)?;
+    Ok(f.metadata().map_err(anyhow::Error::from)?.len())
+}
+
+/// Deletes sessions' audio untouched for `ABANDONED`.
+fn forget_abandoned(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > ABANDONED);
+        if old && e.path().extension().is_some_and(|x| x == "pcm") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Cleanup should shorten a little, never rewrite: reject output far off the input's length.
 fn plausible(input: &str, output: &str) -> bool {
     let (i, o) = (input.chars().count() as f64, output.chars().count() as f64);
@@ -211,6 +298,8 @@ fn plausible(input: &str, output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn rejects_rewrites() {
@@ -303,5 +392,60 @@ esac
         for f in files {
             assert!(f.contains("loft-voice/") && !std::path::Path::new(&f).exists(), "{f} is left behind");
         }
+    }
+
+    /// A stand-in `loft-transcribe` with `body` as its script, where the backend looks for the helper.
+    fn fake_helper(st: &AppState, body: &str) {
+        let bin = helper(st);
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+
+    async fn talk(st: &AppState, session: &str, audio: &[u8], last: bool) -> Result<Value, (StatusCode, String)> {
+        let q = TranscribeQuery { session: session.into(), last };
+        transcribe(State(st.clone()), Query(q), Bytes::copy_from_slice(audio)).await.map(|j| j.0).map_err(|e| (e.0, e.1))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn chunks_return_growing_text_then_the_final_text_and_the_audio_is_deleted() {
+        let st = crate::tasks::tests::state();
+        // Says how much audio it was given, so each answer shows it heard the whole session so far.
+        fake_helper(&st, r#"printf 'heard %s bytes\n' "$(wc -c < "$1" | tr -d ' ')""#);
+        let id = uuid::Uuid::new_v4().to_string();
+        let file = std::env::temp_dir().join("loft-voice").join(format!("{id}.pcm"));
+        assert_eq!(talk(&st, &id, &[1, 0, 2, 0], false).await.unwrap(), json!({ "text": "heard 4 bytes", "final": false }));
+        assert_eq!(talk(&st, &id, &[3, 0, 4, 0, 5, 0], false).await.unwrap(), json!({ "text": "heard 10 bytes", "final": false }));
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600, "the user's voice is private");
+        assert_eq!(talk(&st, &id, &[6, 0], true).await.unwrap(), json!({ "text": "heard 12 bytes", "final": true }));
+        assert!(!file.exists(), "the final chunk deletes the session's audio");
+        assert_eq!(talk(&st, &id, &[7, 0], true).await.unwrap()["text"], "heard 2 bytes", "the same id starts over");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn where_it_cannot_transcribe_it_says_why_instead_of_a_500() {
+        let st = crate::tasks::tests::state();
+        let id = uuid::Uuid::new_v4().to_string();
+        let (code, reason) = talk(&st, &id, &[0, 0], false).await.unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(reason.contains("hasn't built Loft's transcriber"), "{reason}");
+        // The helper's own reasons (older macOS, no speech model, no permission) come through as they are.
+        fake_helper(&st, "echo \"Transcribing needs macOS 26 or later with Apple's speech model.\" >&2; exit 2");
+        assert_eq!(talk(&st, &id, &[0, 0], false).await.unwrap_err(), (StatusCode::SERVICE_UNAVAILABLE, "Transcribing needs macOS 26 or later with Apple's speech model.".into()));
+        fake_helper(&st, "echo 'the analyzer crashed' >&2; exit 1");
+        assert_eq!(talk(&st, &id, &[0, 0], false).await.unwrap_err(), (StatusCode::BAD_GATEWAY, "Transcribing failed: the analyzer crashed".into()));
+        assert!(!std::env::temp_dir().join("loft-voice").join(format!("{id}.pcm")).exists(), "a failure ends the session");
+    }
+
+    #[tokio::test]
+    async fn refuses_a_session_id_that_isnt_a_plain_name_and_odd_audio() {
+        let st = crate::tasks::tests::state();
+        fake_helper(&st, "echo should not run; exit 1");
+        for bad_id in ["", "../../etc/x", "a/b", &"x".repeat(65)] {
+            assert_eq!(talk(&st, bad_id, &[0, 0], false).await.unwrap_err().0, StatusCode::BAD_REQUEST, "{bad_id}");
+        }
+        assert_eq!(talk(&st, "ok-1", &[0, 0, 0], false).await.unwrap_err().0, StatusCode::BAD_REQUEST, "half a sample");
     }
 }
