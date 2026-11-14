@@ -364,6 +364,11 @@ public struct SystemReading: Codable, Hashable {
     /// nominal | warm (≥ 85 °C) | hot (≥ 95 °C)
     public var level: String?
     public var sampledAt: Date?
+    /// Active + wired + compressed, like Activity Monitor's "Memory Used". Nil from an older Loft.
+    public var memUsedBytes: UInt64? = nil
+    public var memTotalBytes: UInt64? = nil
+    /// nominal | high (≥ 80 %) | critical (≥ 90 %), from memory used.
+    public var memLevel: String? = nil
 }
 
 /// Claude plan usage (`GET /api/usage`), as Claude Code's /usage shows it.

@@ -146,6 +146,7 @@ final class MacNav {
             section = .needsYou
             needsYouFocus = id
         case .agents, .talk: section = .agents
+        case .overview: section = .overview
         case .agent(let id): openChat(id)
         case .issue(let id):
             section = .issues
