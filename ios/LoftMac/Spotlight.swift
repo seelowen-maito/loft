@@ -11,6 +11,8 @@ final class MacSpotlight {
     private let index = CSSearchableIndex.default()
     /// What the index holds, as far as this run knows; nil until the first sync, which starts from a cleared index.
     private var indexed: [SpotlightIndex.Entry]?
+    /// The index work so far, run in order and off the main actor: drawing stickers can take a while.
+    private var work: Task<Void, Never>?
 
     init(store: LoftStore) {
         self.store = store
@@ -29,7 +31,7 @@ final class MacSpotlight {
     private func sync() {
         let results = SpotlightIndex.entries(agents: store.agents, tasks: store.tasks, deliveries: Array(store.deliverySummaries.values))
         guard UserDefaults.standard.bool(forKey: Prefs.spotlight) else {
-            if indexed != [] { index.deleteSearchableItems(withDomainIdentifiers: [SpotlightIndex.domain]) }
+            if indexed != [] { enqueue(clear: true) }
             indexed = []
             return
         }
@@ -37,16 +39,23 @@ final class MacSpotlight {
         guard !results.isEmpty else { return }
         guard let indexed else {
             // Items closed or deleted while the app wasn't running go too.
-            index.deleteSearchableItems(withDomainIdentifiers: [SpotlightIndex.domain]) { [index] _ in
-                index.indexSearchableItems(results.map(SpotlightIndex.item))
-            }
+            enqueue(clear: true, index: results)
             self.indexed = results
             return
         }
         let change = SpotlightIndex.changes(from: indexed, to: results)
-        if !change.remove.isEmpty { index.deleteSearchableItems(withIdentifiers: change.remove) }
-        if !change.index.isEmpty { index.indexSearchableItems(change.index.map(SpotlightIndex.item)) }
+        if !change.remove.isEmpty || !change.index.isEmpty { enqueue(remove: change.remove, index: change.index) }
         self.indexed = results
+    }
+
+    private func enqueue(clear: Bool = false, remove: [String] = [], index entries: [SpotlightIndex.Entry] = []) {
+        let previous = work, index = index
+        work = Task.detached(priority: .utility) {
+            await previous?.value
+            if clear { try? await index.deleteSearchableItems(withDomainIdentifiers: [SpotlightIndex.domain]) }
+            if !remove.isEmpty { try? await index.deleteSearchableItems(withIdentifiers: remove) }
+            if !entries.isEmpty { try? await index.indexSearchableItems(entries.map(SpotlightIndex.item)) }
+        }
     }
 }
 
