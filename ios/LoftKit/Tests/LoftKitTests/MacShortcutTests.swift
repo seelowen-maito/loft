@@ -40,16 +40,33 @@ final class MacShortcutTests: XCTestCase {
     }
 
     func testAModifierIsNeededUnlessItsAFunctionKey() {
-        XCTAssertEqual(MacShortcut(keyCode: 0, modifiers: 0).refusal(taken: []), "A needs ⌘, ⌥, ⌃ or ⇧, unless it's a function key.")
+        XCTAssertEqual(MacShortcut(keyCode: 0, modifiers: 0).refusal(taken: []), "A needs ⌘, ⌥ or ⌃, unless it's a function key.")
         XCTAssertNil(MacShortcut(keyCode: 109, modifiers: 0).refusal(taken: []))
-        XCTAssertNil(MacShortcut(keyCode: 0, modifiers: MacShortcut.shift).refusal(taken: []))
+        XCTAssertNil(MacShortcut(keyCode: 109, modifiers: MacShortcut.shift).refusal(taken: []))
+        XCTAssertNil(MacShortcut(keyCode: 0, modifiers: MacShortcut.control).refusal(taken: []))
+    }
+
+    func testShiftAloneIsNotEnough() {
+        XCTAssertEqual(MacShortcut(keyCode: 0, modifiers: MacShortcut.shift).refusal(taken: []), "⇧A needs ⌘, ⌥ or ⌃, unless it's a function key.")
+        XCTAssertEqual(MacShortcut(keyCode: 18, modifiers: MacShortcut.shift).refusal(taken: []), "⇧1 needs ⌘, ⌥ or ⌃, unless it's a function key.")
+        XCTAssertNil(MacShortcut(keyCode: 0, modifiers: MacShortcut.shift | MacShortcut.option).refusal(taken: []))
+    }
+
+    func testStandardMenuShortcutsAreRefused() {
+        let c = MacShortcut.command
+        XCTAssertEqual(MacShortcut(keyCode: 12, modifiers: c).refusal(taken: []), "⌘Q is already Loft's Quit shortcut.")
+        XCTAssertEqual(MacShortcut(keyCode: 8, modifiers: c).refusal(taken: []), "⌘C is already Loft's Copy shortcut.")
+        XCTAssertEqual(MacShortcut(keyCode: 43, modifiers: c).refusal(taken: []), "⌘, is already Loft's Settings shortcut.")
+        XCTAssertEqual(MacShortcut(keyCode: 6, modifiers: MacShortcut.shift | c).refusal(taken: []), "⇧⌘Z is already Loft's Redo shortcut.")
+        for code: UInt32 in [13, 4, 46, 9, 7, 6, 0, 3] { XCTAssertNotNil(MacShortcut(keyCode: code, modifiers: c).refusal(taken: []), "\(code)") }
+        XCTAssertNil(MacShortcut(keyCode: 12, modifiers: MacShortcut.control | c).refusal(taken: []))
     }
 
     func testTakenCombinationsAreRefused() {
         XCTAssertEqual(MacShortcut.quickSearchDefault.refusal(taken: [(.quickSearchDefault, "quick search")]),
                        "⌥Space is already Loft's quick search shortcut.")
         XCTAssertEqual(controlCommandSpace.refusal(taken: [(.quickSearchDefault, "quick search")], system: [controlCommandSpace]),
-                       "macOS already uses ⌃⌘Space. Pick another.")
+                       "macOS already uses ⌃⌘Space. Record another.")
         XCTAssertNil(controlCommandSpace.refusal(taken: [(.quickSearchDefault, "quick search")], system: []))
     }
 }

@@ -59,13 +59,25 @@ public struct MacShortcut: Equatable, Sendable {
     /// Why it can't be a global shortcut, or nil. `taken` are Loft's other shortcuts with what each does, and `system`
     /// the ones macOS keeps for itself.
     public func refusal(taken: [(MacShortcut, String)], system: [MacShortcut] = []) -> String? {
-        if modifiers & (Self.command | Self.option | Self.control | Self.shift) == 0 && !isFunctionKey {
-            return "\(label) needs ⌘, ⌥, ⌃ or ⇧, unless it's a function key."
+        // ⇧ alone only types a capital or a symbol, which would then be lost in every app.
+        if modifiers & (Self.command | Self.option | Self.control) == 0 && !isFunctionKey {
+            return "\(label) needs ⌘, ⌥ or ⌃, unless it's a function key."
         }
-        if let t = taken.first(where: { $0.0 == self }) { return "\(label) is already Loft's \(t.1) shortcut." }
-        if system.contains(self) { return "macOS already uses \(label). Pick another." }
+        if let t = (taken + Self.standardMenuKeys).first(where: { $0.0 == self }) { return "\(label) is already Loft's \(t.1) shortcut." }
+        if system.contains(self) { return "macOS already uses \(label). Record another." }
         return nil
     }
+
+    /// The app, Edit and Window menus' standard shortcuts, which Loft has too: a global one with the same keys would
+    /// take Quit, Copy, Undo… from Loft and every other app.
+    public static let standardMenuKeys: [(MacShortcut, String)] = [
+        (12, command, "Quit"), (13, command, "Close"), (4, command, "Hide"), (4, option | command, "Hide Others"),
+        (46, command, "Minimize"), (43, command, "Settings"), (6, command, "Undo"), (6, shift | command, "Redo"),
+        (7, command, "Cut"), (8, command, "Copy"), (9, command, "Paste"), (9, option | shift | command, "Paste and Match Style"),
+        (0, command, "Select All"), (3, command, "Find"), (5, command, "Find Next"), (5, shift | command, "Find Previous"),
+        (14, command, "Use Selection for Find"), (31, command, "Open"), (35, command, "Print"), (17, command, "New Tab"),
+        (50, command, "Cycle Through Windows"), (3, control | command, "Enter Full Screen"),
+    ].map { (MacShortcut(keyCode: $0.0, modifiers: $0.1), $0.2) }
 
     private static let functionKeys: [UInt32: String] = [
         122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8", 101: "F9", 109: "F10",
