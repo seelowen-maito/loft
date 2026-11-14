@@ -112,4 +112,6 @@ enum WidgetTheme {
     static let working = Theme.working
     /// The darker amber in light mode, readable on the white tile.
     static let attention = Theme.attentionInk
+    /// The darker red in light mode, readable on the white tile.
+    static let failure = Theme.failureInk
 }
