@@ -45,20 +45,13 @@ final class VoicePanelController {
     /// Off while drawing screenshots, so Sent stays on screen.
     @ObservationIgnored var closesWhenSent = true
     @ObservationIgnored private var panel: VoicePanelWindow?
-    @ObservationIgnored private var hotKey: GlobalHotKey!
-    @ObservationIgnored private var shortcut: MacShortcut?
+    @ObservationIgnored private var binding: ShortcutBinding!
 
     init(store: LoftStore, nav: MacNav, voice: VoiceSession) {
         self.store = store
         self.nav = nav
         self.voice = voice
-        hotKey = GlobalHotKey(id: GlobalHotKey.voicePanel) { [weak self] in self?.toggle() }
-        applyShortcut()
-        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applyShortcut() }
-            // Again once every observer has run: the other shortcut may only now have let go of these keys.
-            DispatchQueue.main.async { self?.applyShortcut() }
-        }
+        binding = ShortcutBinding(.voicePanel) { [weak self] in self?.toggle() }
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-render-voice-panel"), i + 2 < args.count {
@@ -68,15 +61,7 @@ final class VoicePanelController {
     }
 
     var step: VoicePanel.Step { VoicePanel.step(phase: voice.phase, needsPermission: voice.failureNeedsPermission, listened: listened) }
-    var shortcutLabel: String? { shortcut == .off ? nil : shortcut?.label }
-
-    private func applyShortcut() {
-        let s = MacShortcut(stored: UserDefaults.standard.string(forKey: Prefs.voicePanelShortcut), default: .shiftOptionSpace)
-        // Tries again when it failed, as the clash may be gone.
-        guard s != shortcut || HotKeyFailures.shared.byID[GlobalHotKey.voicePanel] != nil else { return }
-        shortcut = s
-        hotKey.set(s)
-    }
+    var shortcutLabel: String? { binding.current?.label }
 
     func toggle() {
         if panel?.isVisible == true { close() } else { show() }
@@ -337,16 +322,10 @@ struct VoicePanelView: View {
 
 /// Settings › Voice panel: its shortcut, or none.
 struct VoicePanelSettings: View {
-    @AppStorage(Prefs.voicePanelShortcut) private var shortcut = MacShortcut.shiftOptionSpace.rawValue
-
     var body: some View {
         Section("Voice panel") {
-            Picker("Shortcut", selection: $shortcut) {
-                ForEach(MacShortcut.allCases) { Text($0.label).tag($0.rawValue) }
-            }
-            .accessibilityIdentifier("voicePanelShortcutPicker")
-            ShortcutFailure(id: GlobalHotKey.voicePanel)
-            Text("Opens a floating panel from any app that listens, has Loft tidy up what you said, and sends it to the agent you pick. Also in the menu bar. Pick a different shortcut from quick search's.")
+            ShortcutRow(.voicePanel)
+            Text("Opens a floating panel from any app that listens, has Loft tidy up what you said, and sends it to the agent you pick. Also in the menu bar.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

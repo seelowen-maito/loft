@@ -34,6 +34,10 @@ struct SettingsSection: View {
                 .accessibilityIdentifier("appearancePicker")
                 note("Dark matches Loft on the web. System follows this Mac.")
             }
+            Section("Open Loft") {
+                ShortcutRow(.openLoft)
+                note("Brings this window to the front from any app. Off until you record one.")
+            }
             QuickSearchSettings()
             VoicePanelSettings()
             Section { AppleIntelligenceSection().toggleStyle(.checkbox).padding(.vertical, 4) }

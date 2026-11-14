@@ -13,6 +13,7 @@ struct LoftMacApp: App {
     @State private var quickSearch: QuickSearchController
     @State private var voicePanel: VoicePanelController
     @State private var spotlight: MacSpotlight?
+    @State private var openLoft: ShortcutBinding
 
     init() {
         Prefs.registerDefaults()
@@ -28,6 +29,11 @@ struct LoftMacApp: App {
         _voicePanel = State(initialValue: VoicePanelController(store: store, nav: nav, voice: voice))
         let quickSearch = QuickSearchController(store: store, nav: nav)
         _quickSearch = State(initialValue: quickSearch)
+        // Brings the main window to the front from any app, opening it if it was closed.
+        _openLoft = State(initialValue: ShortcutBinding(.openLoft) {
+            quickSearch.showWindow?()
+            NSApp.activate(ignoringOtherApps: true)
+        })
         MacAppDelegate.openSpotlightItem = { quickSearch.open(spotlightItem: $0) }
         _spotlight = State(initialValue: Self.indexesSpotlight ? MacSpotlight(store: store) : nil)
     }
@@ -336,6 +342,10 @@ func renderWindow(store: LoftStore, nav: MacNav, to folder: String) async {
             try? await Task.sleep(for: .seconds(2))
             png("\(section)")
         }
+        // What a refused recording says: ⌘Space is macOS's Spotlight.
+        HotKeyFailures.shared.refused[LoftShortcut.openLoft.rawValue] = LoftShortcut.openLoft.refusal(MacShortcut(keyCode: MacShortcut.space, modifiers: MacShortcut.command))
+        try? await Task.sleep(for: .seconds(1))
+        png("settings-refused")
     }
     NSApp.terminate(nil)
 }

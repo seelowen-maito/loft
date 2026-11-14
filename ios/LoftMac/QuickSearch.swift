@@ -3,88 +3,6 @@ import Carbon.HIToolbox
 import LoftKit
 import SwiftUI
 
-/// The global shortcuts Settings offers for quick search (⌥Space by default) and the voice panel (⇧⌥Space).
-enum MacShortcut: String, CaseIterable, Identifiable {
-    case optionSpace = "option-space", shiftOptionSpace = "shift-option-space", optionCommandSpace = "option-command-space",
-         controlOptionSpace = "control-option-space", off
-
-    var id: String { rawValue }
-
-    init(stored: String?, default fallback: MacShortcut = .optionSpace) { self = stored.flatMap(Self.init(rawValue:)) ?? fallback }
-
-    var label: String {
-        switch self {
-        case .optionSpace: "⌥Space"
-        case .shiftOptionSpace: "⇧⌥Space"
-        case .optionCommandSpace: "⌥⌘Space"
-        case .controlOptionSpace: "⌃⌥Space"
-        case .off: "Off"
-        }
-    }
-
-    /// The Carbon modifiers with Space, or nil when off.
-    fileprivate var modifiers: UInt32? {
-        switch self {
-        case .optionSpace: UInt32(optionKey)
-        case .shiftOptionSpace: UInt32(shiftKey | optionKey)
-        case .optionCommandSpace: UInt32(optionKey | cmdKey)
-        case .controlOptionSpace: UInt32(controlKey | optionKey)
-        case .off: nil
-        }
-    }
-}
-
-/// The shortcuts that couldn't be registered, by hot key id: Loft's other shortcut has it, or macOS doesn't allow it.
-/// Settings shows it under the picker. Another app holding the same keys isn't an error to Carbon: only one of the apps
-/// gets the presses.
-@MainActor
-@Observable
-final class HotKeyFailures {
-    static let shared = HotKeyFailures()
-    var byID: [UInt32: MacShortcut] = [:]
-}
-
-/// A system-wide shortcut through Carbon's hot keys: it works from any app and needs no Accessibility permission.
-/// Each one has its own `id`, and passes the others' presses on.
-final class GlobalHotKey {
-    static let quickSearch: UInt32 = 1, voicePanel: UInt32 = 2
-
-    private var ref: EventHotKeyRef?
-    private var handler: EventHandlerRef?
-    private let id: UInt32
-    private let action: () -> Void
-
-    init(id: UInt32, action: @escaping () -> Void) {
-        self.id = id
-        self.action = action
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, event, me in
-            guard let event, let me else { return OSStatus(eventNotHandledErr) }
-            let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(me).takeUnretainedValue()
-            var pressed = EventHotKeyID()
-            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
-                              MemoryLayout<EventHotKeyID>.size, nil, &pressed)
-            guard pressed.id == hotKey.id else { return OSStatus(eventNotHandledErr) }
-            DispatchQueue.main.async { hotKey.action() }
-            return noErr
-        }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handler)
-    }
-
-    @MainActor
-    func set(_ shortcut: MacShortcut) {
-        if let ref { UnregisterEventHotKey(ref) }
-        ref = nil
-        HotKeyFailures.shared.byID[id] = nil
-        guard let modifiers = shortcut.modifiers else { return }
-        let status = RegisterEventHotKey(UInt32(kVK_Space), modifiers, EventHotKeyID(signature: OSType(0x4C_4F_46_54), id: id),
-                                         GetApplicationEventTarget(), 0, &ref)
-        if status != noErr {
-            ref = nil
-            HotKeyFailures.shared.byID[id] = shortcut
-        }
-    }
-}
-
 /// A floating panel that takes typing without bringing Loft to the front, like Spotlight. It closes when it loses
 /// the keyboard (a click outside), and hands its keys to `onKey` first.
 private final class QuickSearchPanel: NSPanel {
@@ -150,19 +68,12 @@ final class QuickSearchController {
     /// Opens or raises the main window; set by the menu bar item, which is there for the app's whole life.
     var showWindow: (() -> Void)?
     private var panel: QuickSearchPanel?
-    private var hotKey: GlobalHotKey!
-    private var shortcut: MacShortcut?
+    private var binding: ShortcutBinding!
 
     init(store: LoftStore, nav: MacNav) {
         model = QuickSearchModel(store: store)
         self.nav = nav
-        hotKey = GlobalHotKey(id: GlobalHotKey.quickSearch) { [weak self] in self?.toggle() }
-        applyShortcut()
-        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applyShortcut() }
-            // Again once every observer has run: the other shortcut may only now have let go of these keys.
-            DispatchQueue.main.async { self?.applyShortcut() }
-        }
+        binding = ShortcutBinding(.quickSearch) { [weak self] in self?.toggle() }
         #if DEBUG
         // Needs no window: a directly launched app may not open one.
         let args = ProcessInfo.processInfo.arguments
@@ -170,14 +81,6 @@ final class QuickSearchController {
             Task { await renderQuickSearch(self, query: args[i + 1], to: args[i + 2]) }
         }
         #endif
-    }
-
-    private func applyShortcut() {
-        let s = MacShortcut(stored: UserDefaults.standard.string(forKey: Prefs.quickSearchShortcut))
-        // Tries again when it failed, as the clash may be gone.
-        guard s != shortcut || HotKeyFailures.shared.byID[GlobalHotKey.quickSearch] != nil else { return }
-        shortcut = s
-        hotKey.set(s)
     }
 
     func toggle() {
@@ -348,42 +251,24 @@ struct QuickSearchView: View {
 
 /// Settings › Quick search: the shortcut, or none, and where Enter opens a result; and Spotlight on or off.
 struct QuickSearchSettings: View {
-    @AppStorage(Prefs.quickSearchShortcut) private var shortcut = MacShortcut.optionSpace.rawValue
     @AppStorage(Prefs.quickSearchOpensIn) private var opensIn = "app"
     @AppStorage(Prefs.spotlight) private var spotlight = true
 
     var body: some View {
         Section("Quick search") {
-            Picker("Shortcut", selection: $shortcut) {
-                ForEach(MacShortcut.allCases) { Text($0.label).tag($0.rawValue) }
-            }
-            .accessibilityIdentifier("quickSearchShortcutPicker")
-            ShortcutFailure(id: GlobalHotKey.quickSearch)
+            ShortcutRow(.quickSearch)
             Picker("Open results in", selection: $opensIn) {
                 Text("Mac app").tag("app")
                 Text("Browser").tag("browser")
             }
             .pickerStyle(.segmented)
-            Text("Finds agents, issues, tickets and specs from any app. ↵ opens, ⌘↵ opens an agent's chat, ⌥↵ opens in the other place. Pages only the web has always open in the browser. If the shortcut does nothing, another app may use it too: pick another.")
+            Text("Finds agents, issues, tickets and specs from any app. ↵ opens, ⌘↵ opens an agent's chat, ⌥↵ opens in the other place. Pages only the web has always open in the browser. If the shortcut does nothing, another app may use it too: record another.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         Section("Spotlight") {
             Toggle("Show Loft in Spotlight", isOn: $spotlight).accessibilityIdentifier("spotlightToggle")
             Text("⌘Space finds agents and open issues, tickets and specs, and opens them here. Off removes them from Spotlight.")
                 .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// "⌥Space couldn't be set up…" under a shortcut picker, when it couldn't be registered.
-struct ShortcutFailure: View {
-    let id: UInt32
-
-    var body: some View {
-        if let failed = HotKeyFailures.shared.byID[id] {
-            Text("\(failed.label) couldn't be set up: Loft's other shortcut may use it. Pick another.")
-                .font(.caption).foregroundStyle(.red)
-                .accessibilityIdentifier("shortcutFailure")
         }
     }
 }

@@ -123,10 +123,12 @@ public enum Prefs {
     public static let aiShortSpoken = "aiShortSpoken"
     /// One-line summaries and suggested replies in "Needs you".
     public static let aiNeedsYou = "aiNeedsYou"
-    /// The Mac's quick search shortcut (`MacShortcut`'s raw value; "off" turns it off).
+    /// The Mac's quick search shortcut (`MacShortcut.stored`; "off" turns it off).
     public static let quickSearchShortcut = "quickSearchShortcut"
-    /// The Mac's voice panel shortcut (`MacShortcut`'s raw value; "off" turns it off).
+    /// The Mac's voice panel shortcut (`MacShortcut.stored`; "off" turns it off).
     public static let voicePanelShortcut = "voicePanelShortcut"
+    /// The Mac's shortcut that brings Loft's window to the front (`MacShortcut.stored`); off until one is recorded.
+    public static let openLoftShortcut = "openLoftShortcut"
     /// Where Enter opens a quick search result on the Mac: "app" or "browser" (⌥Enter opens it in the other).
     public static let quickSearchOpensIn = "quickSearchOpensIn"
     /// The Mac puts Loft's agents, issues and specs in Spotlight; off clears them from it.
@@ -170,8 +172,9 @@ public enum Prefs {
             talkSayToSend: true,
             aiChatReplies: true,
             aiExplain: true,
-            quickSearchShortcut: "option-space",
-            voicePanelShortcut: "shift-option-space",
+            quickSearchShortcut: MacShortcut.quickSearchDefault.stored,
+            voicePanelShortcut: MacShortcut.voicePanelDefault.stored,
+            openLoftShortcut: MacShortcut.off,
             quickSearchOpensIn: "app",
             spotlight: true,
         ])
