@@ -228,13 +228,24 @@ final class QuickSearchController {
             NSWorkspace.shared.open(base.appendingPathComponent(r.webPath))
             return
         }
-        switch r.kind {
-        case .agent: nav.openChat(r.target)
+        go(r.kind, r.target, webPath: r.webPath)
+    }
+
+    /// A Loft item chosen in macOS Spotlight: opens it in the app.
+    func open(spotlightItem identifier: String) {
+        guard let (kind, id) = SpotlightIndex.target(of: identifier) else { return }
+        go(kind, id, webPath: "")
+    }
+
+    /// Goes to the agent, issue or page in the main window, opening or raising it.
+    private func go(_ kind: QuickSearch.Kind, _ target: String, webPath: String) {
+        switch kind {
+        case .agent: nav.openChat(target)
         case .spec, .ticket, .issue:
             nav.section = .issues
-            nav.issuePath = [r.target]
+            nav.issuePath = [target]
         case .page:
-            nav.section = Self.sections[r.webPath] ?? .overview
+            nav.section = Self.sections[webPath] ?? .overview
         }
         showWindow?()
         NSApp.activate(ignoringOtherApps: true)
@@ -335,10 +346,11 @@ struct QuickSearchView: View {
     }
 }
 
-/// Settings › Quick search: the shortcut, or none, and where Enter opens a result.
+/// Settings › Quick search: the shortcut, or none, and where Enter opens a result; and Spotlight on or off.
 struct QuickSearchSettings: View {
     @AppStorage(Prefs.quickSearchShortcut) private var shortcut = MacShortcut.optionSpace.rawValue
     @AppStorage(Prefs.quickSearchOpensIn) private var opensIn = "app"
+    @AppStorage(Prefs.spotlight) private var spotlight = true
 
     var body: some View {
         Section("Quick search") {
@@ -353,6 +365,11 @@ struct QuickSearchSettings: View {
             }
             .pickerStyle(.segmented)
             Text("Finds agents, issues, tickets and specs from any app. ↵ opens, ⌘↵ opens an agent's chat, ⌥↵ opens in the other place. Pages only the web has always open in the browser. If the shortcut does nothing, another app may use it too: pick another.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        Section("Spotlight") {
+            Toggle("Show Loft in Spotlight", isOn: $spotlight).accessibilityIdentifier("spotlightToggle")
+            Text("⌘Space finds agents and open issues, tickets and specs, and opens them here. Off removes them from Spotlight.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

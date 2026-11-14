@@ -55,9 +55,7 @@ public enum QuickSearch {
         for t in tasks {
             let number = t.github.map { "#\($0.number)" }
             guard let s = score(q, title: t.title, number: number) else { continue }
-            let kind: Kind = SpecViews.isSpec(t) ? .spec : SpecViews.isSpecTicket(t, deliveries) ? .ticket : .issue
-            hits.append((s, t.state.isClosed, t.updatedAt,
-                         Result(kind: kind, target: t.id, title: t.title, number: t.github?.shortName, webPath: "/issues/\(t.id)")))
+            hits.append((s, t.state.isClosed, t.updatedAt, result(for: t, deliveries: deliveries)))
         }
         for p in pages {
             if let s = score(q, title: p.title) { hits.append((s, false, .distantPast, p)) }
@@ -71,6 +69,12 @@ public enum QuickSearch {
             return a.result.title.localizedCaseInsensitiveCompare(b.result.title) == .orderedAscending
         }
         .prefix(limit).map(\.result)
+    }
+
+    /// An issue as a result: a spec, a spec's ticket, or a plain issue.
+    static func result(for t: HBTask, deliveries: [DeliverySummary]) -> Result {
+        let kind: Kind = SpecViews.isSpec(t) ? .spec : SpecViews.isSpecTicket(t, deliveries) ? .ticket : .issue
+        return Result(kind: kind, target: t.id, title: t.title, number: t.github?.shortName, webPath: "/issues/\(t.id)")
     }
 
     /// How well a lowercased query matches, lower is better, nil for no match: the number exactly ("459", "#459" or

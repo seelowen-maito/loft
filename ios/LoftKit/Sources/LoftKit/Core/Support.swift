@@ -129,6 +129,8 @@ public enum Prefs {
     public static let voicePanelShortcut = "voicePanelShortcut"
     /// Where Enter opens a quick search result on the Mac: "app" or "browser" (⌥Enter opens it in the other).
     public static let quickSearchOpensIn = "quickSearchOpensIn"
+    /// The Mac puts Loft's agents, issues and specs in Spotlight; off clears them from it.
+    public static let spotlight = "spotlight"
     /// When the app was last in front: the digest covers what happened since.
     public static let digestLastLooked = "digestLastLooked"
     /// A one-line first reply from the on-device model right after you send to the Orchestrator.
@@ -171,6 +173,7 @@ public enum Prefs {
             quickSearchShortcut: "option-space",
             voicePanelShortcut: "shift-option-space",
             quickSearchOpensIn: "app",
+            spotlight: true,
         ])
     }
 }
