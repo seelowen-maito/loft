@@ -106,4 +106,18 @@ final class MarkdownBlocksTests: XCTestCase {
         XCTAssertEqual(blocks, [.paragraph(String(repeating: ">", count: 40_000 - B.maxDepth) + " hi")])
         XCTAssertLessThan(Date().timeIntervalSince(start), 1)
     }
+
+    /// A line of 40,000 `- ` or `1. ` made one list per marker and overflowed the stack (Security on #486).
+    func testDeeplyNestedListMarkersStopNesting() {
+        for marker in ["- ", "1. "] {
+            let start = Date()
+            var blocks = B.parse(String(repeating: marker, count: 40_000) + "hi")
+            var depth = 0
+            var last: B.ListItem?
+            while case .list(_, let items) = blocks.first, let item = items.first { last = item; blocks = item.blocks; depth += 1 }
+            XCTAssertEqual(depth, B.maxDepth, marker)
+            XCTAssertEqual(last?.text, String(repeating: marker, count: 40_000 - B.maxDepth) + "hi")
+            XCTAssertLessThan(Date().timeIntervalSince(start), 1, marker)
+        }
+    }
 }

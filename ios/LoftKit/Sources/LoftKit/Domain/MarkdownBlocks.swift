@@ -15,7 +15,8 @@ public indirect enum MarkdownBlock: Equatable, Sendable {
     /// A table column's alignment from its divider: `:---:` centres, `---:` aligns right.
     public enum ColumnAlignment: Equatable, Sendable { case leading, center, trailing }
 
-    /// How deep quotes nest before further `>` stay as text, so a line of thousands of `>` can't overflow the stack.
+    /// How deep quotes and lists nest before further `>`, `-` or `1.` stay as text, so a line of thousands of them
+    /// can't overflow the stack.
     static let maxDepth = 8
 
     public struct ListItem: Equatable, Sendable {
@@ -76,7 +77,7 @@ public indirect enum MarkdownBlock: Equatable, Sendable {
                 }
                 var inner = quoted[...]
                 blocks.append(.quote(parse(&inner, depth: depth + 1)))
-            } else if listItem(line) != nil {
+            } else if listItem(line) != nil, depth < maxDepth {
                 flush()
                 blocks.append(list(&lines, depth: depth))
             } else if trimmed.contains("|"), lines.dropFirst().first.map(isTableDivider) == true {
