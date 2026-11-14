@@ -10,7 +10,7 @@ final class MacSpotlight {
     private let store: LoftStore
     private let index = CSSearchableIndex.default()
     /// What the index holds, as far as this run knows; nil until the first sync, which starts from a cleared index.
-    private var indexed: [QuickSearch.Result]?
+    private var indexed: [SpotlightIndex.Entry]?
 
     init(store: LoftStore) {
         self.store = store
@@ -27,7 +27,7 @@ final class MacSpotlight {
     }
 
     private func sync() {
-        let results = SpotlightIndex.results(agents: store.agents, tasks: store.tasks, deliveries: Array(store.deliverySummaries.values))
+        let results = SpotlightIndex.entries(agents: store.agents, tasks: store.tasks, deliveries: Array(store.deliverySummaries.values))
         guard UserDefaults.standard.bool(forKey: Prefs.spotlight) else {
             if indexed != [] { index.deleteSearchableItems(withDomainIdentifiers: [SpotlightIndex.domain]) }
             indexed = []

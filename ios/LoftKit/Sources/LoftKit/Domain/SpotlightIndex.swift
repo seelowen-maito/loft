@@ -8,26 +8,43 @@ public enum SpotlightIndex {
     /// Every item Loft puts in Spotlight shares this domain, so they can be cleared together.
     public static let domain = "loft"
 
-    /// What goes in the index: every agent, and the issues, tickets and specs that aren't closed.
-    public static func results(agents: [Agent], tasks: [HBTask], deliveries: [DeliverySummary]) -> [QuickSearch.Result] {
-        agents.map { QuickSearch.Result(kind: .agent, target: $0.id, title: $0.name, webPath: "/agents/\($0.id)") }
-            + tasks.filter { !$0.state.isClosed }.map { QuickSearch.result(for: $0, deliveries: deliveries) }
+    /// One item to index: quick search's result, plus an agent's line and sticker.
+    public struct Entry: Hashable, Sendable {
+        public var result: QuickSearch.Result
+        /// "loft · Dev" for an agent; "Ticket · loft#460" otherwise.
+        public var detail: String
+        /// The agent's sticker SVG, nil without one or for an issue.
+        public var svg: String?
+        public var lead = false
+        public var id: String { result.id }
     }
 
-    public static func item(_ r: QuickSearch.Result) -> CSSearchableItem {
+    /// What goes in the index: every agent, and the issues, tickets and specs that aren't closed.
+    public static func entries(agents: [Agent], tasks: [HBTask], deliveries: [DeliverySummary]) -> [Entry] {
+        agents.map { a in
+            Entry(result: QuickSearch.Result(kind: .agent, target: a.id, title: a.name, webPath: "/agents/\(a.id)"),
+                  detail: [a.project, Agent.roleLabel(a.role)].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · "),
+                  svg: a.avatar?.svg, lead: a.isLead)
+        } + tasks.filter { !$0.state.isClosed }.map { t in
+            let r = QuickSearch.result(for: t, deliveries: deliveries)
+            return Entry(result: r, detail: [r.kind.label, r.number].compactMap { $0 }.joined(separator: " · "))
+        }
+    }
+
+    /// The sticker's size in Spotlight's results, in pixels (2x for a 64pt image).
+    static let thumbnailPixels = 128
+
+    public static func item(_ e: Entry) -> CSSearchableItem {
+        let r = e.result
         let a = CSSearchableItemAttributeSet(contentType: .content)
         a.title = r.title
         a.displayName = r.title
-        a.contentDescription = description(r)
+        a.contentDescription = e.detail
         // "460" and "#460" find a ticket too.
         let n = r.number.flatMap { $0.split(separator: "#").last }.map(String.init)
         a.keywords = [r.kind.label] + (n.map { [$0, "#" + $0] } ?? [])
+        a.thumbnailData = e.svg.flatMap { Sticker.png(svg: $0, pixels: thumbnailPixels, lead: e.lead) }
         return CSSearchableItem(uniqueIdentifier: r.id, domainIdentifier: domain, attributeSet: a)
-    }
-
-    /// "Agent", or "Ticket · loft#460".
-    static func description(_ r: QuickSearch.Result) -> String {
-        [r.kind.label, r.number].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// The kind and id a chosen item's identifier names; nil for one Loft doesn't know.
@@ -39,8 +56,7 @@ public enum SpotlightIndex {
     }
 
     /// What to (re)index and which identifiers to remove, going from what's in the index to what should be.
-    public static func changes(from old: [QuickSearch.Result], to new: [QuickSearch.Result])
-        -> (index: [QuickSearch.Result], remove: [String]) {
+    public static func changes(from old: [Entry], to new: [Entry]) -> (index: [Entry], remove: [String]) {
         let before = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let now = Set(new.map(\.id))
         return (new.filter { before[$0.id] != $0 }, before.keys.filter { !now.contains($0) }.sorted())
