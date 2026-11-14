@@ -145,8 +145,16 @@ struct VoiceCard: View {
     let cancel: () -> Void
     /// Edit in chat: the agent and the tidied text, for its chat's message box.
     let toChat: (_ agentId: String, _ text: String) -> Void
-    @State private var picking = false
+    @State private var picking: Bool
     private var voice: VoiceSession { flow.voice }
+
+    /// `picking` opens More from the start, for screenshots.
+    init(flow: VoiceFlow, cancel: @escaping () -> Void, toChat: @escaping (_ agentId: String, _ text: String) -> Void, picking: Bool = false) {
+        self.flow = flow
+        self.cancel = cancel
+        self.toChat = toChat
+        _picking = State(initialValue: picking)
+    }
 
     var body: some View {
         let step = flow.step
@@ -192,7 +200,7 @@ struct VoiceCard: View {
             }
             .scrollIndicators(.hidden)
             Button("More") { picking = true }.fixedSize().accessibilityIdentifier("talkMore")
-                .popover(isPresented: $picking) { TalkMore(isPresented: $picking) { flow.pick($0) } }
+                .popover(isPresented: $picking) { TalkMore(voice: voice, isPresented: $picking) { flow.pick($0) } }
         }
         .disabled(step == .sent || step == .tidying)
     }
@@ -338,10 +346,11 @@ struct TalkBars: View {
     }
 }
 
-/// Talk's More: every agent by group, searchable.
+/// Talk's More: every agent by group, searchable. It takes the session from its card, not the environment: the
+/// floating voice panel doesn't put one there (#491).
 private struct TalkMore: View {
     @Environment(LoftStore.self) private var store
-    @Environment(VoiceSession.self) private var voice
+    let voice: VoiceSession
     @Binding var isPresented: Bool
     let pick: (String) -> Void
     @State private var query = ""
@@ -349,6 +358,7 @@ private struct TalkMore: View {
     var body: some View {
         VStack(spacing: 8) {
             TextField("Name, title, group or project", text: $query).textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("talkMoreSearch")
             List {
                 ForEach(TalkRecipients.sections(store.agents, query: query), id: \.title) { section in
                     Section(section.title) {
@@ -360,6 +370,7 @@ private struct TalkMore: View {
                                 HStack { Text(a.name); Spacer(); if a.id == voice.agentId { Image(systemName: "checkmark") } }.contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("talkMoreRow-\(a.name)")
                         }
                     }
                 }

@@ -167,6 +167,33 @@ final class LoftMacUITests: XCTestCase {
         XCTAssertTrue(app.textFields["composerField"].waitForExistence(timeout: 5))
     }
 
+    /// The floating voice panel's More opens the recipient list, while listening and on review, and the pick becomes
+    /// the To chip (#491: it crashed, the panel had no `VoiceSession` in its environment).
+    func testVoicePanelMorePicksTheRecipient() {
+        for fixture in ["listening", "review"] {
+            launch(["-ui-testing", "-no-speech", "-show-voice-panel", fixture])
+            let more = app.buttons["talkMore"]
+            XCTAssertTrue(more.waitForExistence(timeout: 10), fixture)
+            more.click()
+            let search = app.textFields["talkMoreSearch"]
+            XCTAssertTrue(search.waitForExistence(timeout: 5), "More opened the list (\(fixture))")
+            search.click()
+            search.typeText("QA")
+            let row = app.buttons["talkMoreRow-QA Agent"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5), fixture)
+            let a = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            a.name = "Voice panel More (\(fixture))"
+            a.lifetime = .keepAlways
+            add(a)
+            row.click()
+            XCTAssertTrue(app.buttons["talkTo-QA Agent"].waitForExistence(timeout: 5), "the pick is the To chip (\(fixture))")
+            XCTAssertTrue(app.buttons["talkSend"].isEnabled, "the panel still sends (\(fixture))")
+            app.buttons["talkCancel"].click()
+            XCTAssertFalse(app.buttons["talkCancel"].waitForExistence(timeout: 2), "Cancel closes the panel (\(fixture))")
+            app.terminate()
+        }
+    }
+
     /// ⌘N opens New message, and picking an agent opens its chat.
     func testNewMessageShortcut() {
         launch(["-ui-testing"])

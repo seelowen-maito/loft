@@ -41,6 +41,8 @@ final class VoicePanelController {
     var showWindow: (() -> Void)?
     /// Off while drawing screenshots, so Sent stays on screen.
     var closesWhenSent = true
+    /// On while drawing screenshots of More.
+    var opensMore = false
     private var panel: VoicePanelWindow?
     private var binding: ShortcutBinding!
 
@@ -53,6 +55,9 @@ final class VoicePanelController {
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-render-voice-panel"), i + 2 < args.count {
             Task { await renderVoicePanel(self, store: store, fixture: args[i + 1], to: args[i + 2]) }
+        }
+        if let i = args.firstIndex(of: "-show-voice-panel"), i + 1 < args.count {
+            Task { await showVoicePanel(self, store: store, fixture: args[i + 1]) }
         }
         if let i = args.firstIndex(of: "-render-talk-sheet"), i + 2 < args.count {
             Task { await renderTalkSheet(store: store, voice: voice, fixture: args[i + 1], to: args[i + 2]) }
@@ -137,7 +142,7 @@ struct VoicePanelView: View {
     let controller: VoicePanelController
 
     var body: some View {
-        VoiceCard(flow: controller.flow, cancel: controller.close, toChat: controller.toChat)
+        VoiceCard(flow: controller.flow, cancel: controller.close, toChat: controller.toChat, picking: controller.opensMore)
             .padding(20)
             .background(WebTheme.canvas, in: RoundedRectangle(cornerRadius: WebTheme.panelRadius))
             .overlay(RoundedRectangle(cornerRadius: WebTheme.panelRadius).strokeBorder(WebTheme.line))
@@ -160,21 +165,39 @@ struct VoicePanelSettings: View {
 }
 
 #if DEBUG
-/// `-render-voice-panel <fixture> <file.png>`: shows the panel in one of `VoiceSession`'s fixture phases (listening,
-/// cleaning, review, sending, failed), draws it to a PNG, then quits. For screenshots without a microphone.
+/// `-show-voice-panel <fixture>`: shows the panel in one of `VoiceSession`'s fixture phases (listening, cleaning,
+/// review, sending, failed) and leaves it open, for UI tests without a microphone.
 @MainActor
-func renderVoicePanel(_ c: VoicePanelController, store: LoftStore, fixture: String, to file: String) async {
+func showVoicePanel(_ c: VoicePanelController, store: LoftStore, fixture: String) async {
     for _ in 0..<80 where store.agents.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
     c.closesWhenSent = false
     c.show(listening: false)
     c.flow.voice.applyFixture(fixture, agentId: store.orchestratorId ?? store.agents.first?.id ?? "")
     c.flow.listened = true
     if fixture == "review" { c.flow.suggested = store.agents.first { $0.id != store.orchestratorId } }
+}
+
+/// `-render-voice-panel <fixture> <file.png>`: the panel as `-show-voice-panel` shows it, drawn to a PNG, then quits.
+/// For screenshots without a microphone. `<fixture>+more` also opens More, drawn over the panel where it pops up.
+@MainActor
+func renderVoicePanel(_ c: VoicePanelController, store: LoftStore, fixture: String, to file: String) async {
+    c.opensMore = fixture.hasSuffix("+more")
+    await showVoicePanel(c, store: store, fixture: fixture.replacingOccurrences(of: "+more", with: ""))
     try? await Task.sleep(for: .seconds(1.5))
-    if let view = NSApp.windows.first(where: { $0 is NSPanel && $0.isVisible })?.contentView,
-       let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-        view.cacheDisplay(in: view.bounds, to: rep)
-        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: file))
+    // The panel, then any popover window on top of it, each at its place on screen.
+    let windows = NSApp.windows.filter { $0.isVisible && ($0 is NSPanel || $0.className.contains("Popover")) }
+        .sorted { ($0 is NSPanel ? 0 : 1) < ($1 is NSPanel ? 0 : 1) }
+    guard let frame = windows.map(\.frame).reduce(nil, { $0?.union($1) ?? $1 }) else { return NSApp.terminate(nil) }
+    let image = NSImage(size: frame.size, flipped: false) { _ in
+        for w in windows {
+            guard let view = w.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            rep.draw(in: NSRect(x: w.frame.minX - frame.minX, y: w.frame.minY - frame.minY, width: w.frame.width, height: w.frame.height))
+        }
+        return true
+    }
+    if let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: file))
     }
     NSApp.terminate(nil)
 }
