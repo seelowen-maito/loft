@@ -146,6 +146,10 @@ final class Router {
             tab = .overview
             overviewPath = NavigationPath()
             picksTalk = true
+        case .overview:
+            composer = nil
+            tab = .overview
+            overviewPath = NavigationPath()
         }
     }
 
