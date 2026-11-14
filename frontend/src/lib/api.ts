@@ -652,6 +652,8 @@ export type SimulatorInput =
   | { action: "key"; code: number }
   | { action: "button"; name: "home" | "lock" };
 
+export type AgentCommand = { name: string; description: string; tag: "passthrough" | "loft" | "terminal"; reason: string | null };
+
 export const api = {
   simulators: () => req<{ interactive: boolean; devices: Simulator[]; error?: string }>("GET", "/simulator"),
   /** Agents' Simulator devices, biggest first; none without Xcode. */
@@ -735,6 +737,8 @@ export const api = {
   clearMessages: (id: string) => req("DELETE", `/agents/${id}/messages`),
   run: (id: string) => req("POST", `/agents/${id}/run`),
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
+  /** What the agent's CLI offers (Loft's own commands, then the CLI's by name), each tagged with how it runs. */
+  commands: (id: string) => req<AgentCommand[]>("GET", `/agents/${id}/commands`),
   /** The user has seen this chat: clears its Unread reply in every browser. */
   markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */

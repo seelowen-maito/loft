@@ -78,7 +78,7 @@ pub fn merged(reported: &Reported, claude_dir: &Path) -> Vec<Command> {
         .iter()
         .map(|(n, d)| Command { name: format!("/{n}"), description: d.to_string(), tag: "loft", reason: None })
         .collect();
-    let mut cli: Vec<&String> = reported.commands.iter().chain(&reported.terminal).filter(|n| !LOFT.iter().any(|(l, _)| l == n)).collect();
+    let mut cli: Vec<&String> = reported.commands.iter().chain(&reported.terminal).filter(|n| !LOFT.iter().any(|(l, _)| l == n) && !n.starts_with("__")).collect();
     cli.sort();
     cli.dedup();
     for n in cli {
@@ -164,12 +164,13 @@ mod tests {
         let home = dir("merge");
         std::fs::create_dir_all(home.join("commands")).unwrap();
         std::fs::write(home.join("commands/ship.md"), "---\ndescription: \"Ship the branch\"\n---\nDo it").unwrap();
-        let r = Reported { commands: vec!["review".into(), "clear".into(), "ship".into(), "doctor".into()], terminal: vec!["doctor".into(), "focus".into()] };
+        let r = Reported { commands: vec!["review".into(), "clear".into(), "ship".into(), "doctor".into(), "__internal".into()], terminal: vec!["doctor".into(), "focus".into()] };
         let list = merged(&r, &home);
         let tags: Vec<_> = list.iter().map(|c| (c.name.as_str(), c.tag)).collect();
         assert_eq!(
             tags,
-            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")]
+            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
+            "the CLI's internal __ commands are left out"
         );
         let doctor = list.iter().find(|c| c.name == "/doctor").unwrap();
         assert!(doctor.reason.as_deref().unwrap().contains("terminal"));

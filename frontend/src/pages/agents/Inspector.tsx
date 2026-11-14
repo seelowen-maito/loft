@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
+  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Terminal, Trash2, X,
 } from "lucide-react";
 import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
@@ -12,8 +12,9 @@ import { GroupInput, ProjectsField } from "./ProjectsField";
 import { projectsOf, withTyped } from "../../lib/team";
 import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
+import { CommandsPanel } from "./CommandsPanel";
 
-type Tab = "config" | "permissions" | "memory" | "workspace";
+type Tab = "config" | "permissions" | "memory" | "commands" | "workspace";
 
 export const MODELS = [
   { value: "sonnet", label: "Sonnet · balanced" },
@@ -55,6 +56,7 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
     { id: "config", label: "Config", icon: <SlidersHorizontal className="size-3.5" /> },
     { id: "permissions", label: "Access", icon: <Shield className="size-3.5" />, badge: pending },
     { id: "memory", label: "Memory", icon: <Brain className="size-3.5" /> },
+    { id: "commands", label: "Commands", icon: <Terminal className="size-3.5" /> },
     { id: "workspace", label: "Files", icon: <Folder className="size-3.5" /> },
   ];
   return (
@@ -78,6 +80,7 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
         {tab === "config" && <ConfigTab key={agent.id} agent={agent} groups={groups} projects={projects} onCleared={onCleared} />}
         {tab === "permissions" && <AccessTab agent={agent} perms={perms} />}
         {tab === "memory" && <MemoryTab agent={agent} />}
+        {tab === "commands" && <CommandsPanel agent={agent} />}
         {tab === "workspace" && <FilesTab agent={agent} />}
       </div>
     </div>
