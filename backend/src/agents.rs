@@ -1101,7 +1101,7 @@ fn agent_file(state: &AppState, agent_id: &str, kind: &str) -> PathBuf {
 }
 
 pub(crate) const AGENT_FILES: &str = ".agent-files";
-const AGENT_FILE_KINDS: [&str; 4] = ["md", "mcp.json", "settings.json", "env.sh"];
+const AGENT_FILE_KINDS: [&str; 5] = ["md", "mcp.json", "settings.json", "env.sh", "commands.json"];
 /// Where the agents' files were kept before they held more than the prompt.
 const OLD_AGENT_FILES: &str = ".system-prompts";
 
@@ -1174,7 +1174,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         disallowed.push("Agent".into());
     }
     // The tool lists hold the user's own rules (`Bash(npm *)`), so they go in the settings file too; `--settings`
-    // applies despite `--setting-sources ""`. So does the hook that refuses kills Loft can't scope to the agent's
+    // applies despite `--setting-sources`. So does the hook that refuses kills Loft can't scope to the agent's
     // own processes (`/bin/kill`, `sudo kill`, a `kill` in `sh -c`).
     let exe = loft_exe()?;
     let settings = json!({
@@ -1182,6 +1182,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         "hooks": crate::kill_guard::hooks(&exe),
     });
 
+    crate::commands::link_user_commands(&workspace(state, &a.id), &crate::sessions::claude_dir());
     let ports = crate::ports::range(state, &a.id)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     cmd.current_dir(workspace(state, &a.id))
@@ -1193,8 +1194,9 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .arg("--mcp-config")
         .arg(write_agent_file(state, &a.id, "mcp.json", &mcp_config)?)
         .arg("--strict-mcp-config")
-        // Isolate agents from the user's own Claude Code settings, hooks and plugins.
-        .args(["--setting-sources", ""])
+        // Isolate agents from the user's own Claude Code settings, hooks and plugins. `project` reads only the
+        // workspace's `.claude`, where the user's own commands and skills are linked (see `commands`).
+        .args(["--setting-sources", "project"])
         .arg("--settings")
         .arg(write_agent_file(state, &a.id, "settings.json", &settings.to_string())?)
         .args(["--permission-prompt-tool", "mcp__loft__approval_prompt"])
@@ -1470,6 +1472,7 @@ async fn run_process(
         match ev["type"].as_str() {
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
+                    let _ = crate::commands::save(&state.cfg.storage_dir, agent_id, &crate::commands::parse_init(&ev));
                     if let Some(sid) = ev["session_id"].as_str().filter(|_| !throwaway) {
                         set_session(state, agent_id, sid)?;
                     }
@@ -2072,7 +2075,7 @@ cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 case "$prompt" in *"redraw your sticker"*) cost=0.25 sid=s-redraw;; esac
 : "${cost:=0}" "${sid:=s1}"
-echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
+echo '{"type":"system","subtype":"init","session_id":"'"$sid"'","slash_commands":["clear","review","doctor"],"skills":["review"],"terminal_slash_commands":["doctor"]}'
 case "$prompt" in *"redraw your sticker"*) while [ ! -f go ]; do sleep 0.05; done;; esac
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
@@ -3017,6 +3020,23 @@ esac
 
     async fn idle(st: &AppState, id: &str) {
         until("the runs to end", 10, || !is_running(st, id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_stores_the_commands_its_cli_reports_and_the_api_lists_them_tagged() {
+        let (st, a) = fake_claude_state();
+        let none = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(none.as_array().unwrap().len(), 5, "before a run: Loft's own commands only");
+        let _ = send(&st, &a.id, "hello").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        let list = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        let tag = |n: &str| list.as_array().unwrap().iter().find(|c| c["name"] == n).map(|c| c["tag"].clone());
+        assert_eq!((tag("/clear"), tag("/review"), tag("/doctor")), (Some(json!("loft")), Some(json!("passthrough")), Some(json!("terminal"))));
+        let doctor = list.as_array().unwrap().iter().find(|c| c["name"] == "/doctor").unwrap();
+        assert!(doctor["reason"].as_str().unwrap().contains("terminal"));
+        assert!(crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path("nope".into())).await.is_err());
+        let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
+        assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|w| w == ["--setting-sources", "project"]), "user hooks stay out, the workspace's commands load");
     }
 
     #[tokio::test(flavor = "multi_thread")]

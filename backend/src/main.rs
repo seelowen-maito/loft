@@ -3,6 +3,7 @@ mod apns;
 mod api;
 mod avatar;
 mod backup;
+mod commands;
 mod db;
 mod delivery;
 mod file_search;
@@ -108,6 +109,7 @@ fn api_routes() -> Router<AppState> {
         .route("/agents/{id}/run", post(api::run_now))
         .route("/agents/{id}/stop", post(api::stop_agent))
         .route("/agents/{id}/read", post(api::mark_read))
+        .route("/agents/{id}/commands", get(commands::list))
         .route("/agents/{id}/restart", post(api::restart_agent))
         .route("/agents/{id}/reset-session", post(api::reset_session))
         .route("/agents/{id}/compact", post(api::compact_session))

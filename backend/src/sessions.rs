@@ -21,7 +21,7 @@ pub struct PastSession {
 }
 
 /// Claude Code's folder, as `claude` finds it.
-fn claude_dir() -> PathBuf {
+pub fn claude_dir() -> PathBuf {
     std::env::var("CLAUDE_CONFIG_DIR").map(Into::into).unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"))
 }
 
