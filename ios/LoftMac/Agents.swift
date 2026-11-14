@@ -100,6 +100,37 @@ struct AgentRow: View {
 
 }
 
+/// An agent's sticker, as on the web, drawn off the main actor the first time; its initials until then, or without one.
+struct AgentSticker: View {
+    let agent: Agent
+    var size: CGFloat = 28
+    @Environment(\.displayScale) private var scale
+    @State private var image: NSImage?
+
+    private static let cache = NSCache<NSString, NSImage>()
+
+    var body: some View {
+        let svg = agent.avatar?.svg
+        let pixels = Int(size * scale), lead = agent.isLead
+        let key = "\(svg?.hashValue ?? 0)@\(pixels)\(lead ? "+lead" : "")" as NSString
+        Group {
+            if let image = image ?? Self.cache.object(forKey: key) {
+                Image(nsImage: image).resizable().frame(width: size, height: size)
+            } else {
+                Initials(name: agent.name, lead: lead, size: size * 0.8).frame(width: size, height: size)
+            }
+        }
+        .accessibilityHidden(true)
+        .task(id: key) {
+            guard let svg, Self.cache.object(forKey: key) == nil else { return }
+            let data = await Task.detached(priority: .userInitiated) { Sticker.png(svg: svg, pixels: pixels, lead: lead) }.value
+            guard let data, let drawn = NSImage(data: data) else { return }
+            Self.cache.setObject(drawn, forKey: key)
+            image = drawn
+        }
+    }
+}
+
 /// A round badge with the agent's initials (a Lead's is filled).
 struct Initials: View {
     let name: String

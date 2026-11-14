@@ -77,4 +77,49 @@ final class QuickSearchTests: XCTestCase {
         XCTAssertEqual(r.first?.webPath, "/issues/t1")
         XCTAssertEqual(search("orch").first?.webPath, "/agents/orch")
     }
+
+    func testRowsReadLikeTheWebsSearch() {
+        var dev = Agent(id: "dev", name: "Loft mobile dev", status: "idle")
+        dev.project = "loft"
+        dev.role = "lead"
+        XCTAssertEqual(QuickSearch.results("mobile dev", agents: [dev], tasks: [], deliveries: []).first?.detail, "loft · Lead")
+        XCTAssertEqual(search("orch").first?.detail, "Custom", "No project: the role alone")
+        var done = task("d", "Search done", number: 480, status: "done")
+        done.github?.state = "closed"
+        let r = search("search", tasks: [task("o", "Search open", number: 12), done, task("l", "Search local")])
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: r.map { ($0.target, $0.detail) }),
+                       ["o": "#12 · open · loft", "l": "open · loft", "d": "#480 · closed · loft"])
+    }
+
+    func testPullRequestsAreFoundOnceAndOpenOnGitHub() {
+        func pr(_ n: Int, _ title: String, state: String = "open", draft: Bool? = nil, agent: String = "dev") -> PullRequest {
+            PullRequest(id: "\(agent)\(n)", agentId: agent, slug: "o/loft", number: n, url: "https://github.com/o/loft/pull/\(n)",
+                        title: title, state: state, draft: draft)
+        }
+        let prs = [pr(7, "Search merged", state: "merged"), pr(9, "Search rows", draft: true), pr(9, "Search rows", draft: true, agent: "qa")]
+        let r = QuickSearch.results("search", agents: [], tasks: [], deliveries: [], pullRequests: prs)
+        XCTAssertEqual(r.map(\.target), ["https://github.com/o/loft/pull/9", "https://github.com/o/loft/pull/7"])
+        XCTAssertEqual(r.map(\.detail), ["#9 · draft · loft", "#7 · merged · loft"])
+        XCTAssertEqual(r.first?.kind, .pullRequest)
+        XCTAssertEqual(r.first?.webOnly, true)
+        XCTAssertEqual(QuickSearch.results("#9", agents: [], tasks: [], deliveries: [], pullRequests: prs).count, 1)
+    }
+
+    func testAgentStatusAsTheWebTellsIt() {
+        func agent(_ status: String, running: Bool? = nil, waitingOn: [String]? = nil, every: Int? = nil) -> QuickSearch.AgentStatus {
+            var a = Agent(id: "a", name: "A", status: status)
+            a.running = running
+            a.waitingOn = waitingOn
+            a.intervalMinutes = every
+            return QuickSearch.AgentStatus(a)
+        }
+        XCTAssertEqual(agent("waiting", running: true), .needsYou)
+        XCTAssertEqual(agent("idle", running: true, waitingOn: ["480"]), .waiting)
+        XCTAssertEqual(agent("idle", running: true), .working)
+        XCTAssertEqual(agent("running"), .working)
+        XCTAssertEqual(agent("error"), .error)
+        XCTAssertEqual(agent("idle", every: 30), .sleeping)
+        XCTAssertEqual(agent("idle"), .idle)
+        XCTAssertEqual(QuickSearch.AgentStatus.sleeping.label, "Sleeping")
+    }
 }

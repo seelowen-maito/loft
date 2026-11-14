@@ -9,7 +9,7 @@ private final class QuickSearchPanel: NSPanel {
     var onKey: ((NSEvent) -> Bool)?
 
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 640, height: 470), styleMask: [.borderless, .nonactivatingPanel],
+        super.init(contentRect: NSRect(x: 0, y: 0, width: QuickSearchView.size.width, height: QuickSearchView.size.height), styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: true)
         isFloatingPanel = true
         level = .floating
@@ -46,7 +46,8 @@ final class QuickSearchModel {
     init(store: LoftStore) { self.store = store }
 
     var results: [QuickSearch.Result] {
-        QuickSearch.results(query, agents: store.agents, tasks: store.tasks, deliveries: Array(store.deliverySummaries.values))
+        QuickSearch.results(query, agents: store.agents, tasks: store.tasks, deliveries: Array(store.deliverySummaries.values),
+                            pullRequests: store.pullRequests)
     }
 
     /// Why only pages can be found: Loft isn't connected, or hasn't loaded its agents and issues yet.
@@ -127,7 +128,7 @@ final class QuickSearchController {
         close()
         let chat = flags.contains(.command) && r.kind == .agent
         let browserDefault = UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser"
-        if !chat, r.webOnly || flags.contains(.option) != browserDefault, let base = model.store.api?.baseURL {
+        if !chat, r.kind != .pullRequest, r.webOnly || flags.contains(.option) != browserDefault, let base = model.store.api?.baseURL {
             NSWorkspace.shared.open(base.appendingPathComponent(r.webPath))
             return
         }
@@ -140,9 +141,12 @@ final class QuickSearchController {
         go(kind, id, webPath: "")
     }
 
-    /// Goes to the agent, issue or page in the main window, opening or raising it.
+    /// Goes to the agent, issue or page in the main window, opening or raising it; a pull request opens on GitHub.
     private func go(_ kind: QuickSearch.Kind, _ target: String, webPath: String) {
         switch kind {
+        case .pullRequest:
+            if let url = URL(string: target) { NSWorkspace.shared.open(url) }
+            return
         case .agent: nav.openChat(target)
         case .spec, .ticket, .issue:
             nav.section = .issues
@@ -160,6 +164,11 @@ final class QuickSearchController {
 }
 
 struct QuickSearchView: View {
+    /// The panel's window, the card plus room for its shadow.
+    static let size = CGSize(width: 800, height: 660)
+    /// A row's height, as the web's ⌘K search: a 40pt sticker and two lines.
+    private static let rowHeight: CGFloat = 54
+
     @Bindable var model: QuickSearchModel
     let onPick: (QuickSearch.Result, NSEvent.ModifierFlags) -> Void
     @FocusState private var focused: Bool
@@ -169,19 +178,21 @@ struct QuickSearchView: View {
         let typed = !model.query.trimmingCharacters(in: .whitespaces).isEmpty
         let note = !typed ? nil : model.unavailable.map { "\($0): only pages are searched" } ?? (results.isEmpty ? "Nothing matches" : nil)
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 Image(systemName: "magnifyingglass").font(.system(size: 20)).foregroundStyle(WebTheme.fg3)
                     .accessibilityHidden(true)
-                TextField("Search agents, issues, tickets and specs", text: $model.query)
+                TextField("Search agents, specs, issues and pull requests…", text: $model.query)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 20))
+                    .font(.system(size: 22))
                     .focused($focused)
                     .accessibilityIdentifier("quickSearchField")
             }
-            .padding(14)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
             if let note {
                 Divider()
-                Text(note).foregroundStyle(WebTheme.fg3).padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                Text(note).font(.system(size: 13.5)).foregroundStyle(WebTheme.fg3).padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("quickSearchNote")
             }
             if !results.isEmpty {
@@ -197,45 +208,91 @@ struct QuickSearchView: View {
                         }
                         .padding(6)
                     }
-                    // Rows are about 33pt: as tall as they need, up to nine.
-                    .frame(height: min(CGFloat(results.count) * 33 + 12, 309))
+                    // As tall as the rows need, up to eight and a half, so a ninth shows there's more.
+                    .frame(height: min(CGFloat(results.count) * (Self.rowHeight + 2) + 12, Self.rowHeight * 8.5 + 12))
                     .onChange(of: model.selection) { proxy.scrollTo(model.selection) }
                 }
                 Divider()
                 Text("↵ Open   ⌘↵ Chat   ⌥↵ \(UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser" ? "Mac app" : "Browser")   esc Close")
-                    .font(.caption.monospaced())
+                    .font(.system(size: 11.5, design: .monospaced))
                     .foregroundStyle(WebTheme.fg3)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
             }
         }
-        .background(WebTheme.canvas, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(WebTheme.fg3.opacity(0.25)))
+        .foregroundStyle(WebTheme.fg)
+        .background(WebTheme.surface, in: RoundedRectangle(cornerRadius: WebTheme.panelRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: WebTheme.panelRadius, style: .continuous).strokeBorder(WebTheme.lineStrong))
         .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
         .padding(20)
-        .frame(width: 640, height: 470, alignment: .top)
+        .frame(width: Self.size.width, height: Self.size.height, alignment: .top)
         .onAppear { focused = true }
         .onChange(of: model.opened) { focused = true }
     }
 
+    /// The web's search row: an agent's sticker, name, "project · role" and status; or an issue's, spec's or pull
+    /// request's icon, title, "#480 · open · loft" and kind.
     private func row(_ r: QuickSearch.Result, selected: Bool) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: Self.symbol(r.kind)).frame(width: 20).foregroundStyle(selected ? Theme.accent : WebTheme.fg3)
-                .accessibilityHidden(true)
-            Text(r.title).lineLimit(1)
+        let agent = r.kind == .agent ? model.store.agent(r.target) : nil
+        let status = agent.map(QuickSearch.AgentStatus.init)
+        let closed = r.closed
+        return HStack(spacing: 12) {
+            Group {
+                if let agent {
+                    AgentSticker(agent: agent, size: 40)
+                        .overlay(alignment: .bottomTrailing) {
+                            Circle().fill(status.map(Self.dot) ?? WebTheme.fg3).frame(width: 11, height: 11)
+                                .overlay(Circle().strokeBorder(WebTheme.surface, lineWidth: 2))
+                        }
+                } else {
+                    Image(systemName: Self.symbol(r.kind)).font(.system(size: 17)).foregroundStyle(closed ? WebTheme.fg3 : WebTheme.fg2)
+                }
+            }
+            .frame(width: 40, height: 40)
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(r.title).font(.system(size: 15)).foregroundStyle(closed ? WebTheme.fg2 : WebTheme.fg).lineLimit(1)
+                if let d = r.detail, !d.isEmpty {
+                    Text(d).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(WebTheme.fg3).lineLimit(1)
+                }
+            }
             Spacer(minLength: 8)
-            if let n = r.number { Text(n).font(.caption.monospaced()) }
-            Text(r.kind.label).font(.caption.weight(.medium))
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(.quaternary, in: Capsule())
+            Group {
+                if let status {
+                    Text(status.label).foregroundStyle(Self.text(status))
+                } else {
+                    Text(r.kind.label).foregroundStyle(WebTheme.fg3)
+                }
+            }
+            .font(.system(size: 11.5, design: .monospaced)).textCase(.uppercase).tracking(1.2)
+            if r.webOnly {
+                Image(systemName: "arrow.up.right.square").font(.system(size: 12)).foregroundStyle(WebTheme.fg3)
+                    .accessibilityLabel("Opens in the browser")
+            }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(selected ? Theme.accent.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .frame(height: Self.rowHeight)
+        .background(selected ? WebTheme.fg.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: WebTheme.rowRadius, style: .continuous))
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// The status dot's colour, as the web's `statusOf`.
+    private static func dot(_ s: QuickSearch.AgentStatus) -> Color {
+        switch s {
+        case .needsYou: WebTheme.warn
+        case .waiting: WebTheme.info
+        case .working: Theme.accent
+        case .error: WebTheme.bad
+        case .sleeping: WebTheme.info.opacity(0.7)
+        case .idle: WebTheme.fg3
+        }
+    }
+
+    private static func text(_ s: QuickSearch.AgentStatus) -> Color {
+        s == .sleeping ? WebTheme.fg2 : dot(s)
     }
 
     private static func symbol(_ k: QuickSearch.Kind) -> String {
@@ -244,6 +301,7 @@ struct QuickSearchView: View {
         case .spec: "doc.text"
         case .ticket: "ticket"
         case .issue: "smallcircle.filled.circle"
+        case .pullRequest: "arrow.triangle.pull"
         case .page: "rectangle.on.rectangle"
         }
     }

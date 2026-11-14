@@ -22,9 +22,8 @@ public enum SpotlightIndex {
     /// What goes in the index: every agent, and the issues, tickets and specs that aren't closed.
     public static func entries(agents: [Agent], tasks: [HBTask], deliveries: [DeliverySummary]) -> [Entry] {
         agents.map { a in
-            Entry(result: QuickSearch.Result(kind: .agent, target: a.id, title: a.name, webPath: "/agents/\(a.id)"),
-                  detail: [a.project, Agent.roleLabel(a.role)].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · "),
-                  svg: a.avatar?.svg, lead: a.isLead)
+            let r = QuickSearch.result(for: a)
+            return Entry(result: r, detail: r.detail ?? "", svg: a.avatar?.svg, lead: a.isLead)
         } + tasks.filter { !$0.state.isClosed }.map { t in
             let r = QuickSearch.result(for: t, deliveries: deliveries)
             return Entry(result: r, detail: [r.kind.label, r.number].compactMap { $0 }.joined(separator: " · "))
@@ -50,7 +49,7 @@ public enum SpotlightIndex {
     /// The kind and id a chosen item's identifier names; nil for one Loft doesn't know.
     public static func target(of identifier: String) -> (kind: QuickSearch.Kind, id: String)? {
         guard let colon = identifier.firstIndex(of: ":"), let kind = QuickSearch.Kind(rawValue: String(identifier[..<colon])),
-              kind != .page else { return nil }
+              kind != .page, kind != .pullRequest else { return nil }
         let id = String(identifier[identifier.index(after: colon)...])
         return id.isEmpty ? nil : (kind, id)
     }
