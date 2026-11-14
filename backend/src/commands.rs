@@ -64,6 +64,7 @@ const BUILT_IN: [(&str, &str); 12] = [
 
 /// The `description:` of the user's own command or skill of that name in the Claude folder, if it has one.
 fn user_description(claude_dir: &Path, name: &str) -> Option<String> {
+    let name = name.strip_prefix("user:").unwrap_or(name);
     let text = std::fs::read_to_string(claude_dir.join("commands").join(format!("{name}.md")))
         .or_else(|_| std::fs::read_to_string(claude_dir.join("skills").join(name).join("SKILL.md")))
         .ok()?;
@@ -110,26 +111,62 @@ pub fn load(storage: &Path, agent_id: &str) -> Reported {
     std::fs::read_to_string(file(storage, agent_id)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
-/// Makes the user's own commands and skills (the Claude folder's `commands` and `skills`) visible to the agent's
-/// runs as its project's, which `--setting-sources project` loads. Their settings, hooks and plugins stay out:
-/// only the workspace's own `.claude/settings.json` is read, and the user's isn't there.
-pub fn link_user_commands(workspace: &Path, claude_dir: &Path) {
+/// Removes the links an earlier version put in a workspace (`.claude/commands`, `.claude/skills`) to the user's folders.
+pub fn unlink_user_commands(workspace: &Path, claude_dir: &Path) {
     for kind in ["commands", "skills"] {
-        let (src, dst) = (claude_dir.join(kind), workspace.join(".claude").join(kind));
-        if !src.is_dir() {
-            continue;
+        let dst = workspace.join(".claude").join(kind);
+        if std::fs::read_link(&dst).is_ok_and(|to| to == claude_dir.join(kind)) {
+            let _ = std::fs::remove_file(&dst);
         }
-        match std::fs::read_link(&dst) {
-            Ok(to) if to == src => continue,
-            Ok(_) => {
-                let _ = std::fs::remove_file(&dst);
+    }
+}
+
+/// The plugin name the user's own commands and skills load under: `/user:ship`.
+pub const USER_PLUGIN: &str = "user";
+
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let to = dst.join(e.file_name());
+        // `metadata` follows links, so a linked skill folder is copied as what it points at.
+        if std::fs::metadata(e.path())?.is_dir() {
+            copy_dir(&e.path(), &to)?;
+        } else {
+            std::fs::copy(e.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies the user's own commands and skills (the Claude folder's `commands` and `skills`) into a plugin folder
+/// that Loft owns, outside every workspace, and returns it for `--plugin-dir`. A copy, so an agent can't write
+/// through to the user's folders; with only these two folders in it, the user's settings, hooks and plugins stay
+/// out. Runs read no settings file from the workspace (`--setting-sources ""`), which an agent could write.
+pub fn sync_user_plugin(storage: &Path, claude_dir: &Path) -> Option<std::path::PathBuf> {
+    let (dir, tmp) = (storage.join("user-plugin"), storage.join(format!("user-plugin.{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let built = (|| -> std::io::Result<bool> {
+        let mut any = false;
+        for kind in ["commands", "skills"] {
+            if claude_dir.join(kind).is_dir() {
+                copy_dir(&claude_dir.join(kind), &tmp.join(kind))?;
+                any = true;
             }
-            // Something of the agent's own, or nothing yet.
-            Err(_) if dst.exists() => continue,
-            Err(_) => {}
         }
-        let _ = std::fs::create_dir_all(workspace.join(".claude"));
-        let _ = std::os::unix::fs::symlink(&src, &dst);
+        if any {
+            std::fs::create_dir_all(tmp.join(".claude-plugin"))?;
+            std::fs::write(tmp.join(".claude-plugin/plugin.json"), json!({ "name": USER_PLUGIN, "version": "1.0.0" }).to_string())?;
+        }
+        Ok(any)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    match built {
+        Ok(true) if std::fs::rename(&tmp, &dir).is_ok() => Some(dir),
+        _ => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            None
+        }
     }
 }
 
@@ -200,27 +237,34 @@ mod tests {
     }
 
     #[test]
-    fn the_users_commands_and_skills_are_linked_into_the_workspace_and_nothing_else() {
-        let (home, ws) = (dir("link-home"), dir("link-ws"));
+    fn the_users_commands_and_skills_are_copied_into_a_plugin_and_nothing_else() {
+        let (home, st) = (dir("plug-home"), dir("plug-st"));
         std::fs::create_dir_all(home.join("commands")).unwrap();
-        std::fs::create_dir_all(home.join("skills")).unwrap();
+        std::fs::create_dir_all(home.join("skills/b2b")).unwrap();
+        std::fs::write(home.join("commands/ship.md"), "ship").unwrap();
+        std::fs::write(home.join("skills/b2b/SKILL.md"), "b2b").unwrap();
         std::fs::write(home.join("settings.json"), "{\"hooks\":{}}").unwrap();
-        link_user_commands(&ws, &home);
-        link_user_commands(&ws, &home);
-        assert_eq!(std::fs::read_link(ws.join(".claude/commands")).unwrap(), home.join("commands"));
-        assert_eq!(std::fs::read_link(ws.join(".claude/skills")).unwrap(), home.join("skills"));
-        assert!(!ws.join(".claude/settings.json").exists(), "the user's settings and hooks are not linked");
-        let mut seen: Vec<_> = std::fs::read_dir(ws.join(".claude")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        std::fs::create_dir_all(home.join("plugins")).unwrap();
+        let p = sync_user_plugin(&st, &home).unwrap();
+        sync_user_plugin(&st, &home).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("commands/ship.md")).unwrap(), "ship");
+        assert_eq!(std::fs::read_to_string(p.join("skills/b2b/SKILL.md")).unwrap(), "b2b");
+        assert!(std::fs::symlink_metadata(p.join("commands")).unwrap().is_dir(), "a copy, not a link into the user's folder");
+        let mut seen: Vec<_> = std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
         seen.sort();
-        assert_eq!(seen, ["commands", "skills"]);
-    }
-
-    #[test]
-    fn an_agents_own_commands_folder_is_left_alone() {
-        let (home, ws) = (dir("own-home"), dir("own-ws"));
-        std::fs::create_dir_all(home.join("commands")).unwrap();
-        std::fs::create_dir_all(ws.join(".claude/commands")).unwrap();
-        link_user_commands(&ws, &home);
-        assert!(std::fs::read_link(ws.join(".claude/commands")).is_err());
+        assert_eq!(seen, [".claude-plugin", "commands", "skills"]);
+        // A write through the plugin leaves the user's folder alone.
+        std::fs::write(p.join("commands/ship.md"), "changed").unwrap();
+        assert_eq!(std::fs::read_to_string(home.join("commands/ship.md")).unwrap(), "ship");
+        // Nothing to share: no plugin.
+        assert!(sync_user_plugin(&st, &dir("plug-empty")).is_none());
+        assert!(!st.join("user-plugin").exists());
+        // An old link into the user's folder goes; an agent's own folder stays.
+        let ws = dir("plug-ws");
+        std::fs::create_dir_all(ws.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(home.join("commands"), ws.join(".claude/commands")).unwrap();
+        std::fs::create_dir_all(ws.join(".claude/skills")).unwrap();
+        unlink_user_commands(&ws, &home);
+        assert!(!ws.join(".claude/commands").exists() && ws.join(".claude/skills").is_dir());
     }
 }

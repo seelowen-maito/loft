@@ -1182,7 +1182,10 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         "hooks": crate::kill_guard::hooks(&exe),
     });
 
-    crate::commands::link_user_commands(&workspace(state, &a.id), &crate::sessions::claude_dir());
+    crate::commands::unlink_user_commands(&workspace(state, &a.id), &crate::sessions::claude_dir());
+    // Read from the workspace by a relative path, like the agent's files, so no user folder is on argv.
+    let user_plugin = crate::commands::sync_user_plugin(&state.cfg.storage_dir.join(AGENT_FILES), &crate::sessions::claude_dir())
+        .map(|p| PathBuf::from("..").join(AGENT_FILES).join(p.file_name().unwrap()));
     let ports = crate::ports::range(state, &a.id)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     cmd.current_dir(workspace(state, &a.id))
@@ -1194,13 +1197,15 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .arg("--mcp-config")
         .arg(write_agent_file(state, &a.id, "mcp.json", &mcp_config)?)
         .arg("--strict-mcp-config")
-        // Isolate agents from the user's own Claude Code settings, hooks and plugins. `project` reads only the
-        // workspace's `.claude`, where the user's own commands and skills are linked (see `commands`).
-        .args(["--setting-sources", "project"])
+        // Agents read no settings file: not the user's, and not the workspace's, which the agent can write
+        // (an allow rule or a hook there would skip the approval prompt). The user's own commands and skills
+        // come as a plugin Loft owns (see `commands`).
+        .args(["--setting-sources", ""])
         .arg("--settings")
         .arg(write_agent_file(state, &a.id, "settings.json", &settings.to_string())?)
         .args(["--permission-prompt-tool", "mcp__loft__approval_prompt"])
         .args(["--permission-mode", &a.permission_mode])
+        .args(user_plugin.iter().flat_map(|p| [std::ffi::OsStr::new("--plugin-dir"), p.as_os_str()]))
         .args(["--name", &a.name])
         .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
         // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
@@ -3036,7 +3041,7 @@ esac
         assert!(doctor["reason"].as_str().unwrap().contains("terminal"));
         assert!(crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path("nope".into())).await.is_err());
         let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
-        assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|w| w == ["--setting-sources", "project"]), "user hooks stay out, the workspace's commands load");
+        assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|w| w == ["--setting-sources", ""]), "no settings file is read");
     }
 
     #[tokio::test(flavor = "multi_thread")]
