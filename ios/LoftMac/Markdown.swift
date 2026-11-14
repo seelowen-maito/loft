@@ -7,7 +7,15 @@ import SwiftUI
 struct MarkdownView: View {
     let blocks: [MarkdownBlock]
 
-    init(_ text: String) { blocks = MarkdownBlock.parse(text) }
+    /// Parsed once per message text, not each time a chat row is built.
+    init(_ text: String) {
+        if let cached = Self.cache.object(forKey: text as NSString) {
+            blocks = cached.blocks
+        } else {
+            blocks = MarkdownBlock.parse(text)
+            Self.cache.setObject(Parsed(blocks: blocks), forKey: text as NSString)
+        }
+    }
     init(blocks: [MarkdownBlock]) { self.blocks = blocks }
 
     var body: some View {
@@ -22,6 +30,9 @@ struct MarkdownView: View {
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    private final class Parsed { let blocks: [MarkdownBlock]; init(blocks: [MarkdownBlock]) { self.blocks = blocks } }
+    private static let cache: NSCache<NSString, Parsed> = { let c = NSCache<NSString, Parsed>(); c.countLimit = 500; return c }()
 
     /// Inline Markdown: bold, italics, links underlined in the accent colour, `code` on a faint background.
     static func inline(_ s: String) -> AttributedString {
@@ -63,7 +74,10 @@ private struct MarkdownBlockView: View {
                         }
                         .foregroundStyle(WebTheme.fg2)
                         .frame(minWidth: 16, alignment: .trailing)
-                        Text(MarkdownView.inline(item.text))
+                        VStack(alignment: .leading, spacing: 8) {
+                            if !item.text.isEmpty { Text(MarkdownView.inline(item.text)) }
+                            if !item.blocks.isEmpty { MarkdownView(blocks: item.blocks) }
+                        }
                     }
                     .padding(.leading, CGFloat(item.depth) * 20)
                 }
@@ -76,11 +90,12 @@ private struct MarkdownBlockView: View {
                 MarkdownView(blocks: blocks).foregroundStyle(WebTheme.fg2)
             }
             .fixedSize(horizontal: false, vertical: true)
-        case .table(let header, let rows):
+        case .table(let header, let alignments, let rows):
+            let align = { (c: Int) in alignments.indices.contains(c) ? alignments[c] : .leading }
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                GridRow { ForEach(header.indices, id: \.self) { cell(header[$0]).fontWeight(.semibold) } }
+                GridRow { ForEach(header.indices, id: \.self) { cell(header[$0], align($0)).fontWeight(.semibold) } }
                 ForEach(rows.indices, id: \.self) { r in
-                    GridRow { ForEach(header.indices, id: \.self) { c in cell(rows[r].indices.contains(c) ? rows[r][c] : "") } }
+                    GridRow { ForEach(header.indices, id: \.self) { c in cell(rows[r].indices.contains(c) ? rows[r][c] : "", align(c)) } }
                 }
             }
             .font(.system(size: 13))
@@ -89,49 +104,56 @@ private struct MarkdownBlockView: View {
         }
     }
 
-    private func cell(_ text: String) -> some View {
+    private func cell(_ text: String, _ alignment: MarkdownBlock.ColumnAlignment) -> some View {
         Text(MarkdownView.inline(text))
+            .multilineTextAlignment(alignment == .center ? .center : alignment == .trailing ? .trailing : .leading)
             .padding(.horizontal, 8).padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: alignment == .center ? .center : alignment == .trailing ? .trailing : .leading)
             .overlay(alignment: .bottom) { Rectangle().fill(WebTheme.line).frame(height: 1) }
     }
 }
 
-/// A fenced code block: mono, scrolling sideways when a line is long, with a copy button.
+/// A fenced code block as on the web: a header row with the language and Copy, then mono text that scrolls
+/// sideways when a line is long.
 private struct CodeBlock: View {
     let language: String
     let text: String
     @State private var copied = false
 
     var body: some View {
-        ScrollView(.horizontal) {
-            Text(text)
-                .font(.system(size: 12.5, design: .monospaced))
-                .lineSpacing(2)
-                .fixedSize()
-                .padding(12)
-                .padding(.trailing, 28)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(language.isEmpty ? "code" : language)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(WebTheme.fg2)
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                    copied = true
+                    Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+                } label: {
+                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(copied ? Theme.accent : WebTheme.fg2)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(language.isEmpty ? "Copy code" : "Copy \(language) code")
+                .accessibilityIdentifier("copyCode")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            Rectangle().fill(WebTheme.line).frame(height: 1)
+            ScrollView(.horizontal) {
+                Text(text)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .lineSpacing(2)
+                    .fixedSize()
+                    .padding(12)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WebTheme.canvas, in: RoundedRectangle(cornerRadius: WebTheme.rowRadius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: WebTheme.rowRadius, style: .continuous).strokeBorder(WebTheme.line))
-        .overlay(alignment: .topTrailing) {
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
-                copied = true
-                Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
-            } label: {
-                Image(systemName: copied ? "checkmark" : "doc.on.doc").font(.system(size: 11))
-                    .foregroundStyle(copied ? Theme.accent : WebTheme.fg3)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(4)
-            .help(copied ? "Copied" : "Copy")
-            .accessibilityLabel(language.isEmpty ? "Copy code" : "Copy \(language) code")
-            .accessibilityIdentifier("copyCode")
-        }
     }
 }
