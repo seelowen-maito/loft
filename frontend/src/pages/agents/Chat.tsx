@@ -1161,7 +1161,7 @@ function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNu
 function fmtNext(iso: string): string {
   const d = new Date(iso);
   const far = d.getTime() - Date.now() > 6 * 86400_000;
-  return d.toLocaleString([], { weekday: "short", ...(far ? { month: "short", day: "numeric" } : {}), hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString([], { weekday: "short", ...(far ? { month: "short", day: "numeric" } : {}), hour: "numeric", minute: "2-digit" });
 }
 
 /** Loft commands that answer with a notice: they show or change a setting, or show usage. */
