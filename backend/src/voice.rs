@@ -316,6 +316,13 @@ pub async fn transcribe(State(state): State<AppState>, Query(q): Query<Transcrib
     if size > MAX_AUDIO_BYTES {
         return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "Voice sessions stop at ten minutes.".into()));
     }
+    // No audio yet (the mic stopped before any arrived): nothing to hear, and the analyzer never finishes on none.
+    if size == 0 {
+        if !q.last {
+            std::mem::forget(file);
+        }
+        return Ok(Json(json!({ "text": "", "final": q.last })));
+    }
     let out = Command::new(&helper).arg(&file.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).output();
     let out = tokio::time::timeout(TRANSCRIBE_TIMEOUT, out).await.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Transcribing timed out.".into()))?;
     let out = out.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("Couldn't start the transcriber: {e}")))?;
@@ -544,6 +551,18 @@ esac
         fake_helper(&st, "echo 'the analyzer crashed' >&2; exit 1");
         assert_eq!(talk(&st, &id, &[0, 0], false).await.unwrap_err(), (StatusCode::BAD_GATEWAY, "Transcribing failed: the analyzer crashed".into()));
         assert!(!std::env::temp_dir().join("loft-voice").join(format!("{id}.pcm")).exists(), "a failure ends the session");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_session_with_no_audio_answers_empty_text_without_the_helper() {
+        let st = crate::tasks::tests::state();
+        // Like the real helper on no audio, this one never returns.
+        fake_helper(&st, "sleep 600");
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(talk(&st, &id, &[], false).await.unwrap(), json!({ "text": "", "final": false }));
+        assert_eq!(talk(&st, &id, &[], true).await.unwrap(), json!({ "text": "", "final": true }));
+        assert!(!std::env::temp_dir().join("loft-voice").join(format!("{id}.pcm")).exists(), "the final chunk ends the session");
     }
 
     #[tokio::test]

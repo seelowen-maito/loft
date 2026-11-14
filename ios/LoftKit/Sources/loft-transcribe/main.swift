@@ -46,7 +46,10 @@ func transcribe(_ data: Data) async -> String {
     return VoiceText.join(segments + [partial])
 }
 
-if #available(macOS 26.0, *), Speech.SpeechTranscriber.isAvailable {
+if data.isEmpty {
+    // No audio: nothing to hear, and the analyzer's flush never returns on none.
+    print("")
+} else if #available(macOS 26.0, *), Speech.SpeechTranscriber.isAvailable {
     print(await transcribe(data))
 } else {
     fail("Transcribing needs macOS 26 or later with Apple's speech model.", code: 2)
