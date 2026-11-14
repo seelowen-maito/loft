@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Terminal, Trash2, X,
 } from "lucide-react";
@@ -128,6 +128,13 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
   const [typed, setTyped] = useState("");
   const [shown, setDraft] = useState<Draft>(initial);
   const draft = withTyped(shown, typed);
+  // /model and /effort in the chat change the agent under an open panel: follow them unless the user edited that field.
+  const seen = useRef({ model: agent.model, effort: agent.effort });
+  useEffect(() => {
+    const prev = seen.current;
+    seen.current = { model: agent.model, effort: agent.effort };
+    setDraft((d) => ({ ...d, model: d.model === prev.model ? agent.model : d.model, effort: d.effort === prev.effort ? agent.effort : d.effort }));
+  }, [agent.model, agent.effort]);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // Redraw: busy from the click until the agent's `redrawing` flag says it's done (it survives a reload and shows in other tabs).

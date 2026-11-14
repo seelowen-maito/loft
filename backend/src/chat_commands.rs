@@ -24,7 +24,8 @@ fn setting(state: &AppState, id: &str, what: &str, arg: &str, choices: &[&str], 
     let arg = arg.trim().to_lowercase();
     if arg.is_empty() {
         let now = if current.is_empty() { "default".to_string() } else { current };
-        return Ok(format!("{what}: {now}. Choices: {}.", choices.join(", ")));
+        let extra = if what == "Effort" { ", default" } else { "" };
+        return Ok(format!("{what}: {now}. Choices: {}{extra}.", choices.join(", ")));
     }
     // Effort has no "default" in the list: it clears the setting.
     let value = if what == "Effort" && arg == "default" { String::new() } else { arg };
@@ -34,6 +35,11 @@ fn setting(state: &AppState, id: &str, what: &str, arg: &str, choices: &[&str], 
     let a = state.db.update_agent(id, |a| set(a, value.clone()))?.ok_or_else(not_found)?;
     emit_agent(state, &a);
     Ok(format!("{what} set to {}. The next run uses it.", if value.is_empty() { "default" } else { &value }))
+}
+
+fn cap(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
 }
 
 async fn usage_text(state: &AppState, id: &str, with_plan: bool) -> Result<String, crate::api::ApiError> {
@@ -46,14 +52,14 @@ async fn usage_text(state: &AppState, id: &str, with_plan: bool) -> Result<Strin
     let (runs, cost) = state.db.spend_between(&since.to_rfc3339(), None)?;
     let tokens = a.context_tokens.map_or("not reported yet".to_string(), |t| format!("{t} tokens in context"));
     let mut out = format!(
-        "{}: {tokens}; ${:.2} in total, ${:.2} this session.\nAll agents, {kind}: {runs} runs, ${cost:.2}.",
-        a.name, a.total_cost_usd, a.session_cost_usd
+        "{}: {tokens}; ${:.2} in total, ${:.2} this session.\nAll agents, {kind}: {runs} run{}, ${cost:.2}.",
+        a.name, a.total_cost_usd, a.session_cost_usd, if runs == 1 { "" } else { "s" }
     );
     if with_plan {
         match usage["windows"].as_array().filter(|w| !w.is_empty()) {
             Some(ws) => {
                 for w in ws {
-                    out.push_str(&format!("\nPlan {}: {:.0}% used.", w["label"].as_str().unwrap_or("limit"), w["percent"].as_f64().unwrap_or(0.0)));
+                    out.push_str(&format!("\nPlan {}: {:.0}% used.", cap(w["label"].as_str().unwrap_or("limit")), w["percent"].as_f64().unwrap_or(0.0)));
                 }
             }
             None => out.push_str(&format!("\nPlan limits: {}", usage["error"].as_str().unwrap_or("not available."))),
@@ -94,14 +100,14 @@ mod tests {
         assert!(call(&st, &a.id, "model", "Opus").await.unwrap().contains("set to opus"));
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().model, "opus");
         assert!(call(&st, &a.id, "model", "gpt").await.is_err());
-        assert!(call(&st, &a.id, "effort", "").await.unwrap().starts_with("Effort: default."));
+        assert!(call(&st, &a.id, "effort", "").await.unwrap().starts_with("Effort: default.") && call(&st, &a.id, "effort", "").await.unwrap().ends_with("max, default."));
         call(&st, &a.id, "effort", "high").await.unwrap();
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().effort, "high");
         assert!(call(&st, &a.id, "effort", "huge").await.is_err());
         call(&st, &a.id, "effort", "default").await.unwrap();
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().effort, "");
         let notices = st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.kind == "notice").count();
-        assert_eq!(notices, 5, "each answer is a notice in the chat");
+        assert_eq!(notices, 6, "each answer is a notice in the chat");
     }
 
     #[tokio::test]
@@ -113,9 +119,9 @@ mod tests {
             x.total_cost_usd = 1.5;
         })
         .unwrap();
-        crate::usage::fake(&st, json!({ "windows": [{ "key": "five_hour", "label": "Session", "percent": 42.0, "resets_at": null }], "error": null })).await;
+        crate::usage::fake(&st, json!({ "windows": [{ "key": "five_hour", "label": "session", "percent": 42.0, "resets_at": null }], "error": null })).await;
         let cost = call(&st, &a.id, "cost", "").await.unwrap();
-        assert!(cost.contains("1234 tokens in context") && cost.contains("$1.50 in total") && !cost.contains("Plan"), "{cost}");
+        assert!(cost.contains("0 runs,") && cost.contains("1234 tokens in context") && cost.contains("$1.50 in total") && !cost.contains("Plan"), "{cost}");
         let status = call(&st, &a.id, "status", "").await.unwrap();
         assert!(status.contains("Plan Session: 42% used."), "{status}");
         assert!(call(&st, &a.id, "nope", "").await.is_err());
