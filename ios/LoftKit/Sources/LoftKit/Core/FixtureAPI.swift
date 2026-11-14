@@ -1298,7 +1298,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     public func system() async throws -> SystemReading {
         try check()
-        return SystemReading(cpuTempC: 64.3, level: "nominal", sampledAt: Date())
+        return SystemReading(cpuTempC: 64.3, level: "nominal", sampledAt: Date(), memUsedBytes: 21 << 30, memTotalBytes: 32 << 30, memLevel: "nominal")
     }
 
     public func agentSummaries() async throws -> [AgentSummary] {

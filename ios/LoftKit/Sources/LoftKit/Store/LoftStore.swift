@@ -126,6 +126,8 @@ public final class LoftStore {
 
     /// Redraws the widgets; called when Needs you changes, so an item answered here leaves the widget too (spec #462).
     public var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
+    /// Redraws the Usage widget; called when the plan's numbers change (#489).
+    public var reloadUsageWidget: () -> Void = { WidgetCenter.shared.reloadTimelines(ofKind: "loft.usage") }
 
     public func refreshNeedsYou() async {
         guard let api, supportsNeedsYou, let list = try? await api.needsYou() else { return }
@@ -392,6 +394,7 @@ public final class LoftStore {
         async let s = try? api.agentSummaries()
         async let sys: SystemReading? = info?.supports(.system) == true ? (try? api.system()) : nil
         if let u = await u, u.windows.isEmpty == false || u.error != nil {
+            if u.windows.map(\.percent) != usage?.windows.map(\.percent) || u.error != usage?.error { reloadUsageWidget() }
             usage = u
             usageLoadedAt = Date()
         }

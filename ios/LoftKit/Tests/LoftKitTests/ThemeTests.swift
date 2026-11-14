@@ -72,4 +72,23 @@ final class ThemeTests: XCTestCase {
         defaults.set(AppearanceChoice.light.rawValue, forKey: Prefs.appearance)
         XCTAssertEqual(AppearanceChoice(stored: defaults.string(forKey: Prefs.appearance)), .light)
     }
+
+    /// WCAG contrast of `color` against white, in light mode.
+    private func contrastOnWhite(_ color: Color) -> Double {
+        var l = 0.0
+        NSAppearance(named: .aqua)!.performAsCurrentDrawingAppearance {
+            let c = NSColor(color).usingColorSpace(.sRGB)!
+            let lin = { (v: CGFloat) -> Double in let v = Double(v); return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+            l = 0.2126 * lin(c.redComponent) + 0.7152 * lin(c.greenComponent) + 0.0722 * lin(c.blueComponent)
+        }
+        return 1.05 / (l + 0.05)
+    }
+
+    func testWidgetAmberTextIsReadableOnWhiteAndUnchangedInDark() {
+        for amber in [UsageTone.usage(80), UsageTone.level("warm"), WidgetTheme.attention] {
+            XCTAssertGreaterThanOrEqual(contrastOnWhite(amber), 4.5)
+            XCTAssertEqual(hex(amber, .darkAqua), "FFB840")
+        }
+        XCTAssertLessThan(contrastOnWhite(Theme.attention), 4.5, "the bright amber is why")
+    }
 }

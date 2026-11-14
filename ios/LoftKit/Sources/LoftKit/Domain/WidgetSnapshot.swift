@@ -12,6 +12,8 @@ public enum DeepLink: Equatable {
     case issue(String)
     /// Start talking: the Talk widget and control.
     case talk
+    /// The Overview, with the plan usage and the Mac's reading: the Usage widget.
+    case overview
 
     public var url: URL {
         switch self {
@@ -22,6 +24,7 @@ public enum DeepLink: Equatable {
         case .agent(let id): URL(string: "loft://agent/\(id)")!
         case .issue(let id): URL(string: "loft://issue/\(id)")!
         case .talk: URL(string: "loft://talk")!
+        case .overview: URL(string: "loft://overview")!
         }
     }
 
@@ -33,6 +36,7 @@ public enum DeepLink: Equatable {
             self = id.isEmpty ? .needsYou : .needsYouItem(id)
         case "agents": self = .agents
         case "talk": self = .talk
+        case "overview": self = .overview
         case "agent", "issue":
             guard let id = url.pathComponents.dropFirst().first, !id.isEmpty else { return nil }
             self = url.host == "agent" ? .agent(id) : .issue(id)
