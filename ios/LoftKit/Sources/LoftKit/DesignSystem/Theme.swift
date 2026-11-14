@@ -103,13 +103,21 @@ private struct AccentButton: View {
     let configuration: PrimitiveButtonStyleConfiguration
     #if os(macOS)
     @Environment(\.controlActiveState) private var active
+    @Environment(\.isEnabled) private var enabled
     private var onLime: Bool { active == .key || active == .active }
     #else
     private let onLime = true
+    private let enabled = true
     #endif
 
     var body: some View {
-        Button(configuration).buttonStyle(.borderedProminent).foregroundStyle(onLime ? AnyShapeStyle(Theme.onAccent) : AnyShapeStyle(.primary))
+        if enabled {
+            Button(configuration).buttonStyle(.borderedProminent).foregroundStyle(onLime ? AnyShapeStyle(Theme.onAccent) : AnyShapeStyle(.primary))
+        } else {
+            // On the Mac a disabled prominent button loses its fill on the dark theme, and its dark label with it: draw it
+            // like the other disabled buttons, dimmed with its label kept.
+            Button(configuration).buttonStyle(.bordered)
+        }
     }
 }
 
