@@ -811,6 +811,7 @@ export const api = {
   loopStart: (id: string, interval: string, prompt: string) => req<{ ok: boolean }>("POST", `/agents/${id}/loop`, { interval, prompt }),
   scheduleAdd: (id: string, text: string) => req<{ ok: boolean }>("POST", `/agents/${id}/schedules`, { text }),
   scheduleCancel: (id: string, sid: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/schedules/${sid}`),
+  agentCommand: (id: string, name: string, arg: string) => req<{ text: string }>("POST", `/agents/${id}/command`, { name, arg }),
   loopStop: (id: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/loop`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
   sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),

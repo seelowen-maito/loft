@@ -305,6 +305,18 @@ export function Chat({
     }
   };
 
+  /** /model, /effort, /cost and /status: Loft answers with a notice in the chat. */
+  const infoCommand = async (name: string, arg: string) => {
+    setCmdError(null);
+    stick.current = true;
+    try {
+      await api.agentCommand(agent.id, name, arg);
+      putDraft(agent.id, EMPTY_DRAFT);
+    } catch (e) {
+      setCmdError((e as Error).message);
+    }
+  };
+
   const openEditor = async (keep = "") => {
     setCmdError(null);
     try {
@@ -342,6 +354,7 @@ export function Chat({
       setCmdNote("Add an interval and a prompt, like 10m check the deploy, then press Enter.");
       return;
     }
+    if (INFO_COMMANDS.includes(name)) return infoCommand(name.slice(1), "");
     if (name === "/schedule") {
       setText("/schedule ");
       setCmdNote("Add when and a prompt, like tomorrow 9:00 run the tests, then press Enter.");
@@ -401,6 +414,7 @@ export function Chat({
     if (cmd?.command === "/grill") return startGrill(cmd.rest);
     if (cmd?.command === "/loop") return loopCommand(cmd.rest);
     if (cmd?.command === "/schedule") return scheduleCommand(cmd.rest);
+    if (cmd && INFO_COMMANDS.includes(cmd.command)) return infoCommand(cmd.command.slice(1), cmd.rest);
     // A command the CLI knows, typed first, goes to it as the message ("/review 12"); a terminal-only one doesn't.
     const known = cmd && commands.find((c) => c.name === cmd.command);
     if (cmd && known?.tag !== "passthrough") return runCommand(cmd.command, cmd.rest);
@@ -909,8 +923,8 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   if (m.kind === "notice" && m.meta?.plan_task_id) return <PlanCard taskId={m.meta.plan_task_id} agents={agents} />;
   if (m.kind === "notice") {
     return (
-      <div className="flex items-center justify-center gap-1.5 font-mono text-[11px] text-fg-3">
-        <Info className="size-3" /> {m.content}
+      <div className="flex items-center justify-center gap-1.5 whitespace-pre-wrap [overflow-wrap:anywhere] text-center font-mono text-[11px] text-fg-3">
+        <Info className="size-3 shrink-0" /> {m.content}
       </div>
     );
   }
@@ -1128,3 +1142,6 @@ function ScheduleRow({ agentId, s, onError }: { agentId: string; s: NonNullable<
     </div>
   );
 }
+
+/** Loft commands that answer with a notice: they show or change a setting, or show usage. */
+const INFO_COMMANDS = ["/model", "/effort", "/cost", "/status"];

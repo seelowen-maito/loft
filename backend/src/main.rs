@@ -19,6 +19,7 @@ mod ports;
 mod guard;
 mod herdr;
 mod kill_guard;
+mod chat_commands;
 mod loops;
 mod schedules;
 mod mac_access;
@@ -116,6 +117,7 @@ fn api_routes() -> Router<AppState> {
         .route("/agents/{id}/reset-session", post(api::reset_session))
         .route("/agents/{id}/compact", post(api::compact_session))
         .route("/agents/{id}/loop", post(loops::start).delete(loops::stop))
+        .route("/agents/{id}/command", post(chat_commands::run))
         .route("/agents/{id}/schedules", post(schedules::add))
         .route("/agents/{id}/schedules/{sid}", axum::routing::delete(schedules::cancel))
         .route("/agents/{id}/sessions", get(api::list_sessions))

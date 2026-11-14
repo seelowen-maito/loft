@@ -37,13 +37,17 @@ pub struct Command {
 }
 
 /// Loft's own: they run in Loft, not in the CLI, even where the CLI has one of the same name.
-const LOFT: [(&str, &str); 7] = [
+const LOFT: [(&str, &str); 11] = [
     ("clear", "Clear the conversation context and start fresh. Memory is kept."),
     ("compact", "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary."),
     ("resume", "Go back to one of this agent's past sessions."),
     ("code", "Open this agent's workspace folder in VS Code."),
     ("loop", "Repeat a prompt every interval until stopped: /loop 10m check the deploy. /loop stop ends it."),
     ("schedule", "Send a prompt later or on repeat: /schedule tomorrow 9:00 run the tests, /schedule in 2h ..., /schedule every weekday 9:30 ..."),
+    ("model", "Show or switch the model: /model opus. Choices: sonnet, opus, fable, haiku."),
+    ("effort", "Show or set how hard the model thinks: /effort high. Choices: low, medium, high, xhigh, max, default."),
+    ("cost", "Show this agent's tokens and spend, and the week's spend across agents."),
+    ("status", "Show usage like /cost, plus the plan limits."),
     ("grill", "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it."),
 ];
 
@@ -58,8 +62,6 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("code-review", "Review the current diff or a pull request."),
     ("simplify", "Clean up the changed code."),
     ("debug", "Look into a problem in the project."),
-    ("model", "Switch the model."),
-    ("effort", "Set how hard the model thinks."),
     ("usage", "Show plan usage."),
     ("deep-research", "Research a question across many sources and report what was found."),
     ("design", "Design a screen or a visual from a description."),
@@ -249,7 +251,7 @@ mod tests {
         let tags: Vec<_> = list.iter().map(|c| (c.name.as_str(), c.tag)).collect();
         assert_eq!(
             tags,
-            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/loop", "loft"), ("/schedule", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
+            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/loop", "loft"), ("/schedule", "loft"), ("/model", "loft"), ("/effort", "loft"), ("/cost", "loft"), ("/status", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
             "the CLI's internal __ commands are left out"
         );
         let doctor = list.iter().find(|c| c.name == "/doctor").unwrap();
