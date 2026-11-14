@@ -35,6 +35,12 @@ public enum QuickSearch {
         /// A closed issue, or a merged or closed pull request.
         public var closed = false
         public var id: String { "\(kind.rawValue):\(target)" }
+
+        /// What a pull request row opens: its URL only when `PushDestination.link` trusts it (https on GitHub or the
+        /// Loft host), as it comes from the server; nil for other rows and any other URL, so Enter does nothing.
+        public func link(loftHost: String?) -> URL? {
+            kind == .pullRequest ? PushDestination.link(target, loftHost: loftHost) : nil
+        }
     }
 
     /// Loft's web pages, with those the Mac app doesn't have marked web-only.

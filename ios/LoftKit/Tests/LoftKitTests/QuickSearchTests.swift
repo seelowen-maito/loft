@@ -105,6 +105,19 @@ final class QuickSearchTests: XCTestCase {
         XCTAssertEqual(QuickSearch.results("#9", agents: [], tasks: [], deliveries: [], pullRequests: prs).count, 1)
     }
 
+    func testAPullRequestOpensOnlyATrustedLink() {
+        func row(_ url: String, kind: QuickSearch.Kind = .pullRequest) -> QuickSearch.Result {
+            QuickSearch.Result(kind: kind, target: url, title: "PR", webPath: "")
+        }
+        XCTAssertEqual(row("https://github.com/o/loft/pull/9").link(loftHost: nil), URL(string: "https://github.com/o/loft/pull/9"))
+        XCTAssertEqual(row("https://mac.ts.net/x").link(loftHost: "mac.ts.net"), URL(string: "https://mac.ts.net/x"))
+        XCTAssertNil(row("file:///System/Applications/Calculator.app").link(loftHost: nil))
+        XCTAssertNil(row("smb://host/share").link(loftHost: "host"))
+        XCTAssertNil(row("http://github.com/o/loft/pull/9").link(loftHost: nil))
+        XCTAssertNil(row("https://evil.example/pull/9").link(loftHost: "mac.ts.net"))
+        XCTAssertNil(row("https://github.com/o/loft/pull/9", kind: .agent).link(loftHost: nil))
+    }
+
     func testAgentStatusAsTheWebTellsIt() {
         func agent(_ status: String, running: Bool? = nil, waitingOn: [String]? = nil, every: Int? = nil) -> QuickSearch.AgentStatus {
             var a = Agent(id: "a", name: "A", status: status)

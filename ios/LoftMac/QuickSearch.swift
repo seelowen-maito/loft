@@ -126,9 +126,13 @@ final class QuickSearchController {
 
     private func open(_ r: QuickSearch.Result, _ flags: NSEvent.ModifierFlags) {
         close()
+        if r.kind == .pullRequest {
+            if let url = r.link(loftHost: model.store.api?.baseURL.host()) { NSWorkspace.shared.open(url) }
+            return
+        }
         let chat = flags.contains(.command) && r.kind == .agent
         let browserDefault = UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser"
-        if !chat, r.kind != .pullRequest, r.webOnly || flags.contains(.option) != browserDefault, let base = model.store.api?.baseURL {
+        if !chat, r.webOnly || flags.contains(.option) != browserDefault, let base = model.store.api?.baseURL {
             NSWorkspace.shared.open(base.appendingPathComponent(r.webPath))
             return
         }
@@ -141,12 +145,11 @@ final class QuickSearchController {
         go(kind, id, webPath: "")
     }
 
-    /// Goes to the agent, issue or page in the main window, opening or raising it; a pull request opens on GitHub.
+    /// Goes to the agent, issue or page in the main window, opening or raising it.
     private func go(_ kind: QuickSearch.Kind, _ target: String, webPath: String) {
         switch kind {
         case .pullRequest:
-            if let url = URL(string: target) { NSWorkspace.shared.open(url) }
-            return
+            return // opened by `open(_:_:)`; Spotlight has no pull requests.
         case .agent: nav.openChat(target)
         case .spec, .ticket, .issue:
             nav.section = .issues
