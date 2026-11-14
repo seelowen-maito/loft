@@ -124,7 +124,7 @@ public final class VoiceSession {
         failedSend = nil
         self.agentId = agentId
         // Whoever you start Talk with (the picker too) is who the Talk widget starts with next.
-        UserDefaults.standard.set(agentId, forKey: "voiceLastAgent")
+        UserDefaults.standard.set(agentId, forKey: Prefs.voiceLastAgent)
         if phase != .review {
             segments = []
             committed = ""
@@ -290,7 +290,8 @@ public final class VoiceSession {
     public func switchAgent(_ id: String) {
         guard phase != .sending, phase != .speaking else { return }
         agentId = id
-        UserDefaults.standard.set(id, forKey: "voiceLastAgent")
+        // Not only `start`: switching the To: row mid-Talk and sending never calls `start` again.
+        UserDefaults.standard.set(id, forKey: Prefs.voiceLastAgent)
     }
 
     /// Talk: a dictated message sent from the chat's message box goes out after a short Undo, with the

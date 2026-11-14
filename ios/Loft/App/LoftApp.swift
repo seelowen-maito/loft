@@ -63,7 +63,7 @@ struct LoftApp: App {
                     // The Talk widget or control: start listening with whoever you talked to last. A link they didn't
                     // sign (another app, a web page) or no one to talk to yet: the Overview asking who, mic off.
                     else if TalkKey.signs(url, key: TalkKey.current),
-                            let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: "voiceLastAgent"),
+                            let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
                                                             orchestratorId: store.orchestratorId, agents: store.agents) {
                         Task { await voice.start(agentId: id) }
                     }

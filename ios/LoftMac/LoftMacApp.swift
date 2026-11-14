@@ -51,7 +51,7 @@ struct LoftMacApp: App {
                     // The Talk widget or control: Talk with whoever you talked to last. No one yet: the most
                     // recent Lead, the To: row's first chip. A link they didn't sign (another app, a web page): the agents, mic off.
                     if TalkKey.signs(url, key: TalkKey.current),
-                       let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: "voiceLastAgent"),
+                       let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
                                                        orchestratorId: store.orchestratorId, agents: store.agents)
                            ?? TalkRecipients.chips(store.agents, current: nil).first?.id {
                         nav.talk(id)

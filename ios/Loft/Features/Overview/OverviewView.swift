@@ -175,7 +175,7 @@ private struct TalkButton: View {
     var body: some View {
         Button {
             // Talk starts with whoever you talked to last.
-            if let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: "voiceLastAgent"),
+            if let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
                                                orchestratorId: store.orchestratorId, agents: store.agents) {
                 startVoice(id)
             } else { picking = true }
