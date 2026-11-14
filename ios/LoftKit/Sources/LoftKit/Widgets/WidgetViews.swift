@@ -110,5 +110,6 @@ extension View {
 enum WidgetTheme {
     static let accent = Color(red: 0.78, green: 0.95, blue: 0.43)
     static let working = Theme.working
-    static let attention = Theme.attention
+    /// The darker amber in light mode, readable on the white tile.
+    static let attention = Theme.attentionInk
 }

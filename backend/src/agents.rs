@@ -500,6 +500,7 @@ You are **{name}** ({role}), an autonomous agent living inside Loft — the user
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review while that clone exists; if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first and carry on. Never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
+- Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first.
 - Before each new branch, `git fetch origin` and create it from the remote: `git switch -c <branch> origin/<base>`, where `<base>` is the branch named in the ticket's `## Branch` section, or otherwise the default branch (`origin/HEAD`, whether it's `main` or `master`). Before each build or review round, `git fetch origin` and `git pull --ff-only` on your branch. Never build a ticket on a local default branch you haven't fetched.
 - Before you submit a ticket, mark a PR ready or start a review round, `git fetch origin` and `git merge origin/<base>` into your branch (merge, not rebase, so nobody force-pushes), resolve any conflicts, re-run the tests, then push. Loft refuses a submission whose branch is behind its base.
 - If your clone's `origin` isn't the project's GitHub remote (`git remote get-url origin`), `git remote set-url origin <the project's GitHub URL>` before fetching.
@@ -1219,6 +1220,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
         // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
         .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
+        // Workspaces live inside the user's checkout: git in a workspace with no clone stops here instead of finding it.
+        .env("GIT_CEILING_DIRECTORIES", &state.cfg.storage_dir)
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
         .stdin(Stdio::piped())
@@ -1920,6 +1923,36 @@ pub(crate) mod tests {
         assert_eq!(env("BASH_MAX_TIMEOUT_MS").as_deref(), Some(named));
         assert_eq!(env("MCP_TOOL_TIMEOUT").as_deref(), Some(named));
         assert!(TOOL_WAIT > PERMISSION_TIMEOUT);
+    }
+
+    #[test]
+    fn git_in_a_workspace_with_no_clone_cannot_find_the_checkout_around_it() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cmd = build_command(&st, &a, false).unwrap();
+        let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap().to_owned();
+        assert_eq!(ceiling, st.cfg.storage_dir.as_os_str());
+        // The storage folder sits in a checkout, as agent-local-storage does in the user's loft checkout.
+        let git = |dir: &Path, args: &[&str]| std::process::Command::new("git").args(args).current_dir(dir).env("GIT_CEILING_DIRECTORIES", &ceiling).output().unwrap();
+        let checkout = st.cfg.storage_dir.parent().unwrap();
+        assert!(git(checkout, &["init", "-q"]).status.success());
+        let ws = workspace(&st, &a.id);
+        std::fs::create_dir_all(ws.join("repo")).unwrap();
+        let out = git(&ws, &["status"]);
+        assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("not a git repository"), "{out:?}");
+        // The agent's own clone in its workspace still works.
+        assert!(git(&ws.join("repo"), &["init", "-q"]).status.success());
+        let out = git(&ws.join("repo"), &["rev-parse", "--show-toplevel"]);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), std::fs::canonicalize(ws.join("repo")).unwrap());
+    }
+
+    #[test]
+    fn every_agent_is_told_to_run_git_only_in_its_clone() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let p = system_prompt(&st, &a);
+        assert!(p.contains(&format!("Run git only inside your clone (`git -C {}/<repo>`), never from the workspace root", workspace(&st, &a.id).display())), "{p}");
     }
 
     #[test]
