@@ -43,7 +43,7 @@ public struct LoftWidgetView: View {
             HStack(alignment: .top, spacing: 14) {
                 VStack(alignment: .leading, spacing: 6) {
                     needsHeader.widgetLink(DeepLink.needsYou)
-                    ForEach(snapshot.items) { item in
+                    ForEach(snapshot.items.prefix(WidgetSnapshot.overviewLimit)) { item in
                         VStack(alignment: .leading, spacing: 0) {
                             Text(item.title).font(.caption).lineLimit(1)
                             if let agent = item.agentName { Text(agent).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
@@ -101,7 +101,7 @@ private struct WidgetLink: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     /// A tap opens the app at `link`.
     func widgetLink(_ link: DeepLink) -> some View { modifier(WidgetLink(link: link)) }
 }

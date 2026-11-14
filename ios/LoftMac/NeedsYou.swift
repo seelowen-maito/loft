@@ -5,14 +5,19 @@ import SwiftUI
 /// on a click; replies go through a sheet you send yourself.
 struct NeedsYouScreen: View {
     @Environment(LoftStore.self) private var store
+    @Environment(MacNav.self) private var nav
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
                 if let items = store.needsYou?.items, !items.isEmpty {
                     ForEach(NeedsYouSection.build(items)) { section in
                         switch section {
-                        case .item(let i): NeedsYouRow(item: i)
+                        case .item(let i):
+                            NeedsYouRow(item: i, showsText: i.id == nav.needsYouFocus)
+                                .overlay { if i.id == nav.needsYouFocus { RoundedRectangle(cornerRadius: 10).stroke(Theme.accent, lineWidth: 2) } }
+                                .id(i.id)
                         case .project(let name, let prs):
                             DisclosureGroup {
                                 ForEach(prs) { NeedsYouRow(item: $0) }
@@ -27,6 +32,10 @@ struct NeedsYouScreen: View {
             .frame(maxWidth: 820)
             .padding(20)
             .frame(maxWidth: .infinity)
+        }
+        .onChange(of: nav.needsYouFocus.map { id in store.needsYou?.items.contains { $0.id == id } == true } == true, initial: true) { _, there in
+            if there, let id = nav.needsYouFocus { proxy.scrollTo(id, anchor: .center) }
+        }
         }
         .overlay {
             if store.needsYou?.items.isEmpty != false {
@@ -50,6 +59,8 @@ struct NeedsYouRow: View {
     @Environment(MacNav.self) private var nav
     @Environment(\.openURL) private var openURL
     let item: NeedsYouItem
+    /// The whole text, uncut (the full command, for a permission): the card the Needs you widget's Approve opens.
+    var showsText = false
     /// The on-device model's one-line summary and suggested replies (they only fill the reply sheet).
     @State private var assist: NeedsYouAssist?
     @State private var answering: String?
@@ -78,7 +89,8 @@ struct NeedsYouRow: View {
             }
             Text(item.text.isEmpty ? item.reason : item.text)
                 .foregroundStyle(.secondary)
-                .lineLimit(4)
+                .lineLimit(showsText ? nil : 4)
+                .font(showsText ? .body.monospaced() : nil)
                 .textSelection(.enabled)
             // Only when there's a real choice: a lone suggestion read as a command.
             if let replies = assist?.replies, replies.count >= 2, item.answerAction != nil {

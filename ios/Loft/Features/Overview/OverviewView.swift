@@ -175,9 +175,10 @@ private struct TalkButton: View {
     var body: some View {
         Button {
             // Talk starts with whoever you talked to last.
-            if let id = UserDefaults.standard.string(forKey: "voiceLastAgent"), store.agent(id) != nil {
+            if let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                               orchestratorId: store.orchestratorId, agents: store.agents) {
                 startVoice(id)
-            } else if let o = store.orchestrator { startVoice(o.id) } else { picking = true }
+            } else { picking = true }
         } label: {
             Image(systemName: "mic.fill")
                 .font(.title2.weight(.semibold))
@@ -194,6 +195,11 @@ private struct TalkButton: View {
             }
             Button { picking = true } label: { Label("Talk to another agent…", systemImage: "person.wave.2") }
             Button { router.composer = .pickRecipient } label: { Label("Message an agent", systemImage: "bubble.left") }
+        }
+        .onChange(of: router.picksTalk, initial: true) { _, asks in
+            guard asks else { return }
+            router.picksTalk = false
+            picking = true
         }
         .sheet(isPresented: $picking) {
             NavigationStack {

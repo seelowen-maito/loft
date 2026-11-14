@@ -2,6 +2,12 @@ import Foundation
 
 /// Who Talk can send to: the To: row's chips and the More list (iPhone and Mac).
 public enum TalkRecipients {
+    /// Who a one-tap Talk starts with: whoever you talked to last, else the orchestrator; nil when neither is an agent
+    /// Loft has (pick one then).
+    public static func starter(lastAgentId: String?, orchestratorId: String?, agents: [Agent]) -> String? {
+        [lastAgentId, orchestratorId].compactMap { $0 }.first { id in agents.contains { $0.id == id } }
+    }
+
     /// The chips: `current`, then every Lead, then the others, each most recently run first. The others fill the row
     /// up to `limit` chips; Leads are all shown, even past it.
     public static func chips(_ agents: [Agent], current: String?, limit: Int = 5) -> [Agent] {
@@ -30,5 +36,24 @@ public enum TalkRecipients {
             .map { g in
                 (g.isEmpty ? "No group" : g, byGroup[g]!.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
             }
+    }
+}
+
+/// What a `loft://` link opened in the app does (iPhone and Mac).
+public enum TalkLink {
+    public enum Route: Equatable {
+        /// The Talk widget's or control's signed link: start listening with this agent.
+        case start(String)
+        /// A signed Talk link with no one to start with: ask who.
+        case pick
+        /// Anything else, a Talk link nobody signed (another app, a web page) too: open it, mic off.
+        case open(DeepLink)
+    }
+
+    /// nil for a link Loft doesn't know.
+    public static func route(_ url: URL, key: String?, lastAgentId: String?, orchestratorId: String?, agents: [Agent]) -> Route? {
+        guard let link = DeepLink(url: url) else { return nil }
+        guard TalkKey.signs(url, key: key) else { return .open(link) }
+        return TalkRecipients.starter(lastAgentId: lastAgentId, orchestratorId: orchestratorId, agents: agents).map(Route.start) ?? .pick
     }
 }

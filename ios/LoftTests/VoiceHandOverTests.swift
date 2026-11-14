@@ -93,6 +93,14 @@ final class VoiceHandOverTests: XCTestCase {
         return session
     }
 
+    /// Picking someone in "Talk to…" starts Talk with them: the Talk widget starts with them next time (#467).
+    func testStartingTalkRemembersTheAgentForTheWidget() async {
+        UserDefaults.standard.set("gone", forKey: Prefs.voiceLastAgent)
+        let session = talk()
+        await session.start(agentId: "a1")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: Prefs.voiceLastAgent), "a1")
+    }
+
     func testReadAloudTakingTheAudioPausesTalk() async throws {
         let session = talk()
         await session.start(agentId: "a1")
