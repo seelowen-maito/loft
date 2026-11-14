@@ -342,6 +342,11 @@ func renderWindow(store: LoftStore, nav: MacNav, to folder: String) async {
             try? await Task.sleep(for: .seconds(2))
             png("\(section)")
         }
+        // Quick search's row while it records.
+        HotKeyFailures.shared.recording = LoftShortcut.quickSearch.rawValue
+        try? await Task.sleep(for: .seconds(1))
+        png("settings-recording")
+        HotKeyFailures.shared.recording = nil
         // What a refused recording says: ⌘Space is macOS's Spotlight.
         HotKeyFailures.shared.refused[LoftShortcut.openLoft.rawValue] = LoftShortcut.openLoft.refusal(MacShortcut(keyCode: MacShortcut.space, modifiers: MacShortcut.command))
         try? await Task.sleep(for: .seconds(1))

@@ -59,7 +59,7 @@ enum LoftShortcut: UInt32, CaseIterable {
 }
 
 /// Settings' messages under a shortcut: one that couldn't be registered (macOS doesn't allow it, or Loft's other
-/// shortcut held it), by hot key id, and a recorded combination that was refused. Another app holding the same keys
+/// shortcut held it), by hot key id, and a recorded combination that was refused. Also the one row recording now. Another app holding the same keys
 /// isn't an error to Carbon: only one of the apps gets the presses.
 @MainActor
 @Observable
@@ -67,6 +67,8 @@ final class HotKeyFailures {
     static let shared = HotKeyFailures()
     var byID: [UInt32: MacShortcut] = [:]
     var refused: [UInt32: String] = [:]
+    /// The hot key id whose row is recording: starting another row stops it.
+    var recording: UInt32?
 }
 
 /// A system-wide shortcut through Carbon's hot keys: it works from any app and needs no Accessibility permission.
@@ -163,7 +165,6 @@ final class ShortcutBinding {
 struct ShortcutRow: View {
     let shortcut: LoftShortcut
     @AppStorage private var stored: String
-    @State private var recording = false
     @State private var monitor: Any?
 
     init(_ shortcut: LoftShortcut) {
@@ -172,6 +173,7 @@ struct ShortcutRow: View {
     }
 
     private var current: MacShortcut? { MacShortcut.read(stored, default: shortcut.fallback) }
+    private var recording: Bool { HotKeyFailures.shared.recording == shortcut.rawValue }
 
     var body: some View {
         LabeledContent("Shortcut") {
@@ -188,6 +190,8 @@ struct ShortcutRow: View {
             }
         }
         .onDisappear { stop() }
+        // Another row started recording: this one lets go of the keys.
+        .onChange(of: recording) { _, now in if !now { removeMonitor() } }
         if let why = HotKeyFailures.shared.refused[shortcut.rawValue] {
             Text(why).font(.caption).foregroundStyle(.red).accessibilityIdentifier("shortcutRefused")
         }
@@ -202,8 +206,10 @@ struct ShortcutRow: View {
 
     private func start() {
         HotKeyFailures.shared.refused[shortcut.rawValue] = nil
-        recording = true
+        HotKeyFailures.shared.recording = shortcut.rawValue
+        removeMonitor()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            guard recording else { return e }
             let flags = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if e.keyCode == UInt16(kVK_Escape) && flags.isEmpty { stop() } else { record(MacShortcut(keyCode: UInt32(e.keyCode), modifiers: Self.carbon(flags))) }
             return nil
@@ -212,10 +218,16 @@ struct ShortcutRow: View {
     }
 
     private func stop() {
-        recording = false
+        if recording {
+            HotKeyFailures.shared.recording = nil
+            GlobalHotKey.recorder = nil
+        }
+        removeMonitor()
+    }
+
+    private func removeMonitor() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
-        GlobalHotKey.recorder = nil
     }
 
     private func record(_ s: MacShortcut) {
