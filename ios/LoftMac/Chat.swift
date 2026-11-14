@@ -111,10 +111,8 @@ struct ChatView: View {
         .sheet(isPresented: $talking) {
             TalkSheet(agentId: agent.id) { id, text in
                 nav.openChat(id)
-                if let text {
-                    draft = text
-                    draftByVoice = true
-                }
+                // Through `nav`, like the voice panel: another agent's chat is a new ChatView, so this one's draft is lost.
+                if let text { nav.voiceDraft = (id, text) }
             }
         }
         .onChange(of: nav.voiceDraft?.text, initial: true) {
