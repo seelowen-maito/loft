@@ -53,7 +53,7 @@ struct AgentsSection: View {
 
             Group {
                 if let agent = store.agent(nav.agentId) {
-                    ChatView(agent: agent)
+                    ChatView(agent: agent, showsSettings: $showsSettings)
                         .id(agent.id)
                         .inspector(isPresented: $showsSettings) {
                             AgentSettingsView(agent: agent).id(agent.id)
@@ -66,16 +66,6 @@ struct AgentsSection: View {
             .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle(store.agent(nav.agentId)?.name ?? "Agents")
-        .toolbar {
-            if nav.agentId != nil {
-                ToolbarItem {
-                    Button { showsSettings.toggle() } label: { Label("Agent settings", systemImage: "slider.horizontal.3") }
-                        .keyboardShortcut("i", modifiers: [.command, .option])
-                        .help("Show or hide this agent's settings (⌥⌘I)")
-                        .accessibilityIdentifier("agentSettingsButton")
-                }
-            }
-        }
         .onAppear {
             // Opens on the Lead's chat the first time.
             if nav.agentId == nil { nav.agentId = store.orchestrator?.id ?? AgentSection.sections(store.agents).first?.agents.first?.id }
@@ -133,7 +123,19 @@ struct AgentRow: View {
                 }
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(agent.name).font(.system(size: 13.5)).foregroundStyle(WebTheme.fg).lineLimit(1).truncationMode(.tail)
+                HStack(spacing: 8) {
+                    Text(agent.name).font(.system(size: 13.5)).foregroundStyle(WebTheme.fg).lineLimit(1).truncationMode(.tail)
+                    Spacer(minLength: 0)
+                    // As the web's list: the Session's size as of its last reply, amber past the smart zone.
+                    if let ctx = AgentHeader.listedContext(agent) {
+                        Text(AgentHeader.tokens(ctx))
+                            .font(.system(size: 10.5, design: .monospaced)).monospacedDigit()
+                            .foregroundStyle(ContextWindow.warns(ctx) ? Theme.attentionInk : WebTheme.fg3)
+                            .help("\(ctx.formatted()) tokens in context as of the last reply")
+                            .accessibilityLabel("Context \(AgentHeader.tokens(ctx)) tokens" + (ContextWindow.warns(ctx) ? ", past the smart zone" : ""))
+                            .accessibilityIdentifier("agentContext-\(agent.name)")
+                    }
+                }
                 if !detail.isEmpty {
                     Text(detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3).lineLimit(1)
                 }

@@ -8,6 +8,8 @@ struct ChatView: View {
     @Environment(LoftStore.self) private var store
     @Environment(MacNav.self) private var nav
     let agent: Agent
+    /// The agent's settings inspector, toggled from the header.
+    @Binding var showsSettings: Bool
     @State private var loadError: APIError?
     @State private var draft = ""
     @State private var talking = false
@@ -49,7 +51,7 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ChatHeader(agent: agent)
+            ChatHeader(agent: agent, showsSettings: $showsSettings)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     if store.historyHasMore[agent.id] == true, !shown.isEmpty {
@@ -148,28 +150,6 @@ struct ChatView: View {
         .task(id: agent.id) {
             do { try await store.loadConversation(agent.id); loadError = nil } catch { loadError = APIError.from(error) }
         }
-    }
-}
-
-/// The chat's header, as on the web: the agent's sticker, its name and "project · role".
-private struct ChatHeader: View {
-    let agent: Agent
-
-    var body: some View {
-        HStack(spacing: 10) {
-            AgentSticker(agent: agent, size: 30)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(agent.name).font(.system(size: 14, weight: .medium)).foregroundStyle(WebTheme.fg)
-                if !agent.projectAndRole.isEmpty {
-                    Text(agent.projectAndRole).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-        .overlay(alignment: .bottom) { Rectangle().fill(WebTheme.line).frame(height: 1) }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("chatHeader")
     }
 }
 
