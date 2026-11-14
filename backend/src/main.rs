@@ -19,6 +19,7 @@ mod ports;
 mod guard;
 mod herdr;
 mod kill_guard;
+mod loops;
 mod mac_access;
 mod mcp;
 mod mentions;
@@ -113,6 +114,7 @@ fn api_routes() -> Router<AppState> {
         .route("/agents/{id}/restart", post(api::restart_agent))
         .route("/agents/{id}/reset-session", post(api::reset_session))
         .route("/agents/{id}/compact", post(api::compact_session))
+        .route("/agents/{id}/loop", post(loops::start).delete(loops::stop))
         .route("/agents/{id}/sessions", get(api::list_sessions))
         .route("/agents/{id}/resume-session", post(api::resume_session))
         .route("/agents/{id}/avatar/redraw", post(api::redraw_avatar))
@@ -238,6 +240,7 @@ async fn serve() -> anyhow::Result<()> {
     // Before any run starts: the runs Deliveries were waiting on were lost with the last process.
     delivery::stall_lost_runs(&state);
     tokio::spawn(agents::scheduler(state.clone()));
+    tokio::spawn(loops::scheduler(state.clone()));
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));
     tokio::spawn(prs::backfill(state.clone()));

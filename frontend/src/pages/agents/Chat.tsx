@@ -7,7 +7,7 @@ import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
+import { cx, fmtInterval, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
@@ -29,7 +29,7 @@ import { useAutoGrow } from "../../lib/autoGrow";
 import { formatCombo, loadCombo, openShortcut } from "../../lib/shortcuts";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
 import { useDraft } from "../../lib/useDraft";
-import { filterCommands, terminalNote } from "../../lib/commands";
+import { filterCommands, parseLoop, terminalNote } from "../../lib/commands";
 import { useCommands } from "../../lib/useCommands";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { isVideo } from "../../lib/video";
@@ -280,6 +280,20 @@ export function Chat({
     }
   };
 
+  const loopCommand = async (rest: string) => {
+    const l = parseLoop(rest);
+    if (!l) return setCmdError("Use /loop 10m <prompt> to repeat a prompt (m, h or d), or /loop stop.");
+    setCmdError(null);
+    stick.current = true;
+    try {
+      if ("stop" in l) await api.loopStop(agent.id);
+      else await api.loopStart(agent.id, l.interval, l.prompt);
+      putDraft(agent.id, EMPTY_DRAFT);
+    } catch (e) {
+      setCmdError((e as Error).message);
+    }
+  };
+
   const openEditor = async (keep = "") => {
     setCmdError(null);
     try {
@@ -311,6 +325,12 @@ export function Chat({
     if (name === "/clear") return clearContext(keep);
     if (name === "/compact") return compactContext("");
     if (name === "/code") return openEditor(keep);
+    if (name === "/loop") {
+      // Picked from the menu: leave room for the interval and prompt; Enter again starts it.
+      setText("/loop ");
+      setCmdNote("Add an interval and a prompt, like 10m check the deploy, then press Enter.");
+      return;
+    }
     if (name === "/resume") {
       setText(keep);
       return setResuming(true);
@@ -363,6 +383,7 @@ export function Chat({
     const cmd = splitCommand(t, commandNames, pick);
     if (cmd?.command === "/compact") return compactContext(cmd.rest);
     if (cmd?.command === "/grill") return startGrill(cmd.rest);
+    if (cmd?.command === "/loop") return loopCommand(cmd.rest);
     // A command the CLI knows, typed first, goes to it as the message ("/review 12"); a terminal-only one doesn't.
     const known = cmd && commands.find((c) => c.name === cmd.command);
     if (cmd && known?.tag !== "passthrough") return runCommand(cmd.command, cmd.rest);
@@ -553,6 +574,7 @@ export function Chat({
               </button>
             </div>
           )}
+          {agent.loop && <LoopBar agent={agent} onError={setCmdError} />}
           <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
           {pickingTask && (
@@ -836,7 +858,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     );
   }
   if (m.kind === "run_start") {
-    const label = m.meta?.trigger === "compact" ? "compacting context" : m.meta?.trigger === "schedule" ? "autonomous wake-up" : m.meta?.trigger === "manual" ? "manual wake-up" : m.meta?.trigger === "agent" ? "message from an agent" : "run";
+    const label = m.meta?.trigger === "compact" ? "compacting context" : m.meta?.trigger === "schedule" ? "autonomous wake-up" : m.meta?.trigger === "manual" ? "manual wake-up" : m.meta?.trigger === "loop" ? "loop" : m.meta?.trigger === "agent" ? "message from an agent" : "run";
     return (
       <div className="flex items-center gap-3 pt-3">
         <span className="h-px flex-1 bg-line" />
@@ -1025,6 +1047,36 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** The agent's running /loop, with its Stop. */
+function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => void }) {
+  const l = agent.loop!;
+  const [busy, setBusy] = useState(false);
+  const stop = async () => {
+    setBusy(true);
+    try {
+      await api.loopStop(agent.id);
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mb-3 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2" role="status">
+      <RefreshCw className="size-4 shrink-0 text-accent" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] text-fg">{l.prompt}</div>
+        <div className="truncate font-mono text-[11px] text-fg-3">
+          Looping {fmtInterval(l.interval_minutes)} · next {timeAgo(l.next_at)}
+        </div>
+      </div>
+      <button className="btn shrink-0" onClick={stop} disabled={busy}>
+        <Square className="size-3.5" /> Stop
+      </button>
     </div>
   );
 }

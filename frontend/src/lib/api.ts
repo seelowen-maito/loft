@@ -22,6 +22,8 @@ export type Agent = {
   effort: string;
   interval_minutes: number;
   quiet_hours: QuietWindow[];
+  /** `/loop`: the prompt Loft sends again every interval until it's stopped. */
+  loop?: { prompt: string; interval_minutes: number; next_at: string } | null;
   allowed_tools: string[];
   disallowed_tools: string[];
   mcp_servers: Record<string, unknown>;
@@ -804,6 +806,8 @@ export const api = {
     req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),
   restartRun: (id: string) => req("POST", `/agents/${id}/restart`),
   resetSession: (id: string) => req<Agent>("POST", `/agents/${id}/reset-session`),
+  loopStart: (id: string, interval: string, prompt: string) => req<{ ok: boolean }>("POST", `/agents/${id}/loop`, { interval, prompt }),
+  loopStop: (id: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/loop`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
   sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),
   resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),

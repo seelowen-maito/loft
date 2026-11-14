@@ -37,11 +37,12 @@ pub struct Command {
 }
 
 /// Loft's own: they run in Loft, not in the CLI, even where the CLI has one of the same name.
-const LOFT: [(&str, &str); 5] = [
+const LOFT: [(&str, &str); 6] = [
     ("clear", "Clear the conversation context and start fresh. Memory is kept."),
     ("compact", "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary."),
     ("resume", "Go back to one of this agent's past sessions."),
     ("code", "Open this agent's workspace folder in VS Code."),
+    ("loop", "Repeat a prompt every interval until stopped: /loop 10m check the deploy. /loop stop ends it."),
     ("grill", "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it."),
 ];
 
@@ -169,7 +170,7 @@ mod tests {
         let tags: Vec<_> = list.iter().map(|c| (c.name.as_str(), c.tag)).collect();
         assert_eq!(
             tags,
-            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
+            [("/clear", "loft"), ("/compact", "loft"), ("/resume", "loft"), ("/code", "loft"), ("/loop", "loft"), ("/grill", "loft"), ("/doctor", "terminal"), ("/focus", "terminal"), ("/review", "passthrough"), ("/ship", "passthrough")],
             "the CLI's internal __ commands are left out"
         );
         let doctor = list.iter().find(|c| c.name == "/doctor").unwrap();

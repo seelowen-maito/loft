@@ -17,3 +17,11 @@ export function filterCommands(list: AgentCommand[], word: string): AgentCommand
 export function terminalNote(c: AgentCommand): string {
   return `${c.name} can't run here. ${c.reason ?? "Claude Code runs it only in its own terminal app."}`;
 }
+
+/** What follows `/loop`: "stop", or an interval (10m, 2h, 1d) and the prompt to repeat; null when it's neither. */
+export function parseLoop(rest: string): { stop: true } | { interval: string; prompt: string } | null {
+  const t = rest.trim();
+  if (t.toLowerCase() === "stop") return { stop: true };
+  const m = /^(\d+[mhd])\s+(\S[\s\S]*)$/i.exec(t);
+  return m ? { interval: m[1].toLowerCase(), prompt: m[2].trim() } : null;
+}
