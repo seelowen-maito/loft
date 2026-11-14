@@ -103,6 +103,8 @@ final class QuickSearchController {
     func close() { panel?.orderOut(nil) }
 
     private func makePanel() -> QuickSearchPanel {
+        // The panel can open before the main window, whose root view otherwise applies Settings › Appearance.
+        Appearance.apply()
         let p = QuickSearchPanel()
         p.contentView = NSHostingView(rootView: QuickSearchView(model: model) { [weak self] r, flags in self?.open(r, flags) })
         p.onKey = { [weak self] in self?.handle($0) ?? false }
