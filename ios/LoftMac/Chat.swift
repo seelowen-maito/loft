@@ -42,20 +42,33 @@ struct ChatView: View {
         }
     }
 
+    /// Who a shown message is from: the user, this chat's agent, or the other agent that sent it.
+    private static func speaker(_ m: ChatMessage) -> String {
+        m.kind != "text" ? "-" : m.fromAgentId ?? m.fromAgentName.map { "name:\($0)" } ?? m.role
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            ChatHeader(agent: agent)
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: 12) {
                     if store.historyHasMore[agent.id] == true, !shown.isEmpty {
                         Button("Load earlier messages") { Task { try? await store.loadOlder(agent.id) } }
                             .buttonStyle(.link).foregroundStyle(Theme.accent)
                             .frame(maxWidth: .infinity)
                     }
-                    ForEach(shown) { MessageRow(message: $0) }
+                    let shown = shown
+                    ForEach(Array(shown.enumerated()), id: \.element.id) { i, m in
+                        // The sticker shows once per run of replies from the same agent.
+                        MessageRow(message: m, agent: agent, showsSticker: i == 0 || Self.speaker(shown[i - 1]) != Self.speaker(m))
+                    }
                     ForEach(store.pending(for: agent.id)) { PendingRow(message: $0) }
                     if let a = shownQuickAck { QuickAckRow(text: a) }
                 }
-                .padding(16)
+                // The web's readable column: 820pt wide at most, centred in a wide window.
+                .frame(maxWidth: 820)
+                .padding(.horizontal, 24).padding(.vertical, 20)
+                .frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom)
             .accessibilityIdentifier("messageList")
@@ -138,9 +151,35 @@ struct ChatView: View {
     }
 }
 
+/// The chat's header, as on the web: the agent's sticker, its name and "project · role".
+private struct ChatHeader: View {
+    let agent: Agent
+
+    var body: some View {
+        HStack(spacing: 10) {
+            AgentSticker(agent: agent, size: 30)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(agent.name).font(.system(size: 14, weight: .medium)).foregroundStyle(WebTheme.fg)
+                if !agent.projectAndRole.isEmpty {
+                    Text(agent.projectAndRole).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .overlay(alignment: .bottom) { Rectangle().fill(WebTheme.line).frame(height: 1) }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("chatHeader")
+    }
+}
+
 private struct MessageRow: View {
     @Environment(LoftStore.self) private var store
     let message: ChatMessage
+    /// The chat's agent: the sticker beside its replies.
+    let agent: Agent
+    /// The first of a run of replies from the same agent: it shows the sticker.
+    var showsSticker = true
 
     /// The user's own message. Another agent's handover, delegation or FYI also comes as role user, with who sent
     /// it: that one is incoming, on the left, as on the iPhone and the web.
@@ -155,8 +194,22 @@ private struct MessageRow: View {
         case "notice":
             Text(message.displayContent).font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
         default:
-            HStack(alignment: .top) {
-                if isUser { Spacer(minLength: 80) }
+            HStack(alignment: .top, spacing: 10) {
+                if isUser {
+                    Spacer(minLength: 80)
+                } else {
+                    Group {
+                        if !showsSticker {
+                            Color.clear
+                        } else if let sender {
+                            AgentSticker(agent: sender, size: 26)
+                        } else {
+                            Initials(name: message.fromAgentName ?? "?", size: 26)
+                        }
+                    }
+                    .frame(width: 26, height: 26)
+                    .padding(.top, 2)
+                }
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
                     if let from = message.fromAgentName {
                         Text(message.isMentionReply ? "\(from) · answering your mention" : "From \(from)")
@@ -168,25 +221,47 @@ private struct MessageRow: View {
                         HStack { ForEach(photos, id: \.self) { Photo(url: $0) } }
                     }
                     if !message.displayContent.isEmpty {
-                        Text(Self.markdown(message.displayContent))
-                            .textSelection(.enabled)
-                            .padding(.horizontal, isUser ? 14 : 0)
-                            .padding(.vertical, isUser ? 9 : 0)
-                            .foregroundStyle(WebTheme.fg)
-                            // As on the web: your messages in a faint bubble, the agent's as plain text.
-                            .background(isUser ? WebTheme.fg.opacity(0.07) : .clear,
-                                        in: UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16,
-                                                                   bottomTrailingRadius: 6, topTrailingRadius: 16, style: .continuous))
+                        if isUser {
+                            // As on the web: your messages in a faint bubble on the right.
+                            Text(MarkdownView.inline(message.displayContent))
+                                .font(.system(size: 14))
+                                .lineSpacing(3)
+                                .textSelection(.enabled)
+                                .padding(.horizontal, 14).padding(.vertical, 9)
+                                .foregroundStyle(WebTheme.fg)
+                                .background(WebTheme.fg.opacity(0.07),
+                                            in: UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16,
+                                                                       bottomTrailingRadius: 6, topTrailingRadius: 16, style: .continuous))
+                        } else {
+                            // The agent's reply as one card, so each reads as a block.
+                            let shape = UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 16,
+                                                               bottomTrailingRadius: 16, topTrailingRadius: 16, style: .continuous)
+                            MarkdownView(message.displayContent)
+                                .foregroundStyle(WebTheme.fg)
+                                .padding(.horizontal, 16).padding(.vertical, 12)
+                                .background(WebTheme.surface, in: shape)
+                                .overlay(shape.strokeBorder(WebTheme.line))
+                        }
                     }
                     Text(message.createdAt, style: .time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
                 }
-                if !isUser { Spacer(minLength: 80) }
             }
             // Selectable text isn't read by a combined element, so the label says it.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(spoken)
+            .accessibilityAction(named: "Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(message.displayContent, forType: .string)
+            }
             .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
         }
+    }
+
+    /// The agent whose sticker shows: the other agent that sent it, or the chat's own agent.
+    private var sender: Agent? {
+        if let id = message.fromAgentId { return store.agent(id) }
+        if let name = message.fromAgentName { return store.agents.first { $0.name == name } }
+        return agent
     }
 
     private var spoken: String {
@@ -198,9 +273,6 @@ private struct MessageRow: View {
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
-    static func markdown(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
-    }
 }
 
 /// A message on its way, or one that failed with Retry.

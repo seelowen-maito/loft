@@ -405,7 +405,10 @@ func renderWindow(store: LoftStore, nav: MacNav, to folder: String) async {
     if store.agents.isEmpty {
         png("connect")
     } else {
-        if let id = store.agents.first(where: { $0.name == "Orchestrator" })?.id { nav.openChat(id) }
+        // `-render-agent <name>` draws that agent's chat instead.
+        let args = ProcessInfo.processInfo.arguments
+        let name = args.firstIndex(of: "-render-agent").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } ?? "Orchestrator"
+        if let id = store.agents.first(where: { $0.name == name })?.id { nav.openChat(id) }
         try? await Task.sleep(for: .seconds(2))
         png("agents")
         for section in [MacSection.issues, .overview, .needsYou, .settings] {
