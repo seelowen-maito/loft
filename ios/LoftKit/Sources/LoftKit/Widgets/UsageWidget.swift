@@ -75,16 +75,17 @@ extension UsageWidgetSnapshot {
 }
 
 /// The colours Loft uses for a level, as the web: usage amber at 75 %, red at 90 %; memory high / critical; CPU warm / hot.
+/// Amber is the darker ink in light mode, where the bright amber is too faint on the white tile.
 enum UsageTone {
     static func usage(_ percent: Double?) -> Color {
         guard let p = percent else { return .secondary }
-        return p >= 90 ? Theme.failure : p >= 75 ? Theme.attention : Theme.accent
+        return p >= 90 ? Theme.failure : p >= 75 ? Theme.attentionInk : Theme.accent
     }
 
     static func level(_ level: String?) -> Color {
         switch level {
         case "hot", "critical": Theme.failure
-        case "warm", "high": Theme.attention
+        case "warm", "high": Theme.attentionInk
         default: .primary
         }
     }
@@ -168,7 +169,7 @@ public struct UsageWidgetView: View {
     @ViewBuilder private var footer: some View {
         if snapshot.phase == .unreachable, let at = snapshot.takenAt {
             Label { Text("Offline · from \(Text(at, style: .time))") } icon: { Image(systemName: "bolt.horizontal.circle") }
-                .font(.caption2).foregroundStyle(Theme.attention).lineLimit(1).minimumScaleFactor(0.8)
+                .font(.caption2).foregroundStyle(Theme.attentionInk).lineLimit(1).minimumScaleFactor(0.8)
         }
     }
 }
