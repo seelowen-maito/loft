@@ -151,10 +151,8 @@ public struct UsageWidgetView: View {
                 }
             }
             .frame(height: 6)
-            Group {
-                Text(m.map { UsageWidgetSnapshot.resetText($0.resetsAt, now: .now) } ?? "No reading")
-            }
-            .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
+            Text(m.map { UsageWidgetSnapshot.resetText($0.resetsAt, now: .now) } ?? "No reading")
+                .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
         }
     }
 

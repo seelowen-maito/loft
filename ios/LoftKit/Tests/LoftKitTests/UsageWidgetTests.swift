@@ -75,8 +75,29 @@ final class UsageWidgetTests: XCTestCase {
         XCTAssertEqual(UsageWidgetSnapshot.resetText(now.addingTimeInterval(2 * 3600 + 14 * 60 + 30), now: now), "Resets in 2h 14m")
         XCTAssertEqual(UsageWidgetSnapshot.resetText(now.addingTimeInterval(3 * 86400 + 23 * 3600), now: now), "Resets in 3d 23h")
         XCTAssertEqual(UsageWidgetSnapshot.resetText(now.addingTimeInterval(25 * 60), now: now), "Resets in 25m")
-        XCTAssertEqual(UsageWidgetSnapshot.resetText(now.addingTimeInterval(-60), now: now), "Resets in under a minute", "already past")
+        XCTAssertEqual(UsageWidgetSnapshot.resetText(now.addingTimeInterval(30), now: now), "Resets in under a minute")
+        XCTAssertEqual(UsageWidgetSnapshot.resetText(now.addingTimeInterval(-3 * 3600), now: now), "Reset has passed", "after a long offline stretch")
+        XCTAssertEqual(UsageWidgetSnapshot.resetText(now, now: now), "Reset has passed")
         XCTAssertEqual(UsageWidgetSnapshot.resetText(nil, now: now), "Reset time unknown")
+    }
+
+    /// `/usage` failing while `/system` answers keeps the last plan numbers, also for a later offline state.
+    func testOnlyUsageFailingKeepsTheLastPlanNumbers() async throws {
+        let last = try defaults()
+        let api = FixtureAPI()
+        let live = await UsageWidgetSnapshot.load(usage: api.usage, system: api.system, weekSpend: { 3 }, last: last, now: now)
+        let partial = await UsageWidgetSnapshot.load(usage: { throw Down() }, system: api.system, weekSpend: { 3 }, last: last,
+                                                     now: now.addingTimeInterval(600))
+        XCTAssertEqual(partial.phase, .ready)
+        XCTAssertEqual(partial.session, live.session)
+        XCTAssertEqual(partial.week, live.week)
+        let offline = await UsageWidgetSnapshot.load(usage: { throw Down() }, system: { throw Down() }, weekSpend: { throw Down() },
+                                                     last: last, now: now.addingTimeInterval(1200))
+        XCTAssertEqual(UsageWidgetSnapshot.percentText(offline.session), "42%", "not a dash")
+
+        let loggedOut = await UsageWidgetSnapshot.load(usage: { PlanUsage(error: "not logged in", windows: []) }, system: api.system,
+                                                       weekSpend: { 3 }, last: last, now: now)
+        XCTAssertNil(loggedOut.session, "Loft answering that it can't read the plan is a dash, not the old number")
     }
 
     func testATapOpensTheOverview() {

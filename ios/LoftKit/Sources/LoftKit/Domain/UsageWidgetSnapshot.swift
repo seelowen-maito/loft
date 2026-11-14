@@ -54,6 +54,8 @@ public struct UsageWidgetSnapshot: Codable, Equatable {
     public static func resetText(_ at: Date?, now: Date) -> String {
         guard let at else { return "Reset time unknown" }
         let s = Int(at.timeIntervalSince(now))
+        // A reading from before a long offline stretch: the window has already started over.
+        guard s > 0 else { return "Reset has passed" }
         guard s > 59 else { return "Resets in under a minute" }
         let d = s / 86_400, h = (s % 86_400) / 3600, m = (s % 3600) / 60
         return "Resets in " + (d > 0 ? "\(d)d \(h)h" : h > 0 ? "\(h)h \(m)m" : "\(m)m")
@@ -89,14 +91,20 @@ public struct UsageWidgetSnapshot: Codable, Equatable {
         async let sys = try? system()
         async let spend = try? weekSpend()
         let (plan, mac) = (await u, await sys)
+        let saved = last?.data(forKey: lastKey).flatMap { try? JSONDecoder().decode(Self.self, from: $0) }
         guard plan != nil || mac != nil else {
-            var s = last?.data(forKey: lastKey).flatMap { try? JSONDecoder().decode(Self.self, from: $0) } ?? UsageWidgetSnapshot(phase: .ready)
+            var s = saved ?? UsageWidgetSnapshot(phase: .ready)
             s.phase = .unreachable
             return s
         }
         // A plan Loft can't read (its `error`, like "not logged in") is a dash, not 0%.
         let readable = plan?.error == nil ? plan : nil
-        let s = UsageWidgetSnapshot(usage: readable, system: mac, weekSpend: await spend, at: now)
+        var s = UsageWidgetSnapshot(usage: readable, system: mac, weekSpend: await spend, at: now)
+        // Only `/usage` failing (a timeout asking Anthropic) keeps the last plan numbers, so they aren't lost for later.
+        if plan == nil, let saved {
+            s.session = saved.session
+            s.week = saved.week
+        }
         if let data = try? JSONEncoder().encode(s) { last?.set(data, forKey: lastKey) }
         return s
     }
