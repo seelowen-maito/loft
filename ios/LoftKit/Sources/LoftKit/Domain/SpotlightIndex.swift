@@ -54,6 +54,13 @@ public enum SpotlightIndex {
         return id.isEmpty ? nil : (kind, id)
     }
 
+    /// The web page a chosen item opens when Settings › Quick search opens results in the browser (`opensIn` is
+    /// "browser"), as quick search does; nil to open it in the Mac app, also when there's no web Loft to open.
+    public static func webURL(of identifier: String, opensIn: String?, base: URL?) -> URL? {
+        guard opensIn == "browser", let base, let (kind, id) = target(of: identifier) else { return nil }
+        return base.appendingPathComponent(kind == .agent ? "/agents/\(id)" : "/issues/\(id)")
+    }
+
     /// What to (re)index and which identifiers to remove, going from what's in the index to what should be.
     public static func changes(from old: [Entry], to new: [Entry]) -> (index: [Entry], remove: [String]) {
         let before = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })

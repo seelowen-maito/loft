@@ -90,6 +90,20 @@ final class SpotlightIndexTests: XCTestCase {
         XCTAssertNil(SpotlightIndex.target(of: "nonsense"))
     }
 
+    func testAChosenItemOpensOnTheWebOnlyWhenSettingsSaysBrowser() {
+        let base = URL(string: "https://loft.example:8080")!
+        XCTAssertEqual(SpotlightIndex.webURL(of: "agent:dev", opensIn: "browser", base: base)?.absoluteString,
+                       "https://loft.example:8080/agents/dev")
+        for kind in ["issue", "ticket", "spec"] {
+            XCTAssertEqual(SpotlightIndex.webURL(of: "\(kind):42", opensIn: "browser", base: base)?.absoluteString,
+                           "https://loft.example:8080/issues/42")
+        }
+        XCTAssertNil(SpotlightIndex.webURL(of: "agent:dev", opensIn: "app", base: base), "Mac app opens it here")
+        XCTAssertNil(SpotlightIndex.webURL(of: "agent:dev", opensIn: nil, base: base), "the default is the Mac app")
+        XCTAssertNil(SpotlightIndex.webURL(of: "agent:dev", opensIn: "browser", base: nil), "no web Loft to open")
+        XCTAssertNil(SpotlightIndex.webURL(of: "nonsense", opensIn: "browser", base: base))
+    }
+
     func testNewRenamedClosedAndRestyledItemsChangeTheIndex() {
         let dev = agent("dev", "Loft mobile dev")
         var moved = dev

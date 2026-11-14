@@ -146,8 +146,13 @@ final class QuickSearchController {
         go(r.kind, r.target, webPath: r.webPath)
     }
 
-    /// A Loft item chosen in macOS Spotlight: opens it in the app.
+    /// A Loft item chosen in macOS Spotlight: opens it where Settings › Quick search says, the app or the browser.
     func open(spotlightItem identifier: String) {
+        let opensIn = model.store.isDemo ? nil : UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn)
+        if let url = SpotlightIndex.webURL(of: identifier, opensIn: opensIn, base: model.store.api?.baseURL) {
+            NSWorkspace.shared.open(url)
+            return
+        }
         guard let (kind, id) = SpotlightIndex.target(of: identifier) else { return }
         go(kind, id, webPath: "")
     }
@@ -330,12 +335,12 @@ struct QuickSearchSettings: View {
                 Text("Browser").tag("browser")
             }
             .pickerStyle(.segmented)
-            Text("Finds agents, issues, tickets and specs from any app. ↵ opens, ⌘↵ opens an agent's chat, ⌥↵ opens in the other place. Pages only the web has always open in the browser. If the shortcut does nothing, another app may use it too: record another.")
+            Text("Finds agents, issues, tickets and specs from any app. ↵ opens, ⌘↵ opens an agent's chat, ⌥↵ opens in the other place. Pages only the web has always open in the browser. Spotlight opens Loft items in the same place. If the shortcut does nothing, another app may use it too: record another.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         Section("Spotlight") {
             Toggle("Show Loft in Spotlight", isOn: $spotlight).accessibilityIdentifier("spotlightToggle")
-            Text("⌘Space finds agents and open issues, tickets and specs, and opens them here. Off removes them from Spotlight.")
+            Text("⌘Space finds agents and open issues, tickets and specs, and opens them where quick search does: in the Mac app or the browser. Off removes them from Spotlight.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
