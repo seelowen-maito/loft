@@ -38,3 +38,22 @@ public enum TalkRecipients {
             }
     }
 }
+
+/// What a `loft://` link opened in the app does (iPhone and Mac).
+public enum TalkLink {
+    public enum Route: Equatable {
+        /// The Talk widget's or control's signed link: start listening with this agent.
+        case start(String)
+        /// A signed Talk link with no one to start with: ask who.
+        case pick
+        /// Anything else, a Talk link nobody signed (another app, a web page) too: open it, mic off.
+        case open(DeepLink)
+    }
+
+    /// nil for a link Loft doesn't know.
+    public static func route(_ url: URL, key: String?, lastAgentId: String?, orchestratorId: String?, agents: [Agent]) -> Route? {
+        guard let link = DeepLink(url: url) else { return nil }
+        guard TalkKey.signs(url, key: key) else { return .open(link) }
+        return TalkRecipients.starter(lastAgentId: lastAgentId, orchestratorId: orchestratorId, agents: agents).map(Route.start) ?? .pick
+    }
+}

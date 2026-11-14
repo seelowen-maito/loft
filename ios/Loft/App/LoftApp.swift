@@ -60,15 +60,17 @@ struct LoftApp: App {
                 // `loft://task/<id>`: from a message, a note or another app.
                 .onOpenURL { url in
                     if let id = TaskLink.id(from: url) { router.open(.task(taskId: id)) }
-                    // The Talk widget or control: start listening with whoever you talked to last. A link they didn't
-                    // sign (another app, a web page) or no one to talk to yet: the Overview asking who, mic off.
-                    else if TalkKey.signs(url, key: TalkKey.current),
-                            let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
-                                                            orchestratorId: store.orchestratorId, agents: store.agents) {
-                        Task { await voice.start(agentId: id) }
+                    // A tap on a widget. The Talk widget or control: start listening with whoever you talked to last;
+                    // no one yet, or a link they didn't sign: the Overview asking who, mic off.
+                    else {
+                        switch TalkLink.route(url, key: TalkKey.current, lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                              orchestratorId: store.orchestratorId, agents: store.agents) {
+                        case .start(let id): Task { await voice.start(agentId: id) }
+                        case .pick: router.openLink(.talk)
+                        case .open(let link): router.openLink(link)
+                        case nil: break
+                        }
                     }
-                    // A tap on a widget.
-                    else if let link = DeepLink(url: url) { router.openLink(link) }
                 }
                 // Once the server says it can push, register this phone (and again when the server changes).
                 .task(id: store.info?.supports(.push) == true) { await PushRegistrar.shared.start() }

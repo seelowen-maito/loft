@@ -37,6 +37,24 @@ final class TalkWidgetTests: XCTestCase {
         XCTAssertNil(TalkRecipients.starter(lastAgentId: "qa", orchestratorId: "orch", agents: []), "no agents loaded yet")
     }
 
+    /// What the app does with a link: the signed one starts Talk or asks who; an unsigned one only opens.
+    func testTheLinkRoutesToStartPickOrOpen() async throws {
+        let agents = try await FixtureAPI().agents()
+        let key = "0f1e2d"
+        let signed = TalkKey.url(key: key)
+        func route(_ url: URL, last: String? = "qa", orch: String? = "orch") -> TalkLink.Route? {
+            TalkLink.route(url, key: key, lastAgentId: last, orchestratorId: orch, agents: agents)
+        }
+        XCTAssertEqual(route(signed), .start("qa"))
+        XCTAssertEqual(route(signed, last: nil), .start("orch"))
+        XCTAssertEqual(route(signed, last: "deleted", orch: nil), .pick, "no one to start with")
+        XCTAssertEqual(route(DeepLink.talk.url), .open(.talk), "unsigned: mic off")
+        XCTAssertEqual(route(URL(string: "loft://talk?key=guess")!), .open(.talk))
+        XCTAssertEqual(TalkLink.route(signed, key: nil, lastAgentId: "qa", orchestratorId: nil, agents: agents), .open(.talk), "no shared Keychain")
+        XCTAssertEqual(route(DeepLink.agents.url), .open(.agents))
+        XCTAssertNil(route(URL(string: "https://example.com/talk")!))
+    }
+
     @MainActor
     func testTheWidgetDrawsSmallAndRound() throws {
         var seen: [Data] = []
