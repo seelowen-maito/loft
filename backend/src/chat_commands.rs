@@ -30,7 +30,8 @@ fn setting(state: &AppState, id: &str, what: &str, arg: &str, choices: &[&str], 
     // Effort has no "default" in the list: it clears the setting.
     let value = if what == "Effort" && arg == "default" { String::new() } else { arg };
     if !value.is_empty() && !choices.contains(&value.as_str()) {
-        return Err(bad(format!("{what} is one of {}.", choices.join(", "))));
+        let extra = if what == "Effort" { ", default" } else { "" };
+        return Err(bad(format!("{what} is one of {}{extra}.", choices.join(", "))));
     }
     let a = state.db.update_agent(id, |a| set(a, value.clone()))?.ok_or_else(not_found)?;
     emit_agent(state, &a);
@@ -50,10 +51,11 @@ async fn usage_text(state: &AppState, id: &str, with_plan: bool) -> Result<Strin
         None => (Utc::now() - Duration::days(7), "the last 7 days"),
     };
     let (runs, cost) = state.db.spend_between(&since.to_rfc3339(), None)?;
-    let tokens = a.context_tokens.map_or("not reported yet".to_string(), |t| format!("{t} tokens in context"));
+    let tokens = a.context_tokens.map_or("not reported yet".to_string(), |t| if t >= 1000 { format!("{}k tokens in context", t / 1000) } else { format!("{t} tokens in context") });
+    let usd = |v: f64| if v > 0.0 && v < 0.01 { "<$0.01".to_string() } else { format!("${v:.2}") };
     let mut out = format!(
-        "{}: {tokens}; ${:.2} in total, ${:.2} this session.\nAll agents, {kind}: {runs} run{}, ${cost:.2}.",
-        a.name, a.total_cost_usd, a.session_cost_usd, if runs == 1 { "" } else { "s" }
+        "{}: {tokens}; {} in total, {} this session.\nAll agents, {kind}: {runs} run{}, {}.",
+        a.name, usd(a.total_cost_usd), usd(a.session_cost_usd), if runs == 1 { "" } else { "s" }, usd(cost)
     );
     if with_plan {
         match usage["windows"].as_array().filter(|w| !w.is_empty()) {
@@ -115,14 +117,16 @@ mod tests {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
         st.db.update_agent(&a.id, |x| {
-            x.context_tokens = Some(1234);
+            x.context_tokens = Some(41145);
             x.total_cost_usd = 1.5;
         })
         .unwrap();
         crate::usage::fake(&st, json!({ "windows": [{ "key": "five_hour", "label": "session", "percent": 42.0, "resets_at": null }], "error": null })).await;
         let cost = call(&st, &a.id, "cost", "").await.unwrap();
-        assert!(cost.contains("0 runs,") && cost.contains("1234 tokens in context") && cost.contains("$1.50 in total") && !cost.contains("Plan"), "{cost}");
+        assert!(cost.contains("0 runs,") && cost.contains("41k tokens in context") && cost.contains("$1.50 in total") && !cost.contains("Plan"), "{cost}");
         let status = call(&st, &a.id, "status", "").await.unwrap();
+        st.db.update_agent(&a.id, |x| x.total_cost_usd = 0.003).unwrap();
+        assert!(call(&st, &a.id, "cost", "").await.unwrap().contains("<$0.01 in total"));
         assert!(status.contains("Plan Session: 42% used."), "{status}");
         assert!(call(&st, &a.id, "nope", "").await.is_err());
     }
