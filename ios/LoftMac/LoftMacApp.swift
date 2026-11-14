@@ -77,7 +77,18 @@ struct LoftMacApp: App {
                 .frame(minWidth: 1180, minHeight: 640)
                 .onAppear { store.activate() }
                 // A tap on a widget.
-                .onOpenURL { url in if let link = DeepLink(url: url) { nav.open(link) } }
+                .onOpenURL { url in
+                    // The Talk widget or control: Talk with whoever you talked to last. No one yet: the most recent
+                    // Lead, the To: row's first chip. A link they didn't sign (another app, a web page): the agents, mic off.
+                    switch TalkLink.route(url, key: TalkKey.current, lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                          orchestratorId: store.orchestratorId, agents: store.agents) {
+                    case .start(let id): nav.talk(id)
+                    case .pick:
+                        if let id = TalkRecipients.chips(store.agents, current: nil).first?.id { nav.talk(id) } else { nav.open(.talk) }
+                    case .open(let link): nav.open(link)
+                    case nil: break
+                    }
+                }
                 // A Loft item chosen in Spotlight, when SwiftUI hands it to the window rather than the app delegate.
                 .onContinueUserActivity(CSSearchableItemActionType) { activity in
                     if let id = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String { quickSearch.open(spotlightItem: id) }
@@ -147,16 +158,35 @@ final class MacNav {
     /// The issue pages open in the Issues section, from the board's card on.
     var issuePath: [String] = []
 
+    /// The Needs you item to scroll to and outline: the Needs you widget's Approve.
+    var needsYouFocus: String?
+    /// The chat to open Talk in, once it shows (the Talk widget or control).
+    var talkIn: String?
+
     func openChat(_ agentId: String) {
         section = .agents
         self.agentId = agentId
     }
 
+    /// Opens the agent's chat with Talk listening.
+    func talk(_ agentId: String) {
+        openChat(agentId)
+        talkIn = agentId
+    }
+
     func open(_ link: DeepLink) {
         switch link {
-        case .needsYou: section = .needsYou
-        case .agents: section = .agents
+        case .needsYou:
+            section = .needsYou
+            needsYouFocus = nil
+        case .needsYouItem(let id):
+            section = .needsYou
+            needsYouFocus = id
+        case .agents, .talk: section = .agents
         case .agent(let id): openChat(id)
+        case .issue(let id):
+            section = .issues
+            issuePath = [id]
         }
     }
 }

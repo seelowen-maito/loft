@@ -36,6 +36,19 @@ final class WidgetSnapshotTests: XCTestCase {
         XCTAssertNil(DeepLink(url: URL(string: "https://example.com/needs-you")!))
     }
 
+    /// The Talk widget and control with no one to talk to yet: the Overview's top, with Talk asking who.
+    @MainActor
+    func testTalkWithNoAgentOpensTheOverview() {
+        XCTAssertEqual(DeepLink(url: DeepLink.talk.url), .talk)
+        let r = Router()
+        r.openChat("be")
+        r.open(.needsYou)
+        r.openLink(.talk)
+        XCTAssertEqual(r.tab, .overview)
+        XCTAssertTrue(r.overviewPath.isEmpty)
+        XCTAssertTrue(r.picksTalk, "Talk asks who, instead of a plain Overview")
+    }
+
     /// Like the menu bar: an agent waiting on a permission needs the user, so it isn't listed as working.
     func testAnAgentWaitingOnAPermissionIsNotWorking() async throws {
         let api = FixtureAPI()

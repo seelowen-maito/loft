@@ -95,6 +95,8 @@ public enum TestMode {
 public enum Prefs {
     public static let serverURL = "serverURL"
     public static let orchestratorId = "orchestratorAgentId"
+    /// Who you last talked to: a one-tap Talk (the Overview's button, the widget, the control) starts with them.
+    public static let voiceLastAgent = "voiceLastAgent"
     public static let appearance = "appearance"
     public static let speechLocale = "speechLocale"
     public static let speechOnDeviceOnly = "speechOnDeviceOnly"

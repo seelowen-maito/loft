@@ -1,27 +1,41 @@
 import Foundation
 
-/// Where a tap on a widget opens the app: `loft://needs-you`, `loft://agents` or `loft://agent/<id>`.
+/// Where a tap on a widget opens the app: `loft://needs-you`, `loft://needs-you/<item id>`, `loft://agents`,
+/// `loft://agent/<id>`, `loft://issue/<id>` or `loft://talk`.
 public enum DeepLink: Equatable {
     case needsYou
+    /// Needs you at one item's card: the widget's Approve, approved there with one more tap.
+    case needsYouItem(String)
     case agents
     case agent(String)
+    /// An issue's page: the Delivery widget's spec.
+    case issue(String)
+    /// Start talking: the Talk widget and control.
+    case talk
 
     public var url: URL {
         switch self {
         case .needsYou: URL(string: "loft://needs-you")!
+        case .needsYouItem(let id):
+            URL(string: "loft://needs-you/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) ?? id)")!
         case .agents: URL(string: "loft://agents")!
         case .agent(let id): URL(string: "loft://agent/\(id)")!
+        case .issue(let id): URL(string: "loft://issue/\(id)")!
+        case .talk: URL(string: "loft://talk")!
         }
     }
 
     public init?(url: URL) {
         guard url.scheme == "loft" else { return nil }
         switch url.host {
-        case "needs-you": self = .needsYou
+        case "needs-you":
+            let id = url.pathComponents.dropFirst().first ?? ""
+            self = id.isEmpty ? .needsYou : .needsYouItem(id)
         case "agents": self = .agents
-        case "agent":
+        case "talk": self = .talk
+        case "agent", "issue":
             guard let id = url.pathComponents.dropFirst().first, !id.isEmpty else { return nil }
-            self = .agent(id)
+            self = url.host == "agent" ? .agent(id) : .issue(id)
         default: return nil
         }
     }
@@ -44,9 +58,18 @@ public struct WidgetSnapshot: Equatable {
         /// 3 blocks an agent now … 0 to review.
         public let urgency: Int
         public let link: DeepLink
+        /// One short line: the item's reason, or for a permission what will run (`permissionSubject`).
+        public var summary = ""
+        /// A permission's Approve: opens its card in the app, which shows the whole command and approves with one more
+        /// tap. The widget never approves by itself (spec #462). Nil on everything else.
+        public var approve: DeepLink?
+        /// A permission's Deny, sent from the widget as the server gave it; nil on everything else.
+        public var deny: NeedsYouAction?
     }
 
-    public static let itemLimit = 3
+    /// The Needs you widget's large size shows this many; the overview widget the first `overviewLimit`.
+    public static let itemLimit = 6
+    public static let overviewLimit = 3
 
     public var phase: Phase
     public var needsCount = 0
@@ -68,14 +91,29 @@ public struct WidgetSnapshot: Equatable {
         urgent = needsYou.urgent
         items = needsYou.items.prefix(Self.itemLimit).map {
             let agentId = $0.openAction?.target?.agentId ?? $0.agent?.id
+            let isPermission = $0.type == "permission"
+            let subject = isPermission ? Self.permissionSubject($0.text) : nil
             return Item(id: $0.id, title: $0.title, agentName: $0.agent?.name, urgency: $0.urgency,
-                        link: agentId.map(DeepLink.agent) ?? .needsYou)
+                        link: agentId.map(DeepLink.agent) ?? .needsYou,
+                        summary: subject ?? $0.reason,
+                        approve: isPermission && $0.actions.contains { $0.kind == "approve" } ? .needsYouItem($0.id) : nil,
+                        deny: isPermission ? $0.actions.first { $0.kind == "deny" && $0.isRequest } : nil)
         }
         working = agents.filter { a in
             AgentState(agent: a, pendingApprovals: permissions.filter { $0.isPending && $0.agentId == a.id }.count) == .working
         }
             .map(\.name).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
         self.weekSpend = weekSpend
+    }
+
+    /// What a permission will run, as the server's text says it (backend `permission_text`): the `$ command` line for
+    /// Bash (never the agent's own description above it), else the first line (a path or URL). Nil for a tool with no
+    /// one-line form (its JSON). Only shown: Approve opens the app, which shows the whole command.
+    static func permissionSubject(_ text: String) -> String? {
+        let lines = text.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
+        let line = (lines.first { $0.hasPrefix("$ ") } ?? lines[0]).trimmingCharacters(in: .whitespaces)
+        guard !line.isEmpty, line != "$", !line.hasPrefix("{"), !line.hasPrefix("[") else { return nil }
+        return line
     }
 
     /// "$12.40", or nil when the spend is unknown.

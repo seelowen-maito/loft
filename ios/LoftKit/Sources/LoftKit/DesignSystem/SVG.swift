@@ -1,18 +1,14 @@
 import CoreGraphics
 import Foundation
 
-// MARK: - SVG subset
-
-/// A parsed avatar SVG: a tree of groups and shapes plus the gradients and clip paths they reference.
+/// A parsed avatar SVG: a tree of groups and shapes plus the gradients and clip paths they reference. Shared by the
+/// iPhone's stickers and the widgets (spec #462), so it draws with Core Graphics only.
 public struct SVGDocument {
     fileprivate var root = SVGNode(name: "svg")
     fileprivate var defs: [String: SVGNode] = [:]
 
-    /// Bigger or deeper sources aren't read: avatars are a few KB and a few levels, and anything past these only costs time.
-    static let maxBytes = 64 * 1024, maxDepth = 64
-
     public init?(_ source: String) {
-        guard source.utf8.count <= Self.maxBytes, let data = source.data(using: .utf8) else { return nil }
+        guard let data = source.data(using: .utf8) else { return nil }
         let builder = SVGTreeBuilder()
         let parser = XMLParser(data: data)
         parser.delegate = builder
@@ -29,6 +25,7 @@ public struct SVGDocument {
         return found
     }
 
+    /// Draws the 100x100 canvas into `cg` in its own units, y down.
     public func draw(in cg: CGContext) {
         draw(root, in: cg, style: .initial)
     }
@@ -106,7 +103,7 @@ public struct SVGDocument {
         var colors: [CGColor] = []
         var locations: [CGFloat] = []
         for stop in node.children where stop.name == "stop" {
-            let color = SVGParse.color(stop.attrs["stop-color"] ?? "#000") ?? CGColor(gray: 0, alpha: 1)
+            let color = SVGParse.color(stop.attrs["stop-color"] ?? "#000") ?? CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
             let a = (stop.attrs["stop-opacity"].flatMap(Double.init) ?? 1) * opacity
             colors.append(color.copy(alpha: color.alpha * a) ?? color)
             locations.append(SVGParse.number(stop.attrs["offset"]) ?? 0)
@@ -154,8 +151,6 @@ fileprivate final class SVGTreeBuilder: NSObject, XMLParserDelegate {
     private var stack: [SVGNode] = []
 
     func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String] = [:]) {
-        // Aborting makes `parse()` return false, so the document is nil.
-        guard stack.count < SVGDocument.maxDepth else { return parser.abortParsing() }
         let node = SVGNode(name: name, attrs: attributes)
         if let parent = stack.last { parent.children.append(node) } else { root = node }
         stack.append(node)
@@ -465,5 +460,20 @@ struct NumberScanner {
         }
         guard sawDigit, let v = Double(String(chars[start..<i])) else { i = start; return nil }
         return CGFloat(v)
+    }
+}
+
+extension SVGDocument {
+    /// The drawing alone (no sticker border) as a square image `pixels` wide, for the widgets.
+    public func image(pixels: Int) -> CGImage? {
+        guard pixels > 0, drawsSomething, let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let cg = CGContext(data: nil, width: pixels, height: pixels, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        // A bitmap context's y runs up; the SVG's runs down.
+        let unit = CGFloat(pixels) / 100
+        cg.translateBy(x: 0, y: CGFloat(pixels))
+        cg.scaleBy(x: unit, y: -unit)
+        draw(in: cg)
+        return cg.makeImage()
     }
 }
