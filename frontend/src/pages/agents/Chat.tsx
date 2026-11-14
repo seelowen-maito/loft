@@ -606,7 +606,7 @@ export function Chat({
             </div>
           )}
           {agent.loop && <LoopBar agent={agent} onError={setCmdError} />}
-          {agent.schedules?.map((s) => <ScheduleRow key={s.id} agentId={agent.id} s={s} onError={setCmdError} />)}
+          {!!agent.schedules?.length && <ScheduleList agentId={agent.id} list={agent.schedules} onError={setCmdError} />}
           <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
           {pickingTask && (
@@ -1113,34 +1113,55 @@ function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => voi
   );
 }
 
-/** One of the agent's /schedule entries, with its next run and a Cancel. */
-function ScheduleRow({ agentId, s, onError }: { agentId: string; s: NonNullable<Agent["schedules"]>[number]; onError: (e: string) => void }) {
-  const [busy, setBusy] = useState(false);
-  const cancel = async () => {
-    setBusy(true);
+/** The agent's /schedule entries: one summary row that opens to the list, each with its next run and a Cancel. */
+function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNullable<Agent["schedules"]>; onError: (e: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const cancel = async (sid: string) => {
+    setBusy(sid);
     try {
-      await api.scheduleCancel(agentId, s.id);
+      await api.scheduleCancel(agentId, sid);
     } catch (e) {
       onError((e as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
-  const when = s.every ? `Every ${s.every} at ${s.time}` : "Once";
+  const next = [...list].sort((a, b) => a.next_at.localeCompare(b.next_at))[0];
   return (
-    <div className="mb-3 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2" role="status">
-      <Clock className="size-4 shrink-0 text-accent" />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[13px] text-fg">{s.prompt}</div>
-        <div className="truncate font-mono text-[11px] text-fg-3">
-          {when} · next {new Date(s.next_at).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}
-        </div>
-      </div>
-      <button className="btn shrink-0" onClick={cancel} disabled={busy}>
-        Cancel
+    <div className="mb-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2">
+      <button className="flex w-full items-center gap-3 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <Clock className="size-4 shrink-0 text-accent" />
+        <span className="min-w-0 flex-1 truncate text-[13px] text-fg">
+          {list.length} schedule{list.length === 1 ? "" : "s"} · next {fmtNext(next.next_at)}
+        </span>
+        <ChevronRight className={cx("size-4 shrink-0 text-fg-3 transition-transform", open && "rotate-90")} />
       </button>
+      {open && (
+        <div className="mt-2 max-h-48 space-y-2 overflow-y-auto">
+          {list.map((s) => (
+            <div key={s.id} className="flex items-center gap-3 border-t border-line pt-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] text-fg">{s.prompt}</div>
+                <div className="font-mono text-[11px] text-fg-3">{s.every ? `Every ${s.every} at ${s.time}` : "Once"}</div>
+                <div className="font-mono text-[11px] text-fg-3">next {fmtNext(s.next_at)}</div>
+              </div>
+              <button className="btn shrink-0" onClick={() => cancel(s.id)} disabled={busy === s.id}>
+                Cancel
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+/** "Mon 09:30", with the date when it's more than 6 days away. */
+function fmtNext(iso: string): string {
+  const d = new Date(iso);
+  const far = d.getTime() - Date.now() > 6 * 86400_000;
+  return d.toLocaleString([], { weekday: "short", ...(far ? { month: "short", day: "numeric" } : {}), hour: "2-digit", minute: "2-digit" });
 }
 
 /** Loft commands that answer with a notice: they show or change a setting, or show usage. */

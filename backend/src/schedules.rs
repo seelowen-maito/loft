@@ -50,7 +50,8 @@ fn next_occurrence(every: &str, time: NaiveTime, from: DateTime<Utc>) -> Option<
 
 /// "tomorrow 9:00 run the tests" as a schedule (without an id): the time words, then the prompt.
 pub fn parse(text: &str, now: DateTime<Utc>) -> Result<Schedule, String> {
-    let words: Vec<&str> = text.split_whitespace().collect();
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
     // The text after the first n words, as typed (the prompt may span lines).
     let rest = |n: usize| (0..n).fold(text.trim(), |t, _| t.split_once(char::is_whitespace).map_or("", |(_, r)| r.trim_start())).trim().to_string();
     let bad = || EXAMPLES.to_string();
@@ -173,6 +174,7 @@ mod tests {
         let now = at(12, 10, 0);
         let s = parse("tomorrow 9:00 run the tests", now).unwrap();
         assert_eq!((s.prompt.as_str(), s.every.clone(), s.next_at), ("run the tests", None, at(13, 9, 0).to_rfc3339()));
+        assert_eq!(parse("Tomorrow 9:00 Run The Tests", now).unwrap().prompt, "Run The Tests", "the words are any case, the prompt is kept as typed");
         assert_eq!(parse("today 17:30 go", now).unwrap().next_at, at(12, 17, 30).to_rfc3339());
         assert_eq!(parse("in 2h go on", now).unwrap().next_at, at(12, 12, 0).to_rfc3339());
         let d = parse("every day 8:00 daily report", now).unwrap();
