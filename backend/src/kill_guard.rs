@@ -56,7 +56,9 @@ pub fn hook() -> ! {
         eprintln!("{why}");
         std::process::exit(2);
     }
-    let changes = outside_changes(&input);
+    // Loft gives every run a GIT_CEILING_DIRECTORIES (agents.rs), which claude passes on to this hook and the command.
+    let ceiling: Vec<PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES").map(|v| std::env::split_paths(&v).collect()).unwrap_or_default();
+    let changes = outside_changes(&input, &ceiling);
     if let (false, Ok(url)) = (changes.is_empty(), std::env::var(URL_VAR)) {
         let body = json!({ "changes": changes });
         if let Ok(v) = crate::processes::post(&url, &body.to_string())
@@ -76,12 +78,12 @@ pub fn hooks(exe: &std::path::Path) -> Value {
     json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }] })
 }
 
-/// The changes a hook input's command makes to checkouts outside `agent-local-storage`.
-fn outside_changes(input: &str) -> Vec<Change> {
+/// The changes a hook input's command makes to checkouts outside `agent-local-storage`, run under the git `ceiling`.
+fn outside_changes(input: &str, ceiling: &[PathBuf]) -> Vec<Change> {
     let Ok(v) = serde_json::from_str::<Value>(input) else { return vec![] };
     let Some(command) = v["tool_input"]["command"].as_str() else { return vec![] };
     let Some(cwd) = v["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::current_dir().ok()) else { return vec![] };
-    checkout_changes(command, &cwd).into_iter().filter(|c| !in_agent_storage(&c.folder)).collect()
+    checkout_changes(command, &cwd, ceiling).into_iter().filter(|c| !in_agent_storage(&c.folder)).collect()
 }
 
 fn check(input: &str) -> Result<(), &'static str> {
@@ -122,6 +124,8 @@ struct Dirs {
     cwd: Option<PathBuf>,
     old: Option<PathBuf>,
     stack: Vec<Option<PathBuf>>,
+    /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
+    ceiling: Vec<PathBuf>,
 }
 
 impl Dirs {
@@ -136,12 +140,18 @@ impl Dirs {
     }
 }
 
-/// Every change `command`, run in `cwd`, makes to a checkout (see the module docs), each folder once. A folder the
-/// guard can't tell (`cd "$dir"`) lets the commands after it run.
-pub fn checkout_changes(command: &str, cwd: &Path) -> Vec<Change> {
+/// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
+/// (see the module docs), each folder once. A folder the guard can't tell (`cd "$dir"`) lets the commands after it run.
+/// A command that may unset or change the ceiling, or point git at a repository (`GIT_DIR`, `--git-dir`), has none.
+pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<Change> {
     let mut found = vec![];
     let start = Some(cwd.to_path_buf());
-    changes(command, &mut Dirs { start: start.clone(), cwd: start, ..Default::default() }, 0, &mut found);
+    let ceiling = if ["GIT_CEILING_DIRECTORIES", "GIT_DIR", "--git-dir"].iter().any(|w| command.contains(w)) {
+        vec![]
+    } else {
+        ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect()
+    };
+    changes(command, &mut Dirs { start: start.clone(), cwd: start, ceiling, ..Default::default() }, 0, &mut found);
     let mut out: Vec<Change> = vec![];
     for c in found {
         // A symlink into a user's checkout counts as that checkout.
@@ -169,7 +179,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             saved.push((s, dirs.clone()));
         }
         let all = &cmds[i].words;
-        let words = match unwrap(all, &mut false) {
+        let mut bypass = false;
+        let words = match unwrap(all, &mut bypass) {
             Run::Words(words) => words,
             Run::Text(text) => {
                 changes(&text, dirs, depth + 1, out);
@@ -219,6 +230,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 changes(&args.join(" "), dirs, depth + 1, out);
                 continue;
             }
+            // `sudo` and `env -i` drop the ceiling from git's environment.
+            "git" if bypass => git_changes(&Dirs { ceiling: vec![], ..dirs.clone() }, &vars, args),
             "git" => git_changes(dirs, &vars, args),
             "cargo" => match flags(args, &["--manifest-path"]) {
                 (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
@@ -328,7 +341,7 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
         let target = target.map_or(dirs.cwd.clone(), |t| dirs.at(t));
         return [target, git_dir.and_then(|d| dirs.at(d))].into_iter().flatten().collect();
     }
-    let found = dirs.cwd.map(repo_root);
+    let found = dirs.cwd.map(|d| repo_root(d, &dirs.ceiling));
     // The checkout a `.git` folder belongs to.
     let repo = git_dir.unwrap_or(found.clone()).map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
     [tree.unwrap_or(found), repo].into_iter().flatten().collect()
@@ -358,10 +371,12 @@ fn real_at(path: PathBuf, links: usize) -> PathBuf {
 }
 
 /// The checkout git works on from `folder`: the nearest folder up holding a `.git`, or `folder` when none does.
-/// Symlinks are followed first, as git does.
-fn repo_root(folder: PathBuf) -> PathBuf {
+/// Symlinks are followed first, as git does. From below a `ceiling` folder, git doesn't look in it or above.
+fn repo_root(folder: PathBuf, ceiling: &[PathBuf]) -> PathBuf {
     let folder = real(folder);
-    folder.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
+    let below = |d: &Path| ceiling.iter().any(|c| d != c && d.starts_with(c));
+    let stop = ceiling.iter().any(|c| folder != *c && folder.starts_with(c));
+    folder.ancestors().take_while(|d| !stop || below(d)).find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
 }
 
 /// Whether a git subcommand, with its arguments, only reads.
@@ -1410,7 +1425,7 @@ mod tests {
     /// The folders the hook would ask Loft about, for `cmd` run in `cwd`.
     fn asks_all(cmd: &str, cwd: &str) -> Vec<PathBuf> {
         let input = json!({ "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": cmd } }).to_string();
-        outside_changes(&input).into_iter().map(|c| c.folder).collect()
+        outside_changes(&input, &[]).into_iter().map(|c| c.folder).collect()
     }
 
     /// The one folder the hook would ask Loft about.
@@ -1482,7 +1497,7 @@ mod tests {
             assert_eq!(asks(cmd, cwd), None, "should run: {cmd} (in {cwd})");
         }
         assert!(asks("git pull", USER).is_some());
-        assert!(outside_changes("not json").is_empty());
+        assert!(outside_changes("not json", &[]).is_empty());
     }
 
     #[test]
@@ -1654,6 +1669,48 @@ mod tests {
         assert_eq!(asks("git reset --hard", &at(&clone.join("backend"))), None);
         // A work tree given from the workspace: git still finds the user's repository from the folder.
         assert_eq!(asks(&format!("git --work-tree={} checkout .", at(&clone)), &at(&ws)), Some(project.clone()));
+        std::fs::remove_dir_all(project.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn git_stops_at_the_storage_folder_unless_the_command_moves_the_ceiling_or_the_repository() {
+        let project = std::env::temp_dir().join(format!("loft-guard-{}", uuid::Uuid::new_v4())).join("loft");
+        let storage = project.join("agent-local-storage");
+        let ws = storage.join("x");
+        for d in [project.join(".git"), ws.join("notes"), ws.join("loft/.git")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let project = std::fs::canonicalize(&project).unwrap();
+        let at = |p: &Path| p.display().to_string();
+        let asks_under = |cmd: &str, cwd: &Path, ceiling: &[PathBuf]| {
+            let input = json!({ "tool_name": "Bash", "cwd": at(cwd), "tool_input": { "command": cmd } }).to_string();
+            outside_changes(&input, ceiling).into_iter().map(|c| c.folder).collect::<Vec<_>>()
+        };
+        let ceiling = [storage.clone()];
+        // Git fails there, as Loft's ceiling stops it: nothing to ask the user.
+        for cwd in [&ws, &ws.join("notes")] {
+            for cmd in ["git checkout main", "git reset --hard origin/main", "git stash", "git -C notes checkout main"] {
+                assert_eq!(asks_under(cmd, cwd, &ceiling), Vec::<PathBuf>::new(), "should run: {cmd} (in {})", cwd.display());
+            }
+        }
+        assert_eq!(asks_under("git checkout main", &ws.join("loft"), &ceiling), Vec::<PathBuf>::new());
+        // The ceiling unset or changed, or a repository named: git can reach the user's checkout, so the user is asked.
+        for cmd in [
+            "GIT_CEILING_DIRECTORIES= git checkout main",
+            "unset GIT_CEILING_DIRECTORIES; git checkout main",
+            "export GIT_CEILING_DIRECTORIES=/tmp && git stash",
+            "env -u GIT_CEILING_DIRECTORIES git checkout main",
+            "env -i git checkout main",
+            "sudo git checkout main",
+            "export GIT_DIR=../../.git; git checkout main",
+            "git --git-dir ../../.git checkout main",
+            "git -C ../.. checkout main",
+            "cd ../.. && git checkout main",
+        ] {
+            assert!(asks_under(cmd, &ws, &ceiling).contains(&project), "should ask: {cmd}");
+        }
+        // Git ignores a relative ceiling, and so does the guard.
+        assert_eq!(asks_under("git checkout main", &ws, &[PathBuf::from("agent-local-storage")]), vec![project.clone()]);
         std::fs::remove_dir_all(project.parent().unwrap()).unwrap();
     }
 
