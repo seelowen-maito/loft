@@ -142,15 +142,12 @@ impl Dirs {
 
 /// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
 /// (see the module docs), each folder once. A folder the guard can't tell (`cd "$dir"`) lets the commands after it run.
-/// A command that may unset or change the ceiling, or point git at a repository, has none (`may_move_ceiling`).
+/// The ceiling counts only for a command that is plain git (`plain_git`); any other can move it, so it has none.
 pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<Change> {
     let mut found = vec![];
     let start = Some(cwd.to_path_buf());
-    let ceiling = if may_move_ceiling(command, 0) {
-        vec![]
-    } else {
-        ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect()
-    };
+    let ceiling: Vec<PathBuf> = ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect();
+    let ceiling = if plain_git(command, cwd, &ceiling) { ceiling } else { vec![] };
     changes(command, &mut Dirs { start: start.clone(), cwd: start, ceiling, ..Default::default() }, 0, &mut found);
     let mut out: Vec<Change> = vec![];
     for c in found {
@@ -276,28 +273,41 @@ fn flags<'a>(args: &'a [String], options: &[&str]) -> (Option<&'a str>, Option<&
     (value, sub)
 }
 
-/// Commands that can change or drop a variable of git's environment, or run git without it.
-const MOVES_CEILING: &[&str] = &[
-    "unset", "export", "declare", "typeset", "local", "readonly", "integer", "float", "read", "mapfile", "readarray", "printf",
-    "getopts", "vared", "let", "alias", "for", "select", "env", "exec", "sudo", "doas", "eval", "source", ".", "--git-dir",
+/// Git's own subcommands. Anything else may be an alias, which can run any shell command (`!…`).
+const GIT_BUILTINS: &[&str] = &[
+    "add", "am", "apply", "blame", "branch", "checkout", "cherry-pick", "clean", "clone", "commit", "config", "describe",
+    "diff", "fetch", "grep", "init", "log", "ls-files", "merge", "mv", "pull", "push", "rebase", "remote", "reset", "restore",
+    "revert", "rev-parse", "rm", "show", "stash", "status", "submodule", "switch", "tag", "worktree",
 ];
 
-/// Whether `text` may run git with GIT_CEILING_DIRECTORIES changed or dropped, or with another repository. Fails closed:
-/// any expansion (`$`, backticks, globs, braces, arithmetic), any command in `MOVES_CEILING`, any GIT_ word, or any of
-/// those in a word that is itself shell text (`sh -c '…'`, `watch '…'`, a heredoc), quotes removed at each level.
-fn may_move_ceiling(text: &str, depth: usize) -> bool {
-    if depth > MAX_DEPTH || text.contains(['$', '`']) || text.contains("((") {
-        return true;
+/// Whether `command` is plain git, so it runs with the run's GIT_CEILING_DIRECTORIES: only `git <subcommand> <args>`,
+/// one or more joined by `&&` or `;`, each run directly (no wrapper, shell, pipe, redirection, subshell, expansion or
+/// `NAME=value` before it), with a built-in subcommand, no global option that sets config, the exec path or the
+/// repository, and any `-C` inside a `ceiling` folder. Anything else may move the ceiling, so the guard walks up.
+fn plain_git(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> bool {
+    if command.contains(['$', '`', '\\', '|', '<', '>', '(', ')', '{', '}', '*', '?', '[', ']', '~', '#', '!', '\n']) || command.replace("&&", "").contains('&') {
+        return false;
     }
-    parse(text).iter().any(|c| {
-        (!c.stdin.is_empty() && may_move_ceiling(&c.stdin, depth + 1))
-            || c.words.iter().any(|w| {
-                MOVES_CEILING.contains(&base(w))
-                    || w.contains("GIT_")
-                    || (w != "{" && w != "}" && w.contains(['*', '?', '[', '{']))
-                    || (w.contains(|ch: char| ch.is_whitespace() || ";&|<>()".contains(ch)) && may_move_ceiling(w, depth + 1))
-            })
-    })
+    let cmds = parse(command);
+    !cmds.is_empty()
+        && cmds.iter().all(|c| {
+            let Some(("git", args)) = c.words.split_first().map(|(n, a)| (n.as_str(), a)) else { return false };
+            let mut it = args.iter();
+            loop {
+                match it.next().map(String::as_str) {
+                    Some("-C") => {
+                        let inside = it.next().and_then(|d| resolve(cwd, d)).map(real).is_some_and(|d| ceiling.iter().any(|c| d.starts_with(c)));
+                        if !inside {
+                            return false;
+                        }
+                    }
+                    Some(o) if ["-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"].iter().any(|f| o.starts_with(f)) => return false,
+                    Some(o) if o.starts_with('-') => {}
+                    Some(sub) => return GIT_BUILTINS.contains(&sub),
+                    None => return false,
+                }
+            }
+        })
 }
 
 /// The folders a git command changes, past its global options: its work tree (`--work-tree`, `GIT_WORK_TREE`) and
@@ -1714,6 +1724,9 @@ mod tests {
                 assert_eq!(asks_under(cmd, cwd, &ceiling), Vec::<PathBuf>::new(), "should run: {cmd} (in {})", cwd.display());
             }
         }
+        for cmd in ["git checkout main && git stash", "git status; git reset --hard origin/main", "git -C notes checkout main && git -C notes stash", "git commit -m 'a message'"] {
+            assert_eq!(asks_under(cmd, &ws, &ceiling), Vec::<PathBuf>::new(), "should run: {cmd}");
+        }
         assert_eq!(asks_under("git checkout main", &ws.join("loft"), &ceiling), Vec::<PathBuf>::new());
         // The ceiling unset or changed, or a repository named: git can reach the user's checkout, so the user is asked.
         for cmd in [
@@ -1753,6 +1766,30 @@ mod tests {
             "git --git-dir ../../.git checkout main",
             "git -C ../.. checkout main",
             "cd ../.. && git checkout main",
+            // Words joined into shell text, where the inner quotes go only when that shell runs it.
+            "echo 'un\"\"set' 'G\"\"IT_CEILING_DIRECTORIES' ';' git checkout main | sh",
+            "echo 'e\"\"nv' -i git checkout main | sh",
+            "watch -n 99 'un\"\"set' 'G\"\"IT_CEILING_DIRECTORIES' ';' git checkout main",
+            "parallel 'un\"\"set' 'G\"\"IT_CEILING_DIRECTORIES' ';' git checkout main ::: 1",
+            // Config or an alias that runs a shell, outside any repository.
+            "git -c alias.x='!git -C ../.. checkout main' x",
+            "git -c alias.x='!cd ../.. && git checkout main' x",
+            "git --config-env=alias.x=X x",
+            "git --exec-path=/tmp/bin checkout main",
+            "git x",
+            // A startup file the shell reads before the command.
+            "BASH_ENV=f bash -c 'git checkout main'",
+            "ZDOTDIR=. zsh -c 'git checkout main'",
+            "bash --rcfile f -c 'git checkout main'",
+            "bash --init-file f -i -c 'git checkout main'",
+            "HOME=. git checkout main",
+            "PATH=. git checkout main",
+            // A -C out of the storage folder, and anything run in the background or another shell.
+            "git -C /tmp checkout main; git checkout main",
+            "git checkout main & git checkout main",
+            "git checkout main\ngit checkout main",
+            "xargs git checkout <<< main",
+            "(git checkout main)",
         ] {
             assert!(asks_under(cmd, &ws, &ceiling).contains(&project), "should ask: {cmd}");
         }
