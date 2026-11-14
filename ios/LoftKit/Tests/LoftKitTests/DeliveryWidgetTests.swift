@@ -83,7 +83,7 @@ final class DeliveryWidgetTests: XCTestCase {
         XCTAssertEqual(done.progress, "1 of 1 ticket closed")
         XCTAssertEqual(status(delivery(1, "running", tickets: [ticket(2, "closed"), ticket(3, "open")])).progress, "1 of 2 tickets closed")
         XCTAssertEqual(status(delivery(1, "running")).title, "#1", "without its issue, the spec's number")
-        XCTAssertEqual(status(delivery(1, "running")).link, .agents)
+        XCTAssertEqual(status(delivery(1, "running")).link, .needsYou)
     }
 
     func testAGoneDeliveryKeepsTheTitleTheWidgetLastShowed() async throws {
@@ -99,6 +99,7 @@ final class DeliveryWidgetTests: XCTestCase {
         let s = await load()
         XCTAssertEqual(s.phase, .gone)
         XCTAssertEqual(s.title, "#462 Widgets")
+        XCTAssertEqual(s.link, .needsYou)
     }
 
     func testOfflineIsUnreachableAndTheIssuesFailingLeaveTheTitleShort() async {
@@ -106,6 +107,7 @@ final class DeliveryWidgetTests: XCTestCase {
         let offline = await DeliveryWidgetSnapshot.load(key: "o/loft#1", title: "#1 X", deliveries: { throw Down() }, tasks: { [] })
         XCTAssertEqual(offline.phase, .unreachable)
         XCTAssertEqual(offline.title, "#1 X")
+        XCTAssertEqual(offline.link, .needsYou, "a tap on an unreachable widget isn't an unrelated page")
         let s = await DeliveryWidgetSnapshot.load(key: "o/loft#1", title: "", deliveries: { [self.delivery(1, "running", pr: 2)] },
                                                   tasks: { throw Down() })
         XCTAssertEqual(s.phase, .ready)

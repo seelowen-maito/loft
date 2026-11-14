@@ -96,8 +96,9 @@ public struct DeliveryWidget: Widget {
 }
 
 extension DeliveryWidgetSnapshot {
-    /// Where a tap goes: the spec's page, or the agents list when Loft didn't list the spec's issue.
-    var link: DeepLink { specTaskId.map { .issue($0) } ?? .agents }
+    /// Where a tap goes: the spec's page; without it (Loft unreachable, the Delivery gone, its issue not listed)
+    /// Needs you, where a Delivery waiting on you shows, rather than an unrelated list.
+    var link: DeepLink { specTaskId.map { .issue($0) } ?? .needsYou }
 
     /// What the gallery and the placeholder show.
     static var sample: DeliveryWidgetSnapshot {
