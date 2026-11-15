@@ -329,6 +329,7 @@ kbd { font-family: var(--mono); font-size: .85em; padding: 1px 6px; border-radiu
 }
 @media (max-width: 560px) {
   .wrap { padding: 0 16px; }
+  .nav-links { gap: 16px; }
   .hero { padding: 48px 0 56px; }
   section { padding: 80px 0; }
   .app { margin-top: 48px; border-radius: 14px; }
