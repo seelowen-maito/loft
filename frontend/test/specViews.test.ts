@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, runningText, specRef, stageOf, ticketState, deliveryWaits, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
@@ -194,4 +195,13 @@ test("the Delivery card's running row prints a Dev's wait in full, else the shar
   assert.equal(runningText({ state: "started" }), "building");
   assert.equal(runningText({ state: "changes", waiting: null }), "fixing");
   assert.equal(runningText({ state: "review", waiting_for_ci: true }), "waiting for CI");
+  assert.equal(runningText({ state: "open", waiting_on: ["o/r#7"] }), "waiting on o/r#7");
+  assert.notEqual(runningText({ state: "started", waiting: "waiting on Api Dev: which field name?" }), "waiting", "never the bare word");
+});
+
+test("the Delivery card's running rows print runningText, not ticketState's bare \"waiting\"", () => {
+  const src = readFileSync(new URL("../src/pages/TaskActions.tsx", import.meta.url), "utf8");
+  const row = src.slice(src.indexOf("running.map("), src.indexOf("</ul>", src.indexOf("running.map(")));
+  assert.match(row, /runningText\(x\)/);
+  assert.doesNotMatch(row, /ticketState\(x\)\.text/);
 });
