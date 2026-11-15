@@ -140,14 +140,14 @@ final class DeliveryCardTests: XCTestCase {
         """#)
         let now = JSONCoding.parseDate("2026-11-13T12:10:30Z")!
         XCTAssertEqual(d.line(now: now)?.tone, .ci)
-        XCTAssertEqual(d.line(now: now)?.text, "Waiting for CI on #41, #42 · 6 min", "from the Delivery's ci_since")
+        XCTAssertEqual(d.line(now: now)?.text, "Waiting for CI on #41, #42 ·\u{a0}6\u{a0}min", "from the Delivery's ci_since")
         XCTAssertEqual(d.lineLink?.absoluteString, "https://github.com/o/r/pull/500/checks")
         XCTAssertEqual(d.runningLines, [])
         XCTAssertEqual(d.progressLine(issue: 420), "On spec PR #500. 1 of 3 tickets done.")
 
         // A standalone ticket sends no tickets: its card counts from ci_since all the same.
         let one = try delivery(#"{"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #7"},"started":true,"agent_id":null,"agent_name":null,"pr":12,"checks_url":"https://github.com/o/r/pull/12/checks","ci_since":"2026-11-13T12:08:00+00:00"}"#)
-        XCTAssertEqual(one.line(now: now)?.text, "Waiting for CI on #7 · 2 min")
+        XCTAssertEqual(one.line(now: now)?.text, "Waiting for CI on #7 ·\u{a0}2\u{a0}min")
         XCTAssertEqual(one.lineLink?.absoluteString, "https://github.com/o/r/pull/12/checks")
         XCTAssertEqual(one.progressLine(issue: 7), "Its reviewers passed on PR #12; Loft waits for its CI. #7 closes when the PR merges.")
         let noTime = try delivery(#"{"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #7"},"started":true,"agent_id":null,"agent_name":null,"pr":12,"ci_since":null}"#)

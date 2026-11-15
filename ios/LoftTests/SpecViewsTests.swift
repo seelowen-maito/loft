@@ -169,7 +169,7 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertEqual(lines.map(\.waitingForCi), [false, true])
         XCTAssertFalse(lines[1].current)
         let now = JSONCoding.parseDate("2026-11-13T12:06:30Z")!
-        XCTAssertEqual(SpecViews.ticketLabel(lines[1].state, waitingForCi: true, ciSince: lines[1].ciSince, now: now), "waiting for CI · 6 min")
+        XCTAssertEqual(SpecViews.ticketLabel(lines[1].state, waitingForCi: true, ciSince: lines[1].ciSince, now: now), "waiting for CI ·\u{a0}6\u{a0}min")
         XCTAssertEqual(lines[1].shownVerdicts.map(\.role), ["qa"], "the label says it waits for CI: no ci chip")
         XCTAssertEqual(lines[0].shownVerdicts.map(\.role), ["ci", "qa"], "a ticket not waiting keeps its ci chip")
         XCTAssertEqual(SpecViews.ticketLabel("review"), "in review")
@@ -186,11 +186,11 @@ final class SpecViewsTests: XCTestCase {
     func testHowLongATicketHasWaited() {
         let at = "2026-11-13T12:00:00+00:00", start = JSONCoding.parseDate(at)!
         func after(_ minutes: Double) -> String? { SpecViews.waited(since: at, now: start.addingTimeInterval(minutes * 60)) }
-        XCTAssertEqual(after(0.5), "<1 min")
-        XCTAssertEqual(after(-3), "<1 min", "clock skew")
-        XCTAssertEqual(after(6), "6 min")
-        XCTAssertEqual(after(60), "1 h")
-        XCTAssertEqual(after(125), "2 h 5 min")
+        XCTAssertEqual(after(0.5), "<1\u{a0}min")
+        XCTAssertEqual(after(-3), "<1\u{a0}min", "clock skew")
+        XCTAssertEqual(after(6), "6\u{a0}min")
+        XCTAssertEqual(after(60), "1\u{a0}h")
+        XCTAssertEqual(after(125), "2\u{a0}h\u{a0}5\u{a0}min")
         XCTAssertNil(SpecViews.waited(since: nil))
         XCTAssertNil(SpecViews.waited(since: "not a date"))
     }
