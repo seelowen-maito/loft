@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { api, type Commit, type GithubInfo, type GithubItem, type Info, type Repo, type Site } from "../lib/api";
 import { cx, fmtNum } from "../lib/format";
+import { Callout } from "../components/Callout";
 import { relTime } from "../lib/time";
 import { reposList, useRepos } from "../hooks/lists";
 import { Dialog } from "../components/Dialog";
@@ -146,14 +147,11 @@ export default function ReposPage() {
 
       <div className="mx-auto max-w-[1600px] space-y-6 px-5 py-8">
         {info && !info.github_token && totals.ghErrors > 0 && (
-          <div className="flex items-start gap-3 rounded-2xl border border-warn/20 bg-warn/[0.06] px-4 py-3 text-[13px]">
-            <KeyRound className="mt-0.5 size-4 shrink-0 text-warn" />
-            <div className="text-fg-2">
-              <span className="text-fg">GitHub data is limited.</span> {totals.ghErrors} repo{totals.ghErrors > 1 ? "s" : ""} couldn't be read,
-              probably because they're private. Add a GitHub token in <Link to="/settings" className="text-accent underline decoration-accent/30 underline-offset-2">Settings</Link> to see
-              their pull requests and issues.
-            </div>
-          </div>
+          <Callout tone="warn" icon={<KeyRound />}>
+            <span className="text-fg">GitHub data is limited.</span> {totals.ghErrors} repo{totals.ghErrors > 1 ? "s" : ""} couldn't be read,
+            probably because they're private. Add a GitHub token in <Link to="/settings" className="text-accent underline decoration-accent/30 underline-offset-2">Settings</Link> to see
+            their pull requests and issues.
+          </Callout>
         )}
 
         <AgentActivity />
@@ -469,9 +467,7 @@ function RepoDrawer({ repo: r, gh, onClose }: { repo: Repo; gh?: GithubInfo; onC
         </div>
 
         {gh?.error && (
-          <div className="flex items-center gap-2 rounded-xl border border-warn/20 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
-            <AlertTriangle className="size-3.5 text-warn" /> {gh.error}
-          </div>
+          <Callout tone="warn" icon={<AlertTriangle />}>{gh.error}</Callout>
         )}
         {gh && !gh.error && (
           <div className="grid gap-5 sm:grid-cols-2">

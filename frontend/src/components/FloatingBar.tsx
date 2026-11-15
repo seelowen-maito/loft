@@ -1,11 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { cx } from "../lib/format";
 
-/** A pill floating over the page: the update banner at the top, the Settings save bar and toasts at the bottom.
- *  Only the pill takes clicks, not the strip around it. */
-export function FloatingBar({ at, accent, role, children }: { at: "top" | "bottom"; accent?: boolean; role?: string; children: ReactNode }) {
+const AT = { top: "top-[68px]", bottom: "bottom-5", toast: "bottom-20" };
+
+/** A pill floating over the page: the update banner at the top, the Settings save bar at the bottom, and toasts just
+ *  above it, so a toast never hides behind the save bar. Only the pill takes clicks, not the strip around it. */
+export function FloatingBar({ at, accent, role, children }: { at: keyof typeof AT; accent?: boolean; role?: string; children: ReactNode }) {
   return (
-    <div role={role} className={cx("pointer-events-none fixed inset-x-0 z-50 flex justify-center px-4", at === "top" ? "top-[68px]" : "bottom-5")}>
+    <div role={role} className={cx("pointer-events-none fixed inset-x-0 z-50 flex justify-center px-4", AT[at])}>
       <div
         className={cx(
           "pointer-events-auto flex min-h-[42px] max-w-full animate-rise items-center gap-3 rounded-full border bg-ink-850/95 py-1.5 pl-4 pr-1.5 text-[13px] shadow-2xl backdrop-blur",
@@ -39,7 +41,7 @@ export function Toaster() {
   }, [text]);
   if (!text) return null;
   return (
-    <FloatingBar at="bottom" role="status">
+    <FloatingBar at="toast" role="status">
       <span className="pr-2.5 text-fg-2">{text}</span>
     </FloatingBar>
   );
