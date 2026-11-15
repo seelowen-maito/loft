@@ -42,6 +42,10 @@ final class QuickSearchModel {
     var selection = 0
     /// Bumped each time the panel opens, so the field takes the keyboard again.
     var opened = 0
+    /// Herdr UI is set up on this Mac, so agents can open in it (checked each time the panel opens).
+    var herdrReady = false
+    /// Enter opens agents in Herdr UI, ⌘Enter in the Mac app (Settings › Herdr UI).
+    var herdrFirst: Bool { herdrReady && UserDefaults.standard.string(forKey: Prefs.agentsOpenIn) == "herdr" }
 
     init(store: LoftStore) { self.store = store }
 
@@ -92,6 +96,9 @@ final class QuickSearchController {
         let panel = panel ?? makePanel()
         model.query = ""
         model.opened += 1
+        if !model.store.isDemo {
+            Task { model.herdrReady = (try? await model.store.herdrStatus())?["linked"]?["root"]?.stringValue != nil }
+        }
         // Centred, a third of the way down the screen with the mouse, like Spotlight.
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
             let f = screen.visibleFrame
@@ -137,6 +144,17 @@ final class QuickSearchController {
             if let url = r.link(loftHost: model.store.api?.baseURL.host()) { NSWorkspace.shared.open(url) }
             return
         }
+        // With Herdr UI set up, ⌘ swaps Herdr and the Mac app's chat.
+        if r.kind == .agent, model.herdrReady {
+            if flags.contains(.command) != model.herdrFirst {
+                openInHerdr(r.target)
+                return
+            }
+            if flags.contains(.command) {
+                go(.agent, r.target, webPath: r.webPath)
+                return
+            }
+        }
         let chat = flags.contains(.command) && r.kind == .agent
         let browserDefault = UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser"
         if !chat, r.webOnly || flags.contains(.option) != browserDefault, let base = model.store.api?.baseURL {
@@ -146,8 +164,14 @@ final class QuickSearchController {
         go(r.kind, r.target, webPath: r.webPath)
     }
 
-    /// A Loft item chosen in macOS Spotlight: opens it where Settings › Quick search says, the app or the browser.
+    /// A Loft item chosen in macOS Spotlight: an agent in Herdr when Settings › Herdr UI says so, else where
+    /// Settings › Quick search says, the app or the browser.
     func open(spotlightItem identifier: String) {
+        if !model.store.isDemo, UserDefaults.standard.string(forKey: Prefs.agentsOpenIn) == "herdr",
+           let (kind, id) = SpotlightIndex.target(of: identifier), kind == .agent {
+            openInHerdr(id)
+            return
+        }
         let opensIn = model.store.isDemo ? nil : UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn)
         if let url = SpotlightIndex.webURL(of: identifier, opensIn: opensIn, base: model.store.api?.baseURL) {
             NSWorkspace.shared.open(url)
@@ -155,6 +179,19 @@ final class QuickSearchController {
         }
         guard let (kind, id) = SpotlightIndex.target(of: identifier) else { return }
         go(kind, id, webPath: "")
+    }
+
+    /// Shows the agent's tab in Herdr UI; when Herdr can't, opens its chat here with a line saying why.
+    private func openInHerdr(_ agentId: String) {
+        Task {
+            do {
+                try await model.store.herdrFocus(agentId: agentId)
+                nav.chatNote = nil
+            } catch {
+                nav.chatNote = (agentId, "Opened here: \(APIError.from(error).title)")
+                go(.agent, agentId, webPath: "")
+            }
+        }
     }
 
     /// Goes to the agent, issue or page in the main window, opening or raising it.
@@ -228,7 +265,7 @@ struct QuickSearchView: View {
                     .onChange(of: model.selection) { proxy.scrollTo(model.selection) }
                 }
                 Divider()
-                Text("↵ Open   ⌘↵ Chat   ⌥↵ \(UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser" ? "Mac app" : "Browser")   esc Close")
+                Text("↵ Open   ⌘↵ \(model.herdrReady && !model.herdrFirst ? "Herdr" : "Chat")   ⌥↵ \(UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser" ? "Mac app" : "Browser")   esc Close")
                     .font(.system(size: 11.5, design: .monospaced))
                     .foregroundStyle(WebTheme.fg3)
                     .frame(maxWidth: .infinity, alignment: .leading)
