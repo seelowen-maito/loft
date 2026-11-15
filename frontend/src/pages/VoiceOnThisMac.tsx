@@ -15,8 +15,9 @@ export function VoiceOnThisMac() {
       error={err}
       loading={loading}
     >
-      {status && (
-        <dl className="space-y-3 text-[13px]">
+      {/* Only one answer shows: a failed re-check, not it above the old status. */}
+      {status && !err && (
+        <dl className="space-y-3 text-[13px] [overflow-wrap:anywhere]">
           <div>
             <dt className="text-fg-3">Speech recognition</dt>
             <dd className={status.speech.ready ? "text-good" : "text-bad"}>{status.speech.text}</dd>

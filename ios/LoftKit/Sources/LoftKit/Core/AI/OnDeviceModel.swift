@@ -33,6 +33,17 @@ public enum OnDeviceModel {
             case .needsNewerSystem: "Needs \(Platform.systemName) 26 or later"
             }
         }
+
+        /// Where to look when it stays like this; nil when the status says it already.
+        public var hint: String? {
+            switch self {
+            case .modelNotReady:
+                "\(Platform.systemName) downloads the model itself. Check \(Platform.settingsApp) › Apple Intelligence & Siri; this turns on by itself once it's ready."
+            case .languageNotSupported:
+                "Check the language in \(Platform.settingsApp) › Apple Intelligence & Siri."
+            default: nil
+            }
+        }
     }
 
     private enum Platform {
@@ -59,17 +70,33 @@ public enum OnDeviceModel {
         }
         #endif
         if TestMode.noAI { return .appleIntelligenceOff }
+        guard let s = system else { return .needsNewerSystem }
+        logAvailability(s.raw)
+        return status(unavailableReason: s.reason, languageSupported: s.languageSupported)
+    }
+
+    /// The system's own answer, unmapped: "unavailable(modelNotReady), en_US supported: true". For the log and
+    /// Settings' help text, so a status that looks wrong can be checked on the device.
+    public static var rawAvailability: String {
+        #if DEBUG
+        if let f = FixtureAPI.launchText("fixture-ai-status") { return "fixture \(f)" }
+        #endif
+        if TestMode.noAI { return "-no-ai" }
+        return system?.raw ?? "no FoundationModels"
+    }
+
+    private static var system: (reason: String?, languageSupported: Bool, raw: String)? {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, *) {
             let model = SystemLanguageModel.default
             var reason: String?
             if case .unavailable(let r) = model.availability { reason = "\(r)" }
             let languageSupported = model.supportsLocale()
-            logAvailability("\(reason.map { "unavailable(\($0))" } ?? "available"), \(Locale.current.identifier) supported: \(languageSupported)")
-            return status(unavailableReason: reason, languageSupported: languageSupported)
+            return (reason, languageSupported,
+                    "\(reason.map { "unavailable(\($0))" } ?? "available"), \(Locale.current.identifier) supported: \(languageSupported)")
         }
         #endif
-        return .needsNewerSystem
+        return nil
     }
 
     /// What Settings shows for the system's unavailable reason (nil when the model is available). A reason

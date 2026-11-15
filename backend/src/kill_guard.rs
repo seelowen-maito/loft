@@ -432,7 +432,11 @@ fn git_reads(sub: &str, rest: &[&str]) -> bool {
     match sub {
         "status" | "log" | "diff" | "show" | "fetch" | "rev-parse" | "rev-list" | "ls-files" | "ls-tree" | "ls-remote" | "blame"
         | "grep" | "describe" | "shortlog" | "cat-file" | "show-ref" | "for-each-ref" | "merge-base" | "name-rev"
-        | "range-diff" | "cherry" | "check-ignore" | "count-objects" | "var" | "help" | "version" => true,
+        | "range-diff" | "cherry" | "check-ignore" | "count-objects" | "var" | "help" | "version" | "patch-id" | "diff-tree"
+        | "diff-index" | "diff-files" | "check-ref-format" | "check-attr" | "show-branch" | "whatchanged" | "verify-commit"
+        | "verify-tag" => true,
+        // Plumbing that writes only with an option: `-w` stores the object, `--lost-found` keeps the dangling ones. Git takes bundled short options (`-wt blob`) and unique long prefixes (`--lost-f`, `--write-t`), so any `w` in a short option and any `--l*` or `--w*` asks. `merge-tree` writes by default, so it always asks.
+        "hash-object" | "fsck" => !rest.iter().any(|a| a.starts_with("--l") || a.starts_with("--w") || (a.starts_with('-') && !a.starts_with("--") && a.contains('w'))),
         // Listing: no name given, or a listing option (`--merged` and the like imply `--list`).
         "branch" => {
             let lists = ["--list", "-l", "--show-current", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"];
@@ -1638,7 +1642,7 @@ mod tests {
             "git branch -m old new", "git branch feat", "git tag -d v1", "git tag v2", "git worktree add ../x",
             "git worktree remove x", "git submodule update", "git config user.name x", "git config --unset user.name",
             "git gc", "git update-ref refs/heads/main HEAD", "git bisect start", "git init", "git notes add",
-            "git remote add up x", "git stash push", "git reflog expire --all", "git -C /nowhere/dev/loft branch -D x",
+            "git remote add up x", "git hash-object -w f", "git fsck --lost-found", "git merge-tree --write-tree a b", "git merge-tree a b c", "git hash-object -wt blob f", "git hash-object -wtblob f", "git fsck --lost-f", "git hash-object --write-t f", "git stash push", "git reflog expire --all", "git -C /nowhere/dev/loft branch -D x",
         ] {
             assert_eq!(asks(cmd, USER), user, "should ask: {cmd}");
         }
@@ -1648,7 +1652,9 @@ mod tests {
             "git branch", "git branch -a", "git branch -vv", "git branch --show-current", "git branch --list 'feat/*'",
             "git branch --merged main", "git tag", "git tag -l 'v*'", "git worktree list", "git config user.name",
             "git config --get user.name", "git config --list", "git stash show", "git reflog", "git --version",
-            "git help", "git submodule status", "git -c color.ui=never log",
+            "git help", "git submodule status", "git diff a b | git patch-id --stable", "git diff-tree -r HEAD", "git diff-index HEAD",
+            "git diff-files", "git hash-object f", "git check-ref-format refs/heads/x", "git check-attr -a f",
+            "git show-branch", "git whatchanged", "git verify-commit HEAD", "git verify-tag v1", "git fsck", "git -c color.ui=never log",
         ] {
             assert_eq!(asks(cmd, USER), None, "should run: {cmd}");
         }

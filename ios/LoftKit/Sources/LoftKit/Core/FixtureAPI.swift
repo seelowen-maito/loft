@@ -25,6 +25,9 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     /// Team setup messages the server sent to `loft`, for tests to check it happens once.
     public private(set) var teamSetupsSent = 0
     public private(set) var deliveriesStarted = 0
+    /// The chat header's actions the app sent, as "stop:a1", "wake:a1"…, for tests to check.
+    public private(set) var agentActionsSent: [String] = []
+    private func sent(_ action: String, _ agentId: String) { locked { agentActionsSent.append("\(action):\(agentId)") } }
 
     /// The text after `-<name>` on the command line. A value starting with `base64:` is decoded first: free text
     /// with an apostrophe reached the app mangled ("isn't hidden" as "isnt\ hidden") on its way through
@@ -120,6 +123,10 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         } else {
             agentList[0].lastOutputAt = ago(1)
         }
+        // QA Agent wakes every 30 minutes, next in 12, and sleeps through weeknights (the chat header's schedule).
+        agentList[3].intervalMinutes = 30
+        agentList[3].nextRunAt = now.addingTimeInterval(12 * 60)
+        agentList[3].quietHours = [QuietWindow(days: [0, 1, 2, 3, 4], start: "22:00", end: "07:00")]
         // QA Agent has no sticker, so the initials fallback stays covered.
         for (id, svg) in FixtureStickers.byAgent {
             if let i = agentList.firstIndex(where: { $0.id == id }) { agentList[i].avatar = Avatar(svg: svg) }
@@ -652,7 +659,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         ])
     }
 
-    public func runNow(agentId: String) async throws { try check() }
+    public func runNow(agentId: String) async throws { try check(); sent("wake", agentId) }
     public func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent {
         try check()
         return try locked {
@@ -669,7 +676,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             return agentList[i]
         }
     }
-    public func stopRun(agentId: String) async throws { try check() }
+    public func stopRun(agentId: String) async throws { try check(); sent("stop", agentId) }
     public func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
     /// `-fixture-slow-disk`: sizes take a while, as a real measure can, to show the loader.
     private func measure() async {
@@ -829,6 +836,18 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         if ProcessInfo.processInfo.arguments.contains("-fixture-disk-low") {
             list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.diskLow.utf8)), at: 0)
         }
+        // The demo (and the App Store shots) read like real work, not the redaction and line-limit tests' text.
+        if scripted {
+            for n in list.items.indices {
+                switch list.items[n].id {
+                case "permission:p1": list.items[n].text = "Push the fix\n$ git push origin fix/login-timeout"
+                case "task:dbc521e2-042c-4485-a15d-956c162919ed:failed":
+                    list.items[n].reason = "Failed: the iOS build needs Xcode 27"
+                    list.items[n].text = "The build Mac has Xcode 26. Install Xcode 27 and run it again."
+                default: break
+                }
+            }
+        }
         list.items.removeAll { done.contains($0.id) }
         let seen = locked { needsYouSeen }
         for n in list.items.indices { list.items[n].seen = seen.contains(list.items[n].id) }
@@ -930,6 +949,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     public func resetSession(agentId: String) async throws {
         try check()
+        sent("clear", agentId)
         await slowEndCard()
         locked {
             guard let i = agentList.firstIndex(where: { $0.id == agentId }) else { return }
@@ -940,7 +960,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
                                                           content: "Context cleared.", meta: nil, createdAt: Date()))
         }
     }
-    public func compact(agentId: String) async throws { try check() }
+    public func compact(agentId: String) async throws { try check(); sent("compact", agentId) }
 
     /// Every agent's Sessions: its first one, then two older ones, the oldest started by the Orchestrator.
     public func sessions(agentId: String) async throws -> PastSessions {
@@ -984,6 +1004,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     public func restartRun(agentId: String) async throws {
         try check()
+        sent("restart", agentId)
         guard let i = agentList.firstIndex(where: { $0.id == agentId }) else { return }
         agentList[i].waitingOn = []
         agentList[i].waitingSince = nil
