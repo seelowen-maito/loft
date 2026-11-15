@@ -7,7 +7,7 @@ import { Origin } from "../components/Origin";
 import { parseFilters, withFilters } from "../lib/issueFilters";
 import { Sticker } from "../components/Sticker";
 import { GithubUser } from "../components/GithubUser";
-import { STAGES, arrange, deliveryOf, parseBoard, specOfAgent, stageOf, ticketLabel, ticketsOf, withBoard, DROPPED, specMeta, type BoardOptions, type BoardType, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
+import { STAGES, arrange, deliveryOf, parseBoard, specOfAgent, stageOf, ticketState, ticketsOf, withBoard, DROPPED, specMeta, type BoardOptions, type BoardType, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
 import { Badge, Bar, STAGE_TONE, TONE_BG, TONE_TEXT, Who, progressOf, type Ctx } from "./SpecViews";
 
 /* The Issues page: an Issues column (issues that are no spec and no spec's ticket), then spec cards in stage columns, each with its tickets inline (expandable).
@@ -24,8 +24,8 @@ const sections = (specs: Task[], byProject: boolean) =>
 /** Grid columns by how many columns show (at least the Issues column or a spec stage). */
 const GRID = ["", "grid-cols-1", "grid-cols-2", "grid-cols-3", "grid-cols-4", "grid-cols-5", "grid-cols-6"];
 
-const Dot = ({ state, waitingOn, waitingForCi }: { state: string; waitingOn?: string[]; waitingForCi?: boolean }) => {
-  const l = ticketLabel(state, waitingOn, waitingForCi);
+const Dot = ({ t }: { t: BoardTicket }) => {
+  const l = ticketState(t);
   return <span className={cx("inline-block size-2 shrink-0 rounded-full", TONE_BG[l.tone])} title={l.text} />;
 };
 
@@ -35,14 +35,14 @@ function Verdicts({ v }: { v: Record<string, string> }) {
 
 /** A ticket as a card: opens its own issue. */
 function TicketCard({ t, dense, agentById, open }: { t: BoardTicket; dense: boolean; agentById: Map<string, Agent>; open: (id: string) => void }) {
-  const l = ticketLabel(t.state, t.waitingOn, t.waitingForCi), a = t.agentId ? agentById.get(t.agentId) : undefined;
+  const l = ticketState(t), a = t.agentId ? agentById.get(t.agentId) : undefined;
   const body = (
     <>
       <div className="flex items-start gap-1.5">
         <span className="font-mono text-[10.5px] text-fg-3">{t.number ? `#${t.number}` : "·"}</span>
         <span className={cx("min-w-0 flex-1 leading-snug", dense ? "truncate text-[12px]" : "text-[12.5px]", t.state === "closed" && "text-fg-3")}>{t.title}</span>
       </div>
-      {(!dense || t.current || !!t.waitingOn?.length || t.waitingForCi) && (
+      {(!dense || t.current || !!t.waiting_on?.length || t.waiting_for_ci || !!t.waiting) && (
         <div className="mt-1 flex flex-wrap items-center gap-1">
           <span className={cx("min-w-0 font-mono text-[10px] [overflow-wrap:anywhere]", TONE_TEXT[l.tone])}>{l.text}</span>
           <Verdicts v={t.verdicts} />
@@ -136,7 +136,7 @@ function Cards(v: View) {
                           <>
                             <button onClick={() => toggle(s.id)} aria-expanded={isOpen} className="mt-2 flex w-full items-center gap-1.5 text-left text-[11.5px] text-fg-3 hover:text-fg">
                               <ChevronRight className={cx("size-3 shrink-0 transition-transform", isOpen && "rotate-90")} />
-                              <span className="flex flex-wrap gap-[3px]">{ts.map((t) => <Dot key={t.key} state={t.state} waitingOn={t.waitingOn} waitingForCi={t.waitingForCi} />)}</span>
+                              <span className="flex flex-wrap gap-[3px]">{ts.map((t) => <Dot key={t.key} t={t} />)}</span>
                               <span className="ml-auto font-mono text-[10.5px]">{ts.length} {ts.length === 1 ? "ticket" : "tickets"}</span>
                             </button>
                             {isOpen && <div className="mt-2 space-y-1.5">{ts.map((t) => <TicketCard key={t.key} t={t} dense agentById={v.agentById} open={v.openTicket} />)}</div>}

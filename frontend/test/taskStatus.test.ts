@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { NEEDS_YOU_LABEL, taskStatus, toneText } from "../src/lib/taskStatus.ts";
 import { urgencyOf } from "../src/lib/needsYou.ts";
-import { badgeText, ticketLabel } from "../src/lib/specViews.ts";
+import { badgeText, ticketState } from "../src/lib/specViews.ts";
 
 test("every task status has one label and one tone", () => {
   assert.deepEqual(taskStatus("waiting_approval"), { label: "Needs you", tone: "warn" });
@@ -26,7 +26,7 @@ test("each tone has a text colour", () => {
 
 test("waiting on the user reads Needs you for tasks, tickets, Deliveries and Needs you", () => {
   assert.equal(taskStatus("waiting_approval").label, NEEDS_YOU_LABEL);
-  assert.equal(ticketLabel("needs_human").text, NEEDS_YOU_LABEL);
+  assert.equal(ticketState({ state: "needs_human" }).text, NEEDS_YOU_LABEL);
   assert.equal(urgencyOf(2).label, NEEDS_YOU_LABEL);
   assert.equal(badgeText("delivery", { state: "needs_human" } as any), `In Delivery · ${NEEDS_YOU_LABEL}`);
 });
