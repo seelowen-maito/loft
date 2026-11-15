@@ -453,7 +453,8 @@ private struct Composer: View {
                 .strokeBorder(focused ? Theme.accent.opacity(0.4) : WebTheme.lineStrong))
         }
         .padding(12)
-        .onAppear { focused = true }
+        // Takes the keyboard when the chat opens, but not from the sidebar: ↑/↓ there keep moving between sections.
+        .onAppear { focused = !(NSApp.keyWindow?.firstResponder is NSTableView) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             // Switching away (or a system prompt) can swallow the mouse-up: the mic never stays on behind another app.
             pressing = false
