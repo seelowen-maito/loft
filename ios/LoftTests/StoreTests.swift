@@ -53,7 +53,10 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func stopRun(agentId: String) async throws {}
     var deleted: [(String, Bool)] = []
     func deleteAgent(id: String, purgeFiles: Bool) async throws { try check(); deleted.append((id, purgeFiles)) }
-    func restartRun(agentId: String) async throws {}
+    /// Restarting a run that waits on background work ends the wait, as the server does.
+    func restartRun(agentId: String) async throws {
+        if let i = agentList.firstIndex(where: { $0.id == agentId }) { agentList[i].waitingOn = nil; agentList[i].waitingSince = nil }
+    }
     func resetSession(agentId: String) async throws {}
     func compact(agentId: String) async throws {}
     func sessions(agentId: String) async throws -> PastSessions { PastSessions(sessions: [], current: nil) }

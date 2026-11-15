@@ -85,11 +85,11 @@ if [[ "${SKIP_TESTS:-0}" != 1 ]]; then
   step "Running LoftKit's unit tests" swift test --package-path LoftKit
   if [[ "${MAC:-0}" == 1 ]]; then
     dest="platform=macOS" suites=()
-    [[ "${UI:-0}" == 1 ]] && suites=(-only-testing:LoftMacUITests)
+    [[ "${UI:-0}" == 1 ]] && suites=(-only-testing:LoftMacUITests/LoftMacUITests)
   else
     dest="id=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in sorted(d.items(), reverse=True) if "iOS" in k for x in v if x["name"].startswith("iPhone")))')"
     suites=(-only-testing:LoftTests)
-    [[ "${UI:-0}" == 1 ]] && suites+=(-only-testing:LoftUITests)
+    [[ "${UI:-0}" == 1 ]] && suites+=(-only-testing:LoftUITests/LoftUITests)
   fi
   # A test that hangs (e.g. waiting on a speech model) fails after 2 minutes instead of blocking the release.
   if [[ ${#suites[@]} -gt 0 ]]; then

@@ -88,7 +88,7 @@ ios/
     DesignSystem/            Colors, status badges, cards, empty states
     Features/                Overview, Agents, Tasks, Chat (incl. dictation), Settings
   LoftTests/             Unit tests
-  LoftUITests/           UI tests against fixtures
+  LoftUITests/           UI smoke tests against fixtures (and legacy UI tests, not run by default)
 ```
 
 - **One store, server-authoritative.** `LoftStore` (`@MainActor @Observable`) holds what the server last said. Every action waits for the server's answer before the UI changes. Statuses come from the server and the app doesn't invent any. Agent states are normalized to Working, Needs approval, Idle, Last run failed and Unknown, because those are the only states Loft can report. There is no pause, and no blocked state for agents (tasks can be blocked).
@@ -244,6 +244,7 @@ Small and medium widgets for the Mac desktop and the iPhone home screen: Needs y
 ios/scripts/test.sh                 # the unit tests (LoftKit's `swift test`, then LoftTests), with every test's time
 ios/scripts/test.sh --ui            # the iPhone's UI smoke tests
 ios/scripts/test.sh --mac-ui        # the Mac's UI smoke tests: they take over the Mac's screen
+ios/scripts/test.sh --ui-legacy     # legacy UI tests (also --mac-ui-legacy): see below
 ios/scripts/test.sh --no-build --only LoftTests/StoreTests   # rerun one class on the last build
 ios/scripts/test.sh --no-build --ui --only LoftUITests/LoftUITests/testChatSend   # one UI test
 cd backend && cargo test
@@ -258,7 +259,7 @@ The script runs LoftKit's tests with `swift test` (no Simulator), builds once (`
 - iPhone (`LoftUITests`): launch and connect (the demo), the tabs, open an agent's chat and send, approve or deny a permission.
 - Mac (`LoftMacUITests`): launch and connect (the demo), sidebar navigation (clicks, ⌘1–⌘5, ↑/↓), open an agent's chat and send, quick search.
 
-A new UI test outside those flows needs a reason a unit test can't cover it. Each UI test is a single launch walking one flow, with `-no-animations -no-speech -no-ai` (no animations, microphone, speech recognizer or on-device model), and waits of 5 s or less.
+A new UI test outside those flows needs a reason a unit test can't cover it. The legacy UI tests (`LoftLegacyUITests`, `LoftMacLegacyUITests`) check rules that still live inside SwiftUI views; they run only with `--ui-legacy` or `--mac-ui-legacy`, and each one goes once its logic moves out of the view and gets unit tests. Each UI test is a single launch walking one flow, with `-no-animations -no-speech -no-ai` (no animations, microphone, speech recognizer or on-device model), and waits of 5 s or less.
 
 UI tests run against an in-app fixture server (`-ui-testing`, Debug builds only), so no agents run. The backend tests use a temporary database.
 

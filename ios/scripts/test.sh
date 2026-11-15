@@ -4,9 +4,11 @@
 # or --mac-ui: a UI test only for what a unit test can't reach.
 #
 #   ios/scripts/test.sh                      # the unit tests: LoftKit and LoftTests (target: under 1 min)
-#   ios/scripts/test.sh --ui                 # the iPhone's UI smoke tests only (LoftUITests, target: under 2 min)
-#   ios/scripts/test.sh --mac-ui             # the Mac's UI smoke tests only (LoftMacUITests: they take over this
-#                                            # Mac's screen, so only when nobody is using it)
+#   ios/scripts/test.sh --ui                 # the iPhone's UI smoke tests only (target: under 2 min)
+#   ios/scripts/test.sh --mac-ui             # the Mac's UI smoke tests only (they take over this Mac's screen, so
+#                                            # only when nobody is using it)
+#   ios/scripts/test.sh --ui-legacy          # the iPhone's legacy UI tests: rules not yet moved out of the views
+#   ios/scripts/test.sh --mac-ui-legacy      # the Mac's legacy UI tests
 #   ios/scripts/test.sh --only LoftTests/StoreTests --only LoftKit/QuickSearchTests
 #   ios/scripts/test.sh --no-build --unit    # reuse the last build (nothing changed since)
 #   ios/scripts/test.sh --no-build --ui --only LoftUITests/LoftUITests/testOverview   # rerun one, no build
@@ -34,10 +36,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-build) build=0 ;;
     --unit) suites=(LoftKit LoftTests) ;;
-    --ui) suites=(LoftUITests) ;;
-    --mac-ui) suites=(LoftMacUITests) ;;
+    --ui) suites=(LoftUITests/LoftUITests) ;;
+    --ui-legacy) suites=(LoftUITests/LoftLegacyUITests) ;;
+    --mac-ui) suites=(LoftMacUITests/LoftMacUITests) ;;
+    --mac-ui-legacy) suites=(LoftMacUITests/LoftMacLegacyUITests) ;;
     --only) shift; only+=("-only-testing:$1") ;;
-    -h|--help) sed -n '2,26p' "$self"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$self"; exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -53,7 +57,7 @@ if [[ -z "${DEVELOPER_DIR:-}" && "$(xcode-select -p 2>/dev/null)" == *CommandLin
 fi
 
 derived="${DERIVED_DATA:-build}"
-if [[ "${suites[*]}" == LoftMacUITests ]]; then
+if [[ "${suites[*]}" == LoftMacUITests/* ]]; then
   dest="platform=macOS" scheme=LoftMac
 else
   sim="${SIMULATOR:-$(xcrun simctl list devices booted | grep -m1 -E 'iPhone' | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/' || true)}"
@@ -92,8 +96,8 @@ for suite in "${suites[@]}"; do
     sel=("-only-testing:$suite")
   fi
   result=()
-  if [[ -n "${RESULT:-}" ]]; then mkdir -p "$RESULT"; rm -rf "$RESULT/$suite.xcresult"; result=(-resultBundlePath "$RESULT/$suite.xcresult"); fi
-  log="$log_dir/$suite.log"
+  if [[ -n "${RESULT:-}" ]]; then mkdir -p "$RESULT"; rm -rf "$RESULT/${suite//\//-}.xcresult"; result=(-resultBundlePath "$RESULT/${suite//\//-}.xcresult"); fi
+  log="$log_dir/${suite//\//-}.log"
   echo "▸ $suite (load $(sysctl -n vm.loadavg | awk '{print $2}'))"
   s=$(date +%s)
   suite_status=0
