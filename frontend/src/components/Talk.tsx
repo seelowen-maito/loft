@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { Check, Loader2, Mic, MicOff, Search } from "lucide-react";
 import { api } from "../lib/api";
 import { useAgents } from "../hooks/lists";
+import { Dialog } from "./Dialog";
 import { DRAFT_SET, loadDraft, saveDraft } from "../lib/draft";
 import { cx } from "../lib/format";
 import { loadLastAgent } from "../lib/lastAgent";
@@ -207,141 +208,132 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
     close();
   };
 
-  // Esc closes More first, then cancels Talk: nothing is sent.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.isComposing) return;
-      e.preventDefault();
-      if (picking) setPicking(false);
-      else cancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  });
-
   const shown = chips(agents, to);
   const toName = agents.find((a) => a.id === to)?.name ?? "the agent";
   const retryText = step.kind === "failed" && step.text != null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={cancel}>
-      <div role="dialog" aria-label="Talk" className="panel flex h-[420px] w-full max-w-[520px] flex-col gap-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="relative flex items-center gap-2">
-          <span className="text-[13px] text-fg-3">To</span>
-          <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto">
-            {shown.map((a) => (
-              <button
-                key={a.id}
-                onClick={() => setTo(a.id)}
-                className={cx("shrink-0 rounded-full px-2.5 py-1 text-[12.5px]", a.id === to ? "bg-accent/25 font-medium text-fg" : "bg-white/[0.06] text-fg-2 hover:text-fg")}
-              >
-                {chipLabel(a, shown)}
-              </button>
-            ))}
-          </div>
-          <button className="btn-ghost shrink-0" onClick={() => setPicking((p) => !p)}>
-            More
-          </button>
-          {picking && (
-            <div className="absolute right-0 top-9 z-10 w-72 max-w-full space-y-2 rounded-xl border border-line-strong bg-ink-850 p-2 shadow-2xl">
-              <div className="relative">
-                <Search className="absolute left-2.5 top-2.5 size-3.5 text-fg-3" />
-                <input autoFocus className="input pl-8" placeholder="Name, role, group or project" value={query} onChange={(e) => setQuery(e.target.value)} />
-              </div>
-              <div className="max-h-60 overflow-y-auto">
-                {sections(agents, query).map((s) => (
-                  <div key={s.title}>
-                    <div className="eyebrow px-2 pb-1 pt-2">{s.title}</div>
-                    {s.agents.map((a) => (
-                      <button
-                        key={a.id}
-                        className="flex w-full items-center rounded-lg px-2 py-1.5 text-left text-[13px] hover:bg-white/5"
-                        onClick={() => {
-                          setTo(a.id);
-                          setPicking(false);
-                        }}
-                      >
-                        <span className="flex-1">{a.name}</span>
-                        {a.id === to && <Check className="size-3.5 text-accent" />}
-                      </button>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="flex min-h-0 flex-1 flex-col justify-center">
-          {step.kind === "failed" ? (
-            <div className="space-y-2 text-center">
-              <MicOff className="mx-auto size-9 text-fg-3" />
-              <p className="text-[15px] font-medium">{retryText ? "Not sent" : micOff ? "Loft can't use the microphone" : "Voice stopped"}</p>
-              <p className="text-[13px] text-fg-2">{step.message}</p>
-              {needsHttps && (
-                <a className="text-[13px] text-accent underline" href="/settings#https">
-                  Settings → Https on the tailnet
-                </a>
-              )}
-            </div>
-          ) : step.kind === "cleaning" || step.kind === "finishing" ? (
-            <p className="flex items-center justify-center gap-2 text-[13px] text-fg-3">
-              <Loader2 className="size-4 animate-spin" /> Tidying up…
-            </p>
-          ) : step.kind === "review" || step.kind === "sending" ? (
-            <textarea
-              aria-label="Text to send"
-              className="input h-full resize-none text-[14px]"
-              value={step.text}
-              disabled={step.kind === "sending"}
-              onChange={(e) => dispatch({ type: "edit", text: e.target.value })}
-            />
-          ) : (
-            <div className="flex h-full flex-col gap-4">
-              <p className={cx("flex-1 overflow-hidden text-[17px] font-medium", step.kind === "listening" && step.heard ? "text-fg" : "text-fg-3")}>
-                {step.kind === "listening" && step.heard ? step.heard : step.kind === "preparing" ? "Getting ready…" : "Start talking…"}
-              </p>
-              <Bars level={step.kind === "listening" ? level : 0} />
-              <p className="text-center font-mono text-[11px] text-fg-3">{step.kind === "listening" ? listeningLabel(seconds) : " "}</p>
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button className="btn-ghost" onClick={cancel}>
-            Cancel
-          </button>
-          <span className="flex-1" />
-          {step.kind === "listening" && (
-            <button className="btn-primary" onClick={done}>
-              <Mic className="size-3.5" /> Done
-            </button>
-          )}
-          {(step.kind === "review" || step.kind === "sending") && (
-            <>
-              <button className="btn shrink-0 whitespace-nowrap" disabled={step.kind === "sending"} onClick={editInChat}>
-                Edit in chat
-              </button>
-              {/* On a narrow screen just Send: the To row names the agent. */}
-              <button className="btn-primary whitespace-nowrap" disabled={step.kind === "sending" || !step.text.trim() || !to} onClick={() => dispatch({ type: "send" })}>
-                {step.kind === "sending" ? "Sending…" : <><span className="sm:hidden">Send</span><span className="hidden sm:inline">Send to {toName}</span></>}
-              </button>
-            </>
-          )}
-          {step.kind === "failed" && !needsHttps && (
+    // Esc closes More first, then cancels Talk: nothing is sent.
+    <Dialog title="Talk" size="lg" onClose={picking ? () => setPicking(false) : cancel} className="flex h-[420px] flex-col gap-4 p-5">
+      <div className="relative flex items-center gap-2">
+        <span className="text-[13px] text-fg-3">To</span>
+        <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto">
+          {shown.map((a) => (
             <button
-              className="btn-primary"
-              onClick={() => {
-                dispatch({ type: "retry" });
-                if (!retryText) setAttempt((a) => a + 1);
-              }}
+              key={a.id}
+              onClick={() => setTo(a.id)}
+              className={cx("shrink-0 rounded-full px-2.5 py-1 text-[12.5px]", a.id === to ? "bg-accent/25 font-medium text-fg" : "bg-white/[0.06] text-fg-2 hover:text-fg")}
             >
-              {retryText ? "Retry sending" : "Try again"}
+              {chipLabel(a, shown)}
             </button>
-          )}
+          ))}
         </div>
+        <button className="btn-ghost shrink-0" onClick={() => setPicking((p) => !p)}>
+          More
+        </button>
+        {picking && (
+          <div className="absolute right-0 top-9 z-10 w-72 max-w-full space-y-2 rounded-xl border border-line-strong bg-ink-850 p-2 shadow-2xl">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-2.5 size-3.5 text-fg-3" />
+              <input autoFocus className="input pl-8" placeholder="Name, role, group or project" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => {
+                if (e.key !== "Escape" || e.nativeEvent.isComposing) return;
+                e.preventDefault();
+                setPicking(false);
+              }} />
+            </div>
+            <div className="max-h-60 overflow-y-auto">
+              {sections(agents, query).map((s) => (
+                <div key={s.title}>
+                  <div className="eyebrow px-2 pb-1 pt-2">{s.title}</div>
+                  {s.agents.map((a) => (
+                    <button
+                      key={a.id}
+                      className="flex w-full items-center rounded-lg px-2 py-1.5 text-left text-[13px] hover:bg-white/5"
+                      onClick={() => {
+                        setTo(a.id);
+                        setPicking(false);
+                      }}
+                    >
+                      <span className="flex-1">{a.name}</span>
+                      {a.id === to && <Check className="size-3.5 text-accent" />}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
-    </div>
+
+      <div className="flex min-h-0 flex-1 flex-col justify-center">
+        {step.kind === "failed" ? (
+          <div className="space-y-2 text-center">
+            <MicOff className="mx-auto size-9 text-fg-3" />
+            <p className="text-[15px] font-medium">{retryText ? "Not sent" : micOff ? "Loft can't use the microphone" : "Voice stopped"}</p>
+            <p className="text-[13px] text-fg-2">{step.message}</p>
+            {needsHttps && (
+              <a className="text-[13px] text-accent underline" href="/settings#https">
+                Settings → Https on the tailnet
+              </a>
+            )}
+          </div>
+        ) : step.kind === "cleaning" || step.kind === "finishing" ? (
+          <p className="flex items-center justify-center gap-2 text-[13px] text-fg-3">
+            <Loader2 className="size-4 animate-spin" /> Tidying up…
+          </p>
+        ) : step.kind === "review" || step.kind === "sending" ? (
+          <textarea
+            aria-label="Text to send"
+            className="input h-full resize-none text-[14px]"
+            value={step.text}
+            disabled={step.kind === "sending"}
+            onChange={(e) => dispatch({ type: "edit", text: e.target.value })}
+          />
+        ) : (
+          <div className="flex h-full flex-col gap-4">
+            <p className={cx("flex-1 overflow-hidden text-[17px] font-medium", step.kind === "listening" && step.heard ? "text-fg" : "text-fg-3")}>
+              {step.kind === "listening" && step.heard ? step.heard : step.kind === "preparing" ? "Getting ready…" : "Start talking…"}
+            </p>
+            <Bars level={step.kind === "listening" ? level : 0} />
+            <p className="text-center font-mono text-[11px] text-fg-3">{step.kind === "listening" ? listeningLabel(seconds) : " "}</p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button className="btn-ghost" onClick={cancel}>
+          Cancel
+        </button>
+        <span className="flex-1" />
+        {step.kind === "listening" && (
+          <button className="btn-primary" onClick={done}>
+            <Mic className="size-3.5" /> Done
+          </button>
+        )}
+        {(step.kind === "review" || step.kind === "sending") && (
+          <>
+            <button className="btn shrink-0 whitespace-nowrap" disabled={step.kind === "sending"} onClick={editInChat}>
+              Edit in chat
+            </button>
+            {/* On a narrow screen just Send: the To row names the agent. */}
+            <button className="btn-primary whitespace-nowrap" disabled={step.kind === "sending" || !step.text.trim() || !to} onClick={() => dispatch({ type: "send" })}>
+              {step.kind === "sending" ? "Sending…" : <><span className="sm:hidden">Send</span><span className="hidden sm:inline">Send to {toName}</span></>}
+            </button>
+          </>
+        )}
+        {step.kind === "failed" && !needsHttps && (
+          <button
+            className="btn-primary"
+            onClick={() => {
+              dispatch({ type: "retry" });
+              if (!retryText) setAttempt((a) => a + 1);
+            }}
+          >
+            {retryText ? "Retry sending" : "Try again"}
+          </button>
+        )}
+      </div>
+    </Dialog>
   );
 }
 

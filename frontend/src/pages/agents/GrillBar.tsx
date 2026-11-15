@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router";
 import { ArrowDownToLine, Maximize2, MessagesSquare, Pause, Play, Send, Square } from "lucide-react";
 import { api, grillError, type GrillSession } from "../../lib/api";
 import { cx } from "../../lib/format";
+import { ConfirmDialog } from "../../components/Dialog";
 import { interviewPath, nextQuestion, questionAnchor } from "../../lib/interview";
 
 /** The round bar above the composer: which round, how much of it is answered, and Send / Pause / Resume / End (the app's buttons, same endpoint).
@@ -13,17 +14,6 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const paused = session.state === "paused";
-  // Esc cancels the End confirmation before anything else hears it (the full-screen page would close).
-  useEffect(() => {
-    if (!confirming) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      setConfirming(false);
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [confirming]);
 
   const send = async (command: "send" | "pause" | "resume" | "end") => {
     setBusy(true);
@@ -102,22 +92,16 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
       {error && <div className="-mt-2 mb-2 text-[12px] text-bad">{error}</div>}
 
       {confirming && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setConfirming(false)}>
-          <div className="panel w-full max-w-sm space-y-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-[15px] font-medium">End the interview?</h3>
-            <p className="text-[13px] text-fg-2">
-              The rounds stop now. What you sent is kept, and the agent writes a summary of what was covered.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button className="btn-ghost" onClick={() => setConfirming(false)}>
-                Keep going
-              </button>
-              <button className="btn-primary" disabled={busy} onClick={() => send("end")}>
-                End interview
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmDialog
+          title="End the interview?"
+          body="The rounds stop now. What you sent is kept, and the agent writes a summary of what was covered."
+          cancelLabel="Keep going"
+          confirmLabel="End interview"
+          danger
+          pending={busy}
+          onConfirm={() => send("end")}
+          onClose={() => setConfirming(false)}
+        />
       )}
     </>
   );

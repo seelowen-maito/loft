@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pause, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, roleLabel, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { ticketLabel } from "../lib/specViews";
-import { closesOnEscape } from "../lib/dialogKeys";
+import { ConfirmDialog, DANGER, Dialog } from "../components/Dialog";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
 import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/mentionPicker";
@@ -21,29 +21,6 @@ const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
 /** Stopped with a reason: Send to… hands it to an agent again, with the reason. */
 const STUCK = ["blocked", "failed"];
-
-function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  // Esc closes this dialog, the top one, before the issue page's own dialog sees it.
-  const close = useRef(onClose);
-  close.current = onClose;
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!closesOnEscape(e)) return;
-      e.stopPropagation();
-      close.current();
-    };
-    document.addEventListener("keydown", onKey, true);
-    return () => document.removeEventListener("keydown", onKey, true);
-  }, []);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div className="panel w-full max-w-md space-y-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={title}>
-        <h3 className="text-[15px] font-medium">{title}</h3>
-        {children}
-      </div>
-    </div>
-  );
-}
 
 function AgentSelect({ agents, value, onChange, placeholder }: { agents: Agent[]; value: string; onChange: (v: string) => void; placeholder: string }) {
   return (
@@ -98,7 +75,8 @@ function EditDialog({ task: t, projects, onClose }: { task: Task; projects: stri
     }
   };
   return (
-    <Modal title="Edit Loft issue" onClose={onClose}>
+    <Dialog title="Edit Loft issue" onClose={onClose} className="space-y-4 p-5">
+      <h3 className="text-[15px] font-medium">Edit Loft issue</h3>
       <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" className={FIELD} aria-label="Title" />
       <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
       {/* Mirrored issues stay on their repo. */}
@@ -114,7 +92,7 @@ function EditDialog({ task: t, projects, onClose }: { task: Task; projects: stri
         <button className="btn-primary" disabled={!title.trim() || busy} onClick={save}>Save</button>
       </div>
       {error && <div className="text-[12px] text-bad">{error}</div>}
-    </Modal>
+    </Dialog>
   );
 }
 
@@ -534,7 +512,8 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
       {dialog === "run" && <RunDialog task={t} agents={agents} onClose={() => setDialog(null)} />}
       {dialog === "edit" && <EditDialog task={t} projects={projects} onClose={() => setDialog(null)} />}
       {dialog === "cancel" && (
-        <Modal title="Cancel this issue?" onClose={() => setDialog(null)}>
+        <Dialog title="Cancel this issue?" onClose={() => setDialog(null)} className="space-y-4 p-5">
+          <h3 className="text-[15px] font-medium">Cancel this issue?</h3>
           <p className="text-[13px] text-fg-2">
             It's marked cancelled.{" "}
             {active && agent ? `${agent.name} is told to stop working on it; you can also stop its current run, which may be doing other work too.` : "Nobody is working on it right now."}
@@ -544,20 +523,23 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
             {active && agent?.running && (
               <button className="btn" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, true))}>Cancel and stop {agent.name}</button>
             )}
-            <button className="btn-primary" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>Cancel issue</button>
+            <button className={DANGER} disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>Cancel issue</button>
           </div>
           {error && <div className="text-[12px] text-bad">{error}</div>}
-        </Modal>
+        </Dialog>
       )}
       {dialog === "delete" && (
-        <Modal title="Delete this issue?" onClose={() => setDialog(null)}>
-          <p className="text-[13px] text-fg-2">It's removed with its thread. Sub-issues stay, without a parent. This can't be undone.</p>
-          <div className="flex justify-end gap-2">
-            <button className="btn-ghost" onClick={() => setDialog(null)}>Keep it</button>
-            <button className="btn border-bad/40 bg-bad/20 text-fg" disabled={busy} onClick={() => act(async () => { await api.deleteTask(t.id); navigate({ pathname: "/issues", search: window.location.search }); })}>Delete</button>
-          </div>
-          {error && <div className="text-[12px] text-bad">{error}</div>}
-        </Modal>
+        <ConfirmDialog
+          title="Delete this issue?"
+          body="It's removed with its thread. Sub-issues stay, without a parent. This can't be undone."
+          cancelLabel="Keep it"
+          confirmLabel="Delete"
+          danger
+          pending={busy}
+          error={error}
+          onConfirm={() => act(async () => { await api.deleteTask(t.id); navigate({ pathname: "/issues", search: window.location.search }); })}
+          onClose={() => setDialog(null)}
+        />
       )}
     </div>
   );
@@ -586,8 +568,10 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
     }
   };
   const again = STUCK.includes(t.status);
+  const title = again ? `Send “${t.title}” to…` : `Run “${t.title}”`;
   return (
-    <Modal title={again ? `Send “${t.title}” to…` : `Run “${t.title}”`} onClose={onClose}>
+    <Dialog title={title} onClose={onClose} className="space-y-4 p-5">
+      <h3 className="text-[15px] font-medium">{title}</h3>
       <AgentSelect agents={ordered} value={agentId} onChange={setAgentId} placeholder="Pick an agent" />
       <textarea
         value={note}
@@ -604,7 +588,7 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
         </button>
       </div>
       {error && <div className="text-[12px] text-bad">{error}</div>}
-    </Modal>
+    </Dialog>
   );
 }
 
@@ -853,7 +837,8 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
   };
   const field = FIELD;
   return (
-    <Modal title="New Loft issue" onClose={onClose}>
+    <Dialog title="New Loft issue" onClose={onClose} className="space-y-4 p-5">
+      <h3 className="text-[15px] font-medium">New Loft issue</h3>
       <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing" className={field} />
       <IssueFields {...{ description, setDescription, labels, setLabels, owner, setOwner }} />
       <AgentSelect agents={issuePickerOrder(agents, project)} value={agentId} onChange={pickAgent} placeholder="No agent (a to-do for you)" />
@@ -894,6 +879,6 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
         <button className="btn-primary" disabled={!title.trim() || busy} onClick={create}>Create</button>
       </div>
       {error && <div className="text-[12px] text-bad">{error}</div>}
-    </Modal>
+    </Dialog>
   );
 }

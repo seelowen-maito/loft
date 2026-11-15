@@ -9,6 +9,7 @@ import { MacAccess } from "./MacAccess";
 import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { SettingsCard } from "../components/SettingsCard";
+import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
 import { cleanLineText, cx, fmtBytes, oneLine } from "../lib/format";
@@ -259,16 +260,6 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
   );
 }
 
-function Modal({ onClose, children }: { onClose?: () => void; children: React.ReactNode }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div className="panel flex max-h-[85vh] w-full max-w-2xl flex-col gap-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
-        {children}
-      </div>
-    </div>
-  );
-}
-
 /** Groups items by agent, in the order they come. */
 function byAgent<T extends { agent: string }>(items: T[]): [string, T[]][] {
   const m = new Map<string, T[]>();
@@ -320,7 +311,7 @@ function Skipped({ skipped, name }: { skipped: CleanSkip[]; name: (id: string) =
 /** A clean's log: each removal (or its error) as it happens, with the running total, then the summary. */
 export function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id: string) => string; onClose: () => void }) {
   return (
-    <Modal onClose={log.running ? undefined : onClose}>
+    <Dialog title={log.running ? "Cleaning" : "Clean log"} size="xl" onClose={log.running ? undefined : onClose} className="flex flex-col gap-4 p-5">
       <div>
         <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? relTime(log.at) : ""}`}</h3>
         <p className="mt-1 text-[13px] text-fg-2">
@@ -353,7 +344,7 @@ export function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id:
           {log.running ? "Cleaning…" : "Done"}
         </button>
       </div>
-    </Modal>
+    </Dialog>
   );
 }
 
@@ -668,23 +659,19 @@ export default function SettingsPage() {
         )}
 
         {confirming && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setConfirming(false)}>
-            <div className="panel w-full max-w-sm space-y-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
-              <h3 className="text-[15px] font-medium">Restart loft?</h3>
-              <p className="text-[13px] text-fg-2">
+          <ConfirmDialog
+            title="Restart loft?"
+            body={
+              <>
                 This applies {view.pending_restart.map((f) => LABELS[f] ?? f).join(", ")}. It takes a few seconds; open tabs reconnect on their own.
                 {running > 0 && <span className="mt-2 block text-warn">{running} agent{running > 1 ? "s are" : " is"} running. Restart once they finish.</span>}
-              </p>
-              <div className="flex justify-end gap-2">
-                <button className="btn-ghost" onClick={() => setConfirming(false)}>
-                  Cancel
-                </button>
-                <button className="btn-primary" disabled={running > 0} onClick={restart}>
-                  Restart
-                </button>
-              </div>
-            </div>
-          </div>
+              </>
+            }
+            confirmLabel="Restart"
+            pending={running > 0}
+            onConfirm={restart}
+            onClose={() => setConfirming(false)}
+          />
         )}
       </div>
     </div>

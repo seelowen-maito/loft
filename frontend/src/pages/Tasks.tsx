@@ -18,7 +18,7 @@ import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialo
 import { isSpec } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
 import { BoardPage, boardSpecs } from "./SpecBoard";
-import { closesOnEscape } from "../lib/dialogKeys";
+import { Dialog } from "../components/Dialog";
 import { boardIssues, NEEDS_YOU, parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
 import { agentInGroup, groupAgents, groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
@@ -204,43 +204,8 @@ export default function TasksPage() {
           <BoardPage kept={kept} issues={issues} tasks={tasks} deliveries={deliveries} loaded={deliveriesLoaded} agentById={agentById} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
         )}
       </div>
-      {openId && <Modal onClose={() => openOnBoard(null)}>{detail}</Modal>}
+      {openId && <Dialog title="Issue" size="page" onClose={() => openOnBoard(null)}>{detail}</Dialog>}
       {creating && <NewTaskDialog agents={agents} projects={projects} onClose={() => setCreating(false)} />}
-    </div>
-  );
-}
-
-/** The board's large modal over the full-width board: background click, ✕ or Esc close it; Tab stays inside and focus goes back to the card on close. Full screen at phone width. */
-function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
-  const box = useRef<HTMLDivElement>(null);
-  const close = useRef(onClose);
-  close.current = onClose;
-  useEffect(() => {
-    const from = document.activeElement as HTMLElement | null;
-    box.current?.focus();
-    return () => { if (from?.isConnected) from.focus(); };
-  }, []);
-  const onKey = (e: React.KeyboardEvent) => {
-    const el = e.target as HTMLElement;
-    if (e.key === "Escape") {
-      // Not while a field or another dialog (new issue, confirm…) has it.
-      if (!closesOnEscape(e) || document.querySelectorAll('[role="dialog"]').length > 1) return;
-      e.stopPropagation();
-      close.current();
-    } else if (e.key === "Tab" && box.current) {
-      const f = [...box.current.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')];
-      if (f.length === 0) return e.preventDefault();
-      const first = f[0], last = f[f.length - 1];
-      if (e.shiftKey && (el === first || el === box.current)) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && el === last) { e.preventDefault(); first.focus(); }
-    }
-  };
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-[2px] sm:p-6" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={box} role="dialog" aria-modal="true" aria-label="Issue" tabIndex={-1} onKeyDown={onKey}
-        className="h-full w-full animate-rise overflow-y-auto bg-ink-950 shadow-2xl outline-none sm:h-auto sm:max-h-full sm:max-w-[960px] sm:rounded-2xl sm:border sm:border-line-strong">
-        {children}
-      </div>
     </div>
   );
 }
