@@ -244,7 +244,8 @@ public struct ChatMessage: Codable, Identifiable, Hashable {
 public struct PermissionRequest: Codable, Identifiable, Hashable {
     public let id: String
     public let agentId: String
-    /// prompt (a blocked tool call) | request (the agent asked explicitly)
+    /// prompt (a blocked tool call) | request (the agent asked explicitly) | questions (an allowed
+    /// AskUserQuestion's questions, answered in the web chat rather than allowed)
     public var source: String
     public var toolName: String
     public var input: JSONValue?
@@ -255,6 +256,12 @@ public struct PermissionRequest: Codable, Identifiable, Hashable {
     public var createdAt: Date
 
     public var isPending: Bool { status == "pending" }
+
+    /// An agent's multiple-choice questions: answered in the web chat, where the options show; here only skipped.
+    public var isQuestions: Bool { source == "questions" }
+
+    /// The permission to ask those questions, or the questions themselves: either way, the questions are what's asked.
+    public var asksQuestions: Bool { isQuestions || toolName == "AskUserQuestion" }
 
     /// Whether Always allow can save something. A Kill's rule is only ever one Loft made for a program it can
     /// name (the backend checks it), so an empty rule means none.
@@ -277,6 +284,9 @@ public struct PermissionRequest: Codable, Identifiable, Hashable {
 
     /// A one-line, human description of what is being asked, without dumping raw input.
     public var summary: String {
+        if asksQuestions, case .array(let qs)? = input?["questions"] {
+            return qs.compactMap { $0["question"]?.stringValue }.joined(separator: "\n")
+        }
         if let cmd = input?["command"]?.stringValue { return "\(toolName): \(cmd)" }
         if let path = input?["file_path"]?.stringValue { return "\(toolName): \((path as NSString).lastPathComponent)" }
         if let perm = input?["permission"]?.stringValue { return "Grant \(perm)" }
