@@ -257,7 +257,7 @@ The script runs LoftKit's tests with `swift test` (no Simulator), builds once (`
 **A UI test only for what a unit test can't reach.** Rules, labels, counts, filters, formatting, routing and fixture data belong in unit tests on the store, the view models and the helpers (rendering a view with `ImageRenderer` is fine there). Each app keeps a small UI smoke suite for the core flows that need a real window, focus or the system:
 
 - iPhone (`LoftUITests`): launch and connect (the demo), the tabs, open an agent's chat and send, approve or deny a permission.
-- Mac (`LoftMacUITests`): launch and connect (the demo), sidebar navigation (clicks, ⌘1–⌘5, ↑/↓), open an agent's chat and send, quick search.
+- Mac (`LoftMacUITests`): launch and connect (the demo), sidebar navigation (clicks, ⌘1–⌘5, ↓), open an agent's chat and send, quick search.
 
 A new UI test outside those flows needs a reason a unit test can't cover it. The legacy UI tests (`LoftLegacyUITests`, `LoftMacLegacyUITests`) check rules that still live inside SwiftUI views; they run only with `--ui-legacy` or `--mac-ui-legacy`, and each one goes once its logic moves out of the view and gets unit tests. Each UI test is a single launch walking one flow, with `-no-animations -no-speech -no-ai` (no animations, microphone, speech recognizer or on-device model), and waits of 5 s or less.
 

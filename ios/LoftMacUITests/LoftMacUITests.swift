@@ -14,7 +14,8 @@ class MacUITestCase: XCTestCase {
     }
 
     func launch(_ args: [String]) {
-        app.launchArguments = args
+        // No Needs you notifications: their permission prompt takes the focus mid-test.
+        app.launchArguments = args + ["-no-alerts"]
         app.launch()
         app.activate()
         // macOS can restore Loft with its window closed, leaving only the menu bar item: Go › Agents (⌘2) opens it.
@@ -105,12 +106,12 @@ final class LoftMacUITests: MacUITestCase {
         shot("Sidebar Issues")
     }
 
-    /// Quick search: the global shortcut (⌥Space by default) opens the panel over any window, typing finds an agent,
-    /// and Return opens its chat in the main window.
+    /// Quick search: the panel opens over the main window, typing finds an agent, and Return opens its chat there.
+    /// A synthesized ⌥Space goes to the app, not through the global hot key, so `-show-quick-search` opens it at
+    /// launch as the hot key does.
     func testQuickSearchOpensAnAgentsChat() {
-        launch(["-ui-testing", "-no-ai"])
-        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
-        app.typeKey(" ", modifierFlags: .option)
+        // In the app, whatever Settings › Quick search was left at on this Mac.
+        launch(["-ui-testing", "-no-ai", "-show-quick-search", "-quickSearchOpensIn", "app"])
         let field = app.textFields["quickSearchField"]
         XCTAssertTrue(field.waitForExistence(timeout: 5), "the shortcut opens the panel")
         field.typeText("qa")

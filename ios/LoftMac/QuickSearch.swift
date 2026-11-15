@@ -105,6 +105,8 @@ final class QuickSearchController {
         if let i = args.firstIndex(of: "-render-quick-search"), i + 2 < args.count {
             Task { await renderQuickSearch(self, query: args[i + 1], to: args[i + 2]) }
         }
+        // UI tests: a synthesized ⌥Space reaches the app, not the global hot key, so open it as the hot key does.
+        if args.contains("-show-quick-search") { Task { self.toggle() } }
         #endif
     }
 
