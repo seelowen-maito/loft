@@ -39,18 +39,18 @@ _restore_backup() {
   if [ "$(sqlite3 "$tmp/loft.db" 'PRAGMA integrity_check' 2>&1)" != ok ]; then
     rm -rf "$tmp"; echo "the backup's database is damaged (integrity check failed); nothing was changed"; return 1
   fi
-  local aside="$data/before-restore/$(date +%Y-%m-%d_%H%M%S)" f moved=()
+  local aside="$data/before-restore/$(date +%Y-%m-%d_%H%M%S)" f m moved=()
   for f in loft.db loft.db-wal loft.db-shm settings.json; do
     [ -e "$data/$f" ] || continue
     if mkdir -p "$aside" 2>/dev/null && mv "$data/$f" "$aside/" 2>/dev/null; then moved+=("$f")
     else
-      for f in ${moved[@]+"${moved[@]}"}; do mv "$aside/$f" "$data/"; done
+      for m in ${moved[@]+"${moved[@]}"}; do mv "$aside/$m" "$data/"; done
       rm -rf "$tmp"; echo "couldn't move $f aside; nothing was changed"; return 1
     fi
   done
   if ! { mv "$tmp"/* "$data/" && rmdir "$tmp"; }; then
     for f in loft.db settings.json; do [ -e "$tmp/$f" ] || rm -f "$data/$f"; done
-    for f in ${moved[@]+"${moved[@]}"}; do mv "$aside/$f" "$data/"; done
+    for m in ${moved[@]+"${moved[@]}"}; do mv "$aside/$m" "$data/"; done
     rm -rf "$tmp"; echo "couldn't move the backup in; the old database is back"; return 1
   fi
 }

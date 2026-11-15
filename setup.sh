@@ -182,7 +182,8 @@ if [ $restore = 1 ]; then
       break
     fi
     fail "$why"
-    [ -t 0 ] || { resume_service; exit 1; }
+    resume_service   # Loft stays up while we ask again
+    [ -t 0 ] || exit 1
   done
   resume_service
 fi
