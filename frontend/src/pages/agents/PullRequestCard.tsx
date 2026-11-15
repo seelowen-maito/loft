@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { api, type PullRequest } from "../../lib/api";
 import { cx } from "../../lib/format";
+import { ActionButton } from "../../components/ActionButton";
 import { Callout } from "../../components/Callout";
 import { relTime } from "../../lib/time";
 import { verdicts } from "../../lib/verdicts";
@@ -198,15 +199,16 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
               <button className="btn-ghost" onClick={() => setConfirming(false)} disabled={merging.busy}>
                 Cancel
               </button>
-              <button
-                className="inline-flex items-center gap-1.5 rounded-full bg-merged px-3.5 py-1.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110 disabled:opacity-50"
+              <ActionButton
+                variant="bare"
+                className="gap-1.5 rounded-full bg-merged px-3.5 py-1.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110"
                 onClick={merge}
-                disabled={merging.busy}
-                aria-busy={merging.busy}
+                pending={merging.busy}
+                pendingLabel="Merging…"
+                icon={<GitMerge className="size-3.5" />}
               >
-                {merging.busy ? <Loader2 className="size-3.5 animate-spin" /> : <GitMerge className="size-3.5" />}
-                {merging.busy ? "Merging…" : `Confirm ${method}`}
-              </button>
+                Confirm {method}
+              </ActionButton>
             </div>
           ) : (
             <div className="flex items-center">
