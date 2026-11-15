@@ -24,6 +24,7 @@ struct AgentsSection: View {
                         LazyVStack(alignment: .leading, spacing: 2) {
                             ForEach(AgentSection.sections(filtered)) { section in
                                 Text(section.title).eyebrow().accessibilityLabel(section.title)
+                                    .accessibilityAddTraits(.isHeader).accessibilityIdentifier("agentSection-\(section.title)")
                                     .padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 4)
                                 ForEach(section.agents) { a in
                                     AgentListRow(agent: a, showsGroup: section.id == "leads", selected: a.id == nav.agentId) {
