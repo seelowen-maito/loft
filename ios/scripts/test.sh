@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Runs the iOS tests fast: build once, then the unit tests, then (only if they pass) the UI tests, each test with
-# a time limit, and prints every test's time, slowest first.
+# Runs the iOS and Mac tests fast: LoftKit's (`swift test`), then a build and LoftTests, each test with a time
+# limit, and prints every test's time, slowest first. UI tests are a small smoke suite per app, only with --ui
+# or --mac-ui: a UI test only for what a unit test can't reach.
 #
-#   ios/scripts/test.sh                      # build, unit tests, then UI tests
-#   ios/scripts/test.sh --unit               # unit tests only (LoftTests, target: under 1 min)
-#   ios/scripts/test.sh --ui                 # UI tests only (LoftUITests, target: under 2 min)
-#   ios/scripts/test.sh --only LoftTests/StoreTests --only LoftUITests/LoftUITests/testOverview
+#   ios/scripts/test.sh                      # the unit tests: LoftKit and LoftTests (target: under 1 min)
+#   ios/scripts/test.sh --ui                 # the iPhone's UI smoke tests only (LoftUITests, target: under 2 min)
+#   ios/scripts/test.sh --mac-ui             # the Mac's UI smoke tests only (LoftMacUITests: they take over this
+#                                            # Mac's screen, so only when nobody is using it)
+#   ios/scripts/test.sh --only LoftTests/StoreTests --only LoftKit/QuickSearchTests
 #   ios/scripts/test.sh --no-build --unit    # reuse the last build (nothing changed since)
 #   ios/scripts/test.sh --no-build --ui --only LoftUITests/LoftUITests/testOverview   # rerun one, no build
 #
@@ -26,15 +28,16 @@ self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$self")/.."
 
 build=1
-suites=(LoftTests LoftUITests)
+suites=(LoftKit LoftTests)
 only=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-build) build=0 ;;
-    --unit) suites=(LoftTests) ;;
+    --unit) suites=(LoftKit LoftTests) ;;
     --ui) suites=(LoftUITests) ;;
+    --mac-ui) suites=(LoftMacUITests) ;;
     --only) shift; only+=("-only-testing:$1") ;;
-    -h|--help) sed -n '2,24p' "$self"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$self"; exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -50,18 +53,23 @@ if [[ -z "${DEVELOPER_DIR:-}" && "$(xcode-select -p 2>/dev/null)" == *CommandLin
 fi
 
 derived="${DERIVED_DATA:-build}"
-sim="${SIMULATOR:-$(xcrun simctl list devices booted | grep -m1 -E 'iPhone' | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/' || true)}"
-if [[ -z "$sim" ]]; then echo "No booted iPhone Simulator; boot one or set SIMULATOR." >&2; exit 1; fi
-[[ "$sim" =~ ^[0-9A-F-]{36}$ ]] && dest="platform=iOS Simulator,id=$sim" || dest="platform=iOS Simulator,name=$sim"
+if [[ "${suites[*]}" == LoftMacUITests ]]; then
+  dest="platform=macOS" scheme=LoftMac
+else
+  sim="${SIMULATOR:-$(xcrun simctl list devices booted | grep -m1 -E 'iPhone' | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/' || true)}"
+  if [[ -z "$sim" ]]; then echo "No booted iPhone Simulator; boot one or set SIMULATOR." >&2; exit 1; fi
+  [[ "$sim" =~ ^[0-9A-F-]{36}$ ]] && dest="platform=iOS Simulator,id=$sim" || dest="platform=iOS Simulator,name=$sim"
+  scheme=Loft
+fi
 # LoftKit is a Swift package, which Xcode refuses under legacy build locations (an Xcode setting on this Mac).
-common=(-project Loft.xcodeproj -scheme Loft -destination "$dest" -derivedDataPath "$derived" -IDEBuildLocationStyle=Unique)
+common=(-project Loft.xcodeproj -scheme "$scheme" -destination "$dest" -derivedDataPath "$derived" -IDEBuildLocationStyle=Unique)
 limits=(-parallel-testing-enabled NO -test-timeouts-enabled YES
         -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60)
 # xcodebuild's full output per suite stays here for a look after the run.
 log_dir="$derived/test-logs"
 mkdir -p "$log_dir"
 
-if [[ $build -eq 1 ]]; then
+if [[ $build -eq 1 && "${suites[*]}" != LoftKit ]]; then
   echo "▸ Building for testing ($dest, derived data in $derived)"
   b=$(date +%s)
   xcodebuild build-for-testing "${common[@]}" -quiet
@@ -89,6 +97,20 @@ for suite in "${suites[@]}"; do
   echo "▸ $suite (load $(sysctl -n vm.loadavg | awk '{print $2}'))"
   s=$(date +%s)
   suite_status=0
+  if [[ $suite == LoftKit ]]; then
+    # A Swift package: `swift test` on this Mac, no Simulator. `--only LoftKit/<Class>` picks one class.
+    filter=()
+    for o in ${sel[@]+"${sel[@]}"}; do [[ "$o" == -only-testing:LoftKit/* ]] && filter+=(--filter "${o#-only-testing:LoftKit/}"); done
+    swift test --package-path LoftKit ${filter[@]+"${filter[@]}"} > "$log" 2>&1 || suite_status=$?
+    took=$(( $(date +%s) - s ))
+    timings "$log"
+    if [[ $suite_status -ne 0 ]]; then
+      grep -E "error: |Test Case .* failed" "$log" | head -40 || true
+      echo "▸ LoftKit FAILED in ${took}s"; status=$suite_status; break
+    fi
+    echo "▸ LoftKit passed in ${took}s"
+    continue
+  fi
   xcodebuild test-without-building "${common[@]}" "${limits[@]}" "${sel[@]}" ${result[@]+"${result[@]}"} > "$log" 2>&1 &
   pid=$!
   # xcodebuild has sat for ~10 minutes after the last test had finished (#112, #119 runs: 240 s of tests,
