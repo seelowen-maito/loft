@@ -124,6 +124,15 @@ public final class LoftStore {
 
     public var supportsNeedsYou: Bool { info?.supports(.needsYou) == true }
 
+    /// The Overview tab's badge (#543): what's new in Needs you, the same number as the app icon and the web.
+    /// Before Needs you, servers fall back to pending approvals plus failed or blocked issues plus failed agents.
+    public var attentionBadge: Int {
+        if supportsNeedsYou { return needsYou?.unseen ?? 0 }
+        return pendingApprovals().count
+            + tasks.filter { $0.state == .failed || $0.state == .blocked }.count
+            + agents.filter { state(of: $0) == .failed }.count
+    }
+
     /// Redraws the widgets; called when Needs you changes, so an item answered here leaves the widget too (spec #462).
     public var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
     /// Redraws the Usage widget; called when the plan's numbers change (#489).
