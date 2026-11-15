@@ -65,15 +65,14 @@ public enum QuickSearch {
             }
         }
         for t in tasks {
-            let number = t.github.map { "#\($0.number)" }
-            guard let s = score(q, title: t.title, number: number) else { continue }
+            guard let s = score(q, title: t.title, number: t.github?.shortName) else { continue }
             hits.append((s, t.state.isClosed, t.updatedAt, result(for: t, deliveries: deliveries)))
         }
         // The same pull request can be registered by more than one agent.
         var seen = Set<String>()
         for pr in pullRequests where seen.insert(pr.url).inserted {
             let r = result(for: pr)
-            if let s = score(q, title: pr.title, number: "#\(pr.number)") { hits.append((s, r.closed, pr.createdAt ?? .distantPast, r)) }
+            if let s = score(q, title: pr.title, number: r.number) { hits.append((s, r.closed, pr.createdAt ?? .distantPast, r)) }
         }
         for p in pages {
             if let s = score(q, title: p.title) { hits.append((s, false, .distantPast, p)) }
@@ -141,11 +140,12 @@ public enum QuickSearch {
         }
     }
 
-    /// How well a lowercased query matches, lower is better, nil for no match: the number exactly ("459", "#459" or
-    /// "loft#459"), the whole title, the start of the title, the start of a word, anywhere in it, then the words' first
-    /// letters in order.
+    /// How well a lowercased query matches, lower is better, nil for no match: the number exactly (for `number`
+    /// "loft#459": "459", "#459" or "loft#459", not another repo's "web#459"), the whole title, the start of the title,
+    /// the start of a word, anywhere in it, then the words' first letters in order.
     static func score(_ q: String, title: String, number: String? = nil) -> Int? {
-        if let number, "#" + q == number || q.hasSuffix(number) { return 0 }
+        if let number = number?.lowercased(), let n = number.split(separator: "#").last,
+           q == number || q == n || q == "#" + n { return 0 }
         let t = title.lowercased()
         if t == q { return 1 }
         if t.hasPrefix(q) { return 2 }

@@ -53,7 +53,10 @@ final class QuickSearchTests: XCTestCase {
 
     func testANumberFindsItsIssueFirst() {
         let tasks = [task("a", "Ship 459 things"), task("t", "Quick search panel", number: 459)]
-        for q in ["459", "#459", "loft#459"] { XCTAssertEqual(search(q, tasks: tasks).first?.target, "t", q) }
+        for q in ["459", "#459", "loft#459", "Loft#459"] { XCTAssertEqual(search(q, tasks: tasks).first?.target, "t", q) }
+        // Another repo's #459 isn't this one.
+        for q in ["other#459", "xyz#459"] { XCTAssertNotEqual(search(q, tasks: tasks).first?.target, "t", q) }
+        XCTAssertNil(QuickSearch.score("other#459", title: "Quick search panel", number: "loft#459"))
     }
 
     func testEqualMatchesPutOpenFirstThenAgentsSpecsTicketsIssuesThenTheLatest() {
@@ -103,6 +106,8 @@ final class QuickSearchTests: XCTestCase {
         XCTAssertEqual(r.first?.kind, .pullRequest)
         XCTAssertEqual(r.first?.webOnly, true)
         XCTAssertEqual(QuickSearch.results("#9", agents: [], tasks: [], deliveries: [], pullRequests: prs).count, 1)
+        XCTAssertEqual(QuickSearch.results("loft#9", agents: [], tasks: [], deliveries: [], pullRequests: prs).count, 1)
+        XCTAssertEqual(QuickSearch.results("api#9", agents: [], tasks: [], deliveries: [], pullRequests: prs).count, 0)
     }
 
     func testAPullRequestOpensOnlyATrustedLink() {
