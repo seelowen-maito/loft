@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Payloads copied from a real Loft backend.
 final class DecodingTests: XCTestCase {

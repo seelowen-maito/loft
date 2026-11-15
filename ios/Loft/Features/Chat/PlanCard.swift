@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// A delegated plan in the chat of the agent that made it: progress, and each subtask with who's on it,
@@ -56,7 +57,7 @@ struct PlanCard: View {
                 Text([s.agent?.name, s.state.label].compactMap { $0 }.joined(separator: " · ")).font(.caption2).foregroundStyle(.secondary)
                 if let line = s.line { Text(line).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
                 ForEach(s.prs ?? [], id: \.self) { pr in
-                    if let u = pr.url.flatMap(URL.init(string:)) {
+                    if let u = PushDestination.link(pr.url, loftHost: store.api?.baseURL.host()) {
                         Link(destination: u) {
                             Label([pr.number.map { "#\($0)" }, pr.title].compactMap { $0 }.joined(separator: " "), systemImage: "arrow.triangle.pull")
                                 .font(.caption2).lineLimit(1)

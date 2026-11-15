@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The app icon is set here, not by the asset catalog (ASSETCATALOG_COMPILER_APPICON_NAME): Xcode's actool
+	     writes an AppIcon.icns with no 256pt or 512pt image, and App Store Connect rejects the upload without
+	     them (#454). Loft.icns holds every size; Assets.car keeps the AppIcon set for macOS 26's icon style. -->
+	<key>CFBundleIconFile</key>
+	<string>Loft</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<!-- Loft on this Mac is plain http://localhost:7420; another Mac is reached over HTTPS (tailscale serve).
+	     Local networking only allows plain HTTP to localhost and .local hosts; it is not a general ATS exception. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- loft://needs-you and friends: a tap on a widget. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>loft</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Loft listens when you dictate or talk to an agent.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Loft turns what you say into text for your message.</string>
+</dict>
+</plist>

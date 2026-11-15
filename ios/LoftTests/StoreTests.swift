@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Scriptable server for store tests.
 final class MockAPI: LoftAPI, @unchecked Sendable {

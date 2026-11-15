@@ -16,7 +16,7 @@ ios/**/xcuserdata/
 ios/Config/Local.xcconfig
 ios/Evaluations/local/
 
-# no screenshots or recordings in the repo (the app icon is the one image)
+# no screenshots or recordings in the repo (the app icons are the only images)
 *.png
 *.jpg
 *.jpeg
@@ -25,4 +25,5 @@ ios/Evaluations/local/
 *.mov
 *.mp4
 !ios/Loft/Resources/Assets.xcassets/**/*.png
+!ios/LoftMac/Assets.xcassets/**/*.png
 !ios/LoftUITests/sample-video.mp4

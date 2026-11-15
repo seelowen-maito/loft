@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Grill mode in rounds: `meta.grill` on messages, the session state with its answers, the server event and commands.
 final class GrillDecodingTests: XCTestCase {

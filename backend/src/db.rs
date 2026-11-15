@@ -253,6 +253,12 @@ pub struct Agent {
     /// Windows when autonomous wake-ups are held (e.g. working hours). Empty runs around the clock.
     #[serde(default)]
     pub quiet_hours: Vec<QuietWindow>,
+    /// `/loop`: a prompt Loft sends again every interval until it's stopped.
+    #[serde(default, rename = "loop")]
+    pub repeat: Option<crate::loops::Loop>,
+    /// `/schedule`: prompts Loft sends once, or at each due time of a repeat.
+    #[serde(default)]
+    pub schedules: Vec<crate::schedules::Schedule>,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
     /// Map of MCP server name -> Claude Code MCP server config.

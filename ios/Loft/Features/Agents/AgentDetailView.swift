@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 struct AgentDetailView: View {
@@ -100,7 +101,7 @@ struct AgentDetailView: View {
             if !prs.isEmpty {
                 Section("Pull requests") {
                     ForEach(prs.prefix(5)) { pr in
-                        if let url = URL(string: pr.url) {
+                        if let url = PushDestination.link(pr.url, loftHost: store.api?.baseURL.host()) {
                             Link(destination: url) {
                                 HStack {
                                     Image(systemName: pr.state == "merged" ? "arrow.triangle.merge" : pr.state == "open" ? "arrow.triangle.pull" : "xmark.circle")

@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Publish to GitHub on a Loft-only issue (spec #65): it comes back mirrored, and the list has the link.
 @MainActor

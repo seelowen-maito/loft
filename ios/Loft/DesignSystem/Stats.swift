@@ -1,4 +1,5 @@
 import Charts
+import LoftKit
 import SwiftUI
 
 extension Theme {

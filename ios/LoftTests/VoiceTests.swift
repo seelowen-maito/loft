@@ -2,6 +2,7 @@ import AVFoundation
 import Speech
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class VoiceTextTests: XCTestCase {
     func testEndPhrases() {

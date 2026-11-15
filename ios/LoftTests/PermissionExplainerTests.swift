@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class PermissionExplainerTests: XCTestCase {
     /// 32 requests like the ones agents make (the same set as ios/Evaluations/cases/explain.json).

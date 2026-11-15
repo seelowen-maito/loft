@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The issue page's Delivery card (#340): what it says in each state, which buttons it shows, and that it stays live.
 final class DeliveryCardTests: XCTestCase {

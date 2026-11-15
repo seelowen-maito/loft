@@ -1,4 +1,5 @@
 import AVFoundation
+import LoftKit
 import SwiftUI
 
 /// Chooses the voice that reads agent replies aloud. "Automatic" keeps picking the best installed

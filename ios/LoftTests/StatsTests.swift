@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Payloads captured from a running Loft (`/api/usage`, `/api/agents/summary`).
 final class StatsTests: XCTestCase {

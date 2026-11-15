@@ -72,13 +72,19 @@ There is no shell or command endpoint. The app can only use what's listed above.
 
 ```
 ios/
-  Loft.xcodeproj         Xcode 16+ project (folders sync automatically, no dependencies)
+  Loft.xcodeproj         Xcode 16+ project (folders sync automatically; one local package, LoftKit)
   Config/Info.plist          ATS: local networking only (see Security)
+  LoftKit/               Swift package shared with the Mac app (iOS 17+, macOS 14+)
+    Sources/LoftKit/
+      Store/                 LoftStore (all client state)
+      Core/                  LoftAPI (URLSession), realtime (SSE parser, backoff), errors,
+                             snapshot cache, notifications, push, on-device AI (AI/), the voice
+                             pipeline (Voice/), UI-test fixtures (Debug only)
+      Domain/                Codable models, status mapping, JSON helpers
+      Platform/              The only iOS- or macOS-specific calls: the audio session, VoiceOver,
+                             remote-notification registration
   Loft/
-    App/                     LoftApp (tabs, routing), LoftStore (all client state)
-    Core/                    LoftAPI (URLSession), realtime (SSE parser, backoff), errors,
-                             snapshot cache, notifications, UI-test fixtures (Debug only)
-    Domain/                  Codable models, status mapping, JSON helpers
+    App/                     LoftApp (tabs, routing), AppDelegate
     DesignSystem/            Colors, status badges, cards, empty states
     Features/                Overview, Agents, Tasks, Chat (incl. dictation), Settings
   LoftTests/             Unit tests
@@ -94,7 +100,7 @@ ios/
 
 ## Voice conversations
 
-Long dictation, cleaned up on the Mac, with replies read aloud. The engine is in `Loft/Core/Voice`:
+Long dictation, cleaned up on the Mac, with replies read aloud. The engine is in `LoftKit/Sources/LoftKit/Core/Voice`:
 
 - **`VoiceSession`** listens for as long as you talk.
   - On iOS 26 it uses `SpeechAnalyzer`, which is built for long audio.
@@ -144,8 +150,8 @@ Set the same `LOFT_BUNDLE_ID` (and `LOFT_TEAM_ID`) for the backend to use as pus
 
 ```sh
 cd ios
-xcodebuild -scheme Loft -destination 'generic/platform=iOS Simulator' -derivedDataPath build build
-xcrun simctl install booted build/Debug-iphonesimulator/Loft.app
+xcodebuild -scheme Loft -destination 'generic/platform=iOS Simulator' -derivedDataPath build -IDEBuildLocationStyle=Unique build
+xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/Loft.app
 xcrun simctl launch booted com.example.loft   # or your LOFT_BUNDLE_ID
 ```
 
@@ -188,6 +194,46 @@ not the app). Paste these into App Store Connect:
   **App Functionality**, linked to the user, not used for tracking. Nothing else: the app itself collects no data and
   no name or email is asked for. Push text passes through the relay in transit only and is never stored.
 - *Account deletion:* the only account is on the portal, and it has **Delete my account** (`https://portal.get-loft.com/account/delete`).
+
+**The Mac app**
+
+`LoftMac` is a native macOS 14+ app in the same project, built on LoftKit like the iPhone app. It reaches Loft at `http://localhost:7420` on this Mac, or another Mac's Tailscale address.
+
+It's always signed with your team, even for Debug, because its entitlements need a provisioning profile: so set `LOFT_TEAM_ID` and `LOFT_BUNDLE_ID` (see **Signing**). Its bundle id is `LOFT_BUNDLE_ID` + `.mac`. `Config/LoftMac.entitlements` gives it the App Sandbox (TestFlight requires it), network client, the microphone, read access to images you pick, and the Keychain group `<team>.<LOFT_BUNDLE_ID>.shared` for the desktop widgets.
+
+- *Run from Xcode:* open `ios/Loft.xcodeproj`, pick the **LoftMac** scheme and **My Mac**, then Run. The first build may ask Xcode to register this Mac with your team.
+- *Build from the command line:*
+
+  ```sh
+  cd ios
+  xcodebuild -scheme LoftMac -destination 'platform=macOS' -IDEBuildLocationStyle=Unique -allowProvisioningUpdates build
+  open "$(xcodebuild -scheme LoftMac -destination 'platform=macOS' -IDEBuildLocationStyle=Unique -showBuildSettings | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{print $2}')/Loft.app"
+  ```
+- *First launch:* it asks for the address (this Mac by default), checks Loft answers there and opens the agents.
+- *TestFlight:* the same script with `--mac`. Create the Mac app in App Store Connect once (Apps → + → New App, platform macOS, bundle id `LOFT_BUNDLE_ID.mac`), then:
+
+  ```sh
+  ./testflight.sh --mac              # the LoftMac tests (they drive this Mac's screen), archive, upload
+  ./testflight.sh --mac --fast       # skip the tests
+  ./testflight.sh --mac --no-upload  # archive and export a signed Loft.pkg to ios/build/testflight-mac/export
+  ```
+
+  `-allowProvisioningUpdates` creates the Mac App Store and installer certificates the first time. Testers install it with Apple's TestFlight app for Mac.
+- *Icon:* the ten PNGs in `LoftMac/Assets.xcassets/AppIcon.appiconset`, plus `LoftMac/Loft.icns` built from them, which the app ships as its icon file (`CFBundleIconFile`). Xcode 27 writes an `.icns` from the asset catalog without the 256pt and 512pt images, and App Store Connect rejects the upload without them, so the Mac target doesn't ask it to. When you change the PNGs, rebuild `Loft.icns` from `ios/`:
+
+  ```sh
+  set=$(mktemp -d)/Loft.iconset; mkdir "$set"
+  for pt in 16 32 128 256 512; do
+    cp "LoftMac/Assets.xcassets/AppIcon.appiconset/icon-$pt@1x.png" "$set/icon_${pt}x${pt}.png"
+    cp "LoftMac/Assets.xcassets/AppIcon.appiconset/icon-$pt@2x.png" "$set/icon_${pt}x${pt}@2x.png"
+  done
+  iconutil -c icns "$set" -o LoftMac/Loft.icns
+  ```
+- *Update:* a TestFlight install updates from the TestFlight app (turn on Automatic Updates there). A local build updates by pulling and running it again. The backend updates on its own, so only the app's own changes need a new build.
+
+**Widgets**
+
+Small and medium widgets for the Mac desktop and the iPhone home screen: Needs you (the count and the first items), who is working now, and the Usage week's spend. `LoftWidgets` (iPhone) and `LoftMacWidgets` (Mac) are two thin extensions around `LoftOverviewWidget` in LoftKit, embedded in the apps. A widget has no address field: it reads the Loft address from the Keychain group `<team>.<LOFT_BUNDLE_ID>.shared`, where the apps save it each time they connect. Until then it says "Not connected". A tap opens the app at `loft://needs-you`, `loft://agents` or `loft://agent/<id>`. They refresh about every 15 minutes. Add them from the desktop's or home screen's widget gallery (Edit Widgets); they need `LOFT_TEAM_ID` like the Mac app, since the Keychain group needs a provisioning profile.
 
 **Tests**
 

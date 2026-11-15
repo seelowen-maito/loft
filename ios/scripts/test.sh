@@ -53,7 +53,8 @@ derived="${DERIVED_DATA:-build}"
 sim="${SIMULATOR:-$(xcrun simctl list devices booted | grep -m1 -E 'iPhone' | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/' || true)}"
 if [[ -z "$sim" ]]; then echo "No booted iPhone Simulator; boot one or set SIMULATOR." >&2; exit 1; fi
 [[ "$sim" =~ ^[0-9A-F-]{36}$ ]] && dest="platform=iOS Simulator,id=$sim" || dest="platform=iOS Simulator,name=$sim"
-common=(-project Loft.xcodeproj -scheme Loft -destination "$dest" -derivedDataPath "$derived")
+# LoftKit is a Swift package, which Xcode refuses under legacy build locations (an Xcode setting on this Mac).
+common=(-project Loft.xcodeproj -scheme Loft -destination "$dest" -derivedDataPath "$derived" -IDEBuildLocationStyle=Unique)
 limits=(-parallel-testing-enabled NO -test-timeouts-enabled YES
         -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60)
 # xcodebuild's full output per suite stays here for a look after the run.

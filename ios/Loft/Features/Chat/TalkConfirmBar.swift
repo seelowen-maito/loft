@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// Above the message box while Talk's tidied text waits in it: a Send button whose ring fills for a few seconds, then

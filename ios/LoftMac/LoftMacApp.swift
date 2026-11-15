@@ -1,0 +1,340 @@
+import LoftKit
+import SwiftUI
+
+/// Loft for Mac (spec #382): the same client as the iPhone app, in Mac windows with a sidebar of sections.
+@main
+struct LoftMacApp: App {
+    @State private var store: LoftStore
+    @State private var nav: MacNav
+    @State private var alerts: MacAlerts
+    @State private var voice: VoiceSession
+
+    init() {
+        Prefs.registerDefaults()
+        let store = LoftStore(api: Self.makeAPI())
+        // Live from launch: the menu bar item needs it with the window closed.
+        store.activate()
+        _store = State(initialValue: store)
+        let nav = MacNav()
+        _nav = State(initialValue: nav)
+        _alerts = State(initialValue: MacAlerts(store: store, nav: nav))
+        _voice = State(initialValue: VoiceSession(store: store))
+    }
+
+    private static func makeAPI() -> LoftAPI? {
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("-ui-onboarding") {
+            UserDefaults.standard.removeObject(forKey: Prefs.serverURL)
+            return nil
+        }
+        if args.contains("-ui-testing") {
+            SnapshotStore.standard.clear()
+            return FixtureAPI.fromLaunchArguments()
+        }
+        #endif
+        return UserDefaults.standard.string(forKey: Prefs.serverURL).flatMap(LiveLoftAPI.normalize).map(LiveLoftAPI.init(baseURL:))
+    }
+
+    var body: some Scene {
+        Window("Loft", id: "main") {
+            MacRootView()
+                .tint(Theme.accent)
+                .environment(store)
+                .environment(nav)
+                .environment(voice)
+                .frame(minWidth: 1180, minHeight: 640)
+                .onAppear { store.activate() }
+                // A tap on a widget.
+                .onOpenURL { url in
+                    // The Talk widget or control: Talk with whoever you talked to last. No one yet: the most recent
+                    // Lead, the To: row's first chip. A link they didn't sign (another app, a web page): the agents, mic off.
+                    switch TalkLink.route(url, key: TalkKey.current, lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                          orchestratorId: store.orchestratorId, agents: store.agents) {
+                    case .start(let id): nav.talk(id)
+                    case .pick:
+                        if let id = TalkRecipients.chips(store.agents, current: nil).first?.id { nav.talk(id) } else { nav.open(.talk) }
+                    case .open(let link): nav.open(link)
+                    case nil: break
+                    }
+                }
+                #if DEBUG
+                .task {
+                    let args = ProcessInfo.processInfo.arguments
+                    if let i = args.firstIndex(of: "-render-menubar"), i + 1 < args.count { await renderMenuBar(store: store, nav: nav, to: args[i + 1]) }
+                    if let i = args.firstIndex(of: "-render-window"), i + 1 < args.count { await renderWindow(store: store, nav: nav, to: args[i + 1]) }
+                }
+                #endif
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in store.saveNow() }
+        }
+        // Room for the sidebar, the agents, the chat and the agent's settings side by side.
+        .defaultSize(width: 1400, height: 860)
+        .commands { LoftCommands(nav: nav) }
+
+        MenuBarExtra { MenuBarContent().tint(Theme.accent).environment(store).environment(nav) } label: { MenuBarLabel(alerts: alerts).environment(store) }
+            .menuBarExtraStyle(.window)
+
+        Settings {
+            AddressForm(isOnboarding: false)
+                .tint(Theme.accent)
+                .environment(store)
+                .frame(width: 520)
+                .padding()
+        }
+    }
+}
+
+/// The window's sections, in sidebar order; ⌘1 to ⌘5 open them.
+enum MacSection: Int, CaseIterable, Identifiable {
+    case overview = 1, agents, issues, needsYou, settings
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview: "Overview"
+        case .agents: "Agents"
+        case .issues: "Issues"
+        case .needsYou: "Needs you"
+        case .settings: "Settings"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .overview: "square.grid.2x2"
+        case .agents: "person.3"
+        case .issues: "checklist"
+        case .needsYou: "bell.badge"
+        case .settings: "gearshape"
+        }
+    }
+}
+
+/// Where the window is: the section, the agent whose chat is open, the issue pages open, and the New message picker.
+@MainActor
+@Observable
+final class MacNav {
+    var section: MacSection = .agents
+    var agentId: String?
+    var picksRecipient = false
+    /// The issue pages open in the Issues section, from the board's card on.
+    var issuePath: [String] = []
+
+    /// The Needs you item to scroll to and outline: the Needs you widget's Approve.
+    var needsYouFocus: String?
+    /// The chat to open Talk in, once it shows (the Talk widget or control).
+    var talkIn: String?
+
+    func openChat(_ agentId: String) {
+        section = .agents
+        self.agentId = agentId
+    }
+
+    /// Opens the agent's chat with Talk listening.
+    func talk(_ agentId: String) {
+        openChat(agentId)
+        talkIn = agentId
+    }
+
+    func open(_ link: DeepLink) {
+        switch link {
+        case .needsYou:
+            section = .needsYou
+            needsYouFocus = nil
+        case .needsYouItem(let id):
+            section = .needsYou
+            needsYouFocus = id
+        case .agents, .talk: section = .agents
+        case .overview: section = .overview
+        case .agent(let id): openChat(id)
+        case .issue(let id):
+            section = .issues
+            issuePath = [id]
+        }
+    }
+}
+
+struct LoftCommands: Commands {
+    let nav: MacNav
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Message…") { show { nav.picksRecipient = true } }
+                .keyboardShortcut("n")
+        }
+        CommandMenu("Go") {
+            ForEach(MacSection.allCases) { s in
+                Button(s.title) { show { nav.section = s } }
+                    .keyboardShortcut(KeyEquivalent(Character(String(s.rawValue))))
+            }
+            Divider()
+            Button("Back") { nav.issuePath.removeLast() }
+                .keyboardShortcut("[")
+                .disabled(nav.section != .issues || nav.issuePath.isEmpty)
+        }
+    }
+
+    /// Goes there in the main window, opening or raising it: with only the menu bar item left, a shortcut still shows
+    /// where it went.
+    private func show(_ go: () -> Void) {
+        go()
+        openWindow(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// First the address, then the window's sections. Loft unreachable with nothing loaded yet says so.
+struct MacRootView: View {
+    @Environment(LoftStore.self) private var store
+
+    var body: some View {
+        if store.connection == .notConfigured {
+            AddressForm(isOnboarding: true)
+                .frame(maxWidth: 520)
+                .padding(32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if store.lastSync == nil, case .reconnecting(_, let error) = store.connection {
+            UnreachableScreen(error: error)
+        } else {
+            MainWindow()
+        }
+    }
+}
+
+/// Loft didn't answer at the saved address and nothing is cached: why, and what to try.
+struct UnreachableScreen: View {
+    @Environment(LoftStore.self) private var store
+    let error: APIError
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "bolt.horizontal.circle").font(.system(size: 44)).foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text("Can't reach Loft").font(.title2.bold()).accessibilityIdentifier("unreachableTitle")
+            Text("Nothing answered at \(store.api?.baseURL.absoluteString ?? "the saved address"). Check that Loft is running on that Mac, or change the address.")
+                .multilineTextAlignment(.center).foregroundStyle(.secondary)
+            Text(error.title).font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            HStack {
+                Button("Try again") { store.reconnect() }.keyboardShortcut(.defaultAction)
+                Button("Change address…") { store.forgetServer() }
+            }
+        }
+        .frame(maxWidth: 460)
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct MainWindow: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(MacNav.self) private var nav
+
+    var body: some View {
+        @Bindable var nav = nav
+        NavigationSplitView {
+            List(selection: Binding(get: { nav.section }, set: { if let s = $0 { nav.section = s } })) {
+                ForEach(MacSection.allCases) { s in
+                    Label(s.title, systemImage: s.symbol).tag(s).accessibilityIdentifier("section-\(s.title)")
+                        .badge(s == .needsYou ? store.needsYou?.count ?? 0 : 0)
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 160, ideal: 180)
+            .safeAreaInset(edge: .bottom) {
+                Label {
+                    Text(store.connection.label).foregroundStyle(.secondary)
+                } icon: {
+                    Image(systemName: store.connection.isUsable ? "circle.fill" : "circle.dotted")
+                        .foregroundStyle(store.connection.color)
+                }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .accessibilityIdentifier("connectionLabel")
+            }
+        } detail: {
+            switch nav.section {
+            case .overview: OverviewSection()
+            case .agents: AgentsSection()
+            case .issues: IssuesSection()
+            case .needsYou: NeedsYouScreen()
+            case .settings: SettingsSection()
+            }
+        }
+        .sheet(isPresented: $nav.picksRecipient) { RecipientPicker() }
+    }
+}
+
+/// ⌘N: pick an agent and its chat opens.
+struct RecipientPicker: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(MacNav.self) private var nav
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+
+    private var agents: [Agent] {
+        store.sortedAgents.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("New message").font(.headline)
+            TextField("Search agents", text: $search)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("recipientSearch")
+                .onSubmit { if let a = agents.first { pick(a) } }
+            List(agents) { a in
+                Button { pick(a) } label: { AgentRow(agent: a).contentShape(Rectangle()) }
+                    .buttonStyle(.plain)
+            }
+            .frame(height: 280)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding()
+        .frame(width: 360)
+    }
+
+    private func pick(_ a: Agent) {
+        nav.openChat(a.id)
+        dismiss()
+    }
+}
+
+#if DEBUG
+/// `-render-window <folder>`: draws the main window to PNGs (the address step, or a chat, Issues, Overview and Needs you), then quits.
+/// For screenshots when a UI test can't drive the app (another copy of it is open, and XCUITest picks that one).
+@MainActor
+func renderWindow(store: LoftStore, nav: MacNav, to folder: String) async {
+    // `-render-appearance light|dark`: the system's own setting otherwise.
+    let args = ProcessInfo.processInfo.arguments
+    if let i = args.firstIndex(of: "-render-appearance"), i + 1 < args.count {
+        NSApp.appearance = NSAppearance(named: args[i + 1] == "dark" ? .darkAqua : .aqua)
+    }
+    for _ in 0..<80 where store.agents.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+    try? await Task.sleep(for: .seconds(1))
+    func png(_ name: String) {
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 600 }),
+              let view = window.contentView?.superview ?? window.contentView,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
+    }
+    if store.agents.isEmpty {
+        png("connect")
+    } else {
+        if let id = store.agents.first(where: { $0.name == "Orchestrator" })?.id { nav.openChat(id) }
+        try? await Task.sleep(for: .seconds(2))
+        png("agents")
+        for section in [MacSection.issues, .overview, .needsYou] {
+            nav.section = section
+            try? await Task.sleep(for: .seconds(2))
+            png("\(section)")
+        }
+    }
+    NSApp.terminate(nil)
+}
+#endif

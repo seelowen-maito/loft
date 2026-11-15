@@ -3,6 +3,7 @@ mod apns;
 mod api;
 mod avatar;
 mod backup;
+mod commands;
 mod db;
 mod delivery;
 mod file_search;
@@ -18,6 +19,10 @@ mod ports;
 mod guard;
 mod herdr;
 mod kill_guard;
+mod chat_commands;
+mod login;
+mod loops;
+mod schedules;
 mod mac_access;
 mod mcp;
 mod mentions;
@@ -73,8 +78,11 @@ fn api_routes() -> Router<AppState> {
         .route("/info", get(api::info))
         .route("/update", get(api::update_status))
         .route("/usage", get(api::usage))
+        .route("/claude/login", get(login::get))
+        .route("/claude/login/terminal", post(login::open_terminal))
         .route("/system", get(system::get))
         .route("/system/mac-access", post(mac_access::check))
+        .route("/system/https", get(tailnet::https))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/backups", get(backup::get).post(backup::now))
         .route("/restart", post(api::restart))
@@ -108,9 +116,14 @@ fn api_routes() -> Router<AppState> {
         .route("/agents/{id}/run", post(api::run_now))
         .route("/agents/{id}/stop", post(api::stop_agent))
         .route("/agents/{id}/read", post(api::mark_read))
+        .route("/agents/{id}/commands", get(commands::list))
         .route("/agents/{id}/restart", post(api::restart_agent))
         .route("/agents/{id}/reset-session", post(api::reset_session))
         .route("/agents/{id}/compact", post(api::compact_session))
+        .route("/agents/{id}/loop", post(loops::start).delete(loops::stop))
+        .route("/agents/{id}/command", post(chat_commands::run))
+        .route("/agents/{id}/schedules", post(schedules::add))
+        .route("/agents/{id}/schedules/{sid}", axum::routing::delete(schedules::cancel))
         .route("/agents/{id}/sessions", get(api::list_sessions))
         .route("/agents/{id}/resume-session", post(api::resume_session))
         .route("/agents/{id}/avatar/redraw", post(api::redraw_avatar))
@@ -138,6 +151,7 @@ fn api_routes() -> Router<AppState> {
         .route("/needs-you/{id}/dismiss", post(needs_you::dismiss_item))
         .route("/voice/clean", post(voice::clean))
         .route("/voice/brief", post(voice::brief))
+        .route("/voice/transcribe", post(voice::transcribe))
         .route("/devices", get(devices::list).post(devices::register))
         .route("/devices/{token}", axum::routing::patch(devices::update).delete(devices::remove))
         .route("/devices/{token}/test", post(devices::test))
@@ -236,6 +250,7 @@ async fn serve() -> anyhow::Result<()> {
     // Before any run starts: the runs Deliveries were waiting on were lost with the last process.
     delivery::stall_lost_runs(&state);
     tokio::spawn(agents::scheduler(state.clone()));
+    tokio::spawn(loops::scheduler(state.clone()));
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));
     tokio::spawn(prs::backfill(state.clone()));
@@ -248,6 +263,8 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(agents::quiet_watcher(state.clone()));
     tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
     tokio::spawn(mac_access::watcher(state.clone()));
+    let port = state.cfg.port;
+    tokio::task::spawn_blocking(move || tailnet::check_https(port));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(delivery::ci_poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));

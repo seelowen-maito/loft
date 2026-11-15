@@ -56,7 +56,9 @@ pub fn hook() -> ! {
         eprintln!("{why}");
         std::process::exit(2);
     }
-    let changes = outside_changes(&input);
+    // Loft gives every run a GIT_CEILING_DIRECTORIES (agents.rs), which claude passes on to this hook and the command.
+    let ceiling: Vec<PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES").map(|v| std::env::split_paths(&v).collect()).unwrap_or_default();
+    let changes = outside_changes(&input, &ceiling);
     if let (false, Ok(url)) = (changes.is_empty(), std::env::var(URL_VAR)) {
         let body = json!({ "changes": changes });
         if let Ok(v) = crate::processes::post(&url, &body.to_string())
@@ -76,12 +78,12 @@ pub fn hooks(exe: &std::path::Path) -> Value {
     json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }] })
 }
 
-/// The changes a hook input's command makes to checkouts outside `agent-local-storage`.
-fn outside_changes(input: &str) -> Vec<Change> {
+/// The changes a hook input's command makes to checkouts outside `agent-local-storage`, run under the git `ceiling`.
+fn outside_changes(input: &str, ceiling: &[PathBuf]) -> Vec<Change> {
     let Ok(v) = serde_json::from_str::<Value>(input) else { return vec![] };
     let Some(command) = v["tool_input"]["command"].as_str() else { return vec![] };
     let Some(cwd) = v["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::current_dir().ok()) else { return vec![] };
-    checkout_changes(command, &cwd).into_iter().filter(|c| !in_agent_storage(&c.folder)).collect()
+    checkout_changes(command, &cwd, ceiling).into_iter().filter(|c| !in_agent_storage(&c.folder)).collect()
 }
 
 fn check(input: &str) -> Result<(), &'static str> {
@@ -122,6 +124,8 @@ struct Dirs {
     cwd: Option<PathBuf>,
     old: Option<PathBuf>,
     stack: Vec<Option<PathBuf>>,
+    /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
+    ceiling: Vec<PathBuf>,
 }
 
 impl Dirs {
@@ -136,12 +140,15 @@ impl Dirs {
     }
 }
 
-/// Every change `command`, run in `cwd`, makes to a checkout (see the module docs), each folder once. A folder the
-/// guard can't tell (`cd "$dir"`) lets the commands after it run.
-pub fn checkout_changes(command: &str, cwd: &Path) -> Vec<Change> {
+/// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
+/// (see the module docs), each folder once. A folder the guard can't tell (`cd "$dir"`) lets the commands after it run.
+/// The ceiling counts only for a command that is plain git (`plain_git`); any other can move it, so it has none.
+pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<Change> {
     let mut found = vec![];
     let start = Some(cwd.to_path_buf());
-    changes(command, &mut Dirs { start: start.clone(), cwd: start, ..Default::default() }, 0, &mut found);
+    let ceiling: Vec<PathBuf> = ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect();
+    let ceiling = if plain_git(command, cwd, &ceiling) { ceiling } else { vec![] };
+    changes(command, &mut Dirs { start: start.clone(), cwd: start, ceiling, ..Default::default() }, 0, &mut found);
     let mut out: Vec<Change> = vec![];
     for c in found {
         // A symlink into a user's checkout counts as that checkout.
@@ -266,6 +273,57 @@ fn flags<'a>(args: &'a [String], options: &[&str]) -> (Option<&'a str>, Option<&
     (value, sub)
 }
 
+/// Git's own subcommands. Anything else may be an alias, which can run any shell command (`!…`).
+const GIT_BUILTINS: &[&str] = &[
+    "add", "am", "apply", "blame", "branch", "checkout", "cherry-pick", "clean", "clone", "commit", "config", "describe",
+    "diff", "fetch", "grep", "init", "log", "ls-files", "merge", "mv", "pull", "push", "rebase", "remote", "reset", "restore",
+    "revert", "rev-parse", "rm", "show", "stash", "status", "submodule", "switch", "tag", "worktree",
+];
+
+/// Git's global options that take no value and don't change where git looks or what it runs.
+const GIT_PLAIN_OPTIONS: &[&str] = &["-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--no-optional-locks", "--literal-pathspecs", "--no-advice"];
+
+/// Whether `command` is plain git, so it runs with the run's GIT_CEILING_DIRECTORIES: only `git <subcommand> <args>`,
+/// one or more joined by `&&` or `;`, each run directly (`plain_shell`), with only the global options git can't be
+/// moved by and a built-in subcommand (`plain_git_args`). Anything else may move the ceiling, so the guard walks up.
+fn plain_git(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> bool {
+    let cmds = if plain_shell(command) { parse(command) } else { vec![] };
+    !cmds.is_empty()
+        && cmds.iter().all(|c| match c.words.split_first() {
+            Some((git, args)) if git == "git" => plain_git_args(args, cwd, ceiling),
+            _ => false,
+        })
+}
+
+/// Whether `command` has no shell feature but quotes, `;` and `&&`: no wrapper syntax, pipe, redirection, subshell,
+/// expansion, glob, history, comment, background job or second line.
+fn plain_shell(command: &str) -> bool {
+    !command.contains(['$', '`', '\\', '|', '<', '>', '(', ')', '{', '}', '*', '?', '[', ']', '~', '#', '!', '\n']) && !command.replace("&&", "").contains('&')
+}
+
+/// Whether git's `args` are global options from `GIT_PLAIN_OPTIONS` or a `-C` inside a `ceiling` folder, then a
+/// built-in subcommand. Any other option before the subcommand may take a value (`--namespace x`) or move git.
+fn plain_git_args(args: &[String], cwd: &Path, ceiling: &[PathBuf]) -> bool {
+    let mut it = args.iter().map(String::as_str);
+    loop {
+        match it.next() {
+            Some("-C") => {
+                if !it.next().is_some_and(|d| inside_ceiling(d, cwd, ceiling)) {
+                    return false;
+                }
+            }
+            Some(o) if GIT_PLAIN_OPTIONS.contains(&o) => {}
+            Some(sub) => return GIT_BUILTINS.contains(&sub),
+            None => return false,
+        }
+    }
+}
+
+/// Whether `dir`, from `cwd` with symlinks followed, is in one of the `ceiling` folders.
+fn inside_ceiling(dir: &str, cwd: &Path, ceiling: &[PathBuf]) -> bool {
+    resolve(cwd, dir).map(real).is_some_and(|d| ceiling.iter().any(|c| d.starts_with(c)))
+}
+
 /// The folders a git command changes, past its global options: its work tree (`--work-tree`, `GIT_WORK_TREE`) and
 /// the checkout its repository is in (`--git-dir`, `GIT_DIR`), each by default the repository git finds from the
 /// folder (`-C`): the nearest one up, which for an agent's workspace that isn't a clone is the user's checkout around
@@ -328,7 +386,7 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
         let target = target.map_or(dirs.cwd.clone(), |t| dirs.at(t));
         return [target, git_dir.and_then(|d| dirs.at(d))].into_iter().flatten().collect();
     }
-    let found = dirs.cwd.map(repo_root);
+    let found = dirs.cwd.map(|d| repo_root(d, &dirs.ceiling));
     // The checkout a `.git` folder belongs to.
     let repo = git_dir.unwrap_or(found.clone()).map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
     [tree.unwrap_or(found), repo].into_iter().flatten().collect()
@@ -358,10 +416,12 @@ fn real_at(path: PathBuf, links: usize) -> PathBuf {
 }
 
 /// The checkout git works on from `folder`: the nearest folder up holding a `.git`, or `folder` when none does.
-/// Symlinks are followed first, as git does.
-fn repo_root(folder: PathBuf) -> PathBuf {
+/// Symlinks are followed first, as git does. From below a `ceiling` folder, git doesn't look in it or above.
+fn repo_root(folder: PathBuf, ceiling: &[PathBuf]) -> PathBuf {
     let folder = real(folder);
-    folder.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
+    let below = |d: &Path| ceiling.iter().any(|c| d != c && d.starts_with(c));
+    let stop = ceiling.iter().any(|c| folder != *c && folder.starts_with(c));
+    folder.ancestors().take_while(|d| !stop || below(d)).find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
 }
 
 /// Whether a git subcommand, with its arguments, only reads.
@@ -1410,7 +1470,7 @@ mod tests {
     /// The folders the hook would ask Loft about, for `cmd` run in `cwd`.
     fn asks_all(cmd: &str, cwd: &str) -> Vec<PathBuf> {
         let input = json!({ "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": cmd } }).to_string();
-        outside_changes(&input).into_iter().map(|c| c.folder).collect()
+        outside_changes(&input, &[]).into_iter().map(|c| c.folder).collect()
     }
 
     /// The one folder the hook would ask Loft about.
@@ -1482,7 +1542,7 @@ mod tests {
             assert_eq!(asks(cmd, cwd), None, "should run: {cmd} (in {cwd})");
         }
         assert!(asks("git pull", USER).is_some());
-        assert!(outside_changes("not json").is_empty());
+        assert!(outside_changes("not json", &[]).is_empty());
     }
 
     #[test]
@@ -1654,6 +1714,106 @@ mod tests {
         assert_eq!(asks("git reset --hard", &at(&clone.join("backend"))), None);
         // A work tree given from the workspace: git still finds the user's repository from the folder.
         assert_eq!(asks(&format!("git --work-tree={} checkout .", at(&clone)), &at(&ws)), Some(project.clone()));
+        std::fs::remove_dir_all(project.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn git_stops_at_the_storage_folder_unless_the_command_moves_the_ceiling_or_the_repository() {
+        let project = std::env::temp_dir().join(format!("loft-guard-{}", uuid::Uuid::new_v4())).join("loft");
+        let storage = project.join("agent-local-storage");
+        let ws = storage.join("x");
+        for d in [project.join(".git"), ws.join("notes"), ws.join("loft/.git")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let project = std::fs::canonicalize(&project).unwrap();
+        let at = |p: &Path| p.display().to_string();
+        let asks_under = |cmd: &str, cwd: &Path, ceiling: &[PathBuf]| {
+            let input = json!({ "tool_name": "Bash", "cwd": at(cwd), "tool_input": { "command": cmd } }).to_string();
+            outside_changes(&input, ceiling).into_iter().map(|c| c.folder).collect::<Vec<_>>()
+        };
+        let ceiling = [storage.clone()];
+        // Git fails there, as Loft's ceiling stops it: nothing to ask the user.
+        for cwd in [&ws, &ws.join("notes")] {
+            for cmd in ["git checkout main", "git reset --hard origin/main", "git stash", "git -C notes checkout main"] {
+                assert_eq!(asks_under(cmd, cwd, &ceiling), Vec::<PathBuf>::new(), "should run: {cmd} (in {})", cwd.display());
+            }
+        }
+        for cmd in ["git checkout main && git stash", "git status; git reset --hard origin/main", "git -C notes checkout main && git -C notes stash", "git commit -m 'a message'", "git --no-pager -C notes checkout main"] {
+            assert_eq!(asks_under(cmd, &ws, &ceiling), Vec::<PathBuf>::new(), "should run: {cmd}");
+        }
+        assert_eq!(asks_under("git checkout main", &ws.join("loft"), &ceiling), Vec::<PathBuf>::new());
+        // The ceiling unset or changed, or a repository named: git can reach the user's checkout, so the user is asked.
+        for cmd in [
+            "GIT_CEILING_DIRECTORIES= git checkout main",
+            // Wrappers and other shells that drop the ceiling before git runs.
+            "env -i bash -c 'git checkout main'",
+            "sudo sh -c 'git checkout main'",
+            "env -u GIT_CEILING_DIRECTORIES sh -c 'git stash'",
+            "exec -c git checkout main",
+            "env -i watch 'git checkout main'",
+            "env -i eval 'git checkout main'",
+            "env -i script -c 'git checkout main'",
+            "bash <<EOF\nunset GIT_CEILING_DIRECTORIES\ngit checkout main\nEOF",
+            "echo 'unset GIT_CEILING_DIRECTORIES; git checkout main' | sh",
+            // Names hidden by quoting, globs or expansion.
+            "unset GIT_CEILING_DIRECT\"\"ORIES; git checkout main",
+            "un''set GIT_CEILING_DIRECTORIES; git checkout main",
+            "unset -m 'GIT_CEIL*'; git checkout main",
+            "unset ${!GIT_CEIL*}; git checkout main",
+            "v=GIT_CEILING; unset ${v}_DIRECTORIES; git checkout main",
+            "export GIT_D\"\"IR=../../.git; git checkout main",
+            "G\"\"IT_DIR=../../.git git checkout main",
+            "read GIT_CEILING_DIRECT''ORIES <<< ''; git checkout main",
+            "for GIT_CEILING_DIRECTORIES in ''; do git checkout main; done",
+            "let GIT_CEILING_DIRECTORIES=0; git checkout main",
+            "x=GIT_CEILING_DIRECTORIES; (( x = 0 )); git checkout main",
+            "sh -c 'un\"\"set GIT_CEILING_DIRECTORIES; git checkout main'",
+            "trap 'unset GIT_CEILING_DIRECTORIES' DEBUG; git checkout main",
+            "alias git='env -i git'; git checkout main",
+            "source ./unceil.sh; git checkout main",
+            "unset GIT_CEILING_DIRECTORIES; git checkout main",
+            "export GIT_CEILING_DIRECTORIES=/tmp && git stash",
+            "env -u GIT_CEILING_DIRECTORIES git checkout main",
+            "env -i git checkout main",
+            "sudo git checkout main",
+            "export GIT_DIR=../../.git; git checkout main",
+            "git --git-dir ../../.git checkout main",
+            "git -C ../.. checkout main",
+            "cd ../.. && git checkout main",
+            // Words joined into shell text, where the inner quotes go only when that shell runs it.
+            "echo 'un\"\"set' 'G\"\"IT_CEILING_DIRECTORIES' ';' git checkout main | sh",
+            "echo 'e\"\"nv' -i git checkout main | sh",
+            "watch -n 99 'un\"\"set' 'G\"\"IT_CEILING_DIRECTORIES' ';' git checkout main",
+            "parallel 'un\"\"set' 'G\"\"IT_CEILING_DIRECTORIES' ';' git checkout main ::: 1",
+            // Config or an alias that runs a shell, outside any repository.
+            "git -c alias.x='!git -C ../.. checkout main' x",
+            "git -c alias.x='!cd ../.. && git checkout main' x",
+            "git --config-env=alias.x=X x",
+            "git --exec-path=/tmp/bin checkout main",
+            "git x",
+            // An option before the subcommand that takes a value: git runs the alias `x`, not `checkout`.
+            "git --namespace checkout x",
+            "git --attr-source checkout x",
+            "git --bare checkout main",
+            "git --unknown-option checkout main",
+            // A startup file the shell reads before the command.
+            "BASH_ENV=f bash -c 'git checkout main'",
+            "ZDOTDIR=. zsh -c 'git checkout main'",
+            "bash --rcfile f -c 'git checkout main'",
+            "bash --init-file f -i -c 'git checkout main'",
+            "HOME=. git checkout main",
+            "PATH=. git checkout main",
+            // A -C out of the storage folder, and anything run in the background or another shell.
+            "git -C /tmp checkout main; git checkout main",
+            "git checkout main & git checkout main",
+            "git checkout main\ngit checkout main",
+            "xargs git checkout <<< main",
+            "(git checkout main)",
+        ] {
+            assert!(asks_under(cmd, &ws, &ceiling).contains(&project), "should ask: {cmd}");
+        }
+        // Git ignores a relative ceiling, and so does the guard.
+        assert_eq!(asks_under("git checkout main", &ws, &[PathBuf::from("agent-local-storage")]), vec![project.clone()]);
         std::fs::remove_dir_all(project.parent().unwrap()).unwrap();
     }
 

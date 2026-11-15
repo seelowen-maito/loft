@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The stage rules mirror the web's `specViews.ts` tests.
 final class SpecViewsTests: XCTestCase {
@@ -124,6 +125,27 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertEqual(d.tickets.map(\.agentName), ["Dev 1", "Dev 2", nil])
         XCTAssertEqual(d.waitingForLead, [3])
         XCTAssertEqual(SpecViews.tickets(of: spec(), d, tasks: []).map(\.current), [true, true, false], "every running ticket is current")
+    }
+
+    /// The board's Issues column (the web's `boardIssues`): no specs, no spec's tickets, closed ones only when asked.
+    func testBoardIssuesLeaveOutSpecsAndTheirTicketsAndClosedOnes() {
+        func issue(_ id: String, _ status: String = "ready", number: Int? = nil, parent: String? = nil, description: String = "", minutes: Double = 0) -> HBTask {
+            var t = HBTask(id: id, title: id, description: description, kind: "work", status: status, priority: "normal", project: "loft", agentId: nil,
+                           parentId: parent, dependsOn: [], dueAt: nil, createdBy: "user", note: "", summary: "", error: "",
+                           createdAt: Date(), updatedAt: Date().addingTimeInterval(-minutes * 60))
+            if let number { t.github = .init(repo: "o/r", number: number, url: "", state: "open") }
+            return t
+        }
+        var s = spec(id: "spec")
+        s.labels = ["Spec"]
+        var d = delivery("running")
+        d.tickets = [.init(number: 9, title: "In a Delivery", state: "open")]
+        let tasks = [s, issue("old", minutes: 10), issue("new"), issue("done", "done"), issue("child", parent: "spec"),
+                     issue("templated", description: "## Parent\n\n#7"), issue("ticket", number: 9)]
+        XCTAssertEqual(SpecViews.boardIssues(tasks, [d], showClosed: false).map(\.id), ["new", "old"])
+        XCTAssertEqual(SpecViews.boardIssues(tasks, [d], showClosed: true).map(\.id), ["new", "old", "done"], "closed ones last")
+        XCTAssertEqual(SpecViews.specs(tasks, in: .delivery, SpecViews.index([d])).map(\.id), ["spec"])
+        XCTAssertTrue(SpecViews.specs(tasks, in: .planned, SpecViews.index([d])).isEmpty)
     }
 
     /// #434: the summary's tickets carry what they wait on in another spec, and the spec's detail labels them.

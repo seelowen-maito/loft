@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class DigestTests: XCTestCase {
     private let now = Date()

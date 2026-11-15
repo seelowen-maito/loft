@@ -1,61 +1,13 @@
+import LoftKit
 import SwiftUI
 
-enum Theme {
-    /// The web's green: lime on dark, a deeper green on light, where lime is too faint on white.
-    static let accent = Color.accentColor
-    /// Text and icons on an accent fill: near-black on the lime, white on the deeper green.
-    static let onAccent = ink(light: .white, dark: Color(red: 0.03, green: 0.04, blue: 0.04))
-    static let working = Color(red: 0.30, green: 0.82, blue: 0.52)
-    static let attention = Color(red: 1.00, green: 0.72, blue: 0.25)
-    static let failure = Color(red: 1.00, green: 0.42, blue: 0.40)
-    /// Text in those colours on a pale tint of themselves (risk labels): the same in dark mode, darker in light
-    /// mode, where the bright amber and red read faintly on white (about 5:1 instead of 1.6:1 and 2.5:1).
-    static let attentionInk = ink(light: UIColor(red: 0.60, green: 0.36, blue: 0.00, alpha: 1), dark: attention)
-    static let failureInk = ink(light: UIColor(red: 0.76, green: 0.18, blue: 0.16, alpha: 1), dark: failure)
-    static let neutral = Color.secondary
+/// The iPhone's layout values and grouped backgrounds, beside LoftKit's shared palette.
+extension Theme {
     static let card = Color(uiColor: .secondarySystemGroupedBackground)
     static let background = Color(uiColor: .systemGroupedBackground)
 
     static let radius: CGFloat = 14
     static let gutter: CGFloat = 16
-
-    private static func ink(light: UIColor, dark: Color) -> Color {
-        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(dark) : light })
-    }
-}
-
-extension AgentState {
-    var color: Color {
-        switch self {
-        case .working: Theme.working
-        case .waitingApproval: Theme.attention
-        case .failed: Theme.failure
-        case .idle, .unknown: Theme.neutral
-        }
-    }
-}
-
-extension TaskState {
-    var color: Color {
-        switch self {
-        case .inProgress: Theme.working
-        case .blocked, .waitingApproval: Theme.attention
-        case .failed: Theme.failure
-        case .done: Theme.accent
-        case .inbox, .ready, .cancelled, .unknown: Theme.neutral
-        }
-    }
-}
-
-extension ConnectionState {
-    var color: Color {
-        switch self {
-        case .connected: Theme.working
-        case .polling, .connecting: Theme.attention
-        case .reconnecting(let attempt, _): attempt <= 1 ? Theme.attention : Theme.failure
-        case .notConfigured: Theme.neutral
-        }
-    }
 }
 
 /// Icon + text status, so state never depends on color alone.
@@ -405,15 +357,4 @@ extension Binding {
     func onChange(_ action: @escaping () -> Void) -> Binding<Value> {
         Binding(get: { wrappedValue }, set: { wrappedValue = $0; action() })
     }
-}
-
-/// The filled accent button (`.borderedProminent`) with a label that stays readable on the lime.
-struct AccentButtonStyle: PrimitiveButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        Button(configuration).buttonStyle(.borderedProminent).foregroundStyle(Theme.onAccent)
-    }
-}
-
-extension PrimitiveButtonStyle where Self == AccentButtonStyle {
-    static var accent: AccentButtonStyle { AccentButtonStyle() }
 }

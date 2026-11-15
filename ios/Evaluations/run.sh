@@ -7,8 +7,8 @@
 set -e
 cd "$(dirname "$0")"
 out="${TMPDIR:-/tmp}/loft-evaluations"
-app=../Loft
-swiftc -O -parse-as-library -o "$out" main.swift Pipelines.swift $app/Core/AI/OnDeviceJobs.swift $app/Core/AI/PermissionExplainer.swift $app/Core/AI/GrillUnderstanding.swift \
-    $app/Core/Voice/GrillMatcher.swift $app/Core/Voice/VoiceText.swift $app/Domain/*.swift
+kit=../LoftKit/Sources/LoftKit
+swiftc -O -parse-as-library -o "$out" main.swift Pipelines.swift $kit/Core/AI/OnDeviceJobs.swift $kit/Core/AI/PermissionExplainer.swift $kit/Core/AI/GrillUnderstanding.swift \
+    $kit/Core/Voice/GrillMatcher.swift $kit/Core/Voice/VoiceText.swift $kit/Domain/*.swift
 if [ $# -eq 0 ]; then set -- cases/*.json $(ls local/cases/*.json 2>/dev/null); fi
 "$out" "$@"

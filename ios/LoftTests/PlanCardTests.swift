@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class PlanCardTests: XCTestCase {
     /// The backend's shape (backend/src/tasks.rs plan_view).

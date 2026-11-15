@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 // "Grill me" interviews render inline in the normal chat: each round the agent posts is a card in the
@@ -703,8 +704,10 @@ private struct EndCardSpecView: View {
             // A plan kept in Loft: its issues open here, in Tasks.
             if let id = i.loftTaskId {
                 Button { router.open(.task(taskId: id)) } label: { label }.buttonStyle(.borderless)
+            } else if let url = PushDestination.link(i.url.absoluteString, loftHost: store.api?.baseURL.host()) {
+                Link(destination: url) { label }
             } else {
-                Link(destination: i.url) { label }
+                label
             }
         }
     }

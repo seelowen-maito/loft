@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 struct AgentsListView: View {
@@ -14,17 +15,7 @@ struct AgentsListView: View {
         }
     }
 
-    /// Leads first, then one section per group (alphabetical), then "No group"; each keeps the order it's given.
-    static func sections(_ agents: [Agent]) -> [AgentSection] {
-        let leads = agents.filter(\.isLead)
-        let byGroup = Dictionary(grouping: agents.filter { !$0.isLead }, by: \.team)
-        let groups = byGroup.keys.filter { !$0.isEmpty }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        var out: [AgentSection] = []
-        if !leads.isEmpty { out.append(AgentSection(id: "leads", title: "Leads", agents: leads)) }
-        out += groups.map { AgentSection(id: "group:" + $0, title: $0, agents: byGroup[$0]!) }
-        if let none = byGroup[""] { out.append(AgentSection(id: "none", title: "No group", agents: none)) }
-        return out
-    }
+    static func sections(_ agents: [Agent]) -> [AgentSection] { AgentSection.sections(agents) }
 
     var body: some View {
         List {
@@ -75,12 +66,6 @@ struct AgentsListView: View {
         }
         .createMenu()
     }
-}
-
-struct AgentSection: Identifiable {
-    let id: String
-    let title: String
-    let agents: [Agent]
 }
 
 struct AgentRow: View {

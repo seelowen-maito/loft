@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class StatusTests: XCTestCase {
     private func agent(_ status: String, running: Bool?) -> Agent {

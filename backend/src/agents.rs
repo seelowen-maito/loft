@@ -500,6 +500,7 @@ You are **{name}** ({role}), an autonomous agent living inside Loft — the user
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review while that clone exists; if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first and carry on. Never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
+- Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first.
 - Before each new branch, `git fetch origin` and create it from the remote: `git switch -c <branch> origin/<base>`, where `<base>` is the branch named in the ticket's `## Branch` section, or otherwise the default branch (`origin/HEAD`, whether it's `main` or `master`). Before each build or review round, `git fetch origin` and `git pull --ff-only` on your branch. Never build a ticket on a local default branch you haven't fetched.
 - Before you submit a ticket, mark a PR ready or start a review round, `git fetch origin` and `git merge origin/<base>` into your branch (merge, not rebase, so nobody force-pushes), resolve any conflicts, re-run the tests, then push. Loft refuses a submission whose branch is behind its base.
 - If your clone's `origin` isn't the project's GitHub remote (`git remote get-url origin`), `git remote set-url origin <the project's GitHub URL>` before fetching.
@@ -608,7 +609,7 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
         }
     });
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
-    let for_user = matches!(trigger, "schedule" | "manual") || (text.is_some() && meta["from_agent"].is_null());
+    let for_user = matches!(trigger, "schedule" | "manual" | "scheduled") || (text.is_some() && meta["from_agent"].is_null());
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
     start(state, agent_id, prompt, trigger, for_user);
     msg
@@ -1101,7 +1102,7 @@ fn agent_file(state: &AppState, agent_id: &str, kind: &str) -> PathBuf {
 }
 
 pub(crate) const AGENT_FILES: &str = ".agent-files";
-const AGENT_FILE_KINDS: [&str; 4] = ["md", "mcp.json", "settings.json", "env.sh"];
+const AGENT_FILE_KINDS: [&str; 5] = ["md", "mcp.json", "settings.json", "env.sh", "commands.json"];
 /// Where the agents' files were kept before they held more than the prompt.
 const OLD_AGENT_FILES: &str = ".system-prompts";
 
@@ -1182,6 +1183,10 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         "hooks": crate::kill_guard::hooks(&exe),
     });
 
+    crate::commands::unlink_user_commands(&workspace(state, &a.id), &crate::sessions::claude_dir());
+    // Read from the workspace by a relative path, like the agent's files, so no user folder is on argv.
+    let user_plugin = crate::commands::sync_user_plugin(&state.cfg.storage_dir.join(AGENT_FILES), &crate::sessions::claude_dir())
+        .map(|p| PathBuf::from("..").join(AGENT_FILES).join(p.file_name().unwrap()));
     let ports = crate::ports::range(state, &a.id)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     cmd.current_dir(workspace(state, &a.id))
@@ -1193,12 +1198,15 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .arg("--mcp-config")
         .arg(write_agent_file(state, &a.id, "mcp.json", &mcp_config)?)
         .arg("--strict-mcp-config")
-        // Isolate agents from the user's own Claude Code settings, hooks and plugins.
+        // Agents read no settings file: not the user's, and not the workspace's, which the agent can write
+        // (an allow rule or a hook there would skip the approval prompt). The user's own commands and skills
+        // come as a plugin Loft owns (see `commands`).
         .args(["--setting-sources", ""])
         .arg("--settings")
         .arg(write_agent_file(state, &a.id, "settings.json", &settings.to_string())?)
         .args(["--permission-prompt-tool", "mcp__loft__approval_prompt"])
         .args(["--permission-mode", &a.permission_mode])
+        .args(user_plugin.iter().flat_map(|p| [std::ffi::OsStr::new("--plugin-dir"), p.as_os_str()]))
         .args(["--name", &a.name])
         .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
         // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
@@ -1212,6 +1220,9 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
         // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
         .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
+        // Workspaces live inside the user's checkout: git in a workspace with no clone stops here instead of finding it.
+        // Git ignores a relative ceiling.
+        .env("GIT_CEILING_DIRECTORIES", std::path::absolute(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone()))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
         .stdin(Stdio::piped())
@@ -1470,6 +1481,7 @@ async fn run_process(
         match ev["type"].as_str() {
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
+                    let _ = crate::commands::save(&state.cfg.storage_dir, agent_id, &crate::commands::parse_init(&ev));
                     if let Some(sid) = ev["session_id"].as_str().filter(|_| !throwaway) {
                         set_session(state, agent_id, sid)?;
                     }
@@ -1682,8 +1694,9 @@ async fn run_process(
                 }
                 if ev["is_error"].as_bool().unwrap_or(false) {
                     let msg = ev["result"].as_str().or(ev["subtype"].as_str()).unwrap_or("run failed");
-                    run_msg(quiet, state, agent_id, rid, "system", "error", msg, json!({}));
-                    run_error = Some(msg.to_string());
+                    let msg = crate::login::with_fix(msg);
+                    run_msg(quiet, state, agent_id, rid, "system", "error", &msg, json!({}));
+                    run_error = Some(msg);
                 }
                 let end = json!({
                     "cost_usd": cost,
@@ -1915,6 +1928,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn git_in_a_workspace_with_no_clone_cannot_find_the_checkout_around_it() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cmd = build_command(&st, &a, false).unwrap();
+        let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap().to_owned();
+        assert_eq!(ceiling, st.cfg.storage_dir.as_os_str());
+        // The storage folder sits in a checkout, as agent-local-storage does in the user's loft checkout.
+        let git = |dir: &Path, args: &[&str]| std::process::Command::new("git").args(args).current_dir(dir).env("GIT_CEILING_DIRECTORIES", &ceiling).output().unwrap();
+        let checkout = st.cfg.storage_dir.parent().unwrap();
+        assert!(git(checkout, &["init", "-q"]).status.success());
+        let ws = workspace(&st, &a.id);
+        std::fs::create_dir_all(ws.join("repo")).unwrap();
+        let out = git(&ws, &["status"]);
+        assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("not a git repository"), "{out:?}");
+        // The agent's own clone in its workspace still works.
+        assert!(git(&ws.join("repo"), &["init", "-q"]).status.success());
+        let out = git(&ws.join("repo"), &["rev-parse", "--show-toplevel"]);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), std::fs::canonicalize(ws.join("repo")).unwrap());
+    }
+
+    #[test]
+    fn a_relative_storage_folder_still_gives_git_an_absolute_ceiling() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() };
+        let st = AppState { cfg: std::sync::Arc::new(cfg), ..st };
+        let cmd = build_command(&st, &a, false).unwrap();
+        let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap();
+        assert_eq!(Path::new(ceiling), std::env::current_dir().unwrap().join("agent-local-storage"));
+    }
+
+    #[test]
+    fn every_agent_is_told_to_run_git_only_in_its_clone() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let p = system_prompt(&st, &a);
+        assert!(p.contains(&format!("Run git only inside your clone (`git -C {}/<repo>`), never from the workspace root", workspace(&st, &a.id).display())), "{p}");
+    }
+
+    #[test]
     fn ios_builds_use_xcodes_derived_data_not_the_workspace() {
         let st = crate::tasks::tests::state();
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
@@ -2072,7 +2126,7 @@ cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 case "$prompt" in *"redraw your sticker"*) cost=0.25 sid=s-redraw;; esac
 : "${cost:=0}" "${sid:=s1}"
-echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
+echo '{"type":"system","subtype":"init","session_id":"'"$sid"'","slash_commands":["clear","review","doctor"],"skills":["review"],"terminal_slash_commands":["doctor"]}'
 case "$prompt" in *"redraw your sticker"*) while [ ! -f go ]; do sleep 0.05; done;; esac
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
@@ -3017,6 +3071,23 @@ esac
 
     async fn idle(st: &AppState, id: &str) {
         until("the runs to end", 10, || !is_running(st, id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_stores_the_commands_its_cli_reports_and_the_api_lists_them_tagged() {
+        let (st, a) = fake_claude_state();
+        let none = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(none.as_array().unwrap().len(), 12, "before a run: Loft's own commands only");
+        let _ = send(&st, &a.id, "hello").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        let list = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        let tag = |n: &str| list.as_array().unwrap().iter().find(|c| c["name"] == n).map(|c| c["tag"].clone());
+        assert_eq!((tag("/clear"), tag("/review"), tag("/doctor")), (Some(json!("loft")), Some(json!("passthrough")), Some(json!("terminal"))));
+        let doctor = list.as_array().unwrap().iter().find(|c| c["name"] == "/doctor").unwrap();
+        assert!(doctor["reason"].as_str().unwrap().contains("terminal"));
+        assert!(crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path("nope".into())).await.is_err());
+        let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
+        assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|w| w == ["--setting-sources", ""]), "no settings file is read");
     }
 
     #[tokio::test(flavor = "multi_thread")]

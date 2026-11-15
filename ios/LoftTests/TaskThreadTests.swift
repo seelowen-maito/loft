@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// A Loft issue's thread (spec #65): where each comment stands with GitHub, and Approve / Keep in Loft on it.
 @MainActor

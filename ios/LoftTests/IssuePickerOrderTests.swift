@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class IssuePickerOrderTests: XCTestCase {
     private func agent(_ name: String, role: String?, projects: [String]) -> Agent {

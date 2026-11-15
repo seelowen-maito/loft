@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// "While you were away" at the top of the Agents tab: one line per agent that did something worth knowing since

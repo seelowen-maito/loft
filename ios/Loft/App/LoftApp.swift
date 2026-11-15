@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 @main
@@ -57,7 +58,20 @@ struct LoftApp: App {
                 .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
                 .onAppear { AppDelegate.open = { router.open($0) } }
                 // `loft://task/<id>`: from a message, a note or another app.
-                .onOpenURL { url in if let id = TaskLink.id(from: url) { router.open(.task(taskId: id)) } }
+                .onOpenURL { url in
+                    if let id = TaskLink.id(from: url) { router.open(.task(taskId: id)) }
+                    // A tap on a widget. The Talk widget or control: start listening with whoever you talked to last;
+                    // no one yet, or a link they didn't sign: the Overview asking who, mic off.
+                    else {
+                        switch TalkLink.route(url, key: TalkKey.current, lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                              orchestratorId: store.orchestratorId, agents: store.agents) {
+                        case .start(let id): Task { await voice.start(agentId: id) }
+                        case .pick: router.openLink(.talk)
+                        case .open(let link): router.openLink(link)
+                        case nil: break
+                        }
+                    }
+                }
                 // Once the server says it can push, register this phone (and again when the server changes).
                 .task(id: store.info?.supports(.push) == true) { await PushRegistrar.shared.start() }
         }
@@ -95,6 +109,8 @@ final class Router {
     var tasksPath = NavigationPath()
     var chatPath = NavigationPath()
     var composer: Composer?
+    /// The Overview's Talk button asks who to talk to (a Talk link with no one to start with).
+    var picksTalk = false
 
     enum Composer: Identifiable {
         case newTask(agentId: String?, parentId: String?)
@@ -107,6 +123,33 @@ final class Router {
             case .editTask(let t): "edit-\(t.id)"
             case .pickRecipient: "recipient"
             }
+        }
+    }
+
+    /// A tapped widget.
+    func openLink(_ link: DeepLink) {
+        switch link {
+        case .needsYou: open(.needsYou)
+        case .needsYouItem(let id):
+            composer = nil
+            tab = .overview
+            overviewPath = NavigationPath()
+            overviewPath.append(NeedsYouRoute(focus: id))
+        case .agent(let id): open(.chat(agentId: id))
+        case .issue(let id): open(.task(taskId: id))
+        case .agents:
+            composer = nil
+            tab = .agents
+            agentsPath = NavigationPath()
+        case .talk:
+            composer = nil
+            tab = .overview
+            overviewPath = NavigationPath()
+            picksTalk = true
+        case .overview:
+            composer = nil
+            tab = .overview
+            overviewPath = NavigationPath()
         }
     }
 
@@ -222,7 +265,7 @@ extension View {
             .navigationDestination(for: ChatRoute.self) { ChatView(agentId: $0.agentId, draft: $0.draft, dictate: $0.dictate) }
             .navigationDestination(for: ActivityRoute.self) { _ in ActivityListView() }
             .navigationDestination(for: SettingsRoute.self) { _ in SettingsView() }
-            .navigationDestination(for: NeedsYouRoute.self) { _ in NeedsYouListView() }
+            .navigationDestination(for: NeedsYouRoute.self) { NeedsYouListView(focus: $0.focus) }
     }
 
     /// The global create button, in every tab's navigation bar.

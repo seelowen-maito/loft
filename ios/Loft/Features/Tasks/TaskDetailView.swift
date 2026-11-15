@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 struct TaskDetailView: View {
@@ -81,8 +82,8 @@ struct TaskDetailView: View {
             // Where it lives. GitHub owns the title, description, labels, owner and open/closed of a mirrored issue.
             Section("Where") {
                 if let g = t.github {
-                    // Only a web link: a malformed stored value can't open another app's scheme.
-                    if let url = URL(string: g.url), url.scheme == "https" {
+                    // Only a trusted web link: a malformed stored value can't open another app's scheme or page.
+                    if let url = PushDestination.link(g.url, loftHost: store.api?.baseURL.host()) {
                         Link(destination: url) {
                             LabeledContent("On GitHub") { IssueOriginMark(link: g) }
                         }
