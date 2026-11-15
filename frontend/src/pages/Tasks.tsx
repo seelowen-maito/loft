@@ -48,6 +48,7 @@ export default function TasksPage() {
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
   const [repos, setRepos] = useState<Record<string, string>>({});
   // The filters live in the URL (lib/issueFilters), so back/forward, reload and shared links keep them.
   // A click is a history step; typing replaces the entry, once it pauses.
@@ -83,7 +84,7 @@ export default function TasksPage() {
   }, []);
   useEffect(() => {
     api.tasks().then(setTasks);
-    api.agents().then(setAgents).catch(() => {});
+    api.agents().then(setAgents).catch((e) => setAgentsError((e as Error).message));
     // Which projects have a GitHub repo: only their Loft issues can be published there.
     api.repos().then((rs) => setRepos(Object.fromEntries(rs.filter((r) => r.github).map((r) => [r.name, r.github!])))).catch(() => {});
     sync();
@@ -206,6 +207,7 @@ export default function TasksPage() {
         </button>
         {tasks && <span className="font-mono text-[11px] text-fg-3">{count}</span>}
       </div>
+      {agentsError && <p className="mt-2 text-[12.5px] text-bad">Couldn't load agents: {agentsError}</p>}
     </div>
   );
 

@@ -37,6 +37,7 @@ export default function AgentsPage() {
   // `/agents/:id/interview`: the open interview full screen, in place of the chat.
   const interview = useLocation().pathname.endsWith("/interview");
   const [agents, setAgents] = useState<Agent[] | null>(null);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [perms, setPerms] = useState<PermissionRequest[]>([]);
   const [prs, setPrs] = useState<PullRequest[]>([]);
@@ -78,7 +79,7 @@ export default function AgentsPage() {
   }, [overlay]);
 
   useEffect(() => {
-    api.agents().then(setAgents).catch(() => {});
+    api.agents().then(setAgents).catch((e) => setAgentsError((e as Error).message));
     api.permissions().then(setPerms);
     api.pullRequests().then(setPrs);
   }, []);
@@ -320,7 +321,9 @@ export default function AgentsPage() {
 
       {/* main */}
       <section className="min-h-0 min-w-0 border-r border-line max-xl:border-r-0">
-        {agents && agents.length === 0 ? (
+        {agentsError && !agents ? (
+          <p className="p-6 text-[12.5px] text-bad">Couldn't load agents: {agentsError}</p>
+        ) : agents && agents.length === 0 ? (
           <Empty onCreate={() => setCreating(true)} />
         ) : selected && interview ? (
           <InterviewView agent={selected} session={grill} />

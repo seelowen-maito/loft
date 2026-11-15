@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, runningText, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -159,4 +159,11 @@ test("an open ticket waiting on another spec's ticket says which", () => {
   assert.deepEqual(ticketLabel("open", ["o/ext#9", "o/ext#10"]), { text: "waiting on o/ext#9, o/ext#10", tone: "warn" });
   assert.equal(ticketLabel("open", []).text, "open");
   assert.equal(ticketLabel("started", ["o/ext#9"]).text, "building");
+});
+
+test("the Delivery card's running row prints a Dev's wait in full, else the shared label", () => {
+  assert.equal(runningText({ state: "started", waiting: "waiting on #12: needs the API endpoint." }), "waiting on #12: needs the API endpoint.");
+  assert.equal(runningText({ state: "started" }), "building");
+  assert.equal(runningText({ state: "changes", waiting: null }), "fixing");
+  assert.equal(runningText({ state: "review", waiting_for_ci: true }), "waiting for CI");
 });
