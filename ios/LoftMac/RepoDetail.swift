@@ -35,7 +35,7 @@ struct RepoDetail: View {
                         tile("Forks", gh?.error == nil ? gh?.forks.map(String.init) ?? "—" : "—")
                     }
                     VStack(alignment: .leading, spacing: 8) {
-                        eyebrow("Daily activity")
+                        Text("Daily activity".uppercased()).eyebrow()
                         ScrollView(.horizontal) { Heatmap(daily: repo.daily, cell: 10) }
                     }
                     .accessibilityIdentifier("repoDailyActivity")
@@ -49,12 +49,12 @@ struct RepoDetail: View {
                     }
                     HStack(alignment: .top, spacing: 20) {
                         VStack(alignment: .leading, spacing: 8) {
-                            eyebrow("Languages")
+                            Text("Languages".uppercased()).eyebrow()
                             if let l = repo.languages, !l.isEmpty { ShareBars(items: l) } else { Text("—").foregroundStyle(.secondary) }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         VStack(alignment: .leading, spacing: 6) {
-                            eyebrow("Contributors")
+                            Text("Contributors".uppercased()).eyebrow()
                             ForEach(repo.contributors ?? [], id: \.name) { c in
                                 HStack {
                                     Text(c.name).lineLimit(1)
@@ -66,7 +66,7 @@ struct RepoDetail: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     VStack(alignment: .leading, spacing: 8) {
-                        eyebrow("Recent commits")
+                        Text("Recent commits".uppercased()).eyebrow()
                         if let commits {
                             ForEach(commits) { c in
                                 VStack(alignment: .leading, spacing: 2) {
@@ -98,17 +98,17 @@ struct RepoDetail: View {
 
     private func tile(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            eyebrow(label)
+            Text(label.uppercased()).eyebrow()
             Text(value).font(.system(size: 24, weight: .semibold, design: .rounded)).monospacedDigit()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .panel()
     }
 
     private func miniList(_ title: String, _ items: [RepoGithub.Item]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            eyebrow("\(title) · \(items.count)")
+            Text("\(title) · \(items.count)".uppercased()).eyebrow()
             if items.isEmpty { Text("None open.").foregroundStyle(.secondary) }
             ForEach(items.prefix(8)) { i in
                 Button {
@@ -123,9 +123,6 @@ struct RepoDetail: View {
     }
 }
 
-func eyebrow(_ s: String) -> some View {
-    Text(s.uppercased()).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-}
 
 /// What's local in a repo: changes, ahead, behind, or clean.
 func localText(_ r: RepoSummary) -> String {

@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { Terminal } from "lucide-react";
 import { api, type ClaudeLogin } from "../lib/api";
+import { afterCheck } from "../lib/claudeLogin";
 
 /** Settings → Claude login: whether the claude CLI is logged in and as whom, with Open Terminal to log in. */
 export function ClaudeLoginSection() {
-  const [s, setS] = useState<ClaudeLogin | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [{ s, err }, setView] = useState<{ s: ClaudeLogin | null; err: string | null }>({ s: null, err: null });
+  const setErr = (err: string | null) => setView((v) => ({ ...v, err }));
   const [busy, setBusy] = useState(false);
-  const load = () => api.claudeLogin().then(setS).catch((e) => setErr((e as Error).message));
+  const load = () => api.claudeLogin().then((r) => setView((v) => afterCheck(v, r)), (e) => setView((v) => afterCheck(v, e as Error)));
   // Read again while the page is open, so the status turns once the login in Terminal is done.
   useEffect(() => {
     load();

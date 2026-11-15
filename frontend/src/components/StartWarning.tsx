@@ -32,7 +32,7 @@ export function StartWarning({ waits, onStart, onCancel, onStarted }: { waits: W
       </div>
       <div className="flex flex-wrap gap-2">
         {first.map((f) => (
-          <button key={`${f.repo}#${f.spec}`} className="btn btn-primary text-[12px]" disabled={busy !== null} onClick={() => startFirst(f.issueId, `${f.repo}#${f.spec}`)}>
+          <button key={`${f.repo}#${f.spec}`} className="btn-primary text-[12px]" disabled={busy !== null} onClick={() => startFirst(f.issueId, `${f.repo}#${f.spec}`)}>
             {busy === `${f.repo}#${f.spec}` && <Loader2 className="size-3.5 animate-spin" />} Start {f.repo}#{f.spec} first
           </button>
         ))}

@@ -2,6 +2,8 @@
 // (LoftKit's recognizer), never over the network. The backend runs it for `POST /api/voice/transcribe`.
 // The file is raw 16 kHz mono 16-bit little-endian PCM. Prints the text and exits 0; when it can't run here it
 // prints a reason the web can show on stderr and exits 2; any other failure exits 1.
+// `loft-transcribe --check`: whether it can transcribe here, for Settings: prints the status and exits 0, or the
+// reason it can't on stderr and exits 2. It downloads nothing.
 import AVFoundation
 import Foundation
 import LoftKit
@@ -13,6 +15,19 @@ func fail(_ message: String, code: Int32) -> Never {
 }
 
 let args = CommandLine.arguments
+if args.count == 2, args[1] == "--check" {
+    guard #available(macOS 26.0, *), Speech.SpeechTranscriber.isAvailable else {
+        fail("Needs macOS 26 or later with Apple's speech model.", code: 2)
+    }
+    guard let locale = await Speech.SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) else {
+        let language = Locale.current.localizedString(forIdentifier: Locale.current.identifier) ?? Locale.current.identifier
+        fail("Not available in \(language): change the Mac's language in System Settings › General › Language & Region.", code: 2)
+    }
+    let module = Speech.SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
+    let installed = await AssetInventory.status(forModules: [module]) == .installed
+    print(installed ? "Ready" : "Ready: the speech model downloads on the first recording")
+    exit(0)
+}
 guard args.count == 2, let data = FileManager.default.contents(atPath: args[1]) else {
     fail("usage: loft-transcribe <audio.pcm> (16 kHz mono 16-bit PCM)", code: 1)
 }

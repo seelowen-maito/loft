@@ -62,7 +62,8 @@ struct AddressForm: View {
                 .accessibilityIdentifier("saveServer")
                 if checking { ProgressView().controlSize(.small) }
             }
-            if !isOnboarding, store.api != nil {
+            // The demo's sample Loft can't be forgotten; Exit on its banner leaves it.
+            if !isOnboarding, store.api != nil, !store.isDemo {
                 Divider()
                 LabeledContent("Connection", value: store.connection.label)
                 Button("Forget this Loft", role: .destructive) { store.forgetServer() }
@@ -72,7 +73,9 @@ struct AddressForm: View {
     }
 
     /// Asks Loft for its info first: a wrong address or a Loft that isn't running is said here, nothing is saved.
+    /// The demo address opens the bundled demo instead, with no request, and isn't saved (App Review types it in).
     private func connect() async {
+        if LoftStore.isDemoAddress(address) { store.connect(address: address); return }
         guard let url else { return }
         checking = true
         defer { checking = false }

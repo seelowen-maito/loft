@@ -7,8 +7,11 @@ public struct SVGDocument {
     fileprivate var root = SVGNode(name: "svg")
     fileprivate var defs: [String: SVGNode] = [:]
 
+    /// Bigger or deeper sources aren't read: avatars are a few KB and a few levels, and anything past these only costs time.
+    static let maxBytes = 64 * 1024, maxDepth = 64
+
     public init?(_ source: String) {
-        guard let data = source.data(using: .utf8) else { return nil }
+        guard source.utf8.count <= Self.maxBytes, let data = source.data(using: .utf8) else { return nil }
         let builder = SVGTreeBuilder()
         let parser = XMLParser(data: data)
         parser.delegate = builder
@@ -151,6 +154,8 @@ fileprivate final class SVGTreeBuilder: NSObject, XMLParserDelegate {
     private var stack: [SVGNode] = []
 
     func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String] = [:]) {
+        // Aborting makes `parse()` return false, so the document is nil.
+        guard stack.count < SVGDocument.maxDepth else { return parser.abortParsing() }
         let node = SVGNode(name: name, attrs: attributes)
         if let parent = stack.last { parent.children.append(node) } else { root = node }
         stack.append(node)

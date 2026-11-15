@@ -103,6 +103,8 @@ public struct Agent: Codable, Identifiable, Hashable {
     public var group: String? = nil
     /// The projects it works in, main first; `project` is the main one (older servers send only `project`).
     public var projects: [String]? = nil
+    /// Weekly windows with no autonomous wake-ups (nil from older servers).
+    public var quietHours: [QuietWindow]? = nil
     /// Its running `/loop`, and its `/schedule` entries (older servers send neither).
     public var loop: AgentLoop? = nil
     public var schedules: [AgentSchedule]? = nil
@@ -122,6 +124,11 @@ public struct Agent: Codable, Identifiable, Hashable {
 
     /// The label it goes by, in place of the Title agents used to have.
     public var roleLabel: String { Agent.roleLabel(role) }
+
+    /// "loft · Lead": its main project and role, as the web's agents list and ⌘K search show them.
+    public var projectAndRole: String {
+        [project, roleLabel].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · ")
+    }
 
     /// Its team: the group; empty when it has none (backend `Agent::team`).
     public var team: String { (group ?? "").trimmingCharacters(in: .whitespaces) }
@@ -480,6 +487,21 @@ public struct AgentSummary: Codable, Hashable, Identifiable {
             guard case .array(let a) = v, a.count == 2, let n = a[0].stringValue, let c = a[1].numberValue else { return nil }
             return (n, Int(c))
         }
+    }
+}
+
+/// A weekly window with no autonomous wake-ups, in the Mac's local time (backend `QuietWindow`).
+public struct QuietWindow: Codable, Hashable, Sendable {
+    /// Days the window starts on, 0 = Monday … 6 = Sunday.
+    public var days: [Int]
+    /// "HH:MM". Equal start and end cover the whole day.
+    public var start: String
+    public var end: String
+
+    public init(days: [Int], start: String, end: String) {
+        self.days = days
+        self.start = start
+        self.end = end
     }
 }
 

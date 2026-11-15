@@ -1166,12 +1166,12 @@ final class LoftUITests: XCTestCase {
 
         any("specRow-Implement settings functionality", app).tap()
         XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
-        XCTAssertTrue(any("deliveryState", app).label.hasPrefix("Waiting for CI on #45 · 6 min"), any("deliveryState", app).label)
+        XCTAssertTrue(any("deliveryState", app).label.hasPrefix("Waiting for CI on #45 ·\u{a0}6\u{a0}min"), any("deliveryState", app).label)
         XCTAssertNotEqual(any("deliveryState", app).elementType, .staticText, "a link to the checks: \(any("deliveryState", app).elementType.rawValue)")
         XCTAssertFalse(any("deliveryRunning", app).exists, "nobody is on a ticket")
         for _ in 0..<3 where !any("ticketRow-Docs", app).exists { app.swipeUp() }
         let docs = any("ticketRow-Docs", app).label
-        XCTAssertTrue(docs.contains("waiting for CI · 6 min"), docs)
+        XCTAssertTrue(docs.contains("waiting for CI ·\u{a0}6\u{a0}min"), docs)
         XCTAssertFalse(docs.contains("in review"), docs)
         XCTAssertFalse(docs.contains("ci waiting"), docs)
         XCTAssertTrue(docs.contains("security passed"), docs)

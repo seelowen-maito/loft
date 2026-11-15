@@ -593,6 +593,8 @@ export type MirrorSync = {
 
 /** Loft's https address on the tailnet (null when `tailscale serve` doesn't serve it), and the command that turns it on. */
 export type Https = { url: string | null; host: string | null; command: string };
+/** Whether this Mac can transcribe the web's voice, and whether cleanup runs on Apple's on-device model or on Haiku. */
+export type VoiceStatus = { speech: { ready: boolean; text: string }; cleanup: { on_device: boolean; text: string } };
 
 /** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
 export type MacAccess = {
@@ -701,6 +703,8 @@ export const api = {
   voiceClean: (text: string) => req<{ text: string; cleaned: boolean }>("POST", "/voice/clean", { text }),
   /** Asks Tailscale whether it serves Loft over https. */
   https: () => req<Https>("GET", "/system/https"),
+  /** Checks the transcriber and the on-device model now. */
+  voiceStatus: () => req<VoiceStatus>("GET", "/voice/status"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),

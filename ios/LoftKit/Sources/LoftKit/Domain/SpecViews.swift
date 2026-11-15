@@ -93,12 +93,13 @@ public enum SpecViews {
 
     /// How long something has waited since `since` (RFC 3339), like the web's `fmtWait`: "<1 min", "6 min", "1 h",
     /// "2 h 5 min". Nil when `since` doesn't parse; a time ahead of `now` (clock skew) reads "<1 min".
+    /// Non-breaking spaces, so a long title never wraps it mid-time ("1 h" / "9 min").
     static func waited(since: String?, now: Date = Date()) -> String? {
         guard let since, let at = JSONCoding.parseDate(since) else { return nil }
         let m = Int(max(0, now.timeIntervalSince(at)) / 60)
-        if m < 1 { return "<1 min" }
-        if m < 60 { return "\(m) min" }
-        return m % 60 == 0 ? "\(m / 60) h" : "\(m / 60) h \(m % 60) min"
+        if m < 1 { return "<1\u{a0}min" }
+        if m < 60 { return "\(m)\u{a0}min" }
+        return m % 60 == 0 ? "\(m / 60)\u{a0}h" : "\(m / 60)\u{a0}h\u{a0}\(m % 60)\u{a0}min"
     }
 
     /// Who is on which ticket, one line per running ticket: "Backend Agent on #43 Backend endpoints".
@@ -187,7 +188,7 @@ public enum SpecViews {
     /// says which; one in review whose reviewers all passed is waiting for CI, for how long since `ciSince`.
     public static func ticketLabel(_ state: String, waitingOn: [String] = [], waitingForCi: Bool = false, ciSince: String? = nil, now: Date = Date()) -> String {
         if state == "open" && !waitingOn.isEmpty { return "waiting on " + waitingOn.joined(separator: ", ") }
-        if state == "review" && waitingForCi { return "waiting for CI" + (waited(since: ciSince, now: now).map { " · \($0)" } ?? "") }
+        if state == "review" && waitingForCi { return "waiting for CI" + (waited(since: ciSince, now: now).map { " ·\u{a0}\($0)" } ?? "") }
         return switch state {
         case "closed": "done"
         case "started": "building"

@@ -34,6 +34,8 @@ test("ticket states read in words", () => {
   assert.equal(ticketLabel("needs_human").tone, "warn");
   assert.equal(ticketLabel("needs_human").text, "Waiting on you");
   assert.equal(ticketLabel("whatever").text, "open");
+  assert.deepEqual(ticketLabel("changes"), { text: "fixing", tone: "accent" });
+  assert.equal(ticketLabel("review", [], true).text, "waiting for CI");
 });
 
 const task = (o: Record<string, unknown>) => ({ labels: ["spec"], state: "open", status: "inbox", parent_id: null, updated_at: "2026-01-01", github: null, ...o }) as unknown as Task;

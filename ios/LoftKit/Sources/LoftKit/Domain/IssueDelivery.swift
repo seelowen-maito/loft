@@ -76,7 +76,7 @@ public struct IssueDelivery: Codable, Hashable {
         if let stateLine {
             let tone = Tone(rawValue: stateLine.tone) ?? .running
             guard tone == .ci, let since = ciSince, let waited = SpecViews.waited(since: since, now: now) else { return (tone, stateLine.text) }
-            return (tone, "\(stateLine.text) · \(waited)")
+            return (tone, "\(stateLine.text) ·\u{a0}\(waited)")
         }
         switch state {
         case "stalled": return (.stalled, "Stalled: \(Self.stallWhy(stallReason)).")
