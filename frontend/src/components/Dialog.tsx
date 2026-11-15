@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type HTMLAttributes, type ReactNode, type RefObject } from "react";
 import { cx } from "../lib/format";
-import { closesOnEscape } from "../lib/dialogKeys";
+import { closesOnEscape, fromField } from "../lib/dialogKeys";
 
 // The open dialogs, the top one last: Esc and Tab act on it only.
 const open: RefObject<HTMLElement | null>[] = [];
@@ -8,7 +8,7 @@ const open: RefObject<HTMLElement | null>[] = [];
 const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
 /**
- * A dialog's keyboard and focus: Esc closes the top dialog (not from a field, nor while an IME composes), Tab stays
+ * A dialog's keyboard and focus: Esc closes the top dialog (not while an IME composes, nor when a field's menu took it), Tab stays
  * inside `box`, and focus goes back where it was on close. `onClose` undefined: Esc does nothing (a clean running).
  */
 export function useDialogKeys(box: RefObject<HTMLElement | null>, onClose: (() => void) | undefined) {
@@ -24,12 +24,16 @@ export function useDialogKeys(box: RefObject<HTMLElement | null>, onClose: (() =
     // A field with autoFocus already has it.
     if (!box.current?.contains(document.activeElement)) box.current?.focus();
     // Capture, so a page under it (the full-screen interview, Needs you) doesn't take the key first.
+    const escape = (e: KeyboardEvent) => {
+      if (e.isComposing || !closesOnEscape(e) || !close.current) return;
+      e.preventDefault();
+      close.current();
+    };
     const onKey = (e: KeyboardEvent) => {
       if (open.at(-1) !== me || !box.current) return;
       if (e.key === "Escape") {
-        if (e.isComposing || !closesOnEscape(e) || !close.current) return;
-        e.preventDefault();
-        close.current();
+        // From a field, wait for its own handlers (see onFieldKey); otherwise close now.
+        if (!fromField(e.target)) escape(e);
       } else if (e.key === "Tab") {
         const f = [...box.current.querySelectorAll<HTMLElement>(FOCUSABLE)];
         const at = document.activeElement;
@@ -46,9 +50,16 @@ export function useDialogKeys(box: RefObject<HTMLElement | null>, onClose: (() =
         }
       }
     };
+    // Esc from a field, once it has bubbled past React's handlers: a tag or @-mention menu that took it prevented it.
+    // On document, so a page under it listening on window still sees it handled.
+    const onFieldKey = (e: KeyboardEvent) => {
+      if (open.at(-1) === me && e.key === "Escape" && fromField(e.target)) escape(e);
+    };
     window.addEventListener("keydown", onKey, true);
+    document.addEventListener("keydown", onFieldKey);
     return () => {
       window.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("keydown", onFieldKey);
       open.splice(open.indexOf(me), 1);
       if (from?.isConnected) from.focus();
     };
