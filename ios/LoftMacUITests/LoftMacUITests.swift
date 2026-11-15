@@ -18,6 +18,8 @@ final class LoftMacUITests: XCTestCase {
         app.launchArguments = args
         app.launch()
         app.activate()
+        // macOS can restore Loft with its window closed, leaving only the menu bar item: Go › Agents (⌘2) opens it.
+        if !app.windows.firstMatch.waitForExistence(timeout: 5) { app.typeKey("2", modifierFlags: .command) }
     }
 
     private func shot(_ name: String) {
