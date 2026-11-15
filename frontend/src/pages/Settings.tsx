@@ -445,6 +445,7 @@ export default function SettingsPage() {
   const [folderErr, setFolderErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const restartAsk = useAction();
 
   const load = useCallback(() => api.settings().then((v) => {
     setView(v);
@@ -492,14 +493,9 @@ export default function SettingsPage() {
 
   const restart = async () => {
     setErr(null);
-    try {
-      await api.restart();
-    } catch (e) {
-      setConfirming(false);
-      setErr(errorText(e));
-      return;
-    }
+    const sent = await restartAsk.run(async () => (await api.restart(), true));
     setConfirming(false);
+    if (!sent) return;
     setRestarting(true);
     // Wait for the new process to answer.
     for (let i = 0; i < 60; i++) {
@@ -632,10 +628,10 @@ export default function SettingsPage() {
 
         <MacAccess />
 
-        {(dirty || err || save.error) && (
+        {(dirty || err || save.error || restartAsk.error) && (
           <FloatingBar at="bottom">
-            {err || save.error ? (
-              <ErrorLine error={save.error ?? err} />
+            {err || save.error || restartAsk.error ? (
+              <ErrorLine error={save.error ?? restartAsk.error ?? err} />
             ) : (
               <span className="text-fg-2">
                 Unsaved changes{dirtyRestart.length > 0 && <> · {dirtyRestart.map((f) => LABELS[f] ?? f).join(", ")} needs a restart</>}
@@ -664,7 +660,9 @@ export default function SettingsPage() {
               </>
             }
             confirmLabel="Restart"
-            pending={running > 0}
+            pendingLabel="Restarting…"
+            pending={restartAsk.busy}
+            disabled={running > 0}
             onConfirm={restart}
             onClose={() => setConfirming(false)}
           />

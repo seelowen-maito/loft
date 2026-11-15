@@ -5,14 +5,15 @@ import { specsToStartFirst } from "../lib/waitsOn";
 import { Callout, ErrorLine } from "./Callout";
 import { ActionButton } from "./ActionButton";
 import { useAction } from "../lib/useAction";
+import { startDeliveryLabel } from "../lib/startDelivery";
 
 /** Shown instead of starting a Delivery whose tickets wait on open tickets in another spec: says what they wait on and
  *  offers to start the other spec first (or to start anyway: the waiting tickets stay waiting until those close). */
-export function StartWarning({ waits, onStart, onCancel, onStarted }: { waits: WaitsOn[]; onStart: () => void; onCancel: () => void; onStarted: () => void }) {
+export function StartWarning({ waits, onStart, startPending, onCancel, onStarted }: { waits: WaitsOn[]; onStart: () => void; startPending: boolean; onCancel: () => void; onStarted: () => void }) {
   const starting = useAction();
   // The spec being started, so its button shows the spinner.
   const [picked, setPicked] = useState<string | null>(null);
-  const busy = starting.busy;
+  const busy = starting.busy || startPending;
   const first = specsToStartFirst(waits);
   const startFirst = (id: string, key: string) => {
     if (busy) return;
@@ -42,7 +43,7 @@ export function StartWarning({ waits, onStart, onCancel, onStarted }: { waits: W
               Start {f.repo}#{f.spec} first
             </ActionButton>
           ))}
-          <button className="btn text-[12px]" disabled={busy} onClick={onStart}>Start anyway</button>
+          <ActionButton variant="secondary" className="text-[12px]" pending={startPending} pendingLabel={startDeliveryLabel(true)} disabled={busy} onClick={onStart}>Start anyway</ActionButton>
           <button className="btn text-[12px]" disabled={busy} onClick={onCancel}>Cancel</button>
         </div>
         <ErrorLine error={starting.error} />

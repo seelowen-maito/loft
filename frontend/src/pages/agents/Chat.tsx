@@ -133,13 +133,17 @@ export function Chat({
   const wake = useAction();
   const clear = useAction();
   const restart = useAction();
+  const loopStop = useAction();
+  const scheduleCancel = useAction();
+  // The schedule being cancelled, so its row shows the spinner.
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const [cmdError, setCmdError] = useState<string | null>(null);
   // Commands' and buttons' errors share the one line under the composer; a new attempt clears it.
   const clearErrors = () => {
     setCmdError(null);
-    for (const a of [sending, stop, wake, clear, restart]) a.setError(null);
+    for (const a of [sending, stop, wake, clear, restart, loopStop, scheduleCancel]) a.setError(null);
   };
-  const shownError = cmdError ?? sending.error ?? stop.error ?? wake.error ?? clear.error ?? restart.error;
+  const shownError = cmdError ?? sending.error ?? stop.error ?? wake.error ?? clear.error ?? restart.error ?? loopStop.error ?? scheduleCancel.error;
   const act = <T,>(a: ReturnType<typeof useAction>, fn: () => Promise<T>) => {
     clearErrors();
     return a.run(fn);
@@ -615,8 +619,17 @@ export function Chat({
               </ActionButton>
             </div>
           )}
-          {agent.loop && <LoopBar agent={agent} onError={setCmdError} />}
-          {!!agent.schedules?.length && <ScheduleList agentId={agent.id} list={agent.schedules} onError={setCmdError} />}
+          {agent.loop && <LoopBar agent={agent} stopping={loopStop.busy} onStop={() => act(loopStop, () => api.loopStop(agent.id))} />}
+          {!!agent.schedules?.length && (
+            <ScheduleList
+              list={agent.schedules}
+              cancelling={scheduleCancel.busy ? cancelling : null}
+              onCancel={(sid) => {
+                setCancelling(sid);
+                act(scheduleCancel, () => api.scheduleCancel(agent.id, sid));
+              }}
+            />
+          )}
           <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
           {pickingTask && (
@@ -1097,19 +1110,8 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
 }
 
 /** The agent's running /loop, with its Stop. */
-function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => void }) {
+function LoopBar({ agent, stopping, onStop }: { agent: Agent; stopping: boolean; onStop: () => void }) {
   const l = agent.loop!;
-  const [busy, setBusy] = useState(false);
-  const stop = async () => {
-    setBusy(true);
-    try {
-      await api.loopStop(agent.id);
-    } catch (e) {
-      onError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
-  };
   return (
     <div className="mb-3 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2" role="status">
       <RefreshCw className="size-4 shrink-0 text-accent" />
@@ -1119,7 +1121,7 @@ function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => voi
           Looping {fmtInterval(l.interval_minutes)} · {agent.running && new Date(l.next_at).getTime() <= Date.now() ? "next: when this run ends" : nextRunText(l.next_at)}
         </div>
       </div>
-      <ActionButton variant="secondary" className="shrink-0" icon={<Square className="size-3.5" />} pending={busy} pendingLabel="Stopping…" onClick={stop}>
+      <ActionButton variant="secondary" className="shrink-0" icon={<Square className="size-3.5" />} pending={stopping} pendingLabel="Stopping…" onClick={onStop}>
         Stop
       </ActionButton>
     </div>
@@ -1127,19 +1129,8 @@ function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => voi
 }
 
 /** The agent's /schedule entries: one summary row that opens to the list, each with its next run and a Cancel. */
-function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNullable<Agent["schedules"]>; onError: (e: string) => void }) {
+function ScheduleList({ list, cancelling, onCancel }: { list: NonNullable<Agent["schedules"]>; cancelling: string | null; onCancel: (id: string) => void }) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const cancel = async (sid: string) => {
-    setBusy(sid);
-    try {
-      await api.scheduleCancel(agentId, sid);
-    } catch (e) {
-      onError(errorText(e));
-    } finally {
-      setBusy(null);
-    }
-  };
   const next = [...list].sort((a, b) => a.next_at.localeCompare(b.next_at))[0];
   return (
     <div className="mb-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2">
@@ -1159,7 +1150,7 @@ function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNu
                 <div className="font-mono text-[11px] text-fg-3">{s.every ? `Every ${s.every} at ${s.time}` : "Once"}</div>
                 <div className="font-mono text-[11px] text-fg-3">next {fmtDayTime(s.next_at)}</div>
               </div>
-              <ActionButton variant="secondary" className="shrink-0" pending={busy === s.id} pendingLabel="Cancelling…" onClick={() => cancel(s.id)}>
+              <ActionButton variant="secondary" className="shrink-0" pending={cancelling === s.id} disabled={!!cancelling} pendingLabel="Cancelling…" onClick={() => onCancel(s.id)}>
                 Cancel
               </ActionButton>
             </div>

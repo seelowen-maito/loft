@@ -105,3 +105,15 @@ test("an error line is red and announced, and empty without an error", () => {
   assert.equal(r.div.textContent, "No network");
   assert.equal(render(h(ErrorLine, { error: null })).div.innerHTML, "");
 });
+
+test("Start anyway on the waits-on warning shows the start working, like Start delivery", async () => {
+  const { StartWarning } = await vite.ssrLoadModule("/src/components/StartWarning.tsx");
+  const waits = [{ blocker: "loft#12", repo: "loft", spec: 10, issue_id: "x" }];
+  const props = { waits, onStart: () => {}, onCancel: () => {}, onStarted: () => {} };
+  const r = render(h(StartWarning, { ...props, startPending: true }));
+  const busy = r.div.querySelector('button[aria-busy="true"]')!;
+  assert.equal(busy.textContent, "Starting delivery…");
+  assert.ok(busy.querySelector(".animate-spin"));
+  r.render(h(StartWarning, { ...props, startPending: false }));
+  assert.ok([...r.div.querySelectorAll("button")].some((b) => b.textContent === "Start anyway" && !b.disabled));
+});

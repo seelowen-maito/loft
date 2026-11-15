@@ -96,7 +96,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, starting, merging, out
       )}
       {declined && !askGit && !startedOn && <div className="mt-3 text-[12px] text-fg-3">Nothing was set up: the plan stays as Loft issues.</div>}
       {note}
-      {warn && !startedOn && waits.length > 0 && <StartWarning waits={waits} onStart={() => start(false)} onCancel={() => setWarn(false)} onStarted={reloadWaits} />}
+      {warn && !startedOn && waits.length > 0 && <StartWarning waits={waits} onStart={() => start(false)} startPending={starting.busy} onCancel={() => setWarn(false)} onStarted={reloadWaits} />}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {delivery && !startedOn && !askGit && (
           <ActionButton

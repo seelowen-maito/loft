@@ -132,3 +132,18 @@ test("a destructive confirm is red; a plain one isn't, and pending disables it",
   assert.equal(button().disabled, true);
   m.unmount();
 });
+
+test("a confirm that is running shows a spinner and its working label; one that can't run yet is only disabled; its error is announced", () => {
+  const props = { title: "Delete this issue?", body: "Gone.", confirmLabel: "Delete", pendingLabel: "Deleting…", danger: true, onConfirm: () => {}, onClose: () => {} };
+  const m = mount(h(ConfirmDialog, { ...props, pending: true, error: "No network" }));
+  const confirm = () => document.querySelector<HTMLButtonElement>('[role="dialog"] button[aria-busy]')!;
+  assert.equal(confirm().textContent, "Deleting…");
+  assert.equal(confirm().getAttribute("aria-busy"), "true");
+  assert.ok(confirm().querySelector(".animate-spin"));
+  assert.equal(document.querySelector('[role="dialog"] [role="alert"]')?.textContent, "No network");
+  m.render(h(ConfirmDialog, { ...props, disabled: true }));
+  assert.equal(confirm().textContent, "Delete");
+  assert.equal(confirm().disabled, true);
+  assert.equal(confirm().getAttribute("aria-busy"), "false");
+  m.unmount();
+});

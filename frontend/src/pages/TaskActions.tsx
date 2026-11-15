@@ -324,7 +324,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
         )}
         <DeliveryButtons d={started} a={r} />
       </div>
-      {warn && !started && !!d?.waits_on?.length && <StartWarning waits={d.waits_on} onStart={start} onCancel={() => setWarn(false)} onStarted={reload} />}
+      {warn && !started && !!d?.waits_on?.length && <StartWarning waits={d.waits_on} onStart={start} startPending={starting.busy} onCancel={() => setWarn(false)} onStarted={reload} />}
       <ResultLine said={r.said} className="mt-2" />
       <ErrorLine error={r.error} className="mt-2" />
       {running.length > 0 && (
@@ -504,6 +504,7 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
           body="It's removed with its thread. Sub-issues stay, without a parent. This can't be undone."
           cancelLabel="Keep it"
           confirmLabel="Delete"
+          pendingLabel="Deleting…"
           danger
           pending={busy}
           error={error}

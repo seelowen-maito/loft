@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type HTMLAttributes, type ReactNode, type RefObject } from "react";
 import { cx } from "../lib/format";
 import { closesOnEscape, fromField } from "../lib/dialogKeys";
+import { ActionButton } from "./ActionButton";
+import { ErrorLine } from "./Callout";
 
 // The open dialogs, the top one last: Esc and Tab act on it only.
 const open: RefObject<HTMLElement | null>[] = [];
@@ -105,20 +107,18 @@ export function Dialog({ title, onClose, size = "md", top = false, className, ch
   );
 }
 
-/** Asks before an action: Cancel or `confirmLabel`, red when `danger`. `pending` disables it (while it runs, or when it can't yet). */
-export function ConfirmDialog({ title, body, confirmLabel, cancelLabel = "Cancel", danger = false, pending = false, error, onConfirm, onClose }: { title: string; body: ReactNode; confirmLabel: string; cancelLabel?: string; danger?: boolean; pending?: boolean; error?: string | null; onConfirm: () => void; onClose: () => void }) {
+/** Asks before an action: Cancel or `confirmLabel`, red when `danger`. While `pending` it shows `pendingLabel` and a
+ *  spinner; `disabled`: it can't run yet. */
+export function ConfirmDialog({ title, body, confirmLabel, pendingLabel, cancelLabel = "Cancel", danger = false, pending = false, disabled = false, error, onConfirm, onClose }: { title: string; body: ReactNode; confirmLabel: string; pendingLabel?: string; cancelLabel?: string; danger?: boolean; pending?: boolean; disabled?: boolean; error?: string | null; onConfirm: () => void; onClose: () => void }) {
   return (
     <Dialog title={title} onClose={onClose} size="sm" className="space-y-4 p-5">
       <h3 className="text-[15px] font-medium">{title}</h3>
       <div className="text-[13px] text-fg-2">{body}</div>
       <div className="flex justify-end gap-2">
         <button className="btn-ghost" onClick={onClose}>{cancelLabel}</button>
-        <button className={danger ? DANGER : "btn-primary"} disabled={pending} onClick={onConfirm}>{confirmLabel}</button>
+        <ActionButton variant={danger ? "danger" : "primary"} pending={pending} pendingLabel={pendingLabel} disabled={disabled} onClick={onConfirm}>{confirmLabel}</ActionButton>
       </div>
-      {error && <div className="text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={error} />
     </Dialog>
   );
 }
-
-/** A destructive button: delete, cancel, end. */
-export const DANGER = "btn border-bad/40 bg-bad/20 text-fg";

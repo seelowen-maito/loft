@@ -1,9 +1,18 @@
 import { Loader2 } from "lucide-react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cx } from "../lib/format";
-import { DANGER } from "./Dialog";
 
-const VARIANT = { primary: "btn-primary", secondary: "btn", ghost: "btn-ghost", danger: DANGER } as const;
+/** A destructive button: delete, cancel, end. */
+export const DANGER = "btn border-bad/40 bg-bad/20 text-fg";
+
+const VARIANT = {
+  primary: "btn-primary",
+  secondary: "btn",
+  ghost: "btn-ghost",
+  danger: DANGER,
+  // Inline text, as in the navbar.
+  link: "inline-flex items-center gap-1 text-accent hover:underline disabled:opacity-50",
+} as const;
 
 /**
  * A button that starts an async action. While `pending` it shows a spinner and `pendingLabel` (its label otherwise) at

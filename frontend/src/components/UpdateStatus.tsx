@@ -4,13 +4,16 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
 import { restartDisabled } from "../lib/restartButton";
 import { usePoll } from "../hooks/usePoll";
-import { toast } from "./FloatingBar";
-import { errorText } from "../lib/useAction";
+import { useAction } from "../lib/useAction";
+import { ActionButton } from "./ActionButton";
+import { ErrorLine } from "./Callout";
 
 /** Navbar light for auto-update (LOFT_AUTO_UPDATE); hidden when it's off. */
 export function UpdateStatus({ live }: { live: boolean }) {
   const [s, setS] = useState<Status | null>(null);
-  const [busy, setBusy] = useState(false);
+  const ask = useAction();
+  // Asked, until the phase changes: the request returns before the restart happens.
+  const [sent, setSent] = useState(false);
   // Refetch on (re)connect: a restart after an update drops the event stream.
   useEffect(() => {
     if (live) api.update().then(setS).catch(() => {});
@@ -18,7 +21,7 @@ export function UpdateStatus({ live }: { live: boolean }) {
   // While a restart is due (or after a restart on its own) the page can't be told: ask again until it changes.
   const restarting = s?.phase === "restart";
   useEffect(() => {
-    if (!restarting) setBusy(false);
+    if (!restarting) setSent(false);
   }, [restarting]);
   usePoll(restarting ? () => api.update().then(setS).catch(() => {}) : null, 3000);
   useServerEvents(
@@ -42,22 +45,21 @@ export function UpdateStatus({ live }: { live: boolean }) {
   if (!view) return null;
   const [dot, label, title] = view;
 
-  const restart = () => {
-    setBusy(true);
-    api.restart().catch((e) => {
-      toast(`Couldn't restart: ${errorText(e)}`);
-      setBusy(false);
-    });
-  };
+  const restart = () => ask.run(async () => {
+    await api.restart();
+    setSent(true);
+  });
+  const working = ask.busy || (sent && !s.why?.startsWith("restart failed"));
   return (
     <span className="flex items-center gap-1.5 font-mono text-[11px] text-fg-3" title={title}>
       <span className={cx("size-1.5 rounded-full", dot)} />
       {label}
       {s.phase === "restart" && (
-        <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={restartDisabled(s, busy)} onClick={restart}>
+        <ActionButton type="button" variant="link" pending={working} pendingLabel="Restarting…" disabled={restartDisabled(s, working)} onClick={restart}>
           Restart
-        </button>
+        </ActionButton>
       )}
+      <ErrorLine error={ask.error && `Couldn't restart: ${ask.error}`} className="text-[11px]" />
     </span>
   );
 }

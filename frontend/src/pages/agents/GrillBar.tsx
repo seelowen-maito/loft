@@ -120,6 +120,7 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
           body="The rounds stop now. What you sent is kept, and the agent writes a summary of what was covered."
           cancelLabel="Keep going"
           confirmLabel="End interview"
+          pendingLabel="Ending…"
           danger
           pending={busy}
           onConfirm={() => send("end")}
