@@ -23,7 +23,7 @@ public struct AgentSchedule: Codable, Hashable, Identifiable {
 
     func repeatLabel(locale: Locale = .current) -> String {
         guard let every else { return "Once" }
-        return "Every \(every) \(Self.clock(time ?? "", locale: locale))"
+        return ["Every", every, Self.clock(time ?? "", locale: locale)].filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     /// The schedule's row: "Every weekday · next Mon Nov 16 8:00 AM". The repeat's time is left out when it is the
@@ -31,8 +31,10 @@ public struct AgentSchedule: Codable, Hashable, Identifiable {
     public func rowLabel(locale: Locale = .current, timeZone: TimeZone = .current) -> String {
         let next = Self.nextLabel(nextAt, locale: locale, timeZone: timeZone)
         guard let every else { return "Once · next \(next)" }
-        let same = Self.clock(time ?? "", locale: locale) == Self.format(nextAt, "jmm", locale: locale, timeZone: timeZone)
-        return "Every \(every)\(same ? "" : " " + Self.clock(time ?? "", locale: locale)) · next \(next)"
+        let at = Self.clock(time ?? "", locale: locale)
+        let same = at == Self.format(nextAt, "jmm", locale: locale, timeZone: timeZone)
+        // Only the parts that exist: a schedule without a time gets no extra space.
+        return ["Every", every, same ? "" : at].filter { !$0.isEmpty }.joined(separator: " ") + " · next \(next)"
     }
 
     /// "HH:MM" from the server as a time of day in the user's locale ("8:00 AM", "08:00"); as is when unreadable.

@@ -103,4 +103,12 @@ final class AgentCommandsTests: XCTestCase {
         var once = s; once.every = nil
         XCTAssertTrue(once.rowLabel(locale: us, timeZone: utc).hasPrefix("Once · next "))
     }
+
+    func testARepeatWithoutATimeHasNoDoubleSpace() throws {
+        let json = #"{"id":"s1","prompt":"p","every":"day","next_at":"2026-11-16T08:00:00Z"}"#
+        let s = try JSONCoding.decoder.decode(AgentSchedule.self, from: Data(json.utf8))
+        let us = Locale(identifier: "en_US"), utc = TimeZone(identifier: "UTC")!
+        XCTAssertEqual(s.repeatLabel(locale: us), "Every day")
+        XCTAssertEqual(s.rowLabel(locale: us, timeZone: utc), "Every day · next Mon Nov 16 8:00\u{202F}AM")
+    }
 }
