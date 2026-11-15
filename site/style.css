@@ -161,6 +161,7 @@ h2 { margin: 12px 0 16px; font-size: clamp(30px, 4.4vw, 46px); line-height: 1.1;
 .feature > * { min-width: 0; }
 .feature + .feature { margin-top: 128px; }
 .feature.flip .copytext { order: 2; }
+.feature.solo { grid-template-columns: minmax(0, 640px); justify-content: center; }
 .feature h3 { margin: 12px 0 14px; font-size: clamp(26px, 3.4vw, 36px); line-height: 1.12; letter-spacing: -.025em; font-weight: 600; }
 .feature p { margin: 0; color: var(--fg-2); font-size: 17px; }
 .feature ul { margin: 22px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
