@@ -17,6 +17,7 @@ test("every task status has one label and one tone", () => {
 
 test("an unknown or missing status reads as its words, muted", () => {
   assert.deepEqual(taskStatus("on_hold"), { label: "on hold", tone: "muted" });
+  assert.deepEqual(taskStatus("waiting_on_ci"), { label: "waiting on ci", tone: "muted" }, "every underscore");
   assert.deepEqual(taskStatus(undefined), { label: "", tone: "muted" });
 });
 

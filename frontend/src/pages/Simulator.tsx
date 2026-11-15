@@ -4,6 +4,7 @@ import { api, type Simulator, type SimulatorInput } from "../lib/api";
 import { cx } from "../lib/format";
 import { errorText } from "../lib/useAction";
 import { usePoll } from "../hooks/usePoll";
+import { ErrorLine } from "../components/Callout";
 
 type Devices = { interactive: boolean; devices: Simulator[]; error?: string };
 type Ripple = { id: number; x: number; y: number };
@@ -144,7 +145,7 @@ function LiveScreen({ device }: { device: Simulator }) {
           ))}
         </div>
       </div>
-      {err && <p className="text-[12px] text-bad">{err}</p>}
+      <ErrorLine error={err} />
       <div className="flex w-full max-w-md flex-wrap items-center justify-center gap-2">
         <button className="btn" title="Home" onClick={() => send({ action: "button", name: "home" })}><House className="size-4" /></button>
         <button className="btn" title="Lock" onClick={() => send({ action: "button", name: "lock" })}><Lock className="size-4" /></button>
@@ -207,7 +208,7 @@ function PolledScreen({ device }: { device: Simulator }) {
   return (
     <>
       {frame && <img src={frame} alt={`${device.name} screen`} className={cx("min-h-0 flex-1 rounded-[2.5rem] border border-line object-contain", err && "opacity-50")} />}
-      {err && <p className="text-[12px] text-bad">{err}</p>}
+      <ErrorLine error={err} />
     </>
   );
 }

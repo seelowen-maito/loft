@@ -18,7 +18,7 @@ const STATUS: Record<string, { label: string; tone: Tone }> = {
 
 /** A task status's label and tone. An unknown one reads as its own words, muted. */
 export function taskStatus(s: string | null | undefined): { label: string; tone: Tone } {
-  return STATUS[s ?? ""] ?? { label: (s ?? "").replace("_", " "), tone: "muted" };
+  return STATUS[s ?? ""] ?? { label: (s ?? "").replaceAll("_", " "), tone: "muted" };
 }
 
 const TEXT: Record<Tone, string> = {

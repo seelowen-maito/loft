@@ -462,7 +462,7 @@ export default function SettingsPage() {
   );
 
   if (!view || !draft) {
-    return <div className="mx-auto max-w-3xl px-5 py-8">{err ? <p className="text-bad">{err}</p> : <div className="skeleton h-96 rounded-2xl" />}</div>;
+    return <div className="mx-auto max-w-3xl px-5 py-8">{err ? <ErrorLine error={err} /> : <div className="skeleton h-96 rounded-2xl" />}</div>;
   }
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setDraft({ ...draft, [k]: v });

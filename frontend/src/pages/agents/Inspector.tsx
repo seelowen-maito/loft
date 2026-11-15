@@ -14,7 +14,7 @@ import { projectsOf, withTyped } from "../../lib/team";
 import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
 import { CommandsPanel } from "./CommandsPanel";
-import { ActionButton } from "../../components/ActionButton";
+import { ActionButton, DANGER } from "../../components/ActionButton";
 import { ErrorLine } from "../../components/Callout";
 import { errorText, useAction } from "../../lib/useAction";
 
@@ -359,7 +359,7 @@ export function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () =
         {agent.builtin ? (
           <span className="self-center text-[12.5px] text-fg-3">{agent.name} comes with Loft and can't be deleted.</span>
         ) : !confirm ? (
-          <button className="btn border-bad/30 text-bad" onClick={() => { setPurge(true); setConfirm(true); }}>
+          <button className={DANGER} onClick={() => { setPurge(true); setConfirm(true); }}>
             <Trash2 className="size-3.5" /> Delete agent
           </button>
         ) : (
