@@ -427,6 +427,18 @@ func renderWindow(store: LoftStore, nav: MacNav, to folder: String) async {
         try? await Task.sleep(for: .seconds(1))
         png("settings-refused")
     }
+    // The menu bar item (#516) on a light and a dark bar, with and without a count.
+    for dark in [false, true] {
+        for count in [0, 40] {
+            let bar = MenuBarMark(count: count).font(.system(size: 13)).foregroundStyle(dark ? .white : .black)
+                .padding(.horizontal, 10).frame(height: 24).background(dark ? Color(white: 0.16) : Color(white: 0.93))
+            let renderer = ImageRenderer(content: bar)
+            renderer.scale = 4
+            if let image = renderer.nsImage, let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: folder).appendingPathComponent("menubar-\(dark ? "dark" : "light")-\(count).png"))
+            }
+        }
+    }
     NSApp.terminate(nil)
 }
 #endif

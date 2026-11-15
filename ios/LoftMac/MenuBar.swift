@@ -13,15 +13,27 @@ struct MenuBarLabel: View {
 
     var body: some View {
         let count = MenuBarSummary(store).needsCount
-        HStack(spacing: 3) {
-            Image(systemName: count > 0 ? "bell.badge" : "circle.hexagongrid")
-            if count > 0 { Text("\(count)") }
-        }
+        MenuBarMark(count: count)
         .onAppear {
             alerts?.showWindow = { openWindow(id: "main") }
             quickSearch?.showWindow = { openWindow(id: "main") }
             voicePanel?.showWindow = { openWindow(id: "main") }
         }
+    }
+}
+
+/// Loft's house mark always (#516), with the Needs you count beside it when something waits.
+struct MenuBarMark: View {
+    private static let mark = LoftMark.menuBarImage()
+    var count: Int
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(nsImage: Self.mark)
+            if count > 0 { Text("\(count)") }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(count > 0 ? "Loft, \(count) need you" : "Loft")
     }
 }
 
