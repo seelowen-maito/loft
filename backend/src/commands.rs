@@ -205,7 +205,10 @@ fn listing(dir: &Path, out: &mut Vec<String>) {
     for e in rd.flatten() {
         let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
         let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-        out.push(format!("{} {} {} {t}", e.path().display(), m.is_dir(), m.len()));
+        use std::os::unix::fs::MetadataExt;
+        // ctime can't be set back by an edit; the content is hashed too, for a copy that kept both times.
+        let content = if m.is_file() { std::fs::read(e.path()).map_or(0, |b| b.iter().fold(14695981039346656037u64, |h, x| (h ^ *x as u64).wrapping_mul(1099511628211))) } else { 0 };
+        out.push(format!("{} {} {} {t} {}.{} {content}", e.path().display(), m.is_dir(), m.len(), m.ctime(), m.ctime_nsec()));
         if m.is_dir() {
             listing(&e.path(), out);
         }
@@ -458,5 +461,19 @@ mod tests {
         let p = sync_user_plugin(&st, &home).unwrap();
         assert!(p.join("skills/a/SKILL.md").exists());
         assert!(!p.join("skills/a/back").exists(), "the link back to a folder being copied is skipped");
+    }
+
+    #[test]
+    fn a_same_size_edit_with_the_time_restored_is_seen() {
+        let (home, st) = (dir("sneaky-home"), dir("sneaky-st"));
+        std::fs::create_dir_all(home.join("commands")).unwrap();
+        std::fs::write(home.join("commands/ship.md"), "ship").unwrap();
+        let p = sync_user_plugin(&st, &home).unwrap();
+        let f = p.join("commands/ship.md");
+        let t = std::fs::metadata(&f).unwrap().modified().unwrap();
+        std::fs::write(&f, "evil").unwrap();
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(t).unwrap();
+        sync_user_plugin(&st, &home).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "ship");
     }
 }

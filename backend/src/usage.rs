@@ -24,19 +24,17 @@ const WINDOWS: &[(&str, &str)] = &[
     ("seven_day_sonnet", "week · Sonnet"),
 ];
 
-/// Claude Code's stored login: the macOS keychain, else `.credentials.json` in its config dir.
+/// Claude Code's stored login, in the CLI's order: with `CLAUDE_CONFIG_DIR` set, `.credentials.json` there;
+/// otherwise the macOS keychain, else `.credentials.json` in `~/.claude`.
 pub async fn credentials() -> Result<Value> {
-    let out = tokio::process::Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .output()
-        .await;
-    let raw = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => {
-            let dir = std::env::var("CLAUDE_CONFIG_DIR")
-                .map(Into::into)
-                .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"));
-            std::fs::read_to_string(dir.join(".credentials.json")).context("no Claude Code login found; run `claude` and log in")?
+    let from_file = |dir: std::path::PathBuf| std::fs::read_to_string(dir.join(".credentials.json")).context("no Claude Code login found; run `claude` and log in");
+    let raw = if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        from_file(dir.into())?
+    } else {
+        let out = tokio::process::Command::new("security").args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]).output().await;
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => from_file(dirs::home_dir().unwrap_or_default().join(".claude"))?,
         }
     };
     serde_json::from_str(&raw).context("unreadable Claude Code credentials")

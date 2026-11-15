@@ -635,11 +635,12 @@ export function Chat({
                     e.preventDefault();
                     pickCommand(c.name);
                   }}
-                  className={cx("flex w-full items-baseline gap-3 px-3 py-2 text-left", i === menuIndex && "bg-white/[0.06]", c.tag === "terminal" && "opacity-50")}
+                  className={cx("flex w-full flex-wrap items-baseline gap-x-3 px-3 py-2 text-left", i === menuIndex && "bg-white/[0.06]", c.tag === "terminal" && "opacity-50")}
                 >
                   <span className="font-mono text-[12.5px] text-accent">{c.name}</span>
                   <span className="min-w-0 flex-1 truncate text-[12px] text-fg-3">{c.description}</span>
                   {c.tag === "terminal" && <span className="shrink-0 text-[11px] text-fg-3">terminal only</span>}
+                  {c.tag === "terminal" && <span className="basis-full text-[11px] text-fg-3">{terminalNote(c)}</span>}
                 </button>
               ))}
             </div>

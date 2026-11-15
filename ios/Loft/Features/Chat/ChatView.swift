@@ -1026,11 +1026,11 @@ private struct LoopScheduleBar: View {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(l.prompt).font(.footnote).lineLimit(1)
-                        Text("Looping every \(every(l.intervalMinutes)) · next \(l.nextAt.formatted(.relative(presentation: .named)))")
+                        Text("Looping every \(every(l.intervalMinutes)) · next \(l.nextAt.formatted(date: .abbreviated, time: .shortened))")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("Stop", action: stop).buttonStyle(.bordered).accessibilityIdentifier("loopStop")
+                    Button("Stop", action: stop).buttonStyle(.bordered).frame(minHeight: 44).accessibilityIdentifier("loopStop")
                 }
             }
             ForEach(agent.schedules ?? []) { s in
@@ -1041,11 +1041,10 @@ private struct LoopScheduleBar: View {
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("Cancel") { cancel(s.id) }.buttonStyle(.bordered).accessibilityIdentifier("scheduleCancel")
+                    Button("Cancel") { cancel(s.id) }.buttonStyle(.bordered).frame(minHeight: 44).accessibilityIdentifier("scheduleCancel")
                 }
             }
         }
-        .controlSize(.small)
         .padding(10)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .accessibilityElement(children: .contain)
