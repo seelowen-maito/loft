@@ -1175,7 +1175,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         disallowed.push("Agent".into());
     }
     // The tool lists hold the user's own rules (`Bash(npm *)`), so they go in the settings file too; `--settings`
-    // applies despite `--setting-sources`. So does the hook that refuses kills Loft can't scope to the agent's
+    // applies despite `--setting-sources ""`. So does the hook that refuses kills Loft can't scope to the agent's
     // own processes (`/bin/kill`, `sudo kill`, a `kill` in `sh -c`).
     let exe = loft_exe()?;
     let settings = json!({

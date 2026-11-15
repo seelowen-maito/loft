@@ -20,18 +20,17 @@ pub struct Body {
     arg: String,
 }
 
-fn setting(state: &AppState, id: &str, what: &str, arg: &str, choices: &[&str], current: String, set: fn(&mut crate::db::Agent, String)) -> Result<String, crate::api::ApiError> {
+/// Shows or sets one agent setting. `allow_default` adds "default", which clears the setting.
+fn setting(state: &AppState, id: &str, what: &str, arg: &str, choices: &[&str], allow_default: bool, current: String, set: fn(&mut crate::db::Agent, String)) -> Result<String, crate::api::ApiError> {
     let arg = arg.trim().to_lowercase();
+    let list = if allow_default { format!("{}, default", choices.join(", ")) } else { choices.join(", ") };
     if arg.is_empty() {
         let now = if current.is_empty() { "default".to_string() } else { current };
-        let extra = if what == "Effort" { ", default" } else { "" };
-        return Ok(format!("{what}: {now}. Choices: {}{extra}.", choices.join(", ")));
+        return Ok(format!("{what}: {now}. Choices: {list}."));
     }
-    // Effort has no "default" in the list: it clears the setting.
-    let value = if what == "Effort" && arg == "default" { String::new() } else { arg };
+    let value = if allow_default && arg == "default" { String::new() } else { arg };
     if !value.is_empty() && !choices.contains(&value.as_str()) {
-        let extra = if what == "Effort" { ", default" } else { "" };
-        return Err(bad(format!("{what} is one of {}{extra}.", choices.join(", "))));
+        return Err(bad(format!("{what} is one of {list}.")));
     }
     let a = state.db.update_agent(id, |a| set(a, value.clone()))?.ok_or_else(not_found)?;
     emit_agent(state, &a);
@@ -73,8 +72,8 @@ async fn usage_text(state: &AppState, id: &str, with_plan: bool) -> Result<Strin
 pub async fn run(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<Body>) -> ApiResult<Value> {
     let a = state.db.get_agent(&id)?.ok_or_else(not_found)?;
     let text = match b.name.as_str() {
-        "model" => setting(&state, &id, "Model", &b.arg, &MODELS, a.model, |a, v| a.model = v)?,
-        "effort" => setting(&state, &id, "Effort", &b.arg, &EFFORTS, a.effort, |a, v| a.effort = v)?,
+        "model" => setting(&state, &id, "Model", &b.arg, &MODELS, false, a.model, |a, v| a.model = v)?,
+        "effort" => setting(&state, &id, "Effort", &b.arg, &EFFORTS, true, a.effort, |a, v| a.effort = v)?,
         "login" => crate::login::text().await,
         "cost" => usage_text(&state, &id, false).await?,
         "status" => usage_text(&state, &id, true).await?,
@@ -111,6 +110,15 @@ mod tests {
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().effort, "");
         let notices = st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.kind == "notice").count();
         assert_eq!(notices, 6, "each answer is a notice in the chat");
+    }
+
+    #[tokio::test]
+    async fn the_model_can_be_set_while_the_agent_is_running_and_the_next_run_uses_it() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        assert!(call(&st, &a.id, "model", "haiku").await.unwrap().contains("The next run uses it"));
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().model, "haiku");
     }
 
     #[tokio::test]

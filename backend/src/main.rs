@@ -249,7 +249,6 @@ async fn serve() -> anyhow::Result<()> {
     delivery::stall_lost_runs(&state);
     tokio::spawn(agents::scheduler(state.clone()));
     tokio::spawn(loops::scheduler(state.clone()));
-    tokio::spawn(schedules::scheduler(state.clone()));
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));
     tokio::spawn(prs::backfill(state.clone()));

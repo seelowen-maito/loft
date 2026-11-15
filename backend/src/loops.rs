@@ -78,13 +78,16 @@ pub fn tick(state: &AppState, now: DateTime<Utc>) -> usize {
     sent
 }
 
+/// One timer for both `/loop` and `/schedule`.
 pub async fn scheduler(state: AppState) {
     let mut tick_every = tokio::time::interval(std::time::Duration::from_secs(15));
     loop {
         tick_every.tick().await;
         // Like the wake-ups, held while an update waits for idle.
         if !crate::updater::pending(&state) {
-            tick(&state, Utc::now());
+            let now = Utc::now();
+            tick(&state, now);
+            crate::schedules::tick(&state, now);
         }
     }
 }
@@ -199,6 +202,17 @@ mod tests {
         assert_eq!(tick(&st, t0), 0);
         assert_eq!(user_texts(&st, &a.id), 0);
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().repeat.unwrap().next_at, at(17, 0).to_rfc3339());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn starting_a_loop_replaces_the_one_running() {
+        let (st, a) = agents::tests::fake_claude_state();
+        let go = |interval: &str, prompt: &str| start(State(st.clone()), Path(a.id.clone()), Json(Start { interval: interval.into(), prompt: prompt.into() }));
+        go("10m", "first").await.ok().unwrap();
+        go("2h", "second").await.ok().unwrap();
+        let l = st.db.get_agent(&a.id).unwrap().unwrap().repeat.unwrap();
+        assert_eq!((l.prompt.as_str(), l.interval_minutes), ("second", 120));
+        assert!(go("5", "x").await.is_err() && go("5m", "  ").await.is_err());
     }
 
     #[test]

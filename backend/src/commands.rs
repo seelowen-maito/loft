@@ -169,50 +169,85 @@ pub fn unlink_user_commands(workspace: &Path, claude_dir: &Path) {
 /// The plugin name the user's own commands and skills load under: `/user:ship`.
 pub const USER_PLUGIN: &str = "user";
 
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for e in std::fs::read_dir(src)? {
+/// Folders never copied into the plugin: they are big and no command or skill needs them.
+const SKIP: [&str; 2] = ["node_modules", ".git"];
+
+/// Every file under `src` as (path relative to `src`, size, modified time). Links are followed, so a linked skill
+/// folder counts as what it points at; the depth cap stops a link loop.
+fn files(src: &Path, rel: &Path, depth: u32, out: &mut Vec<(std::path::PathBuf, u64, u128)>) -> std::io::Result<()> {
+    if depth > 8 {
+        return Ok(());
+    }
+    for e in std::fs::read_dir(src.join(rel))? {
         let e = e?;
-        let to = dst.join(e.file_name());
-        // `metadata` follows links, so a linked skill folder is copied as what it points at.
-        if std::fs::metadata(e.path())?.is_dir() {
-            copy_dir(&e.path(), &to)?;
+        let rel = rel.join(e.file_name());
+        let m = std::fs::metadata(e.path())?;
+        if m.is_dir() {
+            if !SKIP.iter().any(|s| e.file_name() == *s) {
+                files(src, &rel, depth + 1, out)?;
+            }
         } else {
-            std::fs::copy(e.path(), &to)?;
+            let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            out.push((rel, m.len(), t));
         }
     }
     Ok(())
 }
 
+static SYNC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SYNCS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Copies the user's own commands and skills (the Claude folder's `commands` and `skills`) into a plugin folder
 /// that Loft owns, outside every workspace, and returns it for `--plugin-dir`. A copy, so an agent can't write
 /// through to the user's folders; with only these two folders in it, the user's settings, hooks and plugins stay
 /// out. Runs read no settings file from the workspace (`--setting-sources ""`), which an agent could write.
+/// Called at every run start: the folder is rebuilt only when the user's files changed, so a running agent keeps
+/// its commands, and runs starting together don't race.
 pub fn sync_user_plugin(storage: &Path, claude_dir: &Path) -> Option<std::path::PathBuf> {
-    let (dir, tmp) = (storage.join("user-plugin"), storage.join(format!("user-plugin.{}", std::process::id())));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let built = (|| -> std::io::Result<bool> {
-        let mut any = false;
-        for kind in ["commands", "skills"] {
-            if claude_dir.join(kind).is_dir() {
-                copy_dir(&claude_dir.join(kind), &tmp.join(kind))?;
-                any = true;
-            }
-        }
-        if any {
-            std::fs::create_dir_all(tmp.join(".claude-plugin"))?;
-            std::fs::write(tmp.join(".claude-plugin/plugin.json"), json!({ "name": USER_PLUGIN, "version": "1.0.0" }).to_string())?;
-        }
-        Ok(any)
-    })();
-    let _ = std::fs::remove_dir_all(&dir);
-    match built {
-        Ok(true) if std::fs::rename(&tmp, &dir).is_ok() => Some(dir),
-        _ => {
-            let _ = std::fs::remove_dir_all(&tmp);
-            None
+    let _lock = SYNC.lock().unwrap_or_else(|e| e.into_inner());
+    let (dir, stamp) = (storage.join("user-plugin"), storage.join("user-plugin.fingerprint"));
+    let tmp = storage.join(format!("user-plugin.{}.{}", std::process::id(), SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let mut all: Vec<(&str, Vec<_>)> = Vec::new();
+    for kind in ["commands", "skills"] {
+        let mut list = Vec::new();
+        if claude_dir.join(kind).is_dir() && files(&claude_dir.join(kind), Path::new(""), 0, &mut list).is_ok() {
+            all.push((kind, list));
         }
     }
+    if all.is_empty() {
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&stamp);
+        return None;
+    }
+    let print = format!("{all:?}");
+    if dir.is_dir() && std::fs::read_to_string(&stamp).is_ok_and(|p| p == print) {
+        return Some(dir);
+    }
+    let built = (|| -> std::io::Result<()> {
+        for (kind, list) in &all {
+            std::fs::create_dir_all(tmp.join(kind))?;
+            for (rel, _, _) in list {
+                let to = tmp.join(kind).join(rel);
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(claude_dir.join(kind).join(rel), to)?;
+            }
+        }
+        std::fs::create_dir_all(tmp.join(".claude-plugin"))?;
+        std::fs::write(tmp.join(".claude-plugin/plugin.json"), json!({ "name": USER_PLUGIN, "version": "1.0.0" }).to_string())?;
+        Ok(())
+    })();
+    // The old folder goes only once the new one is complete.
+    if built.is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        if std::fs::rename(&tmp, &dir).is_ok() {
+            let _ = std::fs::write(&stamp, &print);
+            return Some(dir);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    None
 }
 
 /// `GET /api/agents/{id}/commands`
@@ -312,5 +347,49 @@ mod tests {
         std::fs::create_dir_all(ws.join(".claude/skills")).unwrap();
         unlink_user_commands(&ws, &home);
         assert!(!ws.join(".claude/commands").exists() && ws.join(".claude/skills").is_dir());
+    }
+
+    #[test]
+    fn the_plugin_is_rebuilt_only_when_the_users_files_change_and_skips_big_folders() {
+        let (home, st) = (dir("rebuild-home"), dir("rebuild-st"));
+        std::fs::create_dir_all(home.join("skills/big/node_modules/x")).unwrap();
+        std::fs::write(home.join("skills/big/SKILL.md"), "big").unwrap();
+        std::fs::write(home.join("skills/big/node_modules/x/a.js"), "x").unwrap();
+        let p = sync_user_plugin(&st, &home).unwrap();
+        assert!(p.join("skills/big/SKILL.md").exists() && !p.join("skills/big/node_modules").exists());
+        // Unchanged: left alone, so a running agent keeps what it loaded.
+        std::fs::write(p.join("marker"), "m").unwrap();
+        sync_user_plugin(&st, &home).unwrap();
+        assert!(p.join("marker").exists());
+        // Changed: rebuilt.
+        std::fs::write(home.join("skills/big/SKILL.md"), "bigger").unwrap();
+        sync_user_plugin(&st, &home).unwrap();
+        assert!(!p.join("marker").exists());
+        assert_eq!(std::fs::read_to_string(p.join("skills/big/SKILL.md")).unwrap(), "bigger");
+    }
+
+    #[test]
+    fn a_link_loop_in_the_skills_folder_ends() {
+        let (home, st) = (dir("loop-home"), dir("loop-st"));
+        std::fs::create_dir_all(home.join("skills/a")).unwrap();
+        std::fs::write(home.join("skills/a/SKILL.md"), "a").unwrap();
+        std::os::unix::fs::symlink(home.join("skills"), home.join("skills/a/back")).unwrap();
+        assert!(sync_user_plugin(&st, &home).is_some());
+    }
+
+    #[test]
+    fn syncing_from_several_threads_leaves_one_complete_plugin() {
+        let (home, st) = (dir("race-home"), dir("race-st"));
+        std::fs::create_dir_all(home.join("commands")).unwrap();
+        std::fs::write(home.join("commands/ship.md"), "ship").unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (home, st) = (home.clone(), st.clone());
+                std::thread::spawn(move || sync_user_plugin(&st, &home).is_some())
+            })
+            .collect();
+        assert!(threads.into_iter().all(|t| t.join().unwrap()));
+        assert_eq!(std::fs::read_to_string(st.join("user-plugin/commands/ship.md")).unwrap(), "ship");
+        assert!(st.join("user-plugin/.claude-plugin/plugin.json").exists());
     }
 }

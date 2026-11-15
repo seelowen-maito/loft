@@ -1,6 +1,6 @@
 //! `/schedule <when> <prompt>`: Loft sends the prompt to the agent once, or at each due time of a repeat.
 //! Schedules live on the agent, so they survive a restart; one that came due while Loft was down is sent once on start.
-//! Times are the Mac's local time.
+//! Times are the Mac's local time. Quiet hours don't apply: the user named the time, unlike a `/loop`, which Loft paces.
 use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc, Weekday};
@@ -114,26 +114,15 @@ pub fn tick(state: &AppState, now: DateTime<Utc>) -> usize {
                 }
             });
         });
-        if let Ok(Some(a)) = r {
-            emit_agent(state, &a);
-        }
+        // Only a schedule that was updated is sent, or a failed write would send it again on every tick.
+        let Ok(Some(updated)) = r else { continue };
+        emit_agent(state, &updated);
         for s in due {
             agents::enqueue_with(state, &a.id, Some(s.prompt), json!({ "scheduled": true }), "scheduled");
             sent += 1;
         }
     }
     sent
-}
-
-pub async fn scheduler(state: AppState) {
-    let mut tick_every = tokio::time::interval(std::time::Duration::from_secs(15));
-    loop {
-        tick_every.tick().await;
-        // Like the wake-ups, held while an update waits for idle.
-        if !crate::updater::pending(&state) {
-            tick(&state, Utc::now());
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -220,6 +209,44 @@ mod tests {
         let next = st.db.get_agent(&a.id).unwrap().unwrap().schedules[0].next_at.clone();
         assert_eq!(next, at(16, 9, 30).to_rfc3339());
         assert_eq!(tick(&st, at(15, 12, 1)), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quiet_hours_do_not_hold_a_schedule() {
+        let (st, a) = agents::tests::fake_claude_state();
+        let mut s = parse("tomorrow 9:30 run the tests", at(12, 10, 0)).unwrap();
+        s.id = "s1".into();
+        st.db.update_agent(&a.id, |x| {
+            x.quiet_hours = (0..7).map(|d| crate::db::QuietWindow { days: vec![d], start: "00:00".into(), end: "23:59".into() }).collect();
+            x.schedules.push(s);
+        })
+        .unwrap();
+        assert_eq!(tick(&st, at(13, 9, 30)), 1);
+        assert_eq!(user_texts(&st, &a.id), 1);
+    }
+
+    #[test]
+    fn a_time_that_does_not_exist_is_skipped_not_lost() {
+        // Every day 2:30 on a day the clock jumps over it: the day is skipped, the next day is found.
+        let t = NaiveTime::from_hms_opt(2, 30, 0).unwrap();
+        let from = at(12, 10, 0);
+        let n = next_occurrence("day", t, from).unwrap();
+        assert!(n > from && n <= from + Duration::days(2));
+    }
+
+    #[test]
+    fn an_unknown_agent_or_schedule_is_not_found_and_changes_nothing() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let e = rt.block_on(add(State(st.clone()), Path("nope".into()), Json(Add { text: "in 2h go".into() }))).err().unwrap();
+        assert_eq!(e.0, axum::http::StatusCode::NOT_FOUND);
+        let mut s = parse("in 2h go", at(12, 10, 0)).unwrap();
+        s.id = "s1".into();
+        st.db.update_agent(&a.id, |x| x.schedules.push(s)).unwrap();
+        let _ = rt.block_on(cancel(State(st.clone()), Path((a.id.clone(), "other".into())))).ok().unwrap();
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().schedules.len(), 1, "an unknown schedule id removes nothing");
+        assert!(rt.block_on(cancel(State(st.clone()), Path(("nope".into(), "s1".into())))).is_err());
     }
 
     #[test]
