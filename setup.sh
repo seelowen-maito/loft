@@ -155,6 +155,11 @@ else fail "web app build failed"; show_log; tip "To see everything: cd ${HERE}fr
 [ -x "$BIN" ] && label="Building loft" || label="Building loft ${D}(the first build takes a few minutes)${N}"
 if spin "$label" bash -c 'cd backend && cargo build --release'; then ok "loft"
 else fail "loft build failed"; show_log; tip "To see everything: cd ${HERE}backend && cargo build --release"; exit 1; fi
+# Voice in the browser is transcribed on the Mac by LoftKit's helper (spec #493); without it, voice says why it's off.
+if [ "$MACOS" = 1 ]; then
+  if spin "Building the voice transcriber" bash -c 'cd ios/LoftKit && swift build -c release --product loft-transcribe'; then ok "voice transcriber"
+  else warn "voice transcriber build failed: voice in the browser stays off ${D}(cd ${HERE}ios/LoftKit && swift build -c release --product loft-transcribe)${N}"; fi
+fi
 
 service=0
 if [ "$MACOS" = 1 ]; then

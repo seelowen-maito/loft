@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router";
-import { Bot, GitBranch, Inbox, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
+import { Bot, GitBranch, Inbox, ListTodo, Mic, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api, type Agent, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
@@ -20,6 +20,8 @@ import { UpdateStatus } from "./components/UpdateStatus";
 import { UsageMeter } from "./components/UsageMeter";
 import { TempMeter } from "./components/TempMeter";
 import { Shortcuts } from "./components/Shortcuts";
+import { Talk } from "./components/Talk";
+import { openTalk } from "./lib/talk";
 
 function Clock() {
   const [now, setNow] = useState(new Date());
@@ -250,6 +252,9 @@ export default function App() {
             )}
           </nav>
           <div className="ml-auto flex items-center gap-4 max-md:gap-3 max-[21rem]:gap-2">
+            <button className="rounded-full p-1.5 text-fg-3 transition-colors hover:text-fg" title="Talk to an agent" aria-label="Talk" onClick={() => openTalk()}>
+              <Mic className="size-4" />
+            </button>
             <PendingBadge />
             <NeedsYouBadge live={live} />
             {/* The meters and the clock don't fit on a phone; the live dot and settings do. */}
@@ -273,6 +278,7 @@ export default function App() {
       </header>
       <UpdateBanner live={live} />
       <Shortcuts />
+      <Talk />
       <main className="min-h-0 flex-1">
         <Routes>
           <Route path="/" element={<Navigate to="/repos" replace />} />

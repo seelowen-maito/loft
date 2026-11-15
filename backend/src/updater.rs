@@ -180,6 +180,12 @@ async fn install(root: &Path) -> Result<()> {
     {
         tracing::warn!("herdr ui client: {e}");
     }
+    // The voice transcriber (spec #493), so `POST /api/voice/transcribe` runs the new version.
+    if cfg!(target_os = "macos")
+        && let Err(e) = run(&root.join("ios/LoftKit"), "swift", &["build", "-c", "release", "--product", "loft-transcribe"]).await
+    {
+        tracing::warn!("voice transcriber: {e}");
+    }
     Ok(())
 }
 

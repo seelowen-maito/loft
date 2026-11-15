@@ -714,8 +714,10 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for a in asking {
         let id = format!("mac_access:{}:{}", a.service, a.since);
         let mut actions = vec![];
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Mac access", "target": { "url": format!("{web}/settings#mac-access") } }));
+        }
         if let Some(h) = &host {
-            actions.push(json!({ "kind": "open", "label": "Open Mac access", "target": { "url": format!("http://{h}:{}/settings#mac-access", state.cfg.port) } }));
             actions.push(json!({ "kind": "open", "label": "Screen Sharing", "target": { "url": format!("vnc://{h}") } }));
         }
         actions.push(action("check", "Check again", "POST", "/api/system/mac-access".into(), json!({})));
@@ -749,8 +751,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             None => "There is no good backup yet.".into(),
         };
         let mut actions = vec![action("retry", "Back up now", "POST", "/api/backups".into(), json!({}))];
-        if let Some(h) = crate::tailnet::host() {
-            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#backups", state.cfg.port) } }));
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#backups") } }));
         }
         actions.push(dismiss(&id));
         items.push(Item {
@@ -787,8 +789,8 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
     if let Some(since) = off_since {
         let id = format!("push_off:{since}");
         let mut actions = vec![];
-        if let Some(h) = crate::tailnet::host() {
-            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#push", state.cfg.port) } }));
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#push") } }));
         }
         actions.push(dismiss(&id));
         let phones = if phones == 1 { "your phone".to_string() } else { format!("your {phones} phones") };
@@ -826,8 +828,8 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         let gb = free as f64 / 1e9;
         // Nothing is removed blind: Settings previews what a clean removes.
         let mut actions = vec![];
-        if let Some(h) = crate::tailnet::host() {
-            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#workspaces", state.cfg.port) } }));
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#workspaces") } }));
         }
         actions.push(dismiss(&id));
         items.push(Item {

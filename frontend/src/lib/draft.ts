@@ -50,6 +50,9 @@ export function saveDraft(agent: string, d: Draft, storage?: Store) {
   write(agentKey(agent), empty ? null : JSON.stringify(d), storage);
 }
 
+/** Sent on `window` with an agent id after its Draft was changed outside its composer, which then shows it. */
+export const DRAFT_SET = "loft:draft-set";
+
 export function loadAnswerDraft(session: string, round: number, question: string, storage?: Store): AnswerDraft {
   try {
     const d = JSON.parse(read(answerKey(session, round, question), storage) ?? "null");

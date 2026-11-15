@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "./api";
-import { loadDraft, saveDraft, type Draft } from "./draft";
+import { DRAFT_SET, loadDraft, saveDraft, type Draft } from "./draft";
 import { isVideo } from "./video";
 
 /** A pasted image (or attached video): shown at once from `preview`, sendable once uploaded (`file`). */
@@ -44,6 +44,15 @@ export function useDraft(agent: string) {
   useEffect(() => {
     saveDraft(agent, { text, images: imageList ? imageList.split("\n") : [], task: taskId });
   }, [agent, text, imageList, taskId]);
+
+  // Another part of the page (Talk's Edit in chat) changed this agent's saved Draft: show it.
+  useEffect(() => {
+    const onSet = (e: Event) => {
+      if ((e as CustomEvent<string>).detail === shown.current) showDraft(shown.current, loadDraft(shown.current));
+    };
+    window.addEventListener(DRAFT_SET, onSet);
+    return () => window.removeEventListener(DRAFT_SET, onSet);
+  }, []);
 
   // Also drops a Draft's image whose file is gone (the chat history was cleared): it can't be shown or sent.
   const removeImage = (key: string) =>
