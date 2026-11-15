@@ -22,20 +22,30 @@ find_backups() {
 }
 
 # Restore backup folder $1 into the Loft data folder $2 (.loft). The copy is checked before anything is touched, so a
-# bad backup leaves the install as it was. Any database is moved aside with its -wal and -shm (a stale -wal would be
-# applied to the restored database). Prints why on failure.
+# bad backup leaves the install as it was. Any database is moved aside with its -wal and -shm into
+# before-restore/<time> (a stale -wal would be applied to the restored database); if that fails or the new files
+# can't be moved in, the old ones are put back. Prints why on failure.
 restore_backup() {
   local b=$1 data=$2 tmp="$2/restore.tmp"
+  command -v sqlite3 >/dev/null || { echo "sqlite3 isn't installed, so the backup can't be checked; nothing was changed"; return 1; }
   [ -f "$b/loft.db" ] || { echo "no loft.db in $b"; return 1; }
   mkdir -p "$data" && rm -rf "$tmp" && mkdir -m 700 "$tmp" || { echo "can't write to $data"; return 1; }
   cp "$b/loft.db" "$tmp/" && { [ ! -f "$b/settings.json" ] || cp "$b/settings.json" "$tmp/"; } || { rm -rf "$tmp"; echo "couldn't copy the backup"; return 1; }
   if [ "$(sqlite3 "$tmp/loft.db" 'PRAGMA integrity_check' 2>&1)" != ok ]; then
     rm -rf "$tmp"; echo "the backup's database is damaged (integrity check failed); nothing was changed"; return 1
   fi
-  local aside="$data/before-restore" f
+  local aside="$data/before-restore/$(date +%Y-%m-%d_%H%M%S)" f moved=()
   for f in loft.db loft.db-wal loft.db-shm settings.json; do
     [ -e "$data/$f" ] || continue
-    mkdir -p "$aside" && mv "$data/$f" "$aside/" || { rm -rf "$tmp"; echo "couldn't move $f aside"; return 1; }
+    if mkdir -p "$aside" 2>/dev/null && mv "$data/$f" "$aside/" 2>/dev/null; then moved+=("$f")
+    else
+      for f in ${moved[@]+"${moved[@]}"}; do mv "$aside/$f" "$data/"; done
+      rm -rf "$tmp"; echo "couldn't move $f aside; nothing was changed"; return 1
+    fi
   done
-  mv "$tmp"/* "$data/" && rmdir "$tmp"
+  if ! { mv "$tmp"/* "$data/" && rmdir "$tmp"; }; then
+    for f in loft.db settings.json; do [ -e "$tmp/$f" ] || rm -f "$data/$f"; done
+    for f in ${moved[@]+"${moved[@]}"}; do mv "$aside/$f" "$data/"; done
+    rm -rf "$tmp"; echo "couldn't move the backup in; the old database is back"; return 1
+  fi
 }

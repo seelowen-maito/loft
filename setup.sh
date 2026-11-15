@@ -132,21 +132,28 @@ if [ "$failed" = 1 ]; then printf '\n  %sFix the items above, then run setup aga
 
 section "Restore a backup"
 . scripts/restore-backup.sh
-# Only an install with no database yet is offered one; an existing Loft is never touched.
+# A fresh install is offered a backup; one with data is asked, defaulting to No (and never when there's no terminal).
+restore=1; skip="start fresh"
 if [ -f .loft/loft.db ]; then
-  ok "this install already has its data ${D}(nothing to restore)${N}"
-else
+  restore=0; skip="keep the current data"
+  if [ -t 0 ] && [[ $(ask "This install already has its data. Restore from a backup? [y/N]" n) =~ ^[Yy] ]]; then restore=1; fi
+  [ $restore = 0 ] && ok "keeping this install's data ${D}(nothing restored)${N}"
+fi
+if [ $restore = 1 ]; then
   dirs=(); while IFS= read -r d; do dirs+=("$d"); done < <(backup_dirs)
+  stopped=0
+  # Only this checkout's own service is stopped, and only once a backup is chosen; it comes back after.
+  resume_service() { [ $stopped = 1 ] && launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; stopped=0; return 0; }
   while :; do
     list=(); while IFS= read -r l; do [ -n "$l" ] && list+=("$l"); done < <(find_backups ${dirs[@]+"${dirs[@]}"})
     if [ ${#list[@]} -eq 0 ]; then
-      ok "no backups found ${D}(a fresh loft)${N}"
-      answer=$(ask "Folder with backups to restore from, or Enter to start fresh:" "")
+      ok "no backups found"
+      answer=$(ask "Folder with backups to restore from, or Enter to $skip:" "")
     else
       i=0; for l in "${list[@]}"; do i=$((i + 1)); IFS='|' read -r _ date size <<<"$l"; printf '    %s) %s  %s\n' "$i" "$date" "$size"; done
-      answer=$(ask "Restore which one? A number, another folder, or Enter to start fresh:" "")
+      answer=$(ask "Restore which one? A number, another folder, or Enter to $skip:" "")
     fi
-    [ -z "$answer" ] && { ok "starting fresh"; break; }
+    [ -z "$answer" ] && { ok "$skip"; break; }
     if [[ $answer =~ ^[0-9]+$ ]] && [ "$answer" -ge 1 ] && [ "$answer" -le ${#list[@]} ]; then
       chosen=${list[answer - 1]%%|*}
     elif [[ $answer =~ ^[0-9]+$ ]]; then
@@ -156,10 +163,17 @@ else
       if [ -d "$answer" ]; then dirs+=("$answer"); continue; fi
       warn "Not a folder: $answer"; [ -t 0 ] || break; continue
     fi
-    # Loft writes its database while it runs: stop it first.
-    if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null; sleep 1; fi
-    if curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/api/info"; then
-      fail "loft is running on port $PORT; stop it (quit the app or ${HERE}start.sh), then run ${HERE}setup.sh again"; exit 1
+    [ -f .loft/loft.db ] && warn "your current data moves to .loft/before-restore/ (kept, not deleted)"
+    # Loft writes its database while it runs: stop this checkout's service first.
+    if [ $stopped = 0 ] && [ -f "$PLIST" ] && grep -qF -e "<string>$BIN</string>" -e "<string>$BIN-signed</string>" "$PLIST" \
+      && launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+      launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null; stopped=1
+      for _ in $(seq 1 20); do launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break; sleep 0.5; done
+      sleep 1
+    fi
+    if [ -n "$(lsof -t .loft/loft.db 2>/dev/null)" ] || curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/api/info"; then
+      fail "loft is running (port $PORT or .loft/loft.db is in use); stop it (quit the app or ${HERE}start.sh), then run ${HERE}setup.sh again"
+      resume_service; exit 1
     fi
     if why=$(restore_backup "$chosen" .loft); then
       ok "restored ${chosen##*/} ${D}(any older database is in .loft/before-restore)${N}"
@@ -168,8 +182,9 @@ else
       break
     fi
     fail "$why"
-    [ -t 0 ] || exit 1
+    [ -t 0 ] || { resume_service; exit 1; }
   done
+  resume_service
 fi
 
 section "Projects folder"

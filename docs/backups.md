@@ -21,23 +21,28 @@ folder, with its settings in `.loft/settings.json`. It backs both up on its own 
 
 ## Move Loft or restore on a new install
 
-Setup restores a backup for you. Run `./setup.sh` (or the one-line installer) on an install that has no
-`.loft/loft.db` yet: a new Mac, or a new Loft folder. It lists the backups it finds in the default folder and in
+Setup restores a backup for you. Run `./setup.sh` (or the one-line installer). On an install with no
+`.loft/loft.db` yet (a new Mac, or a new Loft folder) it offers one straight away. On an install that already has
+data it asks "Restore from a backup? [y/N]" first; No (the default) keeps everything as it is. With no terminal it
+never restores over an existing database. It lists the backups it finds in the default folder and in
 iCloud Drive's "Loft backups", newest first with their date and size, and asks which to restore. You can also type
 another folder (an external disk), or press Enter to start a fresh Loft.
 
-Choosing one stops Loft if it runs as the background service, moves any database aside to `.loft/before-restore/`
-(with its `-wal` and `-shm` files, so an old `-wal` is never applied to the restored database), copies in the
+Choosing one stops Loft if it runs as this folder's background service (and starts it again afterwards, also if the
+restore is refused), says so when your current data is about to move, and moves any database aside to
+`.loft/before-restore/<date_time>/`, a new folder each time (with its `-wal` and `-shm` files, so an old `-wal` is never applied to the restored database), copies in the
 backup's `loft.db` and `settings.json`, and checks the copy with `PRAGMA integrity_check` before it replaces anything.
 A damaged backup is refused and leaves the install as it was. Then setup carries on and starts Loft.
 
-- Setup never offers a restore on an install that already has a database.
+- If Loft is running some other way (the app, `start.sh`, another copy's service), setup asks you to stop it and
+  changes nothing.
 - Agent workspaces aren't in backups: after a restore, agents start with empty workspaces and clone their repos again.
 - Settings come back with it, including the projects folder and your GitHub token. If the projects folder isn't on
   this Mac, change it under Settings.
 - Once you've checked it, delete `before-restore/`.
 
-`scripts/test-restore.sh` tests finding backups, a good restore and a corrupt backup.
+`scripts/test-restore.sh` tests finding backups, a good restore over an existing database, a second restore, a
+corrupt backup, a failed move and a missing `sqlite3`.
 
 ### By hand
 
