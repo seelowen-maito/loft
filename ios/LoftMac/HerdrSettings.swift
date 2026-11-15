@@ -11,6 +11,7 @@ struct HerdrSettings: View {
     @State private var result: JSONValue?
     @State private var error: String?
     @State private var copied = false
+    @AppStorage(Prefs.agentsOpenIn) private var agentsOpenIn = "loft"
 
     private var origin: String { (store.api?.baseURL.absoluteString ?? "").replacingOccurrences(of: #"/+$"#, with: "", options: .regularExpression) }
     private var command: String { "curl -fsSL \(origin)/api/herdr/install.sh | sh -s -- \(origin)" }
@@ -25,6 +26,16 @@ struct HerdrSettings: View {
         Section("Herdr UI") {
             Text("See every agent in Herdr UI, the terminal multiplexer for coding agents: one tab per agent with its chat, slash commands, approvals and this inspector as a sidebar. Herdr shows each one as an agent, working, idle or waiting for you.")
                 .font(.caption).foregroundStyle(.secondary)
+            if linked {
+                Picker("Open agents in", selection: $agentsOpenIn) {
+                    Text("Loft").tag("loft")
+                    Text("Herdr UI").tag("herdr")
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("agentsOpenIn")
+                Text("Where Spotlight and quick search's ↵ open an agent. In quick search, ⌘↵ opens it in the other one. If Herdr isn't running, the chat opens here.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if !open {
                 Button("Set up Herdr UI") { open = true }.buttonStyle(.accent).accessibilityIdentifier("herdrOpen")
             } else {

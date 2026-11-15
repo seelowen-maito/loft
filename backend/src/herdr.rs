@@ -7,6 +7,8 @@
 //!   links the plugin into the local Herdr and opens the agents' tabs.
 //! - Set up on another machine: Settings shows a one-line command that runs `install.sh` there. It
 //!   downloads the plugin files and, when that machine has the same OS and CPU, the built client.
+//! - Open an agent in Herdr (`POST /api/herdr/focus/{agent_id}`): for the sandboxed Mac app, which can't
+//!   reach Herdr's socket itself. Focuses the agent's pane and brings the terminal running Herdr forward.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -153,6 +155,94 @@ pub async fn setup_local(State(state): State<AppState>) -> ApiResult<Value> {
     Ok(Json(json!({ "ok": true, "done": done, "message": message })))
 }
 
+/// Herdr's socket: the pane metadata token each Loft chat pane reports its agent id under (herdr/src/herdr.rs).
+const TOKEN: &str = "loft_agent";
+
+fn socket() -> PathBuf {
+    std::env::var_os("HERDR_SOCKET_PATH").filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| home().join(".config/herdr/herdr.sock"))
+}
+
+/// One request over Herdr's socket API (newline-delimited JSON); `None` when Herdr isn't running or fails.
+async fn call(socket: &Path, method: &str, params: Value) -> Option<Value> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let talk = async {
+        let mut s = tokio::net::UnixStream::connect(socket).await.ok()?;
+        let line = format!("{}\n", json!({ "id": "loft_focus", "method": method, "params": params }));
+        s.write_all(line.as_bytes()).await.ok()?;
+        let mut reply = String::new();
+        BufReader::new(s).read_line(&mut reply).await.ok()?;
+        let v: Value = serde_json::from_str(&reply).ok()?;
+        if v.get("error").is_some() { None } else { Some(v.get("result").cloned().unwrap_or(Value::Null)) }
+    };
+    tokio::time::timeout(Duration::from_secs(10), talk).await.ok().flatten()
+}
+
+/// The pane showing this Loft agent's chat, if Herdr has one.
+async fn pane_of(socket: &Path, agent_id: &str) -> Option<String> {
+    let list = call(socket, "pane.list", json!({})).await?;
+    list.get("panes")?.as_array()?.iter().find(|p| p.pointer(&format!("/tokens/{TOKEN}")).and_then(|v| v.as_str()) == Some(agent_id))?.get("pane_id")?.as_str().map(str::to_string)
+}
+
+/// Focuses the agent's pane; when it has none, runs `sync` (if given) to open its tab and looks again.
+async fn focus_pane(socket: &Path, agent_id: &str, sync: Option<&Path>) -> Result<(), ApiError> {
+    let not_running = || ApiError(StatusCode::CONFLICT, "Herdr isn't running.".into());
+    call(socket, "pane.list", json!({})).await.ok_or_else(not_running)?;
+    let mut pane = pane_of(socket, agent_id).await;
+    if pane.is_none()
+        && let Some(bin) = sync
+    {
+        let _ = run(bin, &["sync"], None).await;
+        pane = pane_of(socket, agent_id).await;
+    }
+    let pane = pane.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "This agent has no tab in Herdr.".into()))?;
+    call(socket, "pane.focus", json!({ "pane_id": pane })).await.ok_or_else(not_running)?;
+    Ok(())
+}
+
+/// The app a Herdr client runs in, from `ps -axo pid=,ppid=,args=`: the nearest ancestor of a `herdr` client
+/// process (not `herdr server`) that runs from an app bundle, as that bundle's path.
+fn terminal_app(ps: &str) -> Option<String> {
+    let procs: Vec<(u32, u32, &str)> = ps
+        .lines()
+        .filter_map(|l| {
+            let (pid, rest) = l.trim_start().split_once(char::is_whitespace)?;
+            let (ppid, args) = rest.trim_start().split_once(char::is_whitespace).unwrap_or((rest.trim_start(), ""));
+            Some((pid.parse().ok()?, ppid.parse().ok()?, args.trim_start()))
+        })
+        .collect();
+    let is_client = |args: &str| {
+        let mut words = args.split_whitespace();
+        words.next().is_some_and(|cmd| cmd.rsplit('/').next() == Some("herdr")) && !words.any(|w| w == "server")
+    };
+    procs.iter().filter(|p| is_client(p.2)).find_map(|&(_, mut ppid, _)| {
+        for _ in 0..32 {
+            let &(_, up, args) = procs.iter().find(|p| p.0 == ppid)?;
+            if let Some(end) = args.find(".app/Contents/MacOS/") {
+                return Some(args[..end + 4].to_string());
+            }
+            ppid = up;
+        }
+        None
+    })
+}
+
+/// Brings the terminal running Herdr to the front; best effort (Herdr may run in tmux or over ssh).
+async fn raise_terminal() {
+    let Ok(ps) = run(Path::new("/bin/ps"), &["-axo", "pid=,ppid=,args="], None).await else { return };
+    if let Some(app) = terminal_app(&ps) {
+        let _ = run(Path::new("/usr/bin/open"), &["-a", &app], None).await;
+    }
+}
+
+/// `POST /api/herdr/focus/{agent_id}`: shows the agent's tab in Herdr and brings its terminal forward.
+/// 409 when Herdr isn't running, 404 when the agent has no tab even after a sync.
+pub async fn focus(State(state): State<AppState>, UrlPath(agent_id): UrlPath<String>) -> ApiResult<Value> {
+    let sync = Some(built(&state)).filter(|b| b.is_file()).or_else(|| find("loft-herdr"));
+    focus_pane(&socket(), &agent_id, sync.as_deref()).await?;
+    raise_terminal().await;
+    Ok(Json(json!({ "ok": true })))
+}
+
 fn text(body: String, kind: &'static str) -> Response {
     ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "no-store")], body).into_response()
 }
@@ -188,6 +278,80 @@ pub async fn binary(State(state): State<AppState>, headers: axum::http::HeaderMa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty folder for a socket, unique per test.
+    fn temp() -> PathBuf {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("loft-herdr-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A fake Herdr on a socket in a temp folder: answers `pane.list` with these panes and records `pane.focus`.
+    async fn fake_herdr(panes: Value) -> (PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let path = temp().join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let focused = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = focused.clone();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                let (r, mut w) = s.into_split();
+                let mut line = String::new();
+                BufReader::new(r).read_line(&mut line).await.unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let result = match req["method"].as_str().unwrap() {
+                    "pane.list" => json!({ "panes": panes }),
+                    "pane.focus" => {
+                        seen.lock().unwrap().push(req["params"]["pane_id"].as_str().unwrap().to_string());
+                        json!({})
+                    }
+                    _ => json!(null),
+                };
+                w.write_all(format!("{}\n", json!({ "id": req["id"], "result": result })).as_bytes()).await.unwrap();
+            }
+        });
+        (path, focused)
+    }
+
+    #[tokio::test]
+    async fn focuses_the_agents_pane() {
+        let panes = json!([{ "pane_id": "w1:p1", "tokens": { "loft_agent": "a1" } }, { "pane_id": "w1:p2", "tokens": { "loft_agent": "a2" } }]);
+        let (sock, focused) = fake_herdr(panes).await;
+        focus_pane(&sock, "a2", None).await.unwrap();
+        assert_eq!(*focused.lock().unwrap(), vec!["w1:p2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn says_when_herdr_isnt_running() {
+        let err = focus_pane(&temp().join("herdr.sock"), "a1", None).await.unwrap_err();
+        assert_eq!((err.0, err.1.as_str()), (StatusCode::CONFLICT, "Herdr isn't running."));
+    }
+
+    #[tokio::test]
+    async fn says_when_the_agent_has_no_tab() {
+        let (sock, focused) = fake_herdr(json!([{ "pane_id": "w1:p1", "tokens": { "loft_agent": "a1" } }, { "pane_id": "w1:p3" }])).await;
+        let err = focus_pane(&sock, "a9", None).await.unwrap_err();
+        assert_eq!((err.0, err.1.as_str()), (StatusCode::NOT_FOUND, "This agent has no tab in Herdr."));
+        assert!(focused.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn finds_the_terminal_app_running_the_herdr_client() {
+        let ps = "\
+    1     0 /sbin/launchd
+  500     1 /Applications/Ghostty.app/Contents/MacOS/ghostty
+  501   500 /usr/bin/login -flp gustavo /bin/zsh
+  502   501 -zsh
+  503   502 herdr
+  600     1 /Users/gustavo/.local/bin/herdr server
+  700     1 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+";
+        assert_eq!(terminal_app(ps).as_deref(), Some("/Applications/Ghostty.app"));
+        assert_eq!(terminal_app("  600     1 /Users/me/.local/bin/herdr server\n"), None, "the server has no terminal");
+    }
 
     #[test]
     fn names_the_platform_like_install_sh() {

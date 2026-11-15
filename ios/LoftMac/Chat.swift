@@ -52,6 +52,17 @@ struct ChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             ChatHeader(agent: agent, showsSettings: $showsSettings)
+            if let note = nav.chatNote, note.agentId == agent.id {
+                HStack {
+                    Text(note.text).font(.callout).foregroundStyle(Theme.attentionInk)
+                    Spacer()
+                    Button { nav.chatNote = nil } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.borderless).accessibilityLabel("Dismiss")
+                }
+                .padding(.horizontal, 24).padding(.vertical, 8)
+                .accessibilityIdentifier("chatNote")
+                Divider()
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     if store.historyHasMore[agent.id] == true, !shown.isEmpty {
@@ -442,7 +453,8 @@ private struct Composer: View {
                 .strokeBorder(focused ? Theme.accent.opacity(0.4) : WebTheme.lineStrong))
         }
         .padding(12)
-        .onAppear { focused = true }
+        // Takes the keyboard when the chat opens, but not from the sidebar: ↑/↓ there keep moving between sections.
+        .onAppear { focused = !(NSApp.keyWindow?.firstResponder is NSTableView) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             // Switching away (or a system prompt) can swallow the mouse-up: the mic never stays on behind another app.
             pressing = false

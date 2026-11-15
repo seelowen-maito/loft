@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loft for Mac</title>
+<meta name="description" content="A native Mac app for loft: a floating voice panel, quick search from any app, your agents and issues in Spotlight, chat, Needs you and widgets. In beta on TestFlight.">
+<meta property="og:title" content="loft on your desk">
+<meta property="og:description" content="A native Mac app for the loft running on your Mac.">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
+  <symbol id="i-todo" viewBox="0 0 24 24"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4M12 16h.01"/></symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-checks" viewBox="0 0 24 24"><path d="M18 6 7 17l-5-5M22 10l-7.5 7.5L13 16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-house" viewBox="0 0 8 8"><path d="M3 0h2v1H3zM2 1h4v1H2zM1 2h6v1H1zM0 3h8v1H0zM1 4h1v4H1zM6 4h1v4H6zM2 7h4v1H2zM3 5h2v2H3z"/></symbol>
+</svg>
+
+<nav class="site">
+  <div class="wrap">
+    <a class="brand" href="./"><svg class="logo" viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg>loft</a>
+    <div class="nav-links">
+      <a class="hide-sm" href="./#features">Features</a>
+      <a class="hide-sm" href="./#install">Install</a>
+      <a href="ios.html">iOS app</a>
+      <a class="hide-sm" href="#get">Get it</a>
+      <a class="btn" href="https://github.com/seelowen-maito/loft">
+        <svg class="ico" viewBox="0 0 16 16" style="fill:currentColor;stroke:none"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<section id="mac" class="first">
+  <div class="wrap">
+    <div class="feature">
+      <div class="copytext">
+        <span class="exp"><i></i>Experimental</span>
+        <h2 style="margin-top:18px">loft on your <span class="serif">desk.</span></h2>
+        <p>A native Mac app for the loft running on your Mac. Talk to your agents from any app, find any agent or issue in a keystroke, and see what needs you from the menu bar. It's in beta on TestFlight, and it needs loft running on a Mac: this one, or another one over Tailscale.</p>
+        <div class="cta" style="justify-content:flex-start"><a class="btn-primary btn lg" href="https://testflight.apple.com/join/w2rCtJYD">Join the beta on TestFlight</a><a class="btn lg" href="#get">How to get it</a></div>
+        <ul>
+          <li>A floating voice panel over any app</li>
+          <li>Quick search for agents, issues, tickets and specs</li>
+          <li>Your agents and issues in Spotlight</li>
+          <li>The web's look, in dark and light</li>
+        </ul>
+      </div>
+      <div><img class="mac-shot" src="shots/mac-chat.webp" alt="The loft Mac app: the agents list and an agent's chat" width="1600" height="1000"></div>
+    </div>
+  </div>
+</section>
+
+<section id="voice">
+  <div class="wrap">
+    <div class="feature">
+      <div class="copytext">
+        <div class="eyebrow">Floating voice panel</div>
+        <h3>Talk from any app.</h3>
+        <p>Press <kbd>⇧⌥Space</kbd>, or pick it from the menu bar, and a small panel floats over whatever you're doing and starts listening. You see the text as you speak, pick which agent it's for, then review it and send. Loft tidies the text up first.</p>
+        <ul>
+          <li>Send with ↵, cancel with esc</li>
+          <li>Loft suggests who it's for, and you can change it</li>
+          <li>Edit in chat opens it in the agent's message box</li>
+        </ul>
+      </div>
+      <div><img class="mac-shot" src="shots/mac-voice-panel.webp" alt="The voice panel over a chat, ready to send to the Orchestrator, suggesting the Backend Agent" width="1360" height="800" loading="lazy"></div>
+    </div>
+
+    <div class="feature solo">
+      <div class="copytext">
+        <div class="eyebrow">Spotlight</div>
+        <h3>Find loft from <kbd>⌘Space</kbd>.</h3>
+        <p>Your agents and open issues, tickets and specs show up in macOS Spotlight, each agent with its sticker. Pick one to open it in loft. Turn off <b>Show Loft in Spotlight</b> in Settings and they're cleared.</p>
+      </div>
+    </div>
+
+    <div class="feature">
+      <div class="copytext">
+        <div class="eyebrow">Quick search</div>
+        <h3>loft's own search, anywhere.</h3>
+        <p>Press <kbd>⌥Space</kbd> in any app for loft's search panel: agents with their stickers and status, issues, tickets, specs and pages. Open the pick in the app, jump straight to an agent's chat, or open it in the browser.</p>
+        <ul>
+          <li>↵ opens, ⌘↵ goes to the chat, ⌥↵ the browser</li>
+          <li>Works with the main window closed</li>
+        </ul>
+      </div>
+      <div><img class="mac-shot" src="shots/mac-quick-search.webp" alt="Quick search over a chat, listing agents with their stickers and status" width="1360" height="800" loading="lazy"></div>
+    </div>
+  </div>
+</section>
+
+<section id="more">
+  <div class="wrap">
+    <div class="center">
+      <div class="eyebrow">And the rest</div>
+      <h2>Everything from the web, <span class="serif">native.</span></h2>
+    </div>
+    <div class="shots mac">
+      <figure><img src="shots/mac-chat-light.webp" alt="The chat in the light theme" width="1600" height="1000" loading="lazy"><figcaption><b>Dark and light</b>The web's colours and cards, in either theme.</figcaption></figure>
+      <figure><img src="shots/mac-needs-you.webp" alt="The Needs you screen of the loft Mac app" width="1600" height="1000" loading="lazy"><figcaption><b>Needs you</b>Approvals, questions and blocked work in one place.</figcaption></figure>
+      <figure><img src="shots/mac-issues.webp" alt="The Issues board of the loft Mac app" width="1600" height="1000" loading="lazy"><figcaption><b>Issues</b>Every piece of work, its state, and who has it.</figcaption></figure>
+      <figure><img src="shots/mac-overview.webp" alt="The Overview screen of the loft Mac app" width="1600" height="1000" loading="lazy"><figcaption><b>Overview</b>Who's working, who's stuck, and what it costs.</figcaption></figure>
+    </div>
+    <ul class="brief">
+      <li><b>Chat</b>Talk to any agent, with every tool call and approval inline.</li>
+      <li><b>Menu bar</b>The Needs you count, who's working, and a quick message box, even with the window closed.</li>
+      <li><b>Widgets</b>Needs you, who's working now, and the week's usage on your desktop.</li>
+      <li><b>Your own shortcuts</b>Record the keys for quick search, the voice panel and Open loft in Settings.</li>
+      <li><b>Apple Intelligence</b>On-device help where the Mac's model can run, with each use switchable.</li>
+      <li><b>Demo mode</b>Try it on sample data before you connect; Exit on its banner leaves it.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <div class="guide">
+      <div class="center">
+        <div class="eyebrow">Get the Mac app</div>
+        <h2>Install it, <span class="serif">point it at loft.</span></h2>
+        <p class="sub">You need a Mac on macOS 14 or later, and loft running on a Mac.</p>
+      </div>
+      <ol>
+        <li class="card g-step">
+          <div class="n">01</div>
+          <div>
+            <h4>Join the beta on TestFlight</h4>
+            <p>Install Apple's TestFlight app on the Mac, then <a href="https://testflight.apple.com/join/w2rCtJYD">join the beta</a>. It's not on the App Store yet.</p>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">02</div>
+          <div>
+            <h4>Have loft running</h4>
+            <p>The app is a client: your agents run in loft, not in the app. If you haven't yet, <a href="./#install">install loft</a> with the one-line installer.</p>
+          </div>
+        </li>
+        <li class="card g-step">
+          <div class="n">03</div>
+          <div>
+            <h4>Connect</h4>
+            <p>On first launch the app asks for loft's address. It suggests this Mac, <code>http://localhost:7420</code>; for loft on another Mac, use its Tailscale address. It checks that loft answers, then opens your agents. To look around first, enter <code>demo-loft-dev.get-loft.com</code> instead: it opens a demo on sample data, with nothing sent anywhere.</p>
+          </div>
+        </li>
+      </ol>
+      <p class="guide-note">The app is experimental: expect rough edges. To build it yourself, see <a href="https://github.com/seelowen-maito/loft/blob/main/ios/README.md">ios/README.md</a>.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="./" style="font-size:15px"><svg class="logo" viewBox="0 0 8 8" shape-rendering="crispEdges"><use href="#i-house"/></svg>loft</a>
+    <div style="display:flex;gap:22px">
+      <a href="https://github.com/seelowen-maito/loft">GitHub</a>
+      <a href="ios.html">iOS app</a>
+      <a href="mac.html">Mac app</a>
+      <a href="https://github.com/seelowen-maito/loft#readme">README</a>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
