@@ -150,12 +150,12 @@ if [ $restore = 1 ]; then
       ok "no backups found"
       answer=$(ask "Folder with backups to restore from, or Enter to $skip:" "")
     else
-      i=0; for l in "${list[@]}"; do i=$((i + 1)); IFS='|' read -r _ date size <<<"$l"; printf '    %s) %s  %s\n' "$i" "$date" "$size"; done
+      i=0; for l in "${list[@]}"; do i=$((i + 1)); size=${l##*|}; rest=${l%|*}; date=${rest##*|}; src=${rest%|*}; src=${src%/*}; printf '    %s) %s  %s  %s\n' "$i" "$date" "$size" "${src/#$HOME/~}"; done
       answer=$(ask "Restore which one? A number, another folder, or Enter to $skip:" "")
     fi
     [ -z "$answer" ] && { ok "$skip"; break; }
-    if [[ $answer =~ ^[0-9]+$ ]] && [ "$answer" -ge 1 ] && [ "$answer" -le ${#list[@]} ]; then
-      chosen=${list[answer - 1]%%|*}
+    if [[ $answer =~ ^[0-9]+$ ]] && [ $((10#$answer)) -ge 1 ] && [ $((10#$answer)) -le ${#list[@]} ]; then
+      chosen=${list[10#$answer - 1]}; chosen=${chosen%|*|*}
     elif [[ $answer =~ ^[0-9]+$ ]]; then
       warn "no backup $answer"; [ -t 0 ] || break; continue
     else

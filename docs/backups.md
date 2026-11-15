@@ -25,7 +25,7 @@ Setup restores a backup for you. Run `./setup.sh` (or the one-line installer). O
 `.loft/loft.db` yet (a new Mac, or a new Loft folder) it offers one straight away. On an install that already has
 data it asks "Restore from a backup? [y/N]" first; No (the default) keeps everything as it is. With no terminal it
 never restores over an existing database. It lists the backups it finds in the default folder and in
-iCloud Drive's "Loft backups", newest first with their date and size, and asks which to restore. You can also type
+iCloud Drive's "Loft backups", newest first with their date, size and the folder they are in (so an iCloud or typed folder is easy to tell from a local one; symlinked files and folders dated in the future are skipped), and asks which to restore. You can also type
 another folder (an external disk), or press Enter to start a fresh Loft.
 
 Choosing one stops Loft if it runs as this folder's background service (and starts it again afterwards, also if the

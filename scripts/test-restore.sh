@@ -52,6 +52,19 @@ check "no sqlite3 is refused" "$rc" 1
 check "and says that" "${out:0:20}" "sqlite3 isn't instal"
 check "the database is untouched" "$(cat "$D4/loft.db")" keep4
 
+# Owner-only straight away, even from 0644 backup files and a 022 umask.
+umask 022; chmod 644 "$T/icloud/2026-11-06_010000"/*
+restore_backup "$T/icloud/2026-11-06_010000" "$T/perm/.loft" >/dev/null
+check "new .loft is 0700" "$(stat -f %Lp "$T/perm/.loft")" 700
+check "settings.json is 0600" "$(stat -f %Lp "$T/perm/.loft/settings.json")" 600
+check "loft.db is 0600" "$(stat -f %Lp "$T/perm/.loft/loft.db")" 600
+
+# Symlinked files aren't backups; a future-dated folder isn't listed; a | in a folder name is fine.
+mk "$T/s/2026-11-01_000000" link; echo secret > "$T/secret"; rm "$T/s/2026-11-01_000000/settings.json"; ln -s "$T/secret" "$T/s/2026-11-01_000000/settings.json"
+mk "$T/s/9999-12-31_235959" future; mk "$T/p|q/2026-11-02_000000" pipe
+check "symlink and future folders skipped, | kept" "$(find_backups "$T/s" "$T/p|q" | cut -d'|' -f1- | sed "s#$T/##")" "p|q/2026-11-02_000000|2026-11-02 00:00|$(du -h "$T/p|q/2026-11-02_000000/loft.db" | cut -f1)"
+out=$(restore_backup "$T/s/2026-11-01_000000" "$T/s2/.loft"); check "restore refuses a symlinked file" "$?:${out:0:20}" "1:the backup has a sym"
+
 # A fresh folder (no .loft yet) works too.
 check "restore into a new folder" "$(restore_backup "$T/icloud/2026-11-06_010000" "$T/new/.loft"; sqlite3 "$T/new/.loft/loft.db" 'SELECT v FROM t')" icloud
 exit $fails
