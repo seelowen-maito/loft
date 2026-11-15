@@ -37,7 +37,7 @@ export function Bar({ done, total, stage }: { done: number; total: number; stage
 
 /** The "Needs you" and "waiting for the Lead" lines of a Delivery, the same on the spec panel and the Delivery card. */
 export function DeliveryWaits({ d, className }: { d: { waiting_on_you?: number[]; waiting_for_lead?: number[] } | null; className?: string }) {
-  return <>{deliveryWaits(d).map((l) => <div key={l} className={cx("text-warn", className)}>{l}</div>)}</>;
+  return <>{deliveryWaits(d).map((l) => <div key={l.text} className={cx(TONE_TEXT[l.tone], className)}>{l.text}</div>)}</>;
 }
 
 export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Map<string, Agent> }) {

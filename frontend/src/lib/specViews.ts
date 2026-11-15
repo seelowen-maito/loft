@@ -51,10 +51,12 @@ export function badgeText(stage: Stage, d: Pick<DeliverySummary, "state" | "stat
   return label + sub;
 }
 
-/** The Delivery's "Needs you" and "Waiting for the Lead" lines, as text (none when nobody waits). */
-export function deliveryWaits(d: { waiting_on_you?: number[]; waiting_for_lead?: number[] } | null): string[] {
+/** The Delivery's "Needs you" (warn: the user acts) and "Waiting for the Lead" (muted: the Lead acts) lines; none when nobody waits. */
+export function deliveryWaits(d: { waiting_on_you?: number[]; waiting_for_lead?: number[] } | null): { text: string; tone: "warn" | "muted" }[] {
   const list = (ns: number[]) => ns.map((n) => `#${n}`).join(", ");
-  return [d?.waiting_on_you?.length ? `${NEEDS_YOU_LABEL}: ${list(d.waiting_on_you)}` : "", d?.waiting_for_lead?.length ? `Waiting for the Lead: ${list(d.waiting_for_lead)}` : ""].filter(Boolean);
+  const you = d?.waiting_on_you?.length ? [{ text: `${NEEDS_YOU_LABEL}: ${list(d.waiting_on_you)}`, tone: "warn" as const }] : [];
+  const lead = d?.waiting_for_lead?.length ? [{ text: `Waiting for the Lead: ${list(d.waiting_for_lead)}`, tone: "muted" as const }] : [];
+  return [...you, ...lead];
 }
 
 /** A ticket's state in a few words and a tone: the one wording and colour for the board, the spec panel and the Delivery card. An open one waiting on tickets outside its spec says which (`owner/repo#n`); one in review whose reviewers all passed is waiting for CI. */

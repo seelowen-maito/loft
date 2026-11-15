@@ -176,7 +176,7 @@ test("one state for every ticket, whichever page asks", () => {
 });
 
 test("the waiting lines read Needs you for the user and Waiting for the Lead", () => {
-  assert.deepEqual(deliveryWaits({ waiting_on_you: [4, 7], waiting_for_lead: [9] }), ["Needs you: #4, #7", "Waiting for the Lead: #9"]);
+  assert.deepEqual(deliveryWaits({ waiting_on_you: [4, 7], waiting_for_lead: [9] }), [{ text: "Needs you: #4, #7", tone: "warn" }, { text: "Waiting for the Lead: #9", tone: "muted" }]);
   assert.deepEqual(deliveryWaits({ waiting_on_you: [] }), []);
   assert.deepEqual(deliveryWaits(null), []);
 });
