@@ -352,18 +352,22 @@ pub async fn transcribe(State(state): State<AppState>, Query(q): Query<Transcrib
 
 /// `GET /api/voice/status` → `{ speech: { ready, text }, cleanup: { on_device, text } }`, for Settings › Voice on this
 /// Mac: whether this Mac can transcribe the web's voice (the helper's `--check`), and whether cleanup runs on Apple's
-/// on-device model (`fm available`) or on Haiku. `text` is the status, or the reason and the fix.
-pub async fn status(State(state): State<AppState>) -> Json<Value> {
+/// on-device model (`fm available`) or on Haiku. `text` is the status, or the reason and the fix. Refused to other
+/// sites, and one check at a time, so nothing can pile up processes on the Mac.
+pub async fn status(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Result<Json<Value>, ApiError> {
+    crate::guard::same_site_read(&headers)?;
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ONE_AT_A_TIME.lock().await;
     let (speech, cleanup) = tokio::join!(speech_status(&state), cleanup_status());
-    Json(json!({
+    Ok(Json(json!({
         "speech": { "ready": speech.is_ok(), "text": speech.unwrap_or_else(|e| e) },
         "cleanup": { "on_device": cleanup.is_ok(), "text": cleanup.unwrap_or_else(|e| e) },
-    }))
+    })))
 }
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A quick check's stdout on exit 0, or what it wrote on failure.
+/// A quick check's stdout on exit 0, or the first line it wrote on failure (at most 200 characters; empty if none).
 async fn check(bin: &std::path::Path, args: &[&str]) -> Result<String, (Option<i32>, String)> {
     let out = Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).output();
     match tokio::time::timeout(CHECK_TIMEOUT, out).await {
@@ -371,7 +375,11 @@ async fn check(bin: &std::path::Path, args: &[&str]) -> Result<String, (Option<i
         Ok(Err(e)) => Err((None, e.to_string())),
         Ok(Ok(o)) => {
             let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
-            if o.status.success() { Ok(text(&o.stdout)) } else { Err((o.status.code(), [text(&o.stderr), text(&o.stdout)].join(" ").trim().to_string())) }
+            if o.status.success() {
+                return Ok(text(&o.stdout));
+            }
+            let said = [text(&o.stderr), text(&o.stdout)].join("\n");
+            Err((o.status.code(), said.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(200).collect()))
         }
     }
 }
@@ -387,9 +395,10 @@ async fn speech_status(state: &AppState) -> Result<String, String> {
     }
     match check(&helper, &["--check"]).await {
         Ok(text) => Ok(text),
-        Err((Some(2), reason)) => Err(reason),
+        Err((Some(2), reason)) if !reason.is_empty() => Err(reason),
         // A helper from before `--check` reads it as a file name and fails.
-        Err((_, reason)) => Err(format!("Couldn't check the transcriber ({reason}): run ./setup.sh, or let Loft update.")),
+        Err((_, reason)) if !reason.is_empty() => Err(format!("Couldn't check the transcriber ({reason}): run ./setup.sh, or let Loft update.")),
+        Err(_) => Err("Couldn't check the transcriber: run ./setup.sh, or let Loft update.".into()),
     }
 }
 
@@ -414,6 +423,8 @@ fn model_status(reason: &str) -> String {
         "This Mac doesn't support it".into()
     } else if r.contains("modelnotready") {
         "Getting ready (downloading)".into()
+    } else if reason.is_empty() {
+        "Unavailable".into()
     } else {
         format!("Unavailable ({reason})")
     }
@@ -596,7 +607,7 @@ esac
     }
 
     async fn status_call(st: &AppState) -> Value {
-        status(State(st.clone())).await.0
+        status(State(st.clone()), axum::http::HeaderMap::new()).await.ok().unwrap().0
     }
 
     #[cfg(target_os = "macos")]
@@ -618,12 +629,24 @@ esac
         assert_eq!(status_call(&st).await["speech"]["text"], "Needs macOS 26 or later with Apple's speech model.");
         fake_helper(&st, "echo 'usage: loft-transcribe <audio.pcm>' >&2; exit 1");
         assert_eq!(status_call(&st).await["speech"]["text"], "Couldn't check the transcriber (usage: loft-transcribe <audio.pcm>): run ./setup.sh, or let Loft update.");
+        // A reason is its first line only; no reason at all gets a fixed text, never "()" or nothing.
+        fake_helper(&st, "printf '\\ndyld: missing symbol\\n  in /some/path\\n' >&2; exit 1");
+        assert_eq!(status_call(&st).await["speech"]["text"], "Couldn't check the transcriber (dyld: missing symbol): run ./setup.sh, or let Loft update.");
+        for code in [1, 2] {
+            fake_helper(&st, &format!("exit {code}"));
+            assert_eq!(status_call(&st).await["speech"], json!({ "ready": false, "text": "Couldn't check the transcriber: run ./setup.sh, or let Loft update." }), "exit {code}");
+        }
+        // Another site's page can't make it run the checks.
+        let mut cross = axum::http::HeaderMap::new();
+        cross.insert("sec-fetch-site", "cross-site".parse().unwrap());
+        assert_eq!(status(State(st.clone()), cross).await.err().unwrap().0, StatusCode::FORBIDDEN);
         // Each model reason in the Mac app's words; an unknown one as fm wrote it.
         for (said, shown) in [
             ("System model unavailable: appleIntelligenceNotEnabled", "Turned off in System Settings › Apple Intelligence & Siri"),
             ("System model unavailable: deviceNotEligible", "This Mac doesn't support it"),
             ("System model unavailable: modelNotReady", "Getting ready (downloading)"),
             ("something new", "Unavailable (something new)"),
+            ("", "Unavailable"),
         ] {
             fake_fm(&st, &format!("echo '{said}'; exit 1"));
             assert_eq!(status_call(&st).await["cleanup"], json!({ "on_device": false, "text": shown }), "{said}");
