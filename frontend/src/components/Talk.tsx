@@ -72,6 +72,8 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
   const [level, setLevel] = useState(0);
   const [seconds, setSeconds] = useState(0);
   const [needsHttps, setNeedsHttps] = useState(false);
+  // The browser can't or won't give Loft the microphone: titled as on the Mac panel.
+  const [micOff, setMicOff] = useState(false);
   // The recording in progress: its session on the Mac and the microphone.
   const rec = useRef<{ session: TalkSession; mic: Recorder | null; timer: number } | null>(null);
 
@@ -101,6 +103,7 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
   useEffect(() => {
     const blocked = micBlocked(window.isSecureContext, !!navigator.mediaDevices?.getUserMedia);
     setNeedsHttps(!window.isSecureContext);
+    setMicOff(!!blocked);
     if (blocked) {
       dispatch({ type: "failed", message: blocked });
       return;
@@ -132,6 +135,7 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
         if (cancelled) return;
         rec.current = null;
         const denied = e.name === "NotAllowedError" || e.name === "SecurityError";
+        setMicOff(denied);
         dispatch({ type: "failed", message: denied ? "The browser blocked the microphone. Allow it for this site, then try again." : e.message });
       },
     );
@@ -240,7 +244,7 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
             More
           </button>
           {picking && (
-            <div className="absolute right-0 top-9 z-10 w-72 space-y-2 rounded-xl border border-line-strong bg-ink-850 p-2 shadow-2xl">
+            <div className="absolute right-0 top-9 z-10 w-72 max-w-full space-y-2 rounded-xl border border-line-strong bg-ink-850 p-2 shadow-2xl">
               <div className="relative">
                 <Search className="absolute left-2.5 top-2.5 size-3.5 text-fg-3" />
                 <input autoFocus className="input pl-8" placeholder="Name, role, group or project" value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -273,7 +277,7 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
           {step.kind === "failed" ? (
             <div className="space-y-2 text-center">
               <MicOff className="mx-auto size-9 text-fg-3" />
-              <p className="text-[15px] font-medium">{retryText ? "Not sent" : "Voice stopped"}</p>
+              <p className="text-[15px] font-medium">{retryText ? "Not sent" : micOff ? "Loft can't use the microphone" : "Voice stopped"}</p>
               <p className="text-[13px] text-fg-2">{step.message}</p>
               {needsHttps && (
                 <a className="text-[13px] text-accent underline" href="/settings#https">
@@ -316,11 +320,12 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
           )}
           {(step.kind === "review" || step.kind === "sending") && (
             <>
-              <button className="btn" disabled={step.kind === "sending"} onClick={editInChat}>
+              <button className="btn shrink-0 whitespace-nowrap" disabled={step.kind === "sending"} onClick={editInChat}>
                 Edit in chat
               </button>
-              <button className="btn-primary" disabled={step.kind === "sending" || !step.text.trim() || !to} onClick={() => dispatch({ type: "send" })}>
-                {step.kind === "sending" ? "Sending…" : `Send to ${toName}`}
+              {/* On a narrow screen just Send: the To row names the agent. */}
+              <button className="btn-primary whitespace-nowrap" disabled={step.kind === "sending" || !step.text.trim() || !to} onClick={() => dispatch({ type: "send" })}>
+                {step.kind === "sending" ? "Sending…" : <><span className="sm:hidden">Send</span><span className="hidden sm:inline">Send to {toName}</span></>}
               </button>
             </>
           )}
