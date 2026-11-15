@@ -3,6 +3,8 @@ import { Link, useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pause, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
 import { api, roleLabel, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
+import { ticketLabel } from "../lib/specViews";
+import { closesOnEscape } from "../lib/dialogKeys";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
 import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/mentionPicker";
@@ -21,6 +23,18 @@ const FINISHED = ["done", "failed", "cancelled"];
 const STUCK = ["blocked", "failed"];
 
 function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  // Esc closes this dialog, the top one, before the issue page's own dialog sees it.
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!closesOnEscape(e)) return;
+      e.stopPropagation();
+      close.current();
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, []);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div className="panel w-full max-w-md space-y-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={title}>
@@ -359,7 +373,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
             <li key={x.number} className="flex flex-wrap items-baseline gap-x-2">
               <span className="font-mono text-fg-3">#{x.number}</span>
               <span>{x.title}</span>
-              <span className="text-fg-3">· {x.waiting ?? (x.state === "review" ? "in review" : x.state === "started" ? "building" : x.state)} ·</span>
+              <span className="text-fg-3" title={x.waiting ?? undefined}>· {x.waiting ? "waiting" : ticketLabel(x.state, x.waiting_on, x.waiting_for_ci).text} ·</span>
               <Link to={`/agents/${x.agent_id}`} className="text-accent hover:underline">{x.agent_name}</Link>
             </li>
           ))}
@@ -540,7 +554,7 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
           <p className="text-[13px] text-fg-2">It's removed with its thread. Sub-issues stay, without a parent. This can't be undone.</p>
           <div className="flex justify-end gap-2">
             <button className="btn-ghost" onClick={() => setDialog(null)}>Keep it</button>
-            <button className="btn-primary" disabled={busy} onClick={() => act(async () => { await api.deleteTask(t.id); navigate({ pathname: "/issues", search: window.location.search }); })}>Delete</button>
+            <button className="btn border-bad/40 bg-bad/20 text-fg" disabled={busy} onClick={() => act(async () => { await api.deleteTask(t.id); navigate({ pathname: "/issues", search: window.location.search }); })}>Delete</button>
           </div>
           {error && <div className="text-[12px] text-bad">{error}</div>}
         </Modal>
