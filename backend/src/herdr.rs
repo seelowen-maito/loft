@@ -198,15 +198,16 @@ async fn focus_pane(socket: &Path, agent_id: &str, sync: Option<&Path>) -> Resul
     Ok(())
 }
 
-/// The app a Herdr client runs in, from `ps -axo pid=,ppid=,args=`: the nearest ancestor of a `herdr` client
+/// The app a Herdr client runs in, from `ps -axo pid=,ppid=,uid=,args=` (only processes of user `uid` count): the nearest ancestor of a `herdr` client
 /// process (not `herdr server`) that runs from an app bundle: the client's pid and that bundle's path.
-fn terminal_app(ps: &str) -> Option<(u32, String)> {
+fn terminal_app(ps: &str, uid: u32) -> Option<(u32, String)> {
     let procs: Vec<(u32, u32, &str)> = ps
         .lines()
         .filter_map(|l| {
             let (pid, rest) = l.trim_start().split_once(char::is_whitespace)?;
-            let (ppid, args) = rest.trim_start().split_once(char::is_whitespace).unwrap_or((rest.trim_start(), ""));
-            Some((pid.parse().ok()?, ppid.parse().ok()?, args.trim_start()))
+            let (ppid, rest) = rest.trim_start().split_once(char::is_whitespace)?;
+            let (owner, args) = rest.trim_start().split_once(char::is_whitespace).unwrap_or((rest.trim_start(), ""));
+            (owner.parse::<u32>().ok()? == uid).then_some((pid.parse().ok()?, ppid.parse().ok()?, args.trim_start()))
         })
         .collect();
     let is_client = |args: &str| {
@@ -225,16 +226,24 @@ fn terminal_app(ps: &str) -> Option<(u32, String)> {
     })
 }
 
+/// Whether the executable `ps` reports for a process (`comm`) is the `herdr` Loft found, by real path.
+fn is_herdr_exe(comm: &str, herdr: &Path) -> bool {
+    match (std::fs::canonicalize(comm.trim()), std::fs::canonicalize(herdr)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Brings the terminal running Herdr to the front; best effort (Herdr may run in tmux or over ssh). Only this
 /// user's processes count, and the client must really run the `herdr` executable Loft found (its path from the
 /// system, not the process's own argv[0]), so another process can't name an app for Loft to open.
 async fn raise_terminal() {
     // SAFETY: geteuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::geteuid() }.to_string();
-    let Ok(ps) = run(Path::new("/bin/ps"), &["-U", &uid, "-o", "pid=,ppid=,args="], None).await else { return };
-    let Some((client, app)) = terminal_app(&ps) else { return };
+    let uid = unsafe { libc::geteuid() };
+    let Ok(ps) = run(Path::new("/bin/ps"), &["-axo", "pid=,ppid=,uid=,args="], None).await else { return };
+    let Some((client, app)) = terminal_app(&ps, uid) else { return };
     let (Some(herdr), Ok(exe)) = (find("herdr"), run(Path::new("/bin/ps"), &["-p", &client.to_string(), "-o", "comm="], None).await) else { return };
-    if std::fs::canonicalize(&exe).ok().is_some_and(|e| Some(e) == std::fs::canonicalize(&herdr).ok()) {
+    if is_herdr_exe(&exe, &herdr) {
         let _ = run(Path::new("/usr/bin/open"), &["-a", &app], None).await;
     }
 }
@@ -374,16 +383,41 @@ mod tests {
     #[test]
     fn finds_the_terminal_app_running_the_herdr_client() {
         let ps = "\
-    1     0 /sbin/launchd
-  500     1 /Applications/Ghostty.app/Contents/MacOS/ghostty
-  501   500 /usr/bin/login -flp gustavo /bin/zsh
-  502   501 -zsh
-  503   502 herdr
-  600     1 /Users/gustavo/.local/bin/herdr server
-  700     1 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+    1     0     0 /sbin/launchd
+  500     1   501 /Applications/Ghostty.app/Contents/MacOS/ghostty
+  501   500   501 /usr/bin/login -flp gustavo /bin/zsh
+  502   501   501 -zsh
+  503   502   501 herdr
+  600     1   501 /Users/gustavo/.local/bin/herdr server
+  700     1   501 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
 ";
-        assert_eq!(terminal_app(ps), Some((503, "/Applications/Ghostty.app".to_string())));
-        assert_eq!(terminal_app("  600     1 /Users/me/.local/bin/herdr server\n"), None, "the server has no terminal");
+        assert_eq!(terminal_app(ps, 501), Some((503, "/Applications/Ghostty.app".to_string())));
+        assert_eq!(terminal_app("  600     1   501 /Users/me/.local/bin/herdr server\n", 501), None, "the server has no terminal");
+    }
+
+    #[test]
+    fn only_this_users_processes_count() {
+        // Another user's herdr client, and this user's client under another user's terminal.
+        let theirs = "  500     1   502 /Applications/Evil.app/Contents/MacOS/evil\n  503   500   502 herdr\n";
+        assert_eq!(terminal_app(theirs, 501), None);
+        let mixed = "  500     1   502 /Applications/Evil.app/Contents/MacOS/evil\n  503   500   501 herdr\n";
+        assert_eq!(terminal_app(mixed, 501), None, "its terminal belongs to someone else");
+        assert_eq!(terminal_app(theirs, 502), Some((503, "/Applications/Evil.app".to_string())));
+    }
+
+    #[test]
+    fn the_herdr_exe_is_checked_by_real_path() {
+        let dir = temp();
+        let real = dir.join("herdr");
+        std::fs::write(&real, "").unwrap();
+        let link = dir.join("herdr-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let other = dir.join("other");
+        std::fs::write(&other, "").unwrap();
+        assert!(is_herdr_exe(&real.to_string_lossy(), &link), "through a symlink");
+        assert!(is_herdr_exe(&format!("{}\n", real.display()), &real));
+        assert!(!is_herdr_exe(&other.to_string_lossy(), &real), "another program named at argv[0] doesn't count");
+        assert!(!is_herdr_exe("/nonexistent/herdr", &real));
     }
 
     #[test]

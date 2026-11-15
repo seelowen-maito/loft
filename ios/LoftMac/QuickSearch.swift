@@ -55,6 +55,19 @@ final class QuickSearchModel {
         herdrCheck = Task { herdrReady = (try? await store.herdrStatus())?["linked"]?["root"]?.stringValue != nil }
     }
 
+    /// Waits for the Herdr check, for a second at most; slower than that counts as not linked.
+    func waitForHerdr() async {
+        guard let check = herdrCheck else { return }
+        let done = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await check.value; return true }
+            group.addTask { try? await Task.sleep(for: .seconds(1)); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        if !done { herdrReady = false }
+    }
+
     /// Where an agent opens for these keys; the footer and Enter both ask this.
     func opening(command: Bool = false, option: Bool = false) -> AgentOpening {
         AgentOpening.choose(herdrReady: herdrReady, herdrFirst: herdrFirst, browserDefault: browserDefault, command: command, option: option)
@@ -158,7 +171,7 @@ final class QuickSearchController {
         }
         if r.kind == .agent {
             Task {
-                await model.herdrCheck?.value
+                await model.waitForHerdr()
                 switch model.opening(command: flags.contains(.command), option: flags.contains(.option)) {
                 case .herdr: openInHerdr(r.target)
                 case .browser: openBrowser(r)
@@ -186,7 +199,7 @@ final class QuickSearchController {
             // Only when Herdr is linked, as in quick search: else it opens as Settings › Quick search says.
             Task {
                 model.checkHerdr()
-                await model.herdrCheck?.value
+                await model.waitForHerdr()
                 if model.herdrReady { openInHerdr(id) } else { openSpotlight(identifier) }
             }
             return
