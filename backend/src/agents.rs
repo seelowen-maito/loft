@@ -272,16 +272,35 @@ pub const ASK_TOOL: &str = "AskUserQuestion";
 /// The source of that second request: the questions, answered rather than allowed.
 pub const QUESTIONS: &str = "questions";
 
-/// `input` with the user's answers, one per question text (choices joined by ", "), or why the user gave none.
-fn with_answers(input: &Value, answers: Option<Value>) -> Result<Value, String> {
-    let given = answers.as_ref().and_then(Value::as_object).filter(|a| a.values().any(|v| v.as_str().is_some_and(|v| !v.trim().is_empty())));
-    let Some(given) = given else {
+/// Longest answer Loft takes for one question (chosen labels joined by ", ", plus what's typed under "Other").
+const MAX_ANSWER: usize = 4000;
+
+/// `input` with the user's answers, one per question text (choices joined by ", "). `Ok(Err(why))` tells the agent
+/// the user gave none; `Err` refuses the decision itself (it stays pending), naming what's wrong for the client.
+/// Only answers to this request's questions are kept, and every question needs one.
+fn with_answers(input: &Value, answers: Option<Value>) -> Result<Result<Value, String>> {
+    let Some(answers) = answers.filter(|a| !a.is_null()) else {
         // An allow from a client that can't show the questions (an older app's plain "Allow").
-        return Err("The user couldn't answer your questions where they saw them. Ask them in your reply instead and end your run.".into());
+        return Ok(Err("The user couldn't answer your questions where they saw them. Ask them in your reply instead and end your run.".into()));
     };
+    let Some(answers) = answers.as_object() else { anyhow::bail!("answers must be an object of answer text by question text") };
+    let Some(questions) = input.as_object().and_then(|i| i.get("questions")).and_then(Value::as_array) else {
+        anyhow::bail!("this request has no questions to answer: deny it instead")
+    };
+    let mut kept = serde_json::Map::new();
+    for q in questions.iter().filter_map(|q| q["question"].as_str()) {
+        let a = match answers.get(q) {
+            Some(Value::String(a)) if !a.trim().is_empty() => a,
+            Some(Value::String(_)) | None => anyhow::bail!("the question \"{q}\" has no answer"),
+            Some(_) => anyhow::bail!("the answer to \"{q}\" must be text"),
+        };
+        anyhow::ensure!(a.chars().count() <= MAX_ANSWER, "the answer to \"{q}\" is longer than {MAX_ANSWER} characters");
+        kept.insert(q.to_string(), Value::String(a.clone()));
+    }
+    anyhow::ensure!(!kept.is_empty(), "this request has no questions to answer: deny it instead");
     let mut done = input.clone();
-    done["answers"] = Value::Object(given.clone());
-    Ok(done)
+    done["answers"] = Value::Object(kept);
+    Ok(Ok(done))
 }
 
 /// Rule suggested for "always allow" on a blocked tool call.
@@ -399,7 +418,7 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     let (mut note, mut input) = (note, None);
     let asks = req.source == QUESTIONS;
     if asks && allow {
-        match with_answers(&req.input, answers) {
+        match with_answers(&req.input, answers)? {
             Ok(done) => {
                 req.input = done.clone();
                 input = Some(done);
@@ -1890,6 +1909,31 @@ pub async fn scheduler(state: AppState) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn answers_keep_only_this_requests_questions_and_need_one_each() {
+        let input = json!({ "questions": [{ "question": "Which store?" }, { "question": "Region?" }] });
+        let refused = |a: Value| with_answers(&input, Some(a)).unwrap_err().to_string();
+        let done = with_answers(&input, Some(json!({ "Which store?": "B2", "Region?": "EU", "rm -rf": "x" }))).unwrap().unwrap();
+        assert_eq!(done["answers"], json!({ "Which store?": "B2", "Region?": "EU" }), "an answer to no question is dropped");
+        assert_eq!(done["questions"], input["questions"]);
+        assert_eq!(refused(json!({ "Which store?": "B2" })), "the question \"Region?\" has no answer");
+        assert_eq!(refused(json!({ "Which store?": "B2", "Region?": " " })), "the question \"Region?\" has no answer");
+        assert_eq!(refused(json!({ "Which store?": "B2", "Region?": ["EU"] })), "the answer to \"Region?\" must be text");
+        assert!(refused(json!({ "Which store?": "B2", "Region?": "E".repeat(MAX_ANSWER + 1) })).contains("longer than 4000 characters"));
+        assert!(refused(json!(["B2", "EU"])).starts_with("answers must be an object"));
+        // No answers at all is an older app's plain allow: the agent hears why, the request isn't refused.
+        assert!(with_answers(&input, None).unwrap().is_err());
+        assert!(with_answers(&input, Some(Value::Null)).unwrap().is_err());
+    }
+
+    #[test]
+    fn answers_to_an_input_without_questions_are_refused_not_a_panic() {
+        for input in [json!("ask me"), json!([1, 2]), json!(7), json!({}), json!({ "questions": "x" }), json!({ "questions": [{ "question": 1 }] })] {
+            let e = with_answers(&input, Some(json!({ "x": "y" }))).unwrap_err().to_string();
+            assert!(e.contains("no questions to answer"), "{input}: {e}");
+        }
+    }
 
     #[test]
     fn prompt_says_background_work_ends_with_the_reply() {

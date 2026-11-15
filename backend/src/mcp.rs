@@ -652,6 +652,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn bad_answers_are_refused_and_the_questions_stay_asked() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let (st2, mut errors) = (st.clone(), vec![]);
+        let (r, _) = gate(&st, &a.id, |p| {
+            if p.source == "prompt" {
+                return drop(agents::decide(&st2, &p.id, "allow_once", None, None, None).unwrap());
+            }
+            for bad in [json!({}), json!({ "Which store?": 3 }), json!("B2")] {
+                errors.push(agents::decide(&st2, &p.id, "allow_once", None, None, Some(bad)).unwrap_err().to_string());
+            }
+            assert_eq!(st2.db.get_permission(&p.id).unwrap().unwrap().status, "pending");
+            drop(agents::decide(&st2, &p.id, "allow_once", None, None, Some(json!({ "Which store?": "S3" }))).unwrap());
+        })
+        .await;
+        assert_eq!(errors, ["the question \"Which store?\" has no answer", "the answer to \"Which store?\" must be text", "answers must be an object of answer text by question text"]);
+        assert_eq!(r["updatedInput"]["answers"], json!({ "Which store?": "S3" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn questions_denied_skipped_or_allowed_without_answers_tell_the_agent_why() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Dev");
