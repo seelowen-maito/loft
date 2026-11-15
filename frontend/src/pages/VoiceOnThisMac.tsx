@@ -14,6 +14,8 @@ export function VoiceOnThisMac() {
     try {
       setStatus(await api.voiceStatus());
     } catch (e) {
+      // Only one answer shows: the failed re-check, not it above the old status.
+      setStatus(null);
       setErr((e as Error).message);
     } finally {
       setBusy(false);
@@ -36,9 +38,9 @@ export function VoiceOnThisMac() {
           <Mic className="size-3.5" /> {busy ? "Checking…" : "Check again"}
         </button>
       </div>
-      {err && <p className="text-[12.5px] text-bad">{err}</p>}
+      {err && <p className="text-[12.5px] text-bad [overflow-wrap:anywhere]">{err}</p>}
       {status && (
-        <dl className="space-y-3 text-[13px]">
+        <dl className="space-y-3 text-[13px] [overflow-wrap:anywhere]">
           <div>
             <dt className="text-fg-3">Speech recognition</dt>
             <dd className={status.speech.ready ? "text-good" : "text-bad"}>{status.speech.text}</dd>
