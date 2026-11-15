@@ -33,6 +33,11 @@ public enum AgentState: String, CaseIterable, Hashable {
         }
     }
 
+    /// `label`, but while only an agent's questions wait, the questions card's words (short enough for the chat header).
+    public func label(pending: [PermissionRequest]) -> String {
+        self == .waitingApproval && !pending.isEmpty && pending.allSatisfy(\.isQuestions) ? "Has questions" : label
+    }
+
     public var shortLabel: String {
         switch self {
         case .working: "Working"

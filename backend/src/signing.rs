@@ -76,7 +76,7 @@ fn stale(copy: &Path, build: &Path) -> bool {
 /// so `stale` can tell it apart from a later build.
 fn sign(build: &Path, hash: &str) -> Option<PathBuf> {
     // Signed beside it under another name, then moved into place: a copy still running keeps its file.
-    let (copy, tmp) = (signed_copy(build), build.with_extension("signing"));
+    let (copy, tmp) = (signed_copy(build), build.with_extension(format!("signing-{}", std::process::id())));
     let stamp = || {
         let modified = std::fs::metadata(build).and_then(|m| m.modified()).ok()?;
         std::fs::File::options().write(true).open(&tmp).and_then(|f| f.set_modified(modified)).ok()
@@ -96,7 +96,10 @@ pub const ARG: &str = "sign";
 pub fn cli() -> ! {
     let signed = (|| {
         let exe = std::env::current_exe().ok()?;
-        (build_of(&exe) == exe).then_some(())?;
+        if build_of(&exe) != exe {
+            eprintln!("loft sign: this is the signed copy; run it from the build at {}", build_of(&exe).display());
+            return None;
+        }
         sign(&exe, &identity_hash()?)
     })();
     std::process::exit(if signed.is_some() { 0 } else { 1 })

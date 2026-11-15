@@ -1849,7 +1849,7 @@ mod tests {
         assert_eq!(req.tool_name, "Checkout");
         assert_eq!(req.input["folder"], user.display().to_string());
         assert!(req.reason.contains("git checkout --detach 3ddf495c"), "{}", req.reason);
-        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
         let v = asking.await.unwrap();
         assert_eq!(v["allow"], false);
         assert!(v["message"].as_str().unwrap().contains("Work in your own clone in your workspace"), "{v}");
@@ -1860,16 +1860,16 @@ mod tests {
         let id = pending()[0].id.clone();
         assert_eq!(pending()[0].rule, "");
         let tools = st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools;
-        assert!(crate::agents::decide(&st, &id, "allow_always", None, None).is_err());
-        assert!(crate::agents::decide(&st, &id, "allow_always", Some(format!("Checkout({})", user.display())), None).is_err());
+        assert!(crate::agents::decide(&st, &id, "allow_always", None, None, None).is_err());
+        assert!(crate::agents::decide(&st, &id, "allow_always", Some(format!("Checkout({})", user.display())), None, None).is_err());
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools, tools);
 
         // Allowed once: this command runs, and the next change there asks again.
-        crate::agents::decide(&st, &id, "allow_once", None, None).unwrap();
+        crate::agents::decide(&st, &id, "allow_once", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["allow"], true);
         let again = guard(user.join("frontend"));
         crate::agents::tests::until("the next change asking again", 5, || pending().len() == 1).await;
-        crate::agents::decide(&st, &pending()[0].id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &pending()[0].id, "deny", None, None, None).unwrap();
         assert_eq!(again.await.unwrap()["allow"], false);
     }
 
@@ -1888,9 +1888,9 @@ mod tests {
         // Allowing the first doesn't let the second run unasked.
         crate::agents::tests::until("the first question", 5, || pending().len() == 1).await;
         assert_eq!(pending()[0].input["folder"], one.display().to_string());
-        crate::agents::decide(&st, &pending()[0].id, "allow", None, None).unwrap();
+        crate::agents::decide(&st, &pending()[0].id, "allow", None, None, None).unwrap();
         crate::agents::tests::until("the second question", 5, || pending().first().is_some_and(|p| p.input["folder"] == two.display().to_string())).await;
-        crate::agents::decide(&st, &pending()[0].id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &pending()[0].id, "deny", None, None, None).unwrap();
         let v = asking.await.unwrap().0;
         assert_eq!(v["allow"], false);
         assert!(v["message"].as_str().unwrap().contains(&two.display().to_string()), "{v}");
