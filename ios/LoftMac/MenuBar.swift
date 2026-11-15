@@ -8,14 +8,32 @@ struct MenuBarLabel: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.openWindow) private var openWindow
     var alerts: MacAlerts?
+    var quickSearch: QuickSearchController?
+    var voicePanel: VoicePanelController?
 
     var body: some View {
         let count = MenuBarSummary(store).needsCount
+        MenuBarMark(count: count)
+        .onAppear {
+            alerts?.showWindow = { openWindow(id: "main") }
+            quickSearch?.showWindow = { openWindow(id: "main") }
+            voicePanel?.showWindow = { openWindow(id: "main") }
+        }
+    }
+}
+
+/// Loft's house mark always (#516), with the Needs you count beside it when something waits.
+struct MenuBarMark: View {
+    private static let mark = LoftMark.menuBarImage()
+    var count: Int
+
+    var body: some View {
         HStack(spacing: 3) {
-            Image(systemName: count > 0 ? "bell.badge" : "circle.hexagongrid")
+            Image(nsImage: Self.mark)
             if count > 0 { Text("\(count)") }
         }
-        .onAppear { alerts?.showWindow = { openWindow(id: "main") } }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(count > 0 ? "Loft, \(count) need you" : "Loft")
     }
 }
 
@@ -23,6 +41,7 @@ struct MenuBarContent: View {
     @Environment(LoftStore.self) private var store
     @Environment(MacNav.self) private var nav
     @Environment(\.openWindow) private var openWindow
+    var voicePanel: VoicePanelController?
     @State private var recipient: String?
     @State private var text = ""
     /// How the last quick message went: a short "Sent to …", or why it failed (the text is kept then).
@@ -55,7 +74,16 @@ struct MenuBarContent: View {
                 Button("All \(s.needsCount)…") { open(section: .needsYou) }.foregroundStyle(Theme.accent)
             }
             Divider()
-            header("Quick message")
+            HStack {
+                header("Quick message")
+                Spacer()
+                Button { voicePanel?.show() } label: {
+                    Label(voicePanel?.shortcutLabel.map { "Talk  \($0)" } ?? "Talk", systemImage: "mic.fill").font(.caption)
+                }
+                .foregroundStyle(Theme.accent)
+                .help("Opens the voice panel: talk, and Loft tidies it up and sends it")
+                .accessibilityIdentifier("menuTalk")
+            }
             Picker("To", selection: Binding(get: { target }, set: { recipient = $0 })) {
                 ForEach(store.sortedAgents) { Text($0.name).tag(Optional($0.id)) }
             }

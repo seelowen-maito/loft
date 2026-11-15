@@ -210,6 +210,8 @@ It's always signed with your team, even for Debug, because its entitlements need
   open "$(xcodebuild -scheme LoftMac -destination 'platform=macOS' -IDEBuildLocationStyle=Unique -showBuildSettings | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{print $2}')/Loft.app"
   ```
 - *First launch:* it asks for the address (this Mac by default), checks Loft answers there and opens the agents.
+- *Quick search:* ⌥Space from any app opens a floating search over agents, issues, tickets, specs and Loft's pages. ↵ opens the result, ⌘↵ an agent's chat, ⌥↵ the browser instead (or the app, when Settings › Quick search opens results in the browser). Change the shortcut or turn it off there.
+- *Voice panel:* ⇧⌥Space from any app, or Talk in the menu bar, opens a small floating panel that starts listening to the open chat's agent (or the last one you talked to). It shows the same voice card as the chat's mic: Send (↵) has Loft tidy it up and sends it, unless the on-device model offers "Send to …?" first; the To chips change who gets it; Edit in chat opens the text in the agent's chat; Cancel (esc) stops and sends nothing. Settings › Voice panel changes the shortcut. Screenshots: `Loft -ui-testing -render-voice-panel <listening|cleaning|review|sending|failed> <file.png>`, and `-render-talk-sheet` with the same arguments for the chat's Talk sheet (Debug).
 - *TestFlight:* the same script with `--mac`. Create the Mac app in App Store Connect once (Apps → + → New App, platform macOS, bundle id `LOFT_BUNDLE_ID.mac`), then:
 
   ```sh
@@ -219,6 +221,7 @@ It's always signed with your team, even for Debug, because its entitlements need
   ```
 
   `-allowProvisioningUpdates` creates the Mac App Store and installer certificates the first time. Testers install it with Apple's TestFlight app for Mac.
+- *App Store screenshots:* from `ios/`, run `scripts/appstore-mac.sh`. It builds the Mac app (Debug, unsigned, so no team is needed) and has it draw six shots from the demo's sample data, with no network, in the dark theme and without the demo banner: an agent's chat with the agents list, the Issues board, Needs you, quick search over the chat, the voice panel, and Overview. They land in `ios/build/appstore-mac/` as `1-chat.png` … `6-overview.png`, each exactly 2880 × 1800 px (a 1440 × 900 pt window at 2×); the script checks the sizes. To upload, open the Mac app's version in App Store Connect, go to Previews and Screenshots › macOS, and drag the six files in, in order (the first shows first). The window's sidebar of sections is left out because its glass draws blank offscreen. The shots come from `LoftMac/AppStoreShots.swift` (`-demo -render-app-store <folder>`, Debug only).
 - *Icon:* the ten PNGs in `LoftMac/Assets.xcassets/AppIcon.appiconset`, plus `LoftMac/Loft.icns` built from them, which the app ships as its icon file (`CFBundleIconFile`). Xcode 27 writes an `.icns` from the asset catalog without the 256pt and 512pt images, and App Store Connect rejects the upload without them, so the Mac target doesn't ask it to. When you change the PNGs, rebuild `Loft.icns` from `ios/`:
 
   ```sh

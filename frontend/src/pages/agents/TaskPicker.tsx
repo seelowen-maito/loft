@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleDot, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import type { Agent } from "../../lib/api";
 import { ATTACH, filterIssues, SOURCES, type Source } from "../../lib/issueFilter";
 import { Origin } from "../../components/Origin";
-import { cx, timeAgo } from "../../lib/format";
+import { IssueRow } from "../../components/IssueRow";
+import { cx } from "../../lib/format";
+import { relTime } from "../../lib/time";
 import { STATUS_TONE } from "../../components/TaskChip";
 import { useTasks } from "../../hooks/lists";
 
@@ -60,24 +62,16 @@ export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPic
         {all === null && <div className="px-3 py-2 font-mono text-[11.5px] text-fg-3">Loading…</div>}
         {all !== null && list.length === 0 && <div className="px-3 py-2 text-[12.5px] text-fg-3">No issue matches.</div>}
         {list.map((t, i) => (
-          <button
+          <IssueRow
             key={t.id}
-            role="option"
-            aria-selected={i === index}
-            onMouseEnter={() => setIndex(i)}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              onPick(t.id);
-            }}
-            className={cx("flex w-full items-center gap-2.5 px-3 py-1.5 text-left", i === index && "bg-white/[0.06]")}
-          >
-            <CircleDot className={cx("size-3.5 shrink-0", STATUS_TONE[t.status])} />
-            <Origin github={!!t.github} />
-            <span className="min-w-0 flex-1 truncate text-[13px]">{t.title}</span>
-            <span className="shrink-0 truncate font-mono text-[10.5px] text-fg-3">
-              {[t.github && `#${t.github.number}`, t.status.replace("_", " "), name(t.agent_id), t.project, timeAgo(t.updated_at)].filter(Boolean).join(" · ")}
-            </span>
-          </button>
+            tone={STATUS_TONE[t.status]}
+            github={!!t.github}
+            title={t.title}
+            meta={[t.github && `#${t.github.number}`, t.status.replace("_", " "), name(t.agent_id), t.project, relTime(t.updated_at)]}
+            selected={i === index}
+            onHover={() => setIndex(i)}
+            onPick={() => onPick(t.id)}
+          />
         ))}
       </div>
       <div className="border-t border-line px-3 py-1.5 font-mono text-[10.5px] text-fg-3">The agent gets the issue's title, status and latest note with your message.</div>

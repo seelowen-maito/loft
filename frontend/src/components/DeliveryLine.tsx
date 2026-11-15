@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useNow } from "../lib/useNow";
 import { ExternalLink } from "lucide-react";
 import { cx } from "../lib/format";
 import { deliveryStateLine, type DeliveryTone } from "../lib/deliveryState";
@@ -16,14 +16,7 @@ const DELIVERY_TONE: Record<DeliveryTone, string> = {
 /** A started Delivery's state line. Waiting for CI counts its minutes (re-rendering only this line) and opens the
  *  Checks tab on GitHub. */
 export function DeliveryLine({ d, className }: { d: Parameters<typeof deliveryStateLine>[0]; className?: string }) {
-  const [now, setNow] = useState(Date.now());
-  const ci = d?.state_line?.tone === "ci";
-  useEffect(() => {
-    if (!ci) return;
-    setNow(Date.now());
-    const t = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(t);
-  }, [ci]);
+  const now = useNow(30_000, d?.state_line?.tone === "ci");
   const line = deliveryStateLine(d, now);
   if (!line) return null;
   const cls = cx("text-[12.5px]", DELIVERY_TONE[line.tone], className);

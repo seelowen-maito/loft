@@ -5,7 +5,8 @@ import {
   GitPullRequest, Globe, KeyRound, Lock, RefreshCw, Search, Star, X,
 } from "lucide-react";
 import { api, type Commit, type GithubInfo, type GithubItem, type Info, type Repo, type Site } from "../lib/api";
-import { cx, fmtNum, timeAgo } from "../lib/format";
+import { cx, fmtNum } from "../lib/format";
+import { relTime } from "../lib/time";
 import { reposList, useRepos } from "../hooks/lists";
 import { Heatmap, ShareBars, WeeklyBars } from "../components/Charts";
 import { AgentActivity } from "./AgentActivity";
@@ -121,7 +122,7 @@ export default function ReposPage() {
               </h1>
             </div>
             <div className="flex items-center gap-3">
-              {loadedAt && <span className="font-mono text-[11px] text-fg-3">updated {timeAgo(loadedAt.toISOString())}</span>}
+              {loadedAt && <span className="font-mono text-[11px] text-fg-3">updated {relTime(loadedAt.toISOString())}</span>}
               <button className="btn" onClick={refresh} disabled={refreshing}>
                 <RefreshCw className={cx("size-3.5", refreshing && "animate-spin")} /> Refresh
               </button>
@@ -335,7 +336,7 @@ function ItemList({
                 <span>·</span>
                 <span>{it.author}</span>
                 <span>·</span>
-                <span>{timeAgo(it.updated_at)}</span>
+                <span>{relTime(it.updated_at)}</span>
                 {it.labels.slice(0, 3).map((l) => <span key={l} className="chip py-0 text-[10px]">{l}</span>)}
               </div>
             </div>
@@ -413,7 +414,7 @@ function RepoCard({ repo: r, gh, index, onOpen }: { repo: Repo; gh?: GithubInfo;
         {r.last_commit ? (
           <div className="flex items-center gap-2 border-t border-line pt-3 text-[12.5px]">
             <span className="truncate text-fg-2">{r.last_commit.subject}</span>
-            <span className="ml-auto shrink-0 font-mono text-[11px] text-fg-3">{timeAgo(r.last_commit.timestamp)}</span>
+            <span className="ml-auto shrink-0 font-mono text-[11px] text-fg-3">{relTime(r.last_commit.timestamp)}</span>
           </div>
         ) : (
           <div className="border-t border-line pt-3 text-[12.5px] text-fg-3">{r.error ? <span className="text-bad">{r.error}</span> : "No commits yet"}</div>
@@ -515,7 +516,7 @@ function RepoDrawer({ repo: r, gh, onClose }: { repo: Repo; gh?: GithubInfo; onC
                     <div className="mt-0.5 flex gap-2 font-mono text-[11px] text-fg-3">
                       <span>{c.hash.slice(0, 7)}</span>
                       <span>{c.author}</span>
-                      <span>{timeAgo(c.timestamp)}</span>
+                      <span>{relTime(c.timestamp)}</span>
                       {c.insertions !== null && <span className="text-good">+{c.insertions}</span>}
                       {c.deletions !== null && <span className="text-bad">−{c.deletions}</span>}
                     </div>

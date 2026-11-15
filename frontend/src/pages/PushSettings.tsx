@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2 } from "lucide-react";
+import { SettingsCard } from "../components/SettingsCard";
 import { api, portalHome, type PushDevice, type PushStatus } from "../lib/api";
-import { cx, timeAgo } from "../lib/format";
+import { cx } from "../lib/format";
+import { relTime } from "../lib/time";
 import { usePoll } from "../hooks/usePoll";
 
 /** Settings → Push notifications: which path pushes take (the user's own APNs key, the Loft relay with a relay key, or none), the phones registered, and a test push. */
@@ -21,10 +23,11 @@ export function PushSettings() {
   const [relayKey, setRelayKey] = useState("");
   const [relayAddr, setRelayAddr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [portalLink, setPortalLink] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
-  const section = useRef<HTMLElement>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const load = () => {
     api.pushStatus().then((s) => {
@@ -32,15 +35,11 @@ export function PushSettings() {
       setKeyId(s.key_id);
       setTeamId(s.team_id);
       setRelayAddr(s.relay_address);
-    });
-    api.devices().then(setDevices);
+      setLoadErr(null);
+    }).catch((e) => setLoadErr((e as Error).message));
+    api.devices().then(setDevices).catch(() => {});
   };
   useEffect(load, []);
-  // `/settings#push` (Needs you's "Push is off") scrolls here once it shows.
-  const shown = !!status;
-  useEffect(() => {
-    if (shown && window.location.hash === "#push") section.current?.scrollIntoView({ block: "start" });
-  }, [shown]);
   // After Sign in the backend collects the key; look until it has it or the code is gone.
   const signingIn = status?.signing_in;
   usePoll(signingIn ? load : null, 2000);
@@ -115,18 +114,19 @@ export function PushSettings() {
     load();
   };
 
-  if (!status) return null;
+  if (!status) return <SettingsCard id="push" title="Push notifications" error={loadErr} loading={!loadErr} />;
   const changed = keyId !== status.key_id || teamId !== status.team_id || !!file;
   const off = status.path === "none";
   const addrChanged = relayAddr.trim() !== status.relay_address;
   const portal = portalHome(status);
   return (
-    <section ref={section} id="push" className="panel scroll-mt-20 space-y-4 p-5">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-[15px] font-medium tracking-tight">Push notifications</h2>
-        <span className={cx("chip text-[10.5px]", off ? "text-fg-3" : "text-good")}>{CHIP[status.path]}</span>
-      </div>
-      <p className="text-[12.5px] text-fg-2">Alerts reach the iPhone app even when it's closed. {WHERE[status.path]}</p>
+    <SettingsCard
+      id="push"
+      title="Push notifications"
+      description={<>Alerts reach the iPhone app even when it's closed. {WHERE[status.path]}</>}
+      action={<span className={cx("chip text-[10.5px]", off ? "text-fg-3" : "text-good")}>{CHIP[status.path]}</span>}
+      error={loadErr}
+    >
       {off && status.devices > 0 && (
         <p role="alert" className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
           Push is off: Loft drops every alert for {status.devices === 1 ? "your paired phone" : `your ${status.devices} paired phones`}. Sign in below to get push through the
@@ -275,24 +275,33 @@ export function PushSettings() {
           <p className="text-[12.5px] text-fg-3">None yet. Open the iPhone app and allow notifications; it registers itself.</p>
         ) : (
           devices.map((d) => (
-            <div key={d.token} className="flex items-center gap-3 rounded-xl border border-line px-3 py-2">
+            <div key={d.token} className="rounded-xl border border-line px-3 py-2">
+             <div className="flex items-center gap-3">
               <Smartphone className="size-4 shrink-0 text-fg-3" />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px]">{d.name || "iPhone"}</div>
                 <div className="truncate font-mono text-[10.5px] text-fg-3">
-                  {d.environment === "production" ? "TestFlight / App Store" : "Xcode build (sandbox)"} · seen {timeAgo(d.last_seen_at)} · {d.kinds.length} kinds
+                  {d.environment === "production" ? "TestFlight / App Store" : "Xcode build (sandbox)"} · seen {relTime(d.last_seen_at)} · {d.kinds.length} kinds
                 </div>
               </div>
               <button type="button" className="btn shrink-0" disabled={off} onClick={() => test(d)} title={off ? "Add a relay key or your own key first" : undefined}>
                 <BellRing className="size-3.5" /> Send test push
               </button>
-              <button type="button" className="btn-ghost shrink-0 text-fg-3 hover:text-bad" onClick={() => remove(d)} aria-label="Remove this phone" title="Remove this phone">
+              <button type="button" className="btn-ghost shrink-0 text-fg-3 hover:text-bad" onClick={() => setRemoving(d.token)} aria-label="Remove this phone" title="Remove this phone">
                 <Trash2 className="size-3.5" />
               </button>
+             </div>
+             {removing === d.token && (
+               <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
+                 <span className="text-[12.5px] text-fg-2">Remove this phone?</span>
+                 <button type="button" className="btn shrink-0 border-bad/40 bg-bad/20 text-fg" onClick={() => { setRemoving(null); remove(d); }}>Remove</button>
+                 <button type="button" className="btn-ghost shrink-0" onClick={() => setRemoving(null)}>Keep</button>
+               </div>
+             )}
             </div>
           ))
         )}
       </div>
-    </section>
+    </SettingsCard>
   );
 }

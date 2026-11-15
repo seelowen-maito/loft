@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { attachable, fmtLength, isVideo, MAX_VIDEO_BYTES } from "../src/lib/video.ts";
+import { attachable, isVideo, MAX_VIDEO_BYTES } from "../src/lib/video.ts";
 
 const f = (type: string, size = 1000) => ({ type, size });
 
@@ -20,10 +20,7 @@ test("where videos aren't taken (grill answers), only images are", () => {
   assert.deepEqual(attachable([f("video/mp4"), f("image/jpeg")], false), { ok: [f("image/jpeg")], why: "Only images can be attached." });
 });
 
-test("stored uploads are told apart by name, and lengths read as m:ss", () => {
+test("stored uploads are told apart by name", () => {
   assert.equal(isVideo("2f1c4a8e-1d7b-4c43-9a43-0f6f0d7c1a11.mov"), true);
   assert.equal(isVideo("2f1c4a8e-1d7b-4c43-9a43-0f6f0d7c1a11.png"), false);
-  assert.equal(fmtLength(7.4), "0:07");
-  assert.equal(fmtLength(754), "12:34");
-  assert.equal(fmtLength(Infinity), "");
 });

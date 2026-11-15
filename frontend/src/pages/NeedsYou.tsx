@@ -3,7 +3,8 @@ import { Link, useLocation, useNavigate } from "react-router";
 import { Check, ExternalLink, Inbox, Send, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "../lib/events";
-import { cx, timeAgo } from "../lib/format";
+import { cx } from "../lib/format";
+import { relTime } from "../lib/time";
 import { isTyping } from "../lib/shortcuts";
 import { answerBody, beingLookedAt, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
 
@@ -49,7 +50,7 @@ function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean;
           {fresh && <span className="self-center rounded-full bg-accent/15 px-1.5 py-px font-mono text-[10px] font-medium uppercase tracking-wide text-accent">New</span>}
           <h2 className={cx("min-w-0 text-[14px] [overflow-wrap:anywhere]", fresh ? "font-medium" : "font-normal text-fg-2")}>{item.title}</h2>
           <span className="font-mono text-[11px] text-fg-3">
-            {[item.agent?.name, item.project, timeAgo(item.created_at)].filter(Boolean).join(" · ")}
+            {[item.agent?.name, item.project, relTime(item.created_at)].filter(Boolean).join(" · ")}
           </span>
         </div>
         <p className="text-[13px] text-fg-2 [overflow-wrap:anywhere]">{item.reason}</p>

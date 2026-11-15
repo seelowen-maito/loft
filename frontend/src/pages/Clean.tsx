@@ -2,7 +2,9 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { ArrowDown, ArrowUp, ChevronRight, Loader2 } from "lucide-react";
 import { api, type CleanItem, type CleanLog, type GitCheck, type LeftProcess, type WorkspaceSizes } from "../lib/api";
-import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, chosenRows, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, ticksAfter, timeAgo, type CleanFilter, type CleanSort } from "../lib/format";
+import { fmtDuration } from "../lib/time";
+import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, chosenRows, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, ticksAfter, type CleanFilter, type CleanSort } from "../lib/format";
+import { relTime } from "../lib/time";
 import { CleanLogView, CopyCommands, EQUIVALENT } from "./Settings";
 import { usePoll } from "../hooks/usePoll";
 
@@ -196,13 +198,13 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
                   </button>
                 )}
                 {i.note && <span className="block text-[11.5px] text-fg-2">{i.note}</span>}
-                <span className="block text-[11.5px] text-fg-3 sm:hidden">{depth === 0 && <>{name(i.agent)} · </>}{cleanType(i)} · {timeAgo(i.changed)}</span>
+                <span className="block text-[11.5px] text-fg-3 sm:hidden">{depth === 0 && <>{name(i.agent)} · </>}{cleanType(i)} · {relTime(i.changed)}</span>
               </span>
             </div>
           </td>
           <td className="hidden whitespace-nowrap px-2 py-1.5 text-fg-3 sm:table-cell">{cleanType(i)}</td>
           <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums max-sm:block max-sm:pl-[2.25rem] max-sm:text-left">{fmtBytes(i.bytes)}</td>
-          <td className="hidden whitespace-nowrap px-2 py-1.5 text-fg-3 sm:table-cell">{timeAgo(i.changed)}</td>
+          <td className="hidden whitespace-nowrap px-2 py-1.5 text-fg-3 sm:table-cell">{relTime(i.changed)}</td>
           <td className={cx("px-2 py-1.5 max-sm:block max-sm:pl-[2.25rem]", status.locked ? "text-warn" : "text-good")}>
             <Reason status={status} blocked={i.blocked} open={more.has(i.path)} onToggle={() => setMore((m) => { const n = new Set(m); if (!n.delete(i.path)) n.add(i.path); return n; })} />
             {!status.locked && i.label && <span className="block text-[11.5px] text-fg-3">{i.label}</span>}
@@ -250,7 +252,7 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
             {ps.map((p) => (
               <li key={p.pid} className="flex gap-3">
                 <span className="min-w-0 flex-1 truncate font-mono" title={p.command}>{p.command}</span>
-                <span className="shrink-0 tabular-nums">{timeAgo(Date.now() / 1000 - p.age_secs).replace(" ago", "")}</span>
+                <span className="shrink-0 tabular-nums">{fmtDuration(p.age_secs * 1000)}</span>
               </li>
             ))}
           </ul>

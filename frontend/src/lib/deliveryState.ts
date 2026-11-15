@@ -1,17 +1,10 @@
 import type { IssueDelivery } from "./api";
+import { fmtDuration } from "./time.ts";
 
 /** The tone of a Delivery card's state line: running, waiting for CI, stalled, paused, needs you, final review or done. */
 export type DeliveryTone = "running" | "ci" | "stalled" | "paused" | "needs_you" | "final" | "done";
 
 const TONES: DeliveryTone[] = ["running", "ci", "stalled", "paused", "needs_you", "final", "done"];
-
-/** How long something has waited: "<1 min", "6 min", "1 h", "2 h 5 min". Negative spans (clock skew) read as "<1 min". */
-export function fmtWait(ms: number): string {
-  const m = Math.floor(Math.max(0, ms) / 60000);
-  if (m < 1) return "<1 min";
-  if (m < 60) return `${m} min`;
-  return m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`;
-}
 
 /** Why a Delivery stalled, as the card says it (only for an older server that sends no `state_line`). */
 function stallWhy(reason: string | null | undefined): string {
@@ -39,7 +32,7 @@ export function deliveryStateLine(
     const tone = TONES.find((t) => t === d.state_line?.tone) ?? "running";
     if (tone !== "ci") return { tone, text: d.state_line.text };
     const since = d.ci_since ? Date.parse(d.ci_since) : NaN;
-    return { tone, text: Number.isNaN(since) ? d.state_line.text : `${d.state_line.text} · ${fmtWait(now - since)}`, ...(d.checks_url ? { href: d.checks_url } : {}) };
+    return { tone, text: Number.isNaN(since) ? d.state_line.text : `${d.state_line.text} · ${fmtDuration(now - since)}`, ...(d.checks_url ? { href: d.checks_url } : {}) };
   }
   switch (d.state) {
     case "stalled":

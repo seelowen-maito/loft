@@ -4,7 +4,8 @@ import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message } from "../../lib/api";
 import { agentsList, useAgents, usePermissions, usePullRequests } from "../../hooks/lists";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
-import { cx, fmtNum, timeAgo } from "../../lib/format";
+import { cx, fmtNum } from "../../lib/format";
+import { relTime } from "../../lib/time";
 import { contextWarns, listedContext } from "../../lib/context";
 import { groupByTeam, projectsOf, teamOf } from "../../lib/team";
 import { ProjectHeader, useCollapsed } from "../../components/ProjectGroup";
@@ -273,7 +274,7 @@ export default function AgentsPage() {
                           {a.running || a.status === "waiting" ? (
                             <span className={s.text}>{s.label}</span>
                           ) : (
-                            <>{[roleLabel(a.role), shownProjects(a), a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
+                            <>{[roleLabel(a.role), shownProjects(a), a.last_run_at ? relTime(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
                           )}
                         </div>
                       </div>

@@ -2,7 +2,8 @@ import { canAlwaysAllow } from "../../lib/permission";
 import { useState } from "react";
 import { Check, CheckCheck, ShieldAlert, ShieldCheck, ShieldX, X } from "lucide-react";
 import { api, type PermissionRequest } from "../../lib/api";
-import { cx, timeAgo } from "../../lib/format";
+import { cx } from "../../lib/format";
+import { relTime } from "../../lib/time";
 
 function describeInput(p: PermissionRequest) {
   const i = p.input ?? {};
@@ -55,7 +56,7 @@ export function PermissionCard({ req, compact = false }: { req: PermissionReques
         <span className="text-fg">
           {req.source === "request" ? "Requests permission" : "Wants to use"} <code className="font-mono text-[12.5px] text-accent">{req.tool_name}</code>
         </span>
-        <span className="ml-auto font-mono text-[11px] text-fg-3">{timeAgo(req.created_at)}</span>
+        <span className="ml-auto font-mono text-[11px] text-fg-3">{relTime(req.created_at)}</span>
       </div>
       {req.reason && <p className="mt-2 text-[13px] text-fg-2">“{req.reason}”</p>}
       {detail && !compact && (

@@ -299,3 +299,67 @@ final class VoiceChoiceTests: XCTestCase {
         XCTAssertFalse(VoiceChoice.sample(for: "ja-JP").isEmpty)
     }
 }
+
+/// Esc or closing while Loft tidies the text up (the Mac's voice panel and Talk sheet): nothing is sent, nothing listens.
+extension VoiceSessionTests {
+    func testDiscardWhileTidyingStopsEveryFinish() async throws {
+        for reason: VoiceSession.FinishReason in [.send, .review, .ask] {
+            let api = MockAPI()
+            api.features.append("voice_clean")
+            api.cleanedText = "Tidied."
+            api.cleanDelay = .milliseconds(300)
+            let store = try await connectedStore(api)
+            let session = VoiceSession(store: store)
+            session.applyFixture("listening", agentId: "a1")
+            let finishing = Task { await session.finish(reason) }
+            for _ in 0..<50 where session.phase != .cleaning { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(session.phase, .cleaning, "\(reason)")
+            session.discard()
+            await finishing.value
+            XCTAssertEqual(session.phase, .idle, "\(reason)")
+            XCTAssertNil(session.cleaned, "\(reason)")
+            XCTAssertFalse(session.awaitingVoiceConfirm, "\(reason)")
+            XCTAssertTrue(api.sentClientIds.isEmpty, "\(reason): nothing sent")
+            store.deactivate()
+        }
+    }
+
+    /// A discarded finish stays stopped even when the next dictation is tidying up by the time its cleanup returns.
+    func testDiscardedFinishIgnoresTheNextDictation() async throws {
+        for reason: VoiceSession.FinishReason in [.send, .ask] {
+            let api = MockAPI()
+            api.features.append("voice_clean")
+            api.cleanedText = "Tidied."
+            api.cleanDelay = .milliseconds(600)
+            let store = try await connectedStore(api)
+            let session = VoiceSession(store: store)
+            session.applyFixture("listening", agentId: "a1")
+            let first = Task { await session.finish(reason) }
+            for _ in 0..<50 where session.phase != .cleaning { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(session.phase, .cleaning, "\(reason)")
+            session.discard()
+            try await Task.sleep(for: .milliseconds(200))
+            session.applyFixture("listening", agentId: "a1")
+            let second = Task { await session.finish(.review) }
+            await first.value
+            await second.value
+            XCTAssertTrue(api.sentClientIds.isEmpty, "\(reason): nothing sent")
+            XCTAssertFalse(session.awaitingVoiceConfirm, "\(reason)")
+            XCTAssertEqual(session.phase, .review, "\(reason): the second dictation waits for review")
+            store.deactivate()
+        }
+    }
+
+    func testFinishWithoutADiscardStillTidiesUp() async throws {
+        let api = MockAPI()
+        api.features.append("voice_clean")
+        api.cleanedText = "Tidied."
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        let session = VoiceSession(store: store)
+        session.applyFixture("listening", agentId: "a1")
+        await session.finish(.review)
+        XCTAssertEqual(session.phase, .review)
+        XCTAssertEqual(session.cleaned, "Tidied.")
+    }
+}

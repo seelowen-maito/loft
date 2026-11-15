@@ -22,7 +22,7 @@ struct NeedsYouScreen: View {
                             DisclosureGroup {
                                 ForEach(prs) { NeedsYouRow(item: $0) }
                             } label: {
-                                Label("\(name) · \(prs.count)", systemImage: "folder").font(.headline)
+                                Label("\(name) · \(prs.count)", systemImage: "folder").eyebrow()
                             }
                             .accessibilityIdentifier("needsYouProject-\(name)")
                         }
@@ -72,7 +72,7 @@ struct NeedsYouRow: View {
         case 3: Theme.failure
         case 2: Theme.attention
         case 1: Theme.accent
-        default: .secondary
+        default: WebTheme.fg3
         }
     }
 
@@ -80,18 +80,21 @@ struct NeedsYouRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Circle().fill(color).frame(width: 8, height: 8).accessibilityHidden(true)
-                Text(item.title).font(.headline).lineLimit(2)
+                Text(item.title).font(.system(size: 13.5, weight: .medium)).lineLimit(2)
                 Spacer(minLength: 0)
-                if let age = item.createdAt { Text(age.shortAgo).font(.caption).foregroundStyle(.secondary) }
+                if let age = item.createdAt { Text(age.shortAgo).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3) }
             }
             if let s = assist?.summary {
                 Label(s, systemImage: "sparkles").accessibilityLabel("Summary: \(s)")
             }
             Text(item.text.isEmpty ? item.reason : item.text)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WebTheme.fg2)
                 .lineLimit(showsText ? nil : 4)
                 .font(showsText ? .body.monospaced() : nil)
                 .textSelection(.enabled)
+            if item.type == "permission", let request = store.permissions.first(where: { "permission:\($0.id)" == item.id }) {
+                PermissionExplainerRow(request: request)
+            }
             // Only when there's a real choice: a lone suggestion read as a command.
             if let replies = assist?.replies, replies.count >= 2, item.answerAction != nil {
                 HStack(spacing: 6) {
@@ -111,8 +114,8 @@ struct NeedsYouRow: View {
             .controlSize(.small)
             if let error { Text(error).font(.caption).foregroundStyle(Theme.failureInk) }
         }
-        .padding(12)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(14)
+        .panel()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("needsYou-\(item.id)")
         .task(id: item.id) {
@@ -253,5 +256,42 @@ private struct NeedsYouAnswerSheet: View {
         }
         .padding()
         .frame(width: 480)
+    }
+}
+
+/// "What does this do?" on a permission request, then the on-device model's sentence (labelled as a suggestion), or a
+/// note that there isn't one. Only on request, and you still decide.
+private struct PermissionExplainerRow: View {
+    let request: PermissionRequest
+    @State private var explanation: String?
+    @State private var explaining = false
+
+    var body: some View {
+        if let e = explanation {
+            if e.isEmpty {
+                Text("No plain explanation for this one. Check the request above.").font(.footnote).foregroundStyle(.secondary)
+            } else {
+                Label(e, systemImage: "sparkles").font(.footnote)
+                    .accessibilityLabel("Plain explanation, from the on-device model: \(e)")
+                    .accessibilityIdentifier("permissionExplanation")
+            }
+        } else if explaining {
+            Label("Explaining…", systemImage: "sparkles").font(.footnote).foregroundStyle(.secondary)
+        } else if OnDeviceFeatures.explainOn {
+            Button { explain() } label: { Label("What does this do?", systemImage: "sparkles") }
+                .font(.footnote)
+                .buttonStyle(.borderless)
+                .foregroundStyle(Theme.accent)
+                .accessibilityIdentifier("permissionExplain")
+        }
+    }
+
+    private func explain() {
+        explaining = true
+        VoiceLog.shared.add("ai: explanation asked for \(request.toolName)")
+        Task {
+            explanation = await OnDeviceFeatures.explain(request) ?? ""
+            explaining = false
+        }
     }
 }

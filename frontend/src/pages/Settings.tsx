@@ -8,9 +8,11 @@ import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
 import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
+import { SettingsCard } from "../components/SettingsCard";
 import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
-import { cleanLineText, cx, fmtBytes, oneLine, timeAgo } from "../lib/format";
+import { cleanLineText, cx, fmtBytes, oneLine } from "../lib/format";
+import { fmtClock, fmtDateTime, relTime } from "../lib/time";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 import { usePoll } from "../hooks/usePoll";
@@ -75,10 +77,10 @@ const SOURCE_LABELS: Record<string, string> = {
 function GithubUsage() {
   const [b, setB] = useState<GithubBudget | null>(null);
   usePoll(() => api.githubBudget().then(setB).catch(() => {}), 15_000);
-  const at = (s: number) => new Date(s * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const at = (s: number) => fmtClock(s);
   const rows = Object.entries(b?.by_source ?? {}).sort((x, y) => y[1].requests - x[1].requests);
   return (
-    <Section title="GitHub API">
+    <SettingsCard title="GitHub API">
       {!b || Object.keys(b.resources).length === 0 ? (
         <p className="text-[12.5px] text-fg-3">No answer from GitHub yet since Loft started.</p>
       ) : (
@@ -117,7 +119,7 @@ function GithubUsage() {
           )}
         </div>
       )}
-    </Section>
+    </SettingsCard>
   );
 }
 
@@ -128,13 +130,8 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
   const [s, setS] = useState<BackupStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const card = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    api.backups().then((v) => {
-      setS(v);
-      // Needs you links here when backups fail.
-      if (window.location.hash === "#backups") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
-    }).catch((e) => setErr((e as Error).message));
+    api.backups().then(setS).catch((e) => setErr((e as Error).message));
   }, []);
   const now = async () => {
     setBusy(true);
@@ -151,25 +148,26 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
   };
   const last = s?.last;
   return (
-    <div ref={card} id="backups">
-      <Section title="Backups">
+    <SettingsCard
+      id="backups"
+      title="Backups"
+      action={
+        <button type="button" className="btn shrink-0" disabled={busy} onClick={now}>
+          {busy ? "Backing up…" : "Back up now"}
+        </button>
+      }
+      error={err ?? (s?.error ? `The last backup failed ${relTime(s.error.at)}: ${s.error.message}` : null)}
+      loading={!s && !err}
+    >
         <div className="flex flex-wrap items-center gap-3">
           <p className="min-w-0 flex-1 text-[13px] text-fg">
             {!s ? " " : last ? (
               <span title={last.path}>
-                Last backup {timeAgo(last.at)} · {new Date(last.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · {(last.bytes / 1e6).toFixed(1)} MB
+                Last backup {relTime(last.at)} · {fmtDateTime(last.at)} · {(last.bytes / 1e6).toFixed(1)} MB
               </span>
             ) : "No backup yet."}
           </p>
-          <button type="button" className="btn shrink-0" disabled={busy} onClick={now}>
-            {busy ? "Backing up…" : "Back up now"}
-          </button>
         </div>
-        {(s?.error || err) && (
-          <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad [overflow-wrap:anywhere]">
-            {err ?? `The last backup failed ${timeAgo(s!.error!.at)}: ${s!.error!.message}`}
-          </p>
-        )}
         <div className="flex flex-wrap gap-2">
           <button type="button" className={chip(folder === "")} aria-pressed={folder === ""} onClick={() => onFolder("")}>This Mac</button>
           {s?.icloud && <button type="button" className={chip(folder === s.icloud)} aria-pressed={folder === s.icloud} onClick={() => onFolder(s.icloud!)}>iCloud Drive</button>}
@@ -183,8 +181,7 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
           <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
         </Field>
         {folderErr && <p className="text-[12.5px] text-bad [overflow-wrap:anywhere]">{folderErr}</p>}
-      </Section>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -209,7 +206,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
   const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
   return (
     <div ref={card} id="workspaces">
-      <Section title="Disk">
+      <SettingsCard title="Disk">
         <div className="flex flex-wrap items-center gap-3">
           <p className={cx("min-w-0 flex-1 text-[13px]", low ? "text-warn" : "text-fg")}>
             {!s ? " " : s.free_bytes == null ? "Free space unknown." : `${fmtBytes(s.free_bytes)} free${low ? " · disk almost full" : ""}`}
@@ -222,7 +219,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
             <span>
-              {last.title || last.what} {timeAgo(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} item{last.removed === 1 ? "" : "s"}
+              {last.title || last.what} {relTime(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} item{last.removed === 1 ? "" : "s"}
               {last.failed > 0 && <span className="text-bad"> · {last.failed} failed</span>}
             </span>
             <button type="button" className="text-accent hover:underline" onClick={() => setShown(last)}>
@@ -256,7 +253,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
         <p className="text-[12px] text-fg-3">
           Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily, a ticket's scratch folder once the ticket is closed, and other scratch and test output in notes after 7 days.
         </p>
-      </Section>
+      </SettingsCard>
       {shown && <CleanLogView log={shown} name={name} onClose={() => setShown(null)} />}
     </div>
   );
@@ -325,7 +322,7 @@ export function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id:
   return (
     <Modal onClose={log.running ? undefined : onClose}>
       <div>
-        <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? timeAgo(log.at) : ""}`}</h3>
+        <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? relTime(log.at) : ""}`}</h3>
         <p className="mt-1 text-[13px] text-fg-2">
           {log.running && log.lines.length === 0 ? "Removing…" : `Freed ${fmtBytes(log.freed_bytes)} · ${log.removed} removed`} · {log.skipped.length} skipped
           {log.failed > 0 && <span className="text-bad"> · {log.failed} failed</span>}
@@ -367,12 +364,12 @@ function Spend() {
     api.agentsSummary().then((r) => setAll(r.all_time)).catch(() => {});
   }, []);
   return (
-    <Section title="Spend">
+    <SettingsCard title="Spend">
       <p className="text-[13px] text-fg" title="Every run since Loft started counting, deleted agents and cleared chats included">
         {all ? `All time: ${all.runs.toLocaleString("en-US")} runs · est. ${exactDollars(all.cost_usd)}` : " "}
       </p>
       <p className="text-[11.5px] text-fg-3">Estimated at API list prices.</p>
-    </Section>
+    </SettingsCard>
   );
 }
 
@@ -441,15 +438,6 @@ function ShortcutSettings() {
       </ul>
       <span className="block text-[11.5px] text-fg-3">Fixed. They don't fire while you type in a text field.</span>
     </div>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="panel space-y-4 p-5">
-      <h2 className="text-[15px] font-medium tracking-tight">{title}</h2>
-      {children}
-    </section>
   );
 }
 
@@ -565,7 +553,7 @@ export default function SettingsPage() {
           </div>
         )}
 
-        <Section title="General">
+        <SettingsCard title="General">
           <Field label="Projects folder" hint="Where your git repos live." restart>
             <input className="input font-mono" value={draft.projects_dir} onChange={(e) => set("projects_dir", e.target.value)} />
           </Field>
@@ -592,7 +580,7 @@ export default function SettingsPage() {
               )}
             </div>
           </Field>
-        </Section>
+        </SettingsCard>
 
         <Backups folder={draft.backup_dir ?? ""} onFolder={(v) => set("backup_dir", v)} folderErr={folderErr} />
 
@@ -601,25 +589,25 @@ export default function SettingsPage() {
         <GithubUsage />
         <Spend />
 
-        <Section title="Updates">
+        <SettingsCard title="Updates">
           <Toggle
             on={draft.auto_update}
             onChange={(v) => set("auto_update", v)}
             label="Update automatically"
             hint="Checks for new commits every minute. Installs once no agent is running, then restarts."
           />
-        </Section>
+        </SettingsCard>
 
-        <Section title="Agents">
+        <SettingsCard title="Agents">
           <Toggle
             on={draft.messaging_rules}
             onChange={(v) => set("messaging_rules", v)}
             label="Messaging rules"
             hint="Tells every agent to message other agents only with a finding, report, verdict or request, never thanks or waiting notes."
           />
-        </Section>
+        </SettingsCard>
 
-        <Section title="GitHub issues">
+        <SettingsCard title="GitHub issues">
           <Field label="Comments going to GitHub" hint="Every comment on a GitHub issue waits for your approval unless this says otherwise.">
             <ModeSelect value={draft.comment_approval_default} onChange={(m) => set("comment_approval_default", m)} />
           </Field>
@@ -629,20 +617,20 @@ export default function SettingsPage() {
             label="Publish new Loft issues to GitHub automatically"
             hint="Each new Loft issue in a project with a GitHub repo becomes a GitHub issue right away. Off: it stays in Loft until you press Publish to GitHub."
           />
-        </Section>
+        </SettingsCard>
 
-        <Section title="Navigation">
+        <SettingsCard title="Navigation">
           <Toggle
             on={draft.show_simulator}
             onChange={(v) => set("show_simulator", v)}
             label="Show Simulator"
             hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
           />
-        </Section>
+        </SettingsCard>
 
-        <Section title="Keyboard shortcuts">
+        <SettingsCard title="Keyboard shortcuts">
           <ShortcutSettings />
-        </Section>
+        </SettingsCard>
 
         <HerdrSetup />
 

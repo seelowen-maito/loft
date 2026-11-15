@@ -82,7 +82,8 @@ struct OverviewSection: View {
             Button("Open Settings") { nav.section = .settings }
         }
         .padding(12)
-        .background(Theme.attention.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Theme.attention.opacity(0.08), in: RoundedRectangle(cornerRadius: WebTheme.panelRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: WebTheme.panelRadius, style: .continuous).strokeBorder(Theme.attention.opacity(0.25)))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("githubLimited")
     }
@@ -112,13 +113,13 @@ private struct StatTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label.uppercased()).font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+            Text(label.uppercased()).eyebrow()
             Text(value ?? "—").font(.system(size: 28, weight: .semibold, design: .rounded)).monospacedDigit()
-            Text(sub ?? " ").font(.caption).foregroundStyle(.secondary)
+            Text(sub ?? " ").font(.system(size: 11, design: .monospaced)).foregroundStyle(WebTheme.fg3)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .panel()
         .accessibilityElement(children: .combine)
     }
 }
@@ -136,7 +137,7 @@ private struct AgentActivity: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("AGENTS · LAST 14 DAYS").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Text("Agents · last 14 days").eyebrow()
                 Spacer()
                 Button("Open agents") { nav.section = .agents }.controlSize(.small)
             }
@@ -196,7 +197,7 @@ private struct AgentCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .panel()
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("agentCard-\(s.agent.name)")
@@ -205,7 +206,9 @@ private struct AgentCard: View {
     private func stat(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value).font(.title3.weight(.semibold)).monospacedDigit()
-            Text(label.uppercased()).font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
+            // Four to a narrow card: smaller and tighter than a group's eyebrow, and on one line so the numbers line up.
+            Text(label.uppercased()).font(.system(size: 9, design: .monospaced)).tracking(0.6).foregroundStyle(WebTheme.fg3)
+                .lineLimit(1).minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -243,7 +246,7 @@ private struct GithubList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("\(title.uppercased()) · \(rows.count)", systemImage: symbol).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            Label("\(title.uppercased()) · \(rows.count)", systemImage: symbol).eyebrow()
             if loading {
                 ProgressView().controlSize(.small)
             } else if rows.isEmpty {
@@ -267,7 +270,7 @@ private struct GithubList: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .panel()
     }
 }
 
@@ -301,7 +304,7 @@ private struct RepoTable: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .panel()
     }
 }
 
@@ -316,7 +319,7 @@ private struct ActivityPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    eyebrow("Activity")
+                    Text("Activity".uppercased()).eyebrow()
                     Text("Commits across all repositories · last 26 weeks")
                 }
                 Spacer()
@@ -333,7 +336,7 @@ private struct ActivityPanel: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .panel()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("overviewActivity")
     }
@@ -361,7 +364,7 @@ private struct MostActive: View {
         let top = (repos ?? []).filter { $0.commits30 > 0 }.sorted { $0.commits30 > $1.commits30 }.prefix(5)
         let peak = max(1, top.first?.commits30 ?? 1)
         VStack(alignment: .leading, spacing: 10) {
-            eyebrow("Most active · 30d")
+            Text("Most active · 30d".uppercased()).eyebrow()
             if repos != nil && top.isEmpty { Text("No commits in the last 30 days.").foregroundStyle(.secondary) }
             ForEach(Array(top.enumerated()), id: \.element.id) { i, r in
                 Button { open(r) } label: {
@@ -380,6 +383,6 @@ private struct MostActive: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .panel()
     }
 }

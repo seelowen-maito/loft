@@ -23,16 +23,14 @@ import { TempMeter } from "./components/TempMeter";
 import { Shortcuts } from "./components/Shortcuts";
 import { Talk } from "./components/Talk";
 import { openTalk } from "./lib/talk";
+import { fmtClock } from "./lib/time";
+import { useNow } from "./lib/useNow";
 
 function Clock() {
-  const [now, setNow] = useState(new Date());
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
+  const now = useNow(1000);
   return (
     <span className="font-mono text-[11px] tabular-nums text-fg-3">
-      {now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
+      {fmtClock(now, { seconds: true })}
     </span>
   );
 }

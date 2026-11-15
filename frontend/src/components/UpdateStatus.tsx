@@ -9,6 +9,7 @@ import { usePoll } from "../hooks/usePoll";
 export function UpdateStatus({ live }: { live: boolean }) {
   const [s, setS] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
   // Refetch on (re)connect: a restart after an update drops the event stream.
   useEffect(() => {
     if (live) api.update().then(setS).catch(() => {});
@@ -42,8 +43,9 @@ export function UpdateStatus({ live }: { live: boolean }) {
 
   const restart = () => {
     setBusy(true);
+    setRestartError(null);
     api.restart().catch((e) => {
-      alert((e as Error).message);
+      setRestartError((e as Error).message);
       setBusy(false);
     });
   };
@@ -56,6 +58,7 @@ export function UpdateStatus({ live }: { live: boolean }) {
           Restart
         </button>
       )}
+      {restartError && <span className="text-bad" role="alert">{restartError}</span>}
     </span>
   );
 }

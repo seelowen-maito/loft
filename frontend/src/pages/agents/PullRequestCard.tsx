@@ -4,7 +4,8 @@ import {
   GitPullRequestDraft, Loader2, RefreshCw, ShieldAlert, X,
 } from "lucide-react";
 import { api, type PullRequest } from "../../lib/api";
-import { cx, timeAgo } from "../../lib/format";
+import { cx } from "../../lib/format";
+import { relTime } from "../../lib/time";
 import { verdicts } from "../../lib/verdicts";
 
 const METHOD_LABEL: Record<string, string> = { squash: "Squash and merge", merge: "Create merge commit", rebase: "Rebase and merge" };
@@ -25,7 +26,7 @@ function mergeability(pr: PullRequest): { tone: Tone; icon: React.ReactNode; lab
       tone: "merged",
       icon: <GitMerge className="size-4" />,
       label: "Merged",
-      detail: [pr.merged_by && `by ${pr.merged_by}`, pr.merged_at && timeAgo(pr.merged_at)].filter(Boolean).join(" · "),
+      detail: [pr.merged_by && `by ${pr.merged_by}`, pr.merged_at && relTime(pr.merged_at)].filter(Boolean).join(" · "),
       canMerge: false,
     };
   if (pr.state === "closed")
@@ -144,7 +145,7 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
               className="ml-auto rounded-full p-1 text-fg-3 transition hover:bg-white/5 hover:text-fg disabled:opacity-40"
               onClick={refresh}
               disabled={busy !== null}
-              title={pr.checked_at ? `Checked ${timeAgo(pr.checked_at)}. Click to refresh` : "Refresh"}
+              title={pr.checked_at ? `Checked ${relTime(pr.checked_at)}. Click to refresh` : "Refresh"}
               aria-label="Refresh pull request status"
             >
               <RefreshCw className={cx("size-3.5", busy === "refresh" && "animate-spin")} />
