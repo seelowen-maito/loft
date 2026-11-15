@@ -44,6 +44,27 @@ test("a dialog is labelled, takes focus, and gives it back when it closes", () =
   opener.remove();
 });
 
+test("focus goes back to the opener when the dialog autofocuses a field, also from a dialog over another", () => {
+  const opener = document.body.appendChild(document.createElement("button"));
+  opener.focus();
+  const m = mount(h(Dialog, { title: "New", onClose: () => {} }, h("input", { autoFocus: true })));
+  assert.equal(document.activeElement?.tagName, "INPUT");
+  m.unmount();
+  assert.equal(document.activeElement, opener);
+  opener.remove();
+
+  // The Edit dialog over the issue page: closing it leaves focus on Edit, inside the issue page.
+  const page = (edit: boolean) =>
+    h(Dialog, { title: "Issue", onClose: () => {} }, h("button", { id: "edit" }, "Edit"), edit && h(Dialog, { title: "Edit", onClose: () => {} }, h("input", { autoFocus: true })));
+  const p = mount(page(false));
+  document.getElementById("edit")!.focus();
+  p.render(page(true));
+  assert.equal(document.activeElement?.tagName, "INPUT");
+  p.render(page(false));
+  assert.equal(document.activeElement?.id, "edit");
+  p.unmount();
+});
+
 test("Esc closes only the top dialog, then the one under it", () => {
   const closed: string[] = [];
   const view = (inner: boolean) =>

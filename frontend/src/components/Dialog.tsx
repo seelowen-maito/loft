@@ -1,4 +1,4 @@
-import { useEffect, useRef, type HTMLAttributes, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, type HTMLAttributes, type ReactNode, type RefObject } from "react";
 import { cx } from "../lib/format";
 import { closesOnEscape } from "../lib/dialogKeys";
 
@@ -14,12 +14,13 @@ const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),textarea
 export function useDialogKeys(box: RefObject<HTMLElement | null>, onClose: (() => void) | undefined) {
   const close = useRef(onClose);
   close.current = onClose;
+  // Where focus was, read while rendering: by the effects, a field's autoFocus has already moved it into the dialog.
+  const [from] = useState(() => document.activeElement as HTMLElement | null);
   useEffect(() => {
     const me = box;
     // A dialog inside another goes above it, also when both open at once (the inner one's effect runs first).
     const inner = open.findIndex((o) => !!o.current && !!box.current?.contains(o.current));
     open.splice(inner < 0 ? open.length : inner, 0, me);
-    const from = document.activeElement as HTMLElement | null;
     // A field with autoFocus already has it.
     if (!box.current?.contains(document.activeElement)) box.current?.focus();
     // Capture, so a page under it (the full-screen interview, Needs you) doesn't take the key first.
@@ -51,7 +52,7 @@ export function useDialogKeys(box: RefObject<HTMLElement | null>, onClose: (() =
       open.splice(open.indexOf(me), 1);
       if (from?.isConnected) from.focus();
     };
-  }, [box]);
+  }, [box, from]);
 }
 
 const CARD = "rounded-2xl border border-line-strong bg-ink-900";
