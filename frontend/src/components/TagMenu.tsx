@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useMemo, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { CircleDot, FileText, GitPullRequest } from "lucide-react";
 import { api, type Agent, type PullRequest } from "../lib/api";
-import { cx, timeAgo } from "../lib/format";
+import { cx } from "../lib/format";
+import { relTime } from "../lib/time";
 import { hashToken, insertTag, tagMatches, tagRows, type TagRow } from "../lib/shortcuts";
 import { IssueRow } from "./IssueRow";
 import { STATUS_TONE, useTasks } from "./TaskChip";
@@ -63,7 +64,7 @@ export function useTagMenu(project: string, agents: Agent[], text: string, setTe
             tone={(r.kind === "pr" ? PR_TONE : STATUS_TONE)[r.status] ?? "text-fg-3"}
             github={r.github}
             title={r.title}
-            meta={[r.number !== null && `#${r.number}`, r.status.replace("_", " "), agents.find((a) => a.id === r.agent)?.name, r.project, timeAgo(r.at)]}
+            meta={[r.number !== null && `#${r.number}`, r.status.replace("_", " "), agents.find((a) => a.id === r.agent)?.name, r.project, relTime(r.at)]}
             selected={i === index}
             onHover={() => setIndex(i)}
             onPick={() => pick(r)}

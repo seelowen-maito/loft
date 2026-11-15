@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2 } from "lucide-react";
 import { SettingsCard } from "../components/SettingsCard";
 import { api, portalHome, type PushDevice, type PushStatus } from "../lib/api";
-import { cx, timeAgo } from "../lib/format";
+import { cx } from "../lib/format";
+import { relTime } from "../lib/time";
 
 /** Settings → Push notifications: which path pushes take (the user's own APNs key, the Loft relay with a relay key, or none), the phones registered, and a test push. */
 const CHIP: Record<PushStatus["path"], string> = { own_key: "Your own key", relay: "Using the Loft relay", none: "Sign in to get push" };
@@ -283,7 +284,7 @@ export function PushSettings() {
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px]">{d.name || "iPhone"}</div>
                 <div className="truncate font-mono text-[10.5px] text-fg-3">
-                  {d.environment === "production" ? "TestFlight / App Store" : "Xcode build (sandbox)"} · seen {timeAgo(d.last_seen_at)} · {d.kinds.length} kinds
+                  {d.environment === "production" ? "TestFlight / App Store" : "Xcode build (sandbox)"} · seen {relTime(d.last_seen_at)} · {d.kinds.length} kinds
                 </div>
               </div>
               <button type="button" className="btn shrink-0" disabled={off} onClick={() => test(d)} title={off ? "Add a relay key or your own key first" : undefined}>

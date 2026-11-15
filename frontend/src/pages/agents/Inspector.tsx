@@ -5,7 +5,8 @@ import {
 import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { pendingClick, redrawBusy, redrawClick, type RedrawClick } from "../../lib/redraw";
-import { cx, fmtBytes, timeAgo } from "../../lib/format";
+import { cx, fmtBytes } from "../../lib/format";
+import { relTime } from "../../lib/time";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { GroupInput, ProjectsField } from "./ProjectsField";
@@ -556,7 +557,7 @@ function MemoryTab({ agent }: { agent: Agent }) {
             {open.has(m.id) && <div className="mt-1.5 whitespace-pre-wrap pl-5 text-[12.5px] leading-relaxed text-fg-2">{m.content}</div>}
             <div className="mt-1.5 flex items-center gap-2 pl-5 font-mono text-[10.5px] text-fg-3">
               <span>#{m.id}</span>
-              <span>{timeAgo(m.created_at)}</span>
+              <span>{relTime(m.created_at)}</span>
               {m.tags && m.tags.split(",").map((t) => <span key={t} className="chip py-0 text-[10px]">{t.trim()}</span>)}
               <button className="ml-auto opacity-0 transition hover:text-bad group-hover:opacity-100" onClick={() => api.deleteMemory(agent.id, m.id)} aria-label="Forget">
                 <Trash2 className="size-3.5" />

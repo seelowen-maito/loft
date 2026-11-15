@@ -4,7 +4,8 @@ import type { Agent } from "../../lib/api";
 import { ATTACH, filterIssues, SOURCES, type Source } from "../../lib/issueFilter";
 import { Origin } from "../../components/Origin";
 import { IssueRow } from "../../components/IssueRow";
-import { cx, timeAgo } from "../../lib/format";
+import { cx } from "../../lib/format";
+import { relTime } from "../../lib/time";
 import { STATUS_TONE, useTasks } from "../../components/TaskChip";
 
 /** Open tasks first, the ones waiting on you on top; then the most recently updated. */
@@ -65,7 +66,7 @@ export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPic
             tone={STATUS_TONE[t.status]}
             github={!!t.github}
             title={t.title}
-            meta={[t.github && `#${t.github.number}`, t.status.replace("_", " "), name(t.agent_id), t.project, timeAgo(t.updated_at)]}
+            meta={[t.github && `#${t.github.number}`, t.status.replace("_", " "), name(t.agent_id), t.project, relTime(t.updated_at)]}
             selected={i === index}
             onHover={() => setIndex(i)}
             onPick={() => onPick(t.id)}

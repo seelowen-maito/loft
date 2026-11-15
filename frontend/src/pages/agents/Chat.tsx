@@ -7,7 +7,9 @@ import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtInterval, fmtQuiet, fmtSchedule, nextRunText } from "../../lib/format";
+import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
+import { fmtClock, fmtDate, fmtDayTime, nextRunText } from "../../lib/time";
+import { useNow } from "../../lib/useNow";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
@@ -432,13 +434,7 @@ export function Chat({
 
   const running = !!agent.running;
   // Re-render every 30 s so the "for N min" counts move while nothing else does.
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!running) return;
-    setNow(Date.now());
-    const t = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(t);
-  }, [running]);
+  const now = useNow(30_000, running);
   const watch = runWatch(agent, messages[messages.length - 1]?.created_at, now);
   const [restarting, setRestarting] = useState(false);
   const restart = async () => {
@@ -866,7 +862,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex items-center gap-3 py-2">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80">
-          /clear · context cleared, memory kept · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          /clear · context cleared, memory kept · {fmtClock(m.created_at)}
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
       </div>
@@ -877,7 +873,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex items-center gap-3 py-2">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80" title={m.meta?.first_message}>
-          /resume · resumed the Session from {new Date(m.meta?.started_at ?? m.created_at).toLocaleDateString(undefined, { dateStyle: "medium" })} · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          /resume · resumed the Session from {fmtDate(m.meta?.started_at ?? m.created_at)} · {fmtClock(m.created_at)}
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
       </div>
@@ -889,7 +885,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex items-center gap-3 py-2">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80">
-          {m.meta?.trigger === "auto" ? "auto-compacted" : "/compact"} · context {k(m.meta?.pre_tokens)} → {k(m.meta?.post_tokens)} tokens · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          {m.meta?.trigger === "auto" ? "auto-compacted" : "/compact"} · context {k(m.meta?.pre_tokens)} → {k(m.meta?.post_tokens)} tokens · {fmtClock(m.created_at)}
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
       </div>
@@ -901,7 +897,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex items-center gap-3 pt-3">
         <span className="h-px flex-1 bg-line" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">
-          {label} · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          {label} · {fmtClock(m.created_at)}
         </span>
         <span className="h-px flex-1 bg-line" />
       </div>
@@ -1139,7 +1135,7 @@ function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNu
       <button className="flex w-full items-center gap-3 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
         <Clock className="size-4 shrink-0 text-accent" />
         <span className="min-w-0 flex-1 truncate text-[13px] text-fg">
-          {list.length} schedule{list.length === 1 ? "" : "s"} · next {fmtNext(next.next_at)}
+          {list.length} schedule{list.length === 1 ? "" : "s"} · next {fmtDayTime(next.next_at)}
         </span>
         <ChevronRight className={cx("size-4 shrink-0 text-fg-3 transition-transform", open && "rotate-90")} />
       </button>
@@ -1150,7 +1146,7 @@ function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNu
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] text-fg">{s.prompt}</div>
                 <div className="font-mono text-[11px] text-fg-3">{s.every ? `Every ${s.every} at ${s.time}` : "Once"}</div>
-                <div className="font-mono text-[11px] text-fg-3">next {fmtNext(s.next_at)}</div>
+                <div className="font-mono text-[11px] text-fg-3">next {fmtDayTime(s.next_at)}</div>
               </div>
               <button className="btn shrink-0" onClick={() => cancel(s.id)} disabled={busy === s.id}>
                 Cancel
@@ -1161,13 +1157,6 @@ function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNu
       )}
     </div>
   );
-}
-
-/** "Mon 09:30", with the date when it's more than 6 days away. */
-function fmtNext(iso: string): string {
-  const d = new Date(iso);
-  const far = d.getTime() - Date.now() > 6 * 86400_000;
-  return d.toLocaleString([], { weekday: "short", ...(far ? { month: "short", day: "numeric" } : {}), hour: "numeric", minute: "2-digit" });
 }
 
 /** Loft commands that answer with a notice: they show or change a setting, or show usage. */

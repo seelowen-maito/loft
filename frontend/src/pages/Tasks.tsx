@@ -6,7 +6,8 @@ import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, MessageS
 import { api, type MirrorSync, type Agent, type Task, type TaskComment } from "../lib/api";
 import { parseFilters, resolveFrom, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
-import { cx, timeAgo } from "../lib/format";
+import { cx } from "../lib/format";
+import { fmtDate, fmtDateTime, relTime } from "../lib/time";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
 import { GithubUser } from "../components/GithubUser";
@@ -330,8 +331,8 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
               {t.github.repo}#{t.github.number} <ExternalLink className="size-3" />
             </a>
           )}
-          <span className="text-fg-3">created by {creator} · {timeAgo(t.created_at)}</span>
-          {t.due_at && <span className="text-fg-3">· due {new Date(t.due_at).toLocaleDateString()}</span>}
+          <span className="text-fg-3">created by {creator} · {relTime(t.created_at)}</span>
+          {t.due_at && <span className="text-fg-3">· due {fmtDate(t.due_at)}</span>}
         </div>
         {!t.github && (t.labels.length > 0 || t.owner) && (
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-1">
@@ -471,7 +472,7 @@ function TaskLinks({ title, tasks, to }: { title: string; tasks: Task[]; to: (id
 function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
   const name = c.author === "user" ? "You" : agent?.name ?? c.meta.author_name ?? "Agent";
   const gh = c.meta.github?.state;
-  const when = new Date(c.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const when = fmtDateTime(c.created_at);
   if (c.kind === "status") {
     const extra = c.meta.summary || c.meta.error;
     return (

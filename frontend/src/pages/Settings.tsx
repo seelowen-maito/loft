@@ -11,7 +11,8 @@ import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { SettingsCard } from "../components/SettingsCard";
 import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
-import { cleanLineText, cx, fmtBytes, oneLine, timeAgo } from "../lib/format";
+import { cleanLineText, cx, fmtBytes, oneLine } from "../lib/format";
+import { fmtClock, fmtDateTime, relTime } from "../lib/time";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 
@@ -80,7 +81,7 @@ function GithubUsage() {
     const id = setInterval(load, 15_000);
     return () => clearInterval(id);
   }, []);
-  const at = (s: number) => new Date(s * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const at = (s: number) => fmtClock(s);
   const rows = Object.entries(b?.by_source ?? {}).sort((x, y) => y[1].requests - x[1].requests);
   return (
     <SettingsCard title="GitHub API">
@@ -159,14 +160,14 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
           {busy ? "Backing up…" : "Back up now"}
         </button>
       }
-      error={err ?? (s?.error ? `The last backup failed ${timeAgo(s.error.at)}: ${s.error.message}` : null)}
+      error={err ?? (s?.error ? `The last backup failed ${relTime(s.error.at)}: ${s.error.message}` : null)}
       loading={!s && !err}
     >
         <div className="flex flex-wrap items-center gap-3">
           <p className="min-w-0 flex-1 text-[13px] text-fg">
             {!s ? " " : last ? (
               <span title={last.path}>
-                Last backup {timeAgo(last.at)} · {new Date(last.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · {(last.bytes / 1e6).toFixed(1)} MB
+                Last backup {relTime(last.at)} · {fmtDateTime(last.at)} · {(last.bytes / 1e6).toFixed(1)} MB
               </span>
             ) : "No backup yet."}
           </p>
@@ -222,7 +223,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
             <span>
-              {last.title || last.what} {timeAgo(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} item{last.removed === 1 ? "" : "s"}
+              {last.title || last.what} {relTime(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} item{last.removed === 1 ? "" : "s"}
               {last.failed > 0 && <span className="text-bad"> · {last.failed} failed</span>}
             </span>
             <button type="button" className="text-accent hover:underline" onClick={() => setShown(last)}>
@@ -325,7 +326,7 @@ export function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id:
   return (
     <Modal onClose={log.running ? undefined : onClose}>
       <div>
-        <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? timeAgo(log.at) : ""}`}</h3>
+        <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? relTime(log.at) : ""}`}</h3>
         <p className="mt-1 text-[13px] text-fg-2">
           {log.running && log.lines.length === 0 ? "Removing…" : `Freed ${fmtBytes(log.freed_bytes)} · ${log.removed} removed`} · {log.skipped.length} skipped
           {log.failed > 0 && <span className="text-bad"> · {log.failed} failed</span>}

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { History, Loader2, X } from "lucide-react";
 import { api, type PastSession } from "../../lib/api";
 import { cx, fmtNum } from "../../lib/format";
+import { fmtDateTime } from "../../lib/time";
 import { contextWarns } from "../../lib/context";
 
 /** `/resume`: the agent's past Sessions, newest first; picking one makes it the agent's Session. */
@@ -67,7 +68,7 @@ export function ResumeDialog({ agentId, running, onClose }: { agentId: string; r
                 {busy === s.id ? <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" /> : <History className="mt-0.5 size-3.5 shrink-0 text-fg-3" />}
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline gap-2 text-[11.5px] text-fg-3">
-                    <span>{new Date(s.started_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</span>
+                    <span>{fmtDateTime(s.started_at)}</span>
                     {current && <span className="text-accent">current</span>}
                     {s.context_tokens != null && (
                       <span className={cx("ml-auto font-mono tabular-nums", contextWarns(s.context_tokens) && "text-warn")}>context {fmtNum(s.context_tokens)}</span>

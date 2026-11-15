@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { ChevronRight, CircleCheck, CircleDot, GitPullRequest } from "lucide-react";
 import type { Agent, Task } from "../lib/api";
-import { cx, timeAgo } from "../lib/format";
+import { cx } from "../lib/format";
+import { relTime } from "../lib/time";
 import { Origin } from "../components/Origin";
 import { parseFilters, withFilters } from "../lib/issueFilters";
 import { Sticker } from "../components/Sticker";
@@ -67,7 +68,7 @@ function IssueCard({ t, dense, agentById, open }: { t: Task; dense: boolean; age
         <Origin github={!!t.github} />
         <span>{t.github ? `#${t.github.number}` : "Loft"}</span>
         {t.project && <span>{t.project}</span>}
-        <span>{timeAgo(t.updated_at)}</span>
+        <span>{relTime(t.updated_at)}</span>
         {(t.owner || (!dense && a)) && (
           <span className="ml-auto inline-flex min-w-0 items-center gap-2 text-[10.5px] text-fg-2">
             {t.owner && <GithubUser login={t.owner} bare />}
