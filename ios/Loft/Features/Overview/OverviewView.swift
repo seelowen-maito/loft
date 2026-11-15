@@ -486,7 +486,7 @@ struct ApprovalCard: View {
             HStack(spacing: 10) {
                 Image(systemName: "hand.raised.fill").foregroundStyle(Theme.attention)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(store.agent(request.agentId)?.name ?? "An agent") needs approval")
+                    Text("\(store.agent(request.agentId)?.name ?? "An agent") \(request.isQuestions ? "has questions for you" : "needs approval")")
                         .font(.subheadline.weight(.semibold))
                     RelativeTime(date: request.createdAt).font(.caption).foregroundStyle(.secondary)
                 }
@@ -517,25 +517,34 @@ struct ApprovalCard: View {
                 .accessibilityLabel("Warnings: " + risks.map(\.label).joined(separator: ", "))
                 .accessibilityIdentifier("permissionRisks")
             }
-            explainer
-            AdaptiveStack {
-                Button(role: .destructive) { decide("deny") } label: { Text("Deny").frame(maxWidth: .infinity) }
+            if request.isQuestions {
+                // The options and the answers need the web chat; here the agent can only be told the user skipped.
+                Text("Open the chat in Loft on the web to answer.").font(.footnote).foregroundStyle(.secondary)
+                Button(role: .destructive) { decide("deny") } label: { Text("Skip").frame(maxWidth: .infinity) }
                     .buttonStyle(.bordered)
-                Button { decide("allow_once") } label: { Text("Allow once").frame(maxWidth: .infinity) }
-                    .buttonStyle(.accent)
-                // A kill with no program to name has no rule to save.
-                if request.canAlwaysAllow {
-                    Menu {
-                        Button("Always allow \(request.rule ?? request.toolName)") { confirmAlways = true }
-                    } label: {
-                        Image(systemName: "ellipsis").frame(height: 20)
+                    .disabled(busy || !store.canWrite)
+                    .controlSize(.small)
+            } else {
+                explainer
+                AdaptiveStack {
+                    Button(role: .destructive) { decide("deny") } label: { Text("Deny").frame(maxWidth: .infinity) }
+                        .buttonStyle(.bordered)
+                    Button { decide("allow_once") } label: { Text("Allow once").frame(maxWidth: .infinity) }
+                        .buttonStyle(.accent)
+                    // A kill with no program to name has no rule to save.
+                    if request.canAlwaysAllow {
+                        Menu {
+                            Button("Always allow \(request.rule ?? request.toolName)") { confirmAlways = true }
+                        } label: {
+                            Image(systemName: "ellipsis").frame(height: 20)
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityLabel("More options")
                     }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("More options")
                 }
+                .disabled(busy || !store.canWrite)
+                .controlSize(.small)
             }
-            .disabled(busy || !store.canWrite)
-            .controlSize(.small)
         }
         .padding(12)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
