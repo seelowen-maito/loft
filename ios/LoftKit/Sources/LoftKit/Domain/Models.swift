@@ -3,6 +3,22 @@ import Foundation
 // Swift mirrors of the Loft backend's JSON (backend/src/db.rs, tasks.rs).
 // The backend sends snake_case keys; `JSONCoding.decoder` converts them.
 
+/// A prompt Loft sends again every interval until it's stopped.
+public struct AgentLoop: Codable, Hashable {
+    public var prompt: String
+    public var intervalMinutes: Int
+    public var nextAt: Date
+}
+
+/// A prompt Loft sends once, or at each due time of a repeat (`every`: "day" or "weekday" at `time`).
+public struct AgentSchedule: Codable, Hashable, Identifiable {
+    public var id: String
+    public var prompt: String
+    public var every: String? = nil
+    public var time: String? = nil
+    public var nextAt: Date
+}
+
 public struct Agent: Codable, Identifiable, Hashable {
     public let id: String
     public var name: String
@@ -43,6 +59,9 @@ public struct Agent: Codable, Identifiable, Hashable {
     public var group: String? = nil
     /// The projects it works in, main first; `project` is the main one (older servers send only `project`).
     public var projects: [String]? = nil
+    /// Its running `/loop`, and its `/schedule` entries (older servers send neither).
+    public var loop: AgentLoop? = nil
+    public var schedules: [AgentSchedule]? = nil
 
     /// Leads its team; it wears a captain hat.
     public var isLead: Bool { role == "lead" }

@@ -202,6 +202,16 @@ struct ChatView: View {
                     .background(.bar)
                     .accessibilityIdentifier("chatSuggestions")
                 }
+                if agent.loop != nil || !(agent.schedules ?? []).isEmpty {
+                    LoopScheduleBar(agent: agent,
+                                    stop: { runCommand(.loop("stop"), text: "") },
+                                    cancel: { id in
+                                        Task { do { try await store.cancelSchedule(agentId, id: id) } catch { actionError = APIError.from(error) } }
+                                    })
+                    .padding(.horizontal, Theme.gutter)
+                    .padding(.top, 6)
+                    .background(.bar)
+                }
                 if let r = routeSuggestion, let target = store.agent(r.agentId) {
                     RouteSuggestionBar(agentName: target.name, send: { sendRouted(r) }, dismiss: {
                         VoiceLog.shared.add("ai: “Send to \(target.name)?” dismissed")
@@ -997,6 +1007,49 @@ private struct QuickAckRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Quick reply: \(text)")
         .accessibilityIdentifier("quickAck")
+    }
+}
+
+/// The agent's running `/loop` with a Stop, and its `/schedule` entries each with a Cancel, above the composer.
+private struct LoopScheduleBar: View {
+    let agent: Agent
+    let stop: () -> Void
+    let cancel: (String) -> Void
+
+    private func every(_ minutes: Int) -> String {
+        minutes % 1440 == 0 ? "\(minutes / 1440)d" : minutes % 60 == 0 ? "\(minutes / 60)h" : "\(minutes)m"
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let l = agent.loop {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l.prompt).font(.footnote).lineLimit(1)
+                        Text("Looping every \(every(l.intervalMinutes)) · next \(l.nextAt.formatted(.relative(presentation: .named)))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Stop", action: stop).buttonStyle(.bordered).accessibilityIdentifier("loopStop")
+                }
+            }
+            ForEach(agent.schedules ?? []) { s in
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(s.prompt).font(.footnote).lineLimit(1)
+                        Text("\(s.every.map { "Every \($0) at \(s.time ?? "")" } ?? "Once") · next \(s.nextAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Cancel") { cancel(s.id) }.buttonStyle(.bordered).accessibilityIdentifier("scheduleCancel")
+                }
+            }
+        }
+        .controlSize(.small)
+        .padding(10)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("loopSchedules")
     }
 }
 

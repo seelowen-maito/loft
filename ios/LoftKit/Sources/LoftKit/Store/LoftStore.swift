@@ -1010,6 +1010,10 @@ public final class LoftStore {
         }
     }
 
+    public func cancelSchedule(_ agentId: String, id: String) async throws {
+        try await requireWrite().needsYouRequest(method: "DELETE", path: "/api/agents/\(agentId)/schedules/\(id)", body: nil)
+    }
+
     public func pastSessions(_ agentId: String) async throws -> PastSessions {
         guard let api else { throw APIError.notConfigured }
         return try await api.sessions(agentId: agentId)

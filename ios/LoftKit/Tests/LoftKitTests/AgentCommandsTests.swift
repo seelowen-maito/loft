@@ -50,4 +50,20 @@ final class AgentCommandsTests: XCTestCase {
         XCTAssertNil(CommandQuery.parseLoop("10m"))
         XCTAssertNil(CommandQuery.parseLoop("soon go"))
     }
+
+    func testAnAgentDecodesItsLoopAndSchedules() throws {
+        let json = """
+        {"id":"a1","name":"Dev","status":"idle",
+         "loop":{"prompt":"check","interval_minutes":120,"next_at":"2026-10-12T10:00:00+00:00"},
+         "schedules":[{"id":"s1","prompt":"report","every":"weekday","time":"09:30","next_at":"2026-10-13T08:30:00+00:00"},
+                      {"id":"s2","prompt":"once","next_at":"2026-10-13T08:30:00Z"}]}
+        """
+        let a = try JSONCoding.decoder.decode(Agent.self, from: Data(json.utf8))
+        XCTAssertEqual(a.loop?.intervalMinutes, 120)
+        XCTAssertEqual(a.schedules?.map(\.id), ["s1", "s2"])
+        XCTAssertEqual(a.schedules?[0].every, "weekday")
+        XCTAssertNil(a.schedules?[1].every)
+        let old = try JSONCoding.decoder.decode(Agent.self, from: Data(#"{"id":"a1","name":"Dev","status":"idle"}"#.utf8))
+        XCTAssertNil(old.loop)
+    }
 }
