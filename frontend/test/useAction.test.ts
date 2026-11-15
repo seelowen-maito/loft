@@ -117,3 +117,14 @@ test("Start anyway on the waits-on warning shows the start working, like Start d
   r.render(h(StartWarning, { ...props, startPending: false }));
   assert.ok([...r.div.querySelectorAll("button")].some((b) => b.textContent === "Start anyway" && !b.disabled));
 });
+
+test("no button calls the API straight from its click: it goes through useAction", async () => {
+  const { readdir, readFile } = await import("node:fs/promises");
+  const files = (await readdir("src", { recursive: true })).filter((f) => f.endsWith(".tsx"));
+  const raw: string[] = [];
+  for (const f of files) {
+    const lines = (await readFile(`src/${f}`, "utf8")).split("\n");
+    lines.forEach((l, i) => /on(Click|Submit|Confirm)=\{\([^)]*\)\s*=>\s*(\{\s*)?(void\s+)?api\.\w+\(/.test(l) && raw.push(`${f}:${i + 1}`));
+  }
+  assert.deepEqual(raw, []);
+});

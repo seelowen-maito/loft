@@ -6,7 +6,9 @@ import {
 } from "lucide-react";
 import { api, type Commit, type GithubInfo, type GithubItem, type Info, type Repo, type Site } from "../lib/api";
 import { cx, fmtNum } from "../lib/format";
-import { Callout } from "../components/Callout";
+import { Callout, ErrorLine } from "../components/Callout";
+import { ActionButton } from "../components/ActionButton";
+import { useAction } from "../lib/useAction";
 import { relTime } from "../lib/time";
 import { reposList, useRepos } from "../hooks/lists";
 import { Dialog } from "../components/Dialog";
@@ -35,7 +37,7 @@ export default function ReposPage() {
   const [gh, setGh] = useState<Record<string, GithubInfo>>({});
   const [ghLoading, setGhLoading] = useState(true);
   const [info, setInfo] = useState<Info | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const refreshing = useAction();
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("activity");
@@ -50,11 +52,11 @@ export default function ReposPage() {
     setGhLoading(true);
     api.github(refresh).then(setGh).finally(() => setGhLoading(false));
   };
-  const refresh = async () => {
-    setRefreshing(true);
-    await reposList.reload(() => api.repos(true)).finally(() => setRefreshing(false));
-    loadGithub(true);
-  };
+  const refresh = () =>
+    refreshing.run(async () => {
+      await reposList.reload(() => api.repos(true));
+      loadGithub(true);
+    });
 
   useEffect(() => {
     loadGithub(false);
@@ -125,10 +127,11 @@ export default function ReposPage() {
             </div>
             <div className="flex items-center gap-3">
               {loadedAt && <span className="font-mono text-[11px] text-fg-3">updated {relTime(loadedAt.toISOString())}</span>}
-              <button className="btn" onClick={refresh} disabled={refreshing}>
-                <RefreshCw className={cx("size-3.5", refreshing && "animate-spin")} /> Refresh
-              </button>
+              <ActionButton variant="secondary" icon={<RefreshCw className="size-3.5" />} pending={refreshing.busy} pendingLabel="Refreshing…" onClick={refresh}>
+                Refresh
+              </ActionButton>
             </div>
+            <ErrorLine error={refreshing.error} className="w-full text-right" />
           </div>
 
           <div className="mt-10 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-line bg-line md:grid-cols-5">

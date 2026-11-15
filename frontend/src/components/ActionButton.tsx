@@ -10,6 +10,8 @@ const VARIANT = {
   secondary: "btn",
   ghost: "btn-ghost",
   danger: DANGER,
+  // No look of its own: the caller's className styles it (a small icon in a row).
+  bare: "inline-flex items-center",
   // Inline text, as in the navbar.
   link: "inline-flex items-center gap-1 text-accent hover:underline disabled:opacity-50",
 } as const;

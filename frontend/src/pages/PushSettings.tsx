@@ -112,10 +112,9 @@ export function PushSettings() {
     });
   };
 
-  const remove = async (d: PushDevice) => {
-    await api.removeDevice(d.token).catch(() => {});
-    load();
-  };
+  const removePhone = useAction();
+  // Reloads either way: a phone already gone fails here but leaves the list.
+  const remove = (d: PushDevice) => removePhone.run(() => api.removeDevice(d.token).finally(load));
 
   if (!status) return <SettingsCard id="push" title="Push notifications" error={loadErr} loading={!loadErr} />;
   const changed = keyId !== status.key_id || teamId !== status.team_id || !!file;
@@ -304,10 +303,11 @@ export function PushSettings() {
              {removing === d.token && (
                <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
                  <span className="text-[12.5px] text-fg-2">Remove this phone?</span>
-                 <button type="button" className="btn shrink-0 border-bad/40 bg-bad/20 text-fg" onClick={() => { setRemoving(null); remove(d); }}>Remove</button>
-                 <button type="button" className="btn-ghost shrink-0" onClick={() => setRemoving(null)}>Keep</button>
+                 <ActionButton type="button" variant="danger" className="shrink-0" pending={removePhone.busy} pendingLabel="Removing…" onClick={async () => { await remove(d); setRemoving(null); }}>Remove</ActionButton>
+                 <button type="button" className="btn-ghost shrink-0" disabled={removePhone.busy} onClick={() => { removePhone.setError(null); setRemoving(null); }}>Keep</button>
                </div>
              )}
+             {removing === d.token && <ErrorLine error={removePhone.error} className="mt-2 text-right" />}
             </div>
           ))
         )}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CornerDownLeft, Delete, House, Lock, Send } from "lucide-react";
 import { api, type Simulator, type SimulatorInput } from "../lib/api";
 import { cx } from "../lib/format";
+import { errorText } from "../lib/useAction";
 import { usePoll } from "../hooks/usePoll";
 
 type Devices = { interactive: boolean; devices: Simulator[]; error?: string };
@@ -80,7 +81,7 @@ function LiveScreen({ device }: { device: Simulator }) {
   const img = useRef<HTMLImageElement>(null);
 
   const send = (input: SimulatorInput) =>
-    api.simulatorInput(device.udid, input).then(() => setErr(null), (e) => setErr(e instanceof Error ? e.message : String(e)));
+    api.simulatorInput(device.udid, input).then(() => setErr(null), (e) => setErr(errorText(e)));
 
   // Where on the screen, as fractions; object-contain can letterbox the image inside its box.
   const at = (e: React.PointerEvent) => {
@@ -191,7 +192,7 @@ function PolledScreen({ device }: { device: Simulator }) {
         timer = setTimeout(tick, 250);
       } catch (e) {
         if (stopped) return;
-        setErr(e instanceof Error ? e.message : String(e));
+        setErr(errorText(e));
         timer = setTimeout(tick, 3000);
       }
     };
