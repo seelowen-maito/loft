@@ -64,3 +64,11 @@ test("toast() shows its text on the Toaster, then it goes away", (t) => {
   // Without a Toaster on the page, it's a no-op.
   toast("nobody listens");
 });
+
+test("success lines come from ResultLine, not a hand-made \"✓ {…}\"", async () => {
+  const { readdir, readFile } = await import("node:fs/promises");
+  const files = (await readdir("src", { recursive: true })).filter((f) => f.endsWith(".tsx") && !f.endsWith("Callout.tsx"));
+  const handMade = [];
+  for (const f of files) if ((await readFile(`src/${f}`, "utf8")).includes("✓ {")) handMade.push(f);
+  assert.deepEqual(handMade, []);
+});
