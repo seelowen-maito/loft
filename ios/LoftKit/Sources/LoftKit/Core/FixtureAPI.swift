@@ -945,6 +945,11 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         locked { herdrLinked = true }
         return ["ok": true, "done": .array(["Built the Herdr UI client", "Linked Loft's plugin into Herdr"]), "message": "Open Herdr: your agents are in the Loft workspace."]
     }
+    /// The demo has no Herdr running.
+    public func herdrFocus(agentId: String) async throws {
+        try check()
+        throw APIError.server(status: 409, message: "Herdr isn't running.")
+    }
     public func updateDevice(token: String, _ fields: [String: JSONValue]) async throws { try check() }
 
     public func resetSession(agentId: String) async throws {

@@ -169,6 +169,8 @@ final class MacNav {
     var needsYouFocus: String?
     /// The chat to open Talk in, once it shows (the Talk widget or control).
     var talkIn: String?
+    /// A line for the top of that agent's chat: why it opened here and not in Herdr.
+    var chatNote: (agentId: String, text: String)?
 
     func openChat(_ agentId: String) {
         section = .agents
