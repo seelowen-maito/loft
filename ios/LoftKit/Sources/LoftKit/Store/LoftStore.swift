@@ -981,6 +981,41 @@ public final class LoftStore {
     }
     public func compact(_ agentId: String) async throws { try await requireWrite().compact(agentId: agentId) }
 
+    /// The agent's "/" menu; empty when it can't be read, so a message is then just sent.
+    public func commands(_ agentId: String) async -> [AgentCommand] { (try? await api?.commands(agentId: agentId)) ?? [] }
+
+    /// Runs a command the composer routed (see `CommandQuery.action`) as the web does. `.resume` is the view's: a sheet.
+    public func run(_ action: CommandQuery.Action, agentId: String) async throws {
+        func post(_ path: String, _ body: JSONValue = [:]) async throws {
+            try await requireWrite().needsYouRequest(method: "POST", path: "/api/agents/\(agentId)/\(path)", body: body)
+        }
+        switch action {
+        case .chat(let text): await send(text, to: agentId)
+        case .clear: try await resetSession(agentId)
+        case .compact(let instructions): try await post("compact", ["instructions": .string(instructions)])
+        case .code: try await post("open-editor")
+        case .grill(let topic):
+            await send(topic.isEmpty ? "Grill me" : "Grill me on \(topic)", to: agentId, meta: ["grill": ["role": "start_request"]])
+        case .loop(let rest):
+            if rest.lowercased() == "stop" {
+                try await requireWrite().needsYouRequest(method: "DELETE", path: "/api/agents/\(agentId)/loop", body: nil)
+            } else if let l = CommandQuery.parseLoop(rest) {
+                try await post("loop", ["interval": .string(l.interval), "prompt": .string(l.prompt)])
+            } else {
+                throw APIError.server(status: 400, message: "Use /loop 10m <prompt> to repeat a prompt (m, h or d), or /loop stop.")
+            }
+        case .schedule(let rest): try await post("schedules", ["text": .string(rest)])
+        case .info(let name, let arg): try await post("command", ["name": .string(name), "arg": .string(arg)])
+        case .terminal(let why): throw APIError.server(status: 400, message: why)
+        case .unknown(let name): throw APIError.server(status: 400, message: "Unknown command \(name).")
+        case .resume: break
+        }
+    }
+
+    public func cancelSchedule(_ agentId: String, id: String) async throws {
+        try await requireWrite().needsYouRequest(method: "DELETE", path: "/api/agents/\(agentId)/schedules/\(id)", body: nil)
+    }
+
     public func pastSessions(_ agentId: String) async throws -> PastSessions {
         guard let api else { throw APIError.notConfigured }
         return try await api.sessions(agentId: agentId)

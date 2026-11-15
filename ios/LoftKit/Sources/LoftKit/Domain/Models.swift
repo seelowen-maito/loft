@@ -3,6 +3,66 @@ import Foundation
 // Swift mirrors of the Loft backend's JSON (backend/src/db.rs, tasks.rs).
 // The backend sends snake_case keys; `JSONCoding.decoder` converts them.
 
+/// A prompt Loft sends again every interval until it's stopped.
+public struct AgentLoop: Codable, Hashable {
+    public var prompt: String
+    public var intervalMinutes: Int
+    public var nextAt: Date
+}
+
+/// A prompt Loft sends once, or at each due time of a repeat (`every`: "day" or "weekday" at `time`).
+public struct AgentSchedule: Codable, Hashable, Identifiable {
+    public var id: String
+    public var prompt: String
+    public var every: String? = nil
+    public var time: String? = nil
+    public var nextAt: Date
+
+    /// "Every weekday 8:00 AM" or "Once", the time in the user's locale; short enough for one line.
+    public var repeatLabel: String { repeatLabel() }
+
+    func repeatLabel(locale: Locale = .current) -> String {
+        guard let every else { return "Once" }
+        return ["Every", every, Self.clock(time ?? "", locale: locale)].filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// The schedule's row: "Every weekday · next Mon Nov 16 8:00 AM". The repeat's time is left out when it is the
+    /// next run's time, which is the usual case, so the row fits on one line.
+    public func rowLabel(locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        let next = Self.nextLabel(nextAt, locale: locale, timeZone: timeZone)
+        guard let every else { return "Once · next \(next)" }
+        let at = Self.clock(time ?? "", locale: locale)
+        let same = at == Self.format(nextAt, "jmm", locale: locale, timeZone: timeZone)
+        // Only the parts that exist: a schedule without a time gets no extra space.
+        return ["Every", every, same ? "" : at].filter { !$0.isEmpty }.joined(separator: " ") + " · next \(next)"
+    }
+
+    /// "HH:MM" from the server as a time of day in the user's locale ("8:00 AM", "08:00"); as is when unreadable.
+    static func clock(_ t: String, locale: Locale) -> String {
+        let p = t.split(separator: ":")
+        guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]), (0..<24).contains(h), (0..<60).contains(m) else { return t }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        guard let d = cal.date(from: DateComponents(year: 2000, month: 1, day: 1, hour: h, minute: m)) else { return t }
+        return format(d, "jmm", locale: locale, timeZone: cal.timeZone)
+    }
+
+    private static func format(_ d: Date, _ template: String, locale: Locale, timeZone: TimeZone) -> String {
+        let f = DateFormatter()
+        f.locale = locale
+        f.timeZone = timeZone
+        f.setLocalizedDateFormatFromTemplate(template)
+        return f.string(from: d)
+    }
+
+    /// A next-run time as "Mon Nov 16 8:00 AM" (en_US) or "Mon 16 Nov 08:00" (en_GB): the same short shape for a
+    /// loop and a schedule, from the user's locale pieces (day and month order, 12 or 24 hour, language) without
+    /// the commas and "at" a full format adds.
+    public static func nextLabel(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        ["EEE", "MMMd", "jmm"].map { format(date, $0, locale: locale, timeZone: timeZone) }.joined(separator: " ")
+    }
+}
+
 public struct Agent: Codable, Identifiable, Hashable {
     public let id: String
     public var name: String
@@ -45,6 +105,9 @@ public struct Agent: Codable, Identifiable, Hashable {
     public var projects: [String]? = nil
     /// Weekly windows with no autonomous wake-ups (nil from older servers).
     public var quietHours: [QuietWindow]? = nil
+    /// Its running `/loop`, and its `/schedule` entries (older servers send neither).
+    public var loop: AgentLoop? = nil
+    public var schedules: [AgentSchedule]? = nil
 
     /// Leads its team; it wears a captain hat.
     public var isLead: Bool { role == "lead" }

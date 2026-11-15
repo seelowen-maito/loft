@@ -50,7 +50,7 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_w = area.width.saturating_sub(4) as usize;
     let (rows, cursor) = app.composer.layout(inner_w);
     let composer_h = (rows.len().clamp(1, 8) + 2) as u16;
-    let menu = app.menu();
+    let menu: Vec<crate::commands::Command> = app.menu().into_iter().cloned().collect();
     let menu_h = if menu.is_empty() { 0 } else { (menu.len() * 2).min(10) as u16 + 2 };
     let perm_lines = permission_lines(app, w);
     let grill_lines = grill_lines(app, w);
@@ -103,8 +103,9 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         for (i, c) in menu.iter().enumerate() {
             let on = i == sel;
             let style = if on { Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::new() };
-            ml.push(Line::styled(format!("{}{}", if on { "▸ " } else { "  " }, c.name), style));
-            ml.push(Line::styled(format!("    {}", clip(c.description, w.saturating_sub(8))), Style::new().fg(DIM)));
+            let tag = if c.terminal() { "  terminal only" } else { "" };
+            ml.push(Line::styled(format!("{}{}{tag}", if on { "▸ " } else { "  " }, c.name), if c.terminal() && !on { style.fg(DIM) } else { style }));
+            ml.push(Line::styled(format!("    {}", clip(&c.description, w.saturating_sub(8))), Style::new().fg(DIM)));
         }
         f.render_widget(Paragraph::new(ml).block(Block::default().borders(Borders::ALL).border_style(Style::new().fg(DIM)).title(" Commands ")), menu_area);
     }

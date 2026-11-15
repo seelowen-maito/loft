@@ -92,4 +92,12 @@ final class ThemeTests: XCTestCase {
         }
         XCTAssertLessThan(contrastOnWhite(Theme.attention), 4.5, "the bright amber is why")
     }
+
+    func testWidgetRedTextIsReadableOnWhiteAndUnchangedInDark() {
+        for red in [UsageTone.usage(95), UsageTone.level("hot"), UsageTone.level("critical"), WidgetTheme.failure] {
+            XCTAssertGreaterThanOrEqual(contrastOnWhite(red), 4.5)
+            XCTAssertEqual(hex(red, .darkAqua), "FF6B66")
+        }
+        XCTAssertLessThan(contrastOnWhite(Theme.failure), 4.5, "the bright red is why")
+    }
 }

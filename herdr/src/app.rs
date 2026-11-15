@@ -6,7 +6,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Value, json};
 
-use crate::commands::{self, Parsed};
+use crate::commands::{self, Command, Parsed};
 use crate::composer::Composer;
 use crate::herdr::{Presence, Report, presence};
 use crate::inspector::{self, Do, Inspector};
@@ -48,6 +48,8 @@ pub struct App {
     pub scroll: usize,
     pub max_scroll: usize,
     pub composer: Composer,
+    /// This agent's commands, from Loft; read again when a run ends, as every run reports its list afresh.
+    pub commands: Vec<Command>,
     pub menu_sel: usize,
     /// Esc closed the command menu; it opens again when the text changes.
     pub menu_closed: bool,
@@ -93,6 +95,7 @@ impl App {
             scroll: 0,
             max_scroll: 0,
             composer: Composer::default(),
+            commands: vec![],
             menu_sel: 0,
             menu_closed: false,
             note: None,
@@ -142,6 +145,12 @@ impl App {
         self.work("perms", move |l| l.permissions(&id).map(Value::Array));
         let id = self.id.clone();
         self.work("grill", move |l| l.get(&format!("/agents/{id}/grill")));
+        self.load_commands();
+    }
+
+    fn load_commands(&self) {
+        let id = self.id.clone();
+        self.work("commands", move |l| l.get(&format!("/agents/{id}/commands")));
     }
 
     fn say(&mut self, text: impl Into<String>) {
@@ -280,8 +289,14 @@ impl App {
             }
         };
         match what {
+            "commands" => self.commands = commands::from_json(&v),
             "agent" => {
+                let was_running = self.agent.get("running").and_then(|r| r.as_bool()) == Some(true);
+                let running = v.get("running").and_then(|r| r.as_bool()) == Some(true);
                 self.agent = v;
+                if was_running && !running {
+                    self.load_commands();
+                }
                 self.loaded = true;
                 self.mark_read();
             }
@@ -366,8 +381,8 @@ impl App {
 
     // ---- input --------------------------------------------------------------
 
-    pub fn menu(&self) -> Vec<&'static commands::Command> {
-        if self.menu_closed { vec![] } else { commands::matching(&self.composer.text) }
+    pub fn menu(&self) -> Vec<&Command> {
+        if self.menu_closed { vec![] } else { commands::matching(&self.composer.text, &self.commands) }
     }
 
     pub fn key(&mut self, k: KeyEvent) {
@@ -422,7 +437,7 @@ impl App {
     }
 
     fn composer_key(&mut self, k: KeyEvent, ctrl: bool, alt: bool) {
-        let menu = self.menu();
+        let menu: Vec<Command> = self.menu().into_iter().cloned().collect();
         let empty = self.composer.is_empty();
         match k.code {
             KeyCode::Enter if alt || k.modifiers.contains(KeyModifiers::SHIFT) => self.composer.insert('\n'),
@@ -430,7 +445,7 @@ impl App {
             KeyCode::Enter => {
                 if let Some(c) = menu.get(self.menu_sel.min(menu.len().saturating_sub(1))) {
                     if self.composer.text.trim().to_lowercase() != c.name {
-                        return self.pick(c.name);
+                        return self.pick(c.clone());
                     }
                 }
                 self.submit();
@@ -518,10 +533,13 @@ impl App {
         qs.get(self.grill_sel.min(qs.len().saturating_sub(1))).map(|q| str_of(q, "id").to_string())
     }
 
-    /// A command picked from the menu: /compact and /grill wait for their text, the others run.
-    fn pick(&mut self, name: &'static str) {
+    /// A command picked from the menu: the ones that take text wait for it, the others run.
+    fn pick(&mut self, c: Command) {
         self.menu_sel = 0;
-        match name {
+        if c.terminal() {
+            return self.fail(c.terminal_note());
+        }
+        match c.name.as_str() {
             "/grill" => {
                 self.composer.set("/grill ");
                 self.say("Add what to plan, then press Enter.");
@@ -530,11 +548,33 @@ impl App {
                 self.composer.set("/compact ");
                 self.say("Add instructions to steer the summary (optional), then press Enter.");
             }
+            "/loop" => {
+                self.composer.set("/loop ");
+                self.say("Add an interval and a prompt, like 10m check the deploy, then press Enter.");
+            }
+            "/schedule" => {
+                self.composer.set("/schedule ");
+                self.say("Add when and a prompt, like tomorrow 9:00 run the tests, then press Enter.");
+            }
             _ => {
-                self.composer.set(name);
+                self.composer.set(&c.name);
                 self.submit();
             }
         }
+    }
+
+    fn send_message(&mut self, t: String) {
+        let id = self.id.clone();
+        self.composer.take();
+        self.scroll = 0;
+        let cid = client_id();
+        let tx = self.tx.clone();
+        let loft = self.loft.clone();
+        // On failure, the text goes back in the composer.
+        std::thread::spawn(move || {
+            let r = loft.send(&id, &t, &cid).map_err(|e| format!("{e}\u{0}{t}"));
+            let _ = tx.send(Msg::Done("message", r));
+        });
     }
 
     fn submit(&mut self) {
@@ -543,52 +583,67 @@ impl App {
         }
         let text = self.composer.text.clone();
         let id = self.id.clone();
-        match commands::parse(&text) {
+        match commands::parse(&text, &self.commands) {
             Parsed::Empty => {
                 if let Some(q) = self.selected_question() {
                     // An empty Enter on a grill question accepts its recommendation.
                     self.answer(q, "yes".into());
                 }
             }
-            Parsed::Run("/clear", rest) => {
+            Parsed::Run(Command { name, .. }, rest) if name == "/clear" => {
                 self.composer.set(&rest);
                 self.work("reset", move |l| l.action(&id, "reset-session"));
             }
-            Parsed::Run("/compact", instructions) => {
+            Parsed::Run(Command { name, .. }, instructions) if name == "/compact" => {
                 self.composer.take();
                 self.work("compact", move |l| l.compact(&id, &instructions));
             }
-            Parsed::Run("/resume", rest) => {
+            Parsed::Run(Command { name, .. }, rest) if name == "/resume" => {
                 self.composer.set(&rest);
                 self.work("sessions", move |l| l.get(&format!("/agents/{id}/sessions")));
             }
-            Parsed::Run("/code", rest) => {
+            Parsed::Run(Command { name, .. }, rest) if name == "/code" => {
                 self.composer.set(&rest);
                 self.work("editor", move |l| l.action(&id, "open-editor"));
             }
-            Parsed::Run("/grill", topic) => {
+            Parsed::Run(Command { name, .. }, topic) if name == "/grill" => {
                 self.composer.take();
                 let text = if topic.is_empty() { "Grill me".to_string() } else { format!("Grill me on {topic}") };
                 let cid = client_id();
                 self.work("send", move |l| l.grill_start(&id, &text, &cid));
             }
-            Parsed::Run(other, _) => self.fail(format!("{other} isn't available here.")),
-            Parsed::Unknown(name) => self.fail(format!("Unknown command {name}. Available: {}", commands::names())),
+            Parsed::Run(Command { name, .. }, rest) if name == "/loop" => {
+                if rest.eq_ignore_ascii_case("stop") {
+                    self.composer.take();
+                    return self.work("loop", move |l| l.call("DELETE", &format!("/agents/{id}/loop"), None));
+                }
+                match parse_loop(&rest) {
+                    Some((interval, prompt)) => {
+                        self.composer.take();
+                        self.work("loop", move |l| l.post(&format!("/agents/{id}/loop"), json!({ "interval": interval, "prompt": prompt })));
+                    }
+                    None => self.fail("Use /loop 10m <prompt> to repeat a prompt (m, h or d), or /loop stop."),
+                }
+            }
+            Parsed::Run(Command { name, .. }, rest) if name == "/schedule" => {
+                self.composer.take();
+                self.work("schedule", move |l| l.post(&format!("/agents/{id}/schedules"), json!({ "text": rest })));
+            }
+            Parsed::Run(Command { name, .. }, arg) if ["/model", "/effort", "/cost", "/status", "/login"].contains(&name.as_str()) => {
+                self.composer.take();
+                let name = name[1..].to_string();
+                self.work("info", move |l| l.post(&format!("/agents/{id}/command"), json!({ "name": name, "arg": arg })));
+            }
+            Parsed::Run(c, _) if c.terminal() => self.fail(c.terminal_note()),
+            // The CLI's own: the agent gets it as the message ("/review 12").
+            Parsed::Run(c, rest) => self.send_message(if rest.is_empty() { c.name } else { format!("{} {rest}", c.name) }),
+            Parsed::Unknown(name) => self.fail(format!("Unknown command {name}.")),
             Parsed::Message(t) => {
                 if let Some(q) = self.selected_question() {
                     self.composer.take();
                     return self.answer(q, t);
                 }
-                self.composer.take();
-                self.scroll = 0;
-                let cid = client_id();
-                let tx = self.tx.clone();
-                let loft = self.loft.clone();
-                // On failure, the text goes back in the composer.
-                std::thread::spawn(move || {
-                    let r = loft.send(&id, &t, &cid).map_err(|e| format!("{e}\u{0}{t}"));
-                    let _ = tx.send(Msg::Done("message", r));
-                });
+                self.send_message(t);
             }
         }
     }
@@ -703,4 +758,26 @@ impl App {
 fn open_url(url: &str) {
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let _ = std::process::Command::new(opener).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+}
+
+/// What follows `/loop`: an interval (10m, 2h, 1d) and the prompt to repeat; none when it's neither.
+fn parse_loop(rest: &str) -> Option<(String, String)> {
+    let (interval, prompt) = rest.trim().split_once(char::is_whitespace)?;
+    let (digits, unit) = interval.split_at(interval.len().checked_sub(1)?);
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) && "mhdMHD".contains(unit) && !prompt.trim().is_empty())
+        .then(|| (interval.to_lowercase(), prompt.trim().to_string()))
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use super::parse_loop;
+
+    #[test]
+    fn loop_takes_an_interval_and_a_prompt() {
+        assert_eq!(parse_loop("10m check the deploy"), Some(("10m".into(), "check the deploy".into())));
+        assert_eq!(parse_loop("2H go"), Some(("2h".into(), "go".into())));
+        assert_eq!(parse_loop("10m"), None);
+        assert_eq!(parse_loop("soon go"), None);
+        assert_eq!(parse_loop("m go"), None);
+    }
 }
