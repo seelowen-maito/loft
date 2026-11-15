@@ -51,12 +51,12 @@ final class LoftMacUITests: XCTestCase {
         field.click()
         field.typeKey("a", modifierFlags: .command)
         field.typeText("demo-loft-dev.get-loft.com\r")
-        XCTAssertTrue(app.otherElements["demoBanner"].waitForExistence(timeout: 10))
+        XCTAssertTrue(card("demoBanner").waitForExistence(timeout: 10))
         XCTAssertTrue(app.descendants(matching: .any)["section-Agents"].exists, "the main window, on sample data")
         shot("Demo")
         app.buttons["exitDemo"].click()
         XCTAssertTrue(field.waitForExistence(timeout: 10), "back on the address screen")
-        XCTAssertFalse(app.otherElements["demoBanner"].exists)
+        XCTAssertFalse(card("demoBanner").exists)
     }
 
     /// Leads first, then groups; an agent's settings save.
@@ -64,7 +64,8 @@ final class LoftMacUITests: XCTestCase {
         launch(["-ui-testing", "-fixture-lead"])
         let list = app.scrollViews["agentsList"]
         XCTAssertTrue(list.waitForExistence(timeout: 10))
-        let leads = list.staticTexts["Leads"], loft = list.staticTexts["Loft"]
+        // The headers read in capitals, as the web's eyebrows: found by name, not by their text.
+        let leads = list.staticTexts["agentSection-Leads"], loft = list.staticTexts["agentSection-Loft"]
         XCTAssertTrue(leads.waitForExistence(timeout: 10))
         XCTAssertTrue(loft.exists)
         XCTAssertLessThan(leads.frame.minY, loft.frame.minY, "Leads come before the groups")
@@ -418,7 +419,9 @@ final class LoftMacUITests: XCTestCase {
         for t in ["Backend endpoints", "iOS screen", "Docs", "QA"] { XCTAssertTrue(card("ticketRow-\(t)").exists, t) }
         XCTAssertFalse(card("delivery-start").exists, "it started")
         shot("Spec page")
-        app.typeKey("[", modifierFlags: .command)
+        // Go › Back (⌘[), from the menu: typing "[" depends on the keyboard layout.
+        app.menuBars.menuBarItems["Go"].click()
+        app.menuBars.menuItems["Back"].click()
 
         // A spec that waits: Start delivery starts it.
         XCTAssertTrue(card("specCard-Offline mode").waitForExistence(timeout: 5))
