@@ -29,7 +29,8 @@ export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPic
   const name = (id: string | null) => agents.find((a) => a.id === id)?.name;
 
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="dialog" aria-label={ATTACH}>
+    // A popover inside the composer, not a dialog: Needs you and the shortcuts look for open dialogs by role.
+    <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="group" aria-label={ATTACH}>
       <label className="flex items-center gap-2 border-b border-line px-3 py-2">
         <Search className="size-3.5 text-fg-3" />
         <input
