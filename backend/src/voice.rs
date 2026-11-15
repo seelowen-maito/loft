@@ -279,7 +279,12 @@ fn only_removes(input: &str, output: &str) -> bool {
 
 /// A voice session's audio: 16 kHz mono 16-bit PCM, so about 19 MB for ten minutes.
 const MAX_AUDIO_BYTES: u64 = 10 * 60 * 16_000 * 2;
-const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long transcribing a session of `bytes` may take: each chunk transcribes all the audio so far, so the limit
+/// grows with it, 30 s plus the audio's own length.
+fn transcribe_timeout(bytes: u64) -> Duration {
+    Duration::from_secs(30 + bytes / (16_000 * 2))
+}
 /// A session nobody finished (the page closed mid-talk) is deleted after this long.
 const ABANDONED: Duration = Duration::from_secs(3600);
 
@@ -330,7 +335,7 @@ pub async fn transcribe(State(state): State<AppState>, Query(q): Query<Transcrib
         return Ok(Json(json!({ "text": "", "final": q.last })));
     }
     let out = Command::new(&helper).arg(&file.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).output();
-    let out = tokio::time::timeout(TRANSCRIBE_TIMEOUT, out).await.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Transcribing timed out.".into()))?;
+    let out = tokio::time::timeout(transcribe_timeout(size), out).await.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Transcribing timed out.".into()))?;
     let out = out.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("Couldn't start the transcriber: {e}")))?;
     let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
     match out.status.code() {
@@ -472,6 +477,13 @@ esac
         for f in files {
             assert!(f.contains("loft-voice/") && !std::path::Path::new(&f).exists(), "{f} is left behind");
         }
+    }
+
+    #[test]
+    fn a_longer_session_may_take_longer_to_transcribe() {
+        assert_eq!(transcribe_timeout(0), Duration::from_secs(30));
+        assert_eq!(transcribe_timeout(60 * 32_000), Duration::from_secs(90), "a minute of audio");
+        assert_eq!(transcribe_timeout(MAX_AUDIO_BYTES), Duration::from_secs(630), "ten minutes");
     }
 
     #[test]
