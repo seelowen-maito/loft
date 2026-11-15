@@ -225,7 +225,7 @@ if [ "$MACOS" = 1 ]; then
   section "Background service"
   # The service is per user, not per copy: another checkout of loft may own it.
   other=""
-  [ -f "$PLIST" ] && ! grep -qE "<string>$BIN(-signed)?</string>" "$PLIST" && other=$(sed -n 's/.*<key>ProgramArguments<\/key><array><string>\(.*\)<\/string>.*/\1/p' "$PLIST")
+  [ -f "$PLIST" ] && ! grep -qF -e "<string>$BIN</string>" -e "<string>$BIN-signed</string>" "$PLIST" && other=$(sed -n 's/.*<key>ProgramArguments<\/key><array><string>\(.*\)<\/string>.*/\1/p' "$PLIST")
   if [ -n "$other" ]; then
     other=${other%-signed}
     warn "the background service runs another copy of loft ${D}(${other%/backend/target/release/loft})${N}"

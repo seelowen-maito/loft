@@ -1222,7 +1222,7 @@ mod tests {
         });
         until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
         let req = pending(&st, &a.id).remove(0);
-        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
         assert!(daemon.alive());
 
@@ -1419,7 +1419,7 @@ mod tests {
             assert!(req.reason.contains(&format!("A command outside {}'s runs (PID {caller})", a.name)), "{}", req.reason);
             assert!(req.reason.contains(&format!("{pid} ({}'s:", a.name)), "{}", req.reason);
             assert!(server.alive(), "it was stopped before the user answered");
-            crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+            crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
             let v = asking.await.unwrap();
             assert_eq!(v["code"], 1, "{v}");
             assert!(v["stderr"].as_str().unwrap().contains("doesn't run in one of your runs"), "{v}");
@@ -1448,7 +1448,7 @@ mod tests {
         assert!(other.alive(), "it was stopped before the user answered");
         // "Always allow" saves the program, not these processes.
         assert_eq!(req.rule, "Kill(/bin/sleep)");
-        crate::agents::decide(&st, &req.id, "allow_always", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "allow_always", None, None, None).unwrap();
         let v = asking.await.unwrap();
         assert_eq!(v["code"], 0, "{v}");
         until("the process to stop", 5, || !other.alive()).await;
@@ -1476,7 +1476,7 @@ mod tests {
         });
         until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
         assert!(other.alive());
-        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
         // A process another agent runs right now asks even when the rule matches it.
         st.db.update_agent(&a.id, |a| a.allowed_tools = vec!["Kill(/bin/sleep)".into()]).unwrap();
@@ -1491,11 +1491,11 @@ mod tests {
         assert!(theirs.alive());
         // It offers no Always: saving the rule wouldn't stop the question.
         assert_eq!(req.rule, "");
-        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(*)".into()), None).is_err());
+        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(*)".into()), None, None).is_err());
         // A rule posted with the answer doesn't give it one.
-        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(/bin/sleep)".into()), None).is_err());
+        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(/bin/sleep)".into()), None, None).is_err());
         assert!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools == vec!["Kill(/bin/sleep)".to_string()], "nothing was added");
-        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
     }
 
@@ -1579,7 +1579,7 @@ mod tests {
         // The Bash call timed out: the connection, and the handler with it, goes away.
         asking.abort();
         until("the request to expire", 5, || st.db.get_permission(&id).unwrap().unwrap().status == "expired").await;
-        assert!(crate::agents::decide(&st, &id, "allow_once", None, None).is_err());
+        assert!(crate::agents::decide(&st, &id, "allow_once", None, None, None).is_err());
         assert!(other.alive());
     }
 
@@ -1597,7 +1597,7 @@ mod tests {
         });
         until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
         assert!(pending(&st, &a.id)[0].reason.contains(&format!("{me} (Loft:")));
-        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None, None).unwrap();
         let v = asking.await.unwrap();
         assert_eq!(v["code"], 1);
         assert!(v["stderr"].as_str().unwrap().contains("The user denied it."), "{v}");
