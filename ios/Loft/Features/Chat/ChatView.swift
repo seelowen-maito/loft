@@ -1045,7 +1045,7 @@ private struct LoopScheduleBar: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(l.prompt).font(.footnote).lineLimit(1)
                         Text("Looping every \(every(l.intervalMinutes)) · next \(AgentSchedule.nextLabel(l.nextAt))")
-                            .font(.caption2).foregroundStyle(.secondary)
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     Button("Stop", action: stop).buttonStyle(.bordered).frame(minHeight: 44).fixedSize().accessibilityIdentifier("loopStop")
@@ -1055,8 +1055,8 @@ private struct LoopScheduleBar: View {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(s.prompt).font(.footnote).lineLimit(1)
-                        Text("\(s.repeatLabel) · next \(AgentSchedule.nextLabel(s.nextAt))")
-                            .font(.caption2).foregroundStyle(.secondary)
+                        Text(s.rowLabel())
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     Button("Cancel") { cancel(s.id) }.buttonStyle(.bordered).frame(minHeight: 44).fixedSize().accessibilityIdentifier("scheduleCancel")

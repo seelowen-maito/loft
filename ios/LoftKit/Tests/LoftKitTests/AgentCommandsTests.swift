@@ -75,10 +75,40 @@ final class AgentCommandsTests: XCTestCase {
         XCTAssertEqual(s.repeatLabel(locale: us), "Every weekday 8:00 AM".replacingOccurrences(of: " AM", with: "\u{202F}AM"))
         XCTAssertEqual(s.repeatLabel(locale: de), "Every weekday 08:00")
         XCTAssertEqual(AgentSchedule(id: "o", prompt: "p", nextAt: s.nextAt).repeatLabel, "Once")
-        XCTAssertEqual(AgentSchedule.nextLabel(s.nextAt, locale: us, timeZone: utc), "Mon 16 Nov 8:00\u{202F}AM", "no comma, no \"at\"")
+        XCTAssertEqual(AgentSchedule.nextLabel(s.nextAt, locale: us, timeZone: utc), "Mon Nov 16 8:00\u{202F}AM", "month first in en_US, no comma, no \"at\"")
         let germanNext = AgentSchedule.nextLabel(s.nextAt, locale: de, timeZone: utc)
-        XCTAssertTrue(germanNext.hasPrefix("Mo") && germanNext.hasSuffix("16 Nov 08:00"), germanNext)
+        XCTAssertTrue(germanNext.hasPrefix("Mo") && germanNext.contains("16") && germanNext.hasSuffix("08:00"), germanNext)
         XCTAssertEqual(AgentSchedule.clock("8:00", locale: us), "8:00\u{202F}AM", "8:00 and 08:00 read the same")
         XCTAssertEqual(AgentSchedule.clock("bad", locale: us), "bad")
+    }
+
+    func testNextRunKeepsEachLocalesDayAndMonthOrder() {
+        let d = Date(timeIntervalSince1970: 1794816000) // Mon 16 Nov 2026 08:00 UTC
+        let utc = TimeZone(identifier: "UTC")!
+        let label = { (id: String) in AgentSchedule.nextLabel(d, locale: Locale(identifier: id), timeZone: utc) }
+        XCTAssertEqual(label("en_US"), "Mon Nov 16 8:00\u{202F}AM")
+        XCTAssertEqual(label("en_GB"), "Mon 16 Nov 08:00")
+        let de = label("de_DE")
+        XCTAssertTrue(de.hasPrefix("Mo") && de.contains("16. Nov") && de.hasSuffix("08:00"), de)
+    }
+
+    func testTheRowDropsTheRepeatTimeWhenItIsTheNextRunsTime() throws {
+        let json = #"{"id":"s1","prompt":"p","every":"weekday","time":"08:00","next_at":"2026-11-16T08:00:00Z"}"#
+        let s = try JSONCoding.decoder.decode(AgentSchedule.self, from: Data(json.utf8))
+        let us = Locale(identifier: "en_US"), utc = TimeZone(identifier: "UTC")!
+        XCTAssertEqual(s.rowLabel(locale: us, timeZone: utc), "Every weekday · next Mon Nov 16 8:00\u{202F}AM")
+        // The phone in another zone: the times differ, so the repeat time stays.
+        let row = s.rowLabel(locale: us, timeZone: TimeZone(identifier: "America/New_York")!)
+        XCTAssertTrue(row.hasPrefix("Every weekday 8:00\u{202F}AM · next "), row)
+        var once = s; once.every = nil
+        XCTAssertTrue(once.rowLabel(locale: us, timeZone: utc).hasPrefix("Once · next "))
+    }
+
+    func testARepeatWithoutATimeHasNoDoubleSpace() throws {
+        let json = #"{"id":"s1","prompt":"p","every":"day","next_at":"2026-11-16T08:00:00Z"}"#
+        let s = try JSONCoding.decoder.decode(AgentSchedule.self, from: Data(json.utf8))
+        let us = Locale(identifier: "en_US"), utc = TimeZone(identifier: "UTC")!
+        XCTAssertEqual(s.repeatLabel(locale: us), "Every day")
+        XCTAssertEqual(s.rowLabel(locale: us, timeZone: utc), "Every day · next Mon Nov 16 8:00\u{202F}AM")
     }
 }
