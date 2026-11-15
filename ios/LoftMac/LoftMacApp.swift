@@ -314,7 +314,7 @@ struct MainWindow: View {
                 }
             }
             // A click on a row leaves a text field the keyboard, so ↑/↓ wouldn't move: the sidebar takes it.
-            .simultaneousGesture(TapGesture().onEnded { SidebarKeyboard.take() })
+            .simultaneousGesture(TapGesture().onEnded { SidebarKeyboard.take(in: NSApp.keyWindow) })
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
             .scrollContentBackground(.hidden)
             .background(WebTheme.canvas)
@@ -355,7 +355,7 @@ struct MainWindow: View {
         guard nav.selection.sidebarKeepsKeyboard, let window = NSApp.keyWindow, !(window.firstResponder is NSText) else { return }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(200))
-            if nav.selection.sidebarKeepsKeyboard, window.firstResponder is NSText { SidebarKeyboard.take() }
+            if nav.selection.sidebarKeepsKeyboard, window.firstResponder is NSText { SidebarKeyboard.take(in: window) }
         }
     }
 }
@@ -363,8 +363,10 @@ struct MainWindow: View {
 /// The sidebar's table: SwiftUI's List leaves the window itself as first responder after a click, and ↑/↓ only move the
 /// selection while the table is.
 enum SidebarKeyboard {
-    @MainActor static func take() {
-        guard let window = NSApp.keyWindow, let root = window.contentView?.superview ?? window.contentView else { return }
+    /// - window: the window the click or section change was in; nothing happens if another one (a sheet, the quick
+    ///   search panel) is key by now.
+    @MainActor static func take(in window: NSWindow?) {
+        guard let window, NSApp.keyWindow === window, let root = window.contentView?.superview ?? window.contentView else { return }
         func sidebar(in view: NSView) -> NSTableView? {
             if let t = view as? NSTableView, t.accessibilityLabel() == "Sidebar" { return t }
             for v in view.subviews { if let t = sidebar(in: v) { return t } }
@@ -372,8 +374,7 @@ enum SidebarKeyboard {
         }
         guard let table = sidebar(in: root) else {
             #if DEBUG
-            NSLog("SidebarKeyboard: no NSTableView labelled \"Sidebar\" in the window; ↑/↓ will not move between sections")
-            assertionFailure("sidebar table not found")
+            NSLog("SidebarKeyboard: no NSTableView labelled \"Sidebar\" in the window (collapsed, or renamed); ↑/↓ will not move between sections")
             #endif
             return
         }
