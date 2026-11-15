@@ -7,7 +7,7 @@ import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
+import { cx, fmtInterval, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
@@ -30,6 +30,8 @@ import { formatCombo, loadCombo, openShortcut } from "../../lib/shortcuts";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
 import { openTalk } from "../../lib/talk";
 import { useDraft } from "../../lib/useDraft";
+import { filterCommands, parseLoop, terminalNote } from "../../lib/commands";
+import { useCommands } from "../../lib/useCommands";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { isVideo } from "../../lib/video";
 import { VideoMessage } from "../../components/VideoMessage";
@@ -96,15 +98,6 @@ const MD_COMPONENTS: Components = {
   },
 };
 
-type Command = { name: string; description: string };
-const COMMANDS: Command[] = [
-  { name: "/clear", description: "Clear the conversation context and start fresh. Memory is kept." },
-  { name: "/compact", description: "Summarize the conversation so later runs carry less context. Add instructions after it to steer the summary." },
-  { name: "/resume", description: "Go back to one of this agent's past sessions." },
-  { name: "/code", description: "Open this agent's workspace folder in VS Code." },
-  { name: "/grill", description: "Plan an idea: the agent grills you on it in rounds of questions, each with a recommendation. Add the topic after it." },
-];
-
 const SUGGESTIONS = [
   "Introduce yourself and tell me what you can do.",
   "Redraw your avatar as a tiny astronaut with a green visor.",
@@ -128,6 +121,8 @@ export function Chat({
   headerActions?: React.ReactNode;
 }) {
   const { text, setText, attachments, setAttachments, images, taskId, setTaskId, putDraft, removeImage } = useDraft(agent.id);
+  const commands = useCommands(agent.id, !!agent.running);
+  const commandNames = useMemo(() => commands.map((c) => c.name), [commands]);
   const [sending, setSending] = useState(false);
   const [cmdError, setCmdError] = useState<string | null>(null);
   const [cmdNote, setCmdNote] = useState<string | null>(null);
@@ -162,7 +157,7 @@ export function Chat({
     if (picked && !stillPicked(text, picked)) setPicked(null);
   }, [text, picked]);
   useEffect(() => setPicked(null), [agent.id]);
-  const typing = commandAt(text, caret, COMMANDS.map((c) => c.name), picked);
+  const typing = commandAt(text, caret, commandNames, picked);
   // The /word is the whole message: picking runs it, as when / commands could only be typed alone.
   const alone = !!typing && text.trim() === typing.word;
   const overlay = useRef<HTMLDivElement>(null);
@@ -170,7 +165,7 @@ export function Chat({
   useLayoutEffect(() => {
     if (overlay.current && composer.current) overlay.current.scrollTop = composer.current.scrollTop;
   });
-  const matches = typing ? COMMANDS.filter((c) => c.name.startsWith(typing.word.toLowerCase())) : [];
+  const matches = typing ? filterCommands(commands, typing.word) : [];
   // Puts `next` in the composer with the caret at `at`, once React has rendered it.
   const pendingCaret = useRef<number | null>(null);
   // Text set from code (a draft, a picked @mention) moves the caret without a select event: follow it too.
@@ -199,7 +194,7 @@ export function Chat({
   const mention = useMention(agent.id, text, setText, mentionable);
   // "#18": specs, issues and pull requests to tag; the backend adds what each is to the agent's prompt.
   const tagMenu = useTagMenu(agent.project, text, setText);
-  const highlight = highlightParts(text, COMMANDS.map((c) => c.name), mentionable.map((a) => a.name), picked);
+  const highlight = highlightParts(text, commandNames, mentionable.map((a) => a.name), picked);
   const highlighted = highlight.some((p) => p.accent);
   // PR cards render right below the tool call that opened them.
   const prsByTool = useMemo(() => {
@@ -286,6 +281,43 @@ export function Chat({
     }
   };
 
+  const loopCommand = async (rest: string) => {
+    const l = parseLoop(rest);
+    if (!l) return setCmdError("Use /loop 10m <prompt> to repeat a prompt (m, h or d), or /loop stop.");
+    setCmdError(null);
+    stick.current = true;
+    try {
+      if ("stop" in l) await api.loopStop(agent.id);
+      else await api.loopStart(agent.id, l.interval, l.prompt);
+      putDraft(agent.id, EMPTY_DRAFT);
+    } catch (e) {
+      setCmdError((e as Error).message);
+    }
+  };
+
+  const scheduleCommand = async (rest: string) => {
+    setCmdError(null);
+    stick.current = true;
+    try {
+      await api.scheduleAdd(agent.id, rest);
+      putDraft(agent.id, EMPTY_DRAFT);
+    } catch (e) {
+      setCmdError((e as Error).message);
+    }
+  };
+
+  /** /model, /effort, /cost and /status: Loft answers with a notice in the chat. */
+  const infoCommand = async (name: string, arg: string) => {
+    setCmdError(null);
+    stick.current = true;
+    try {
+      await api.agentCommand(agent.id, name, arg);
+      putDraft(agent.id, EMPTY_DRAFT);
+    } catch (e) {
+      setCmdError((e as Error).message);
+    }
+  };
+
   const openEditor = async (keep = "") => {
     setCmdError(null);
     try {
@@ -312,11 +344,23 @@ export function Chat({
   };
 
   // `keep`: the rest of the message the command was sent in, put back in the composer once it has run.
-  const runCommand = async (name: string, keep = "") => {
+  const runCommand = async (name: string, keep = ""): Promise<void> => {
     setCmdNote(null);
     if (name === "/clear") return clearContext(keep);
     if (name === "/compact") return compactContext("");
     if (name === "/code") return openEditor(keep);
+    if (name === "/loop") {
+      // Picked from the menu: leave room for the interval and prompt; Enter again starts it.
+      setText("/loop ");
+      setCmdNote("Add an interval and a prompt, like 10m check the deploy, then press Enter.");
+      return;
+    }
+    if (INFO_COMMANDS.includes(name)) return infoCommand(name.slice(1), "");
+    if (name === "/schedule") {
+      setText("/schedule ");
+      setCmdNote("Add when and a prompt, like tomorrow 9:00 run the tests, then press Enter.");
+      return;
+    }
     if (name === "/resume") {
       setText(keep);
       return setResuming(true);
@@ -327,7 +371,10 @@ export function Chat({
       setCmdNote("Add what to plan, then press Enter.");
       return;
     }
-    setCmdError(`Unknown command ${name}. Available: ${COMMANDS.map((c) => c.name).join(", ")}`);
+    // The CLI's own: a terminal-only one says why it can't run; any other goes to the agent as the message.
+    const c = commands.find((x) => x.name === name);
+    if (c?.tag === "terminal") return setCmdError(terminalNote(c));
+    return send(keep ? `${name} ${keep}` : name, null);
   };
 
   const addImages = (all: File[]) => setCmdError(attachImages(agent.id, all, attachments.length, setAttachments, "message", true));
@@ -342,7 +389,7 @@ export function Chat({
   }, [agent.id]);
 
   // `pick`: the command picked from the menu, which runs mid-message (see `picked`).
-  const send = async (t = text, pick = picked) => {
+  const send = async (t = text, pick: CommandWord | null = picked): Promise<void> => {
     const v = t.trim();
     if (!v && images.length === 0) return;
     if (uploading || failed) return;
@@ -363,11 +410,15 @@ export function Chat({
     // The message's one command, leading or picked wherever it sits: /compact and /grill take the rest as their
     // instructions or topic, the others run and leave the rest in the composer. Cut from the untrimmed text, so
     // the picked word's place still holds.
-    const cmd = splitCommand(t, COMMANDS.map((c) => c.name), pick);
+    const cmd = splitCommand(t, commandNames, pick);
     if (cmd?.command === "/compact") return compactContext(cmd.rest);
     if (cmd?.command === "/grill") return startGrill(cmd.rest);
-    if (cmd) return runCommand(cmd.command, cmd.rest);
-    if (v.startsWith("/") && !/\s/.test(v)) return runCommand(v.toLowerCase());
+    if (cmd?.command === "/loop") return loopCommand(cmd.rest);
+    if (cmd?.command === "/schedule") return scheduleCommand(cmd.rest);
+    if (cmd && INFO_COMMANDS.includes(cmd.command)) return infoCommand(cmd.command.slice(1), cmd.rest);
+    // A command the CLI knows, typed first, goes to it as the message ("/review 12"); a terminal-only one doesn't.
+    const known = cmd && commands.find((c) => c.name === cmd.command);
+    if (cmd && known?.tag !== "passthrough") return runCommand(cmd.command, cmd.rest);
     setSending(true);
     setCmdError(null);
     stick.current = true;
@@ -555,6 +606,8 @@ export function Chat({
               </button>
             </div>
           )}
+          {agent.loop && <LoopBar agent={agent} onError={setCmdError} />}
+          {!!agent.schedules?.length && <ScheduleList agentId={agent.id} list={agent.schedules} onError={setCmdError} />}
           <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
           {pickingTask && (
@@ -570,21 +623,25 @@ export function Chat({
           {mention.menu && <div className="mb-2">{mention.menu}</div>}
           {tagMenu.menu && <div className="mb-2">{tagMenu.menu}</div>}
           {matches.length > 0 && (
-            <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Commands">
+            <div className="mb-2 max-h-72 overflow-y-auto rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Commands">
               {matches.map((c, i) => (
                 <button
                   key={c.name}
                   role="option"
                   aria-selected={i === menuIndex}
+                  title={c.tag === "terminal" ? terminalNote(c) : undefined}
+                  ref={(el) => { if (i === menuIndex) el?.scrollIntoView?.({ block: "nearest" }); }}
                   onMouseEnter={() => setMenuIndex(i)}
                   onMouseDown={(e) => {
                     e.preventDefault();
                     pickCommand(c.name);
                   }}
-                  className={cx("flex w-full items-baseline gap-3 px-3 py-2 text-left", i === menuIndex && "bg-white/[0.06]")}
+                  className={cx("flex w-full flex-wrap items-baseline gap-x-3 px-3 py-2 text-left", i === menuIndex && "bg-white/[0.06]", c.tag === "terminal" && "opacity-50")}
                 >
                   <span className="font-mono text-[12.5px] text-accent">{c.name}</span>
-                  <span className="truncate text-[12px] text-fg-3">{c.description}</span>
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-fg-3">{c.description}</span>
+                  {c.tag === "terminal" && <span className="shrink-0 text-[11px] text-fg-3">terminal only</span>}
+                  {c.tag === "terminal" && <span className="basis-full text-[11px] text-fg-3">{terminalNote(c)}</span>}
                 </button>
               ))}
             </div>
@@ -838,7 +895,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     );
   }
   if (m.kind === "run_start") {
-    const label = m.meta?.trigger === "compact" ? "compacting context" : m.meta?.trigger === "schedule" ? "autonomous wake-up" : m.meta?.trigger === "manual" ? "manual wake-up" : m.meta?.trigger === "agent" ? "message from an agent" : "run";
+    const label = m.meta?.trigger === "compact" ? "compacting context" : m.meta?.trigger === "schedule" ? "autonomous wake-up" : m.meta?.trigger === "manual" ? "manual wake-up" : m.meta?.trigger === "loop" ? "loop" : m.meta?.trigger === "scheduled" ? "scheduled message" : m.meta?.trigger === "agent" ? "message from an agent" : "run";
     return (
       <div className="flex items-center gap-3 pt-3">
         <span className="h-px flex-1 bg-line" />
@@ -871,8 +928,8 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   if (m.kind === "notice" && m.meta?.plan_task_id) return <PlanCard taskId={m.meta.plan_task_id} agents={agents} />;
   if (m.kind === "notice") {
     return (
-      <div className="flex items-center justify-center gap-1.5 font-mono text-[11px] text-fg-3">
-        <Info className="size-3" /> {m.content}
+      <div className="flex items-center justify-center gap-1.5 whitespace-pre-wrap [overflow-wrap:anywhere] text-center font-mono text-[11px] text-fg-3">
+        <Info className="size-3 shrink-0" /> {m.content}
       </div>
     );
   }
@@ -1030,3 +1087,87 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
     </div>
   );
 }
+
+/** The agent's running /loop, with its Stop. */
+function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => void }) {
+  const l = agent.loop!;
+  const [busy, setBusy] = useState(false);
+  const stop = async () => {
+    setBusy(true);
+    try {
+      await api.loopStop(agent.id);
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mb-3 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2" role="status">
+      <RefreshCw className="size-4 shrink-0 text-accent" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] text-fg">{l.prompt}</div>
+        <div className="truncate font-mono text-[11px] text-fg-3">
+          Looping {fmtInterval(l.interval_minutes)} · {new Date(l.next_at).getTime() > Date.now() ? `next ${timeAgo(l.next_at)}` : agent.running ? "next: when this run ends" : "next: any moment"}
+        </div>
+      </div>
+      <button className="btn shrink-0" onClick={stop} disabled={busy}>
+        <Square className="size-3.5" /> Stop
+      </button>
+    </div>
+  );
+}
+
+/** The agent's /schedule entries: one summary row that opens to the list, each with its next run and a Cancel. */
+function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNullable<Agent["schedules"]>; onError: (e: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const cancel = async (sid: string) => {
+    setBusy(sid);
+    try {
+      await api.scheduleCancel(agentId, sid);
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const next = [...list].sort((a, b) => a.next_at.localeCompare(b.next_at))[0];
+  return (
+    <div className="mb-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2">
+      <button className="flex w-full items-center gap-3 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <Clock className="size-4 shrink-0 text-accent" />
+        <span className="min-w-0 flex-1 truncate text-[13px] text-fg">
+          {list.length} schedule{list.length === 1 ? "" : "s"} · next {fmtNext(next.next_at)}
+        </span>
+        <ChevronRight className={cx("size-4 shrink-0 text-fg-3 transition-transform", open && "rotate-90")} />
+      </button>
+      {open && (
+        <div className="mt-2 max-h-48 space-y-2 overflow-y-auto">
+          {list.map((s) => (
+            <div key={s.id} className="flex items-center gap-3 border-t border-line pt-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] text-fg">{s.prompt}</div>
+                <div className="font-mono text-[11px] text-fg-3">{s.every ? `Every ${s.every} at ${s.time}` : "Once"}</div>
+                <div className="font-mono text-[11px] text-fg-3">next {fmtNext(s.next_at)}</div>
+              </div>
+              <button className="btn shrink-0" onClick={() => cancel(s.id)} disabled={busy === s.id}>
+                Cancel
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** "Mon 09:30", with the date when it's more than 6 days away. */
+function fmtNext(iso: string): string {
+  const d = new Date(iso);
+  const far = d.getTime() - Date.now() > 6 * 86400_000;
+  return d.toLocaleString([], { weekday: "short", ...(far ? { month: "short", day: "numeric" } : {}), hour: "numeric", minute: "2-digit" });
+}
+
+/** Loft commands that answer with a notice: they show or change a setting, or show usage. */
+const INFO_COMMANDS = ["/model", "/effort", "/cost", "/status", "/login"];

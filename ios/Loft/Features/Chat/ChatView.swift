@@ -48,6 +48,8 @@ struct ChatView: View {
     @State private var pickingTask = false
     /// "Resume a session" in the context menu: the agent's past Sessions.
     @State private var resuming = false
+    /// The agent's "/" menu, read again each time a run ends (every run reports its list afresh).
+    @State private var commands: [AgentCommand] = []
     /// The on-device model's replies to the agent's latest message, when it ends on a question.
     @State private var suggested: (messageId: Int64, replies: [String])?
     private let dictate: Bool
@@ -200,6 +202,16 @@ struct ChatView: View {
                     .background(.bar)
                     .accessibilityIdentifier("chatSuggestions")
                 }
+                if agent.loop != nil || !(agent.schedules ?? []).isEmpty {
+                    LoopScheduleBar(agent: agent,
+                                    stop: { runCommand(.loop("stop"), text: "") },
+                                    cancel: { id in
+                                        Task { do { try await store.cancelSchedule(agentId, id: id) } catch { actionError = APIError.from(error) } }
+                                    })
+                    .padding(.horizontal, Theme.gutter)
+                    .padding(.top, 6)
+                    .background(.bar)
+                }
                 if let r = routeSuggestion, let target = store.agent(r.agentId) {
                     RouteSuggestionBar(agentName: target.name, send: { sendRouted(r) }, dismiss: {
                         VoiceLog.shared.add("ai: “Send to \(target.name)?” dismissed")
@@ -238,6 +250,7 @@ struct ChatView: View {
                     .id(t)
                 }
                 ComposerView(text: $draft, recipient: agent.name, agentId: agentId, isOrchestrator: store.orchestratorId == agent.id,
+                             commands: currentQuestion == nil ? commands : [],
                              control: $composerControl,
                              onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
                              holdAutoSend: { grillSuggestion != nil },
@@ -249,7 +262,9 @@ struct ChatView: View {
                              onVoiceStop: stopByVoice,
                              attachTask: currentQuestion == nil ? { pickingTask = true } : nil,
                              videoAgentId: currentQuestion == nil ? agentId : nil, attachments: $attachments) { text, byVoice in
-                    if !attachments.isEmpty {
+                    if attachments.isEmpty, let action = CommandQuery.action(for: text, commands: commands), currentQuestion == nil {
+                        runCommand(action, text: text)
+                    } else if !attachments.isEmpty {
                         // A message with photos or a video is always plain chat.
                         let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
                         let files = attachments.compactMap(\.uploaded)
@@ -274,6 +289,7 @@ struct ChatView: View {
             }
         }
         .navigationTitle(agent.name)
+        .task(id: "\(agentId)-\(agent.running)") { commands = await store.commands(agentId) }
         // Undo on Talk's status screen: the text comes back to this message box (the chat stays the same view).
         .onChange(of: VoicePresentation.shared.returnedText, initial: true) { _, t in
             guard let t, VoicePresentation.shared.statusAgentId == agentId else { return }
@@ -655,6 +671,19 @@ extension ChatView {
         } catch { actionError = APIError.from(error) }
     }
 
+    /// A command typed or picked from the "/" menu, sent: the composer is emptied once it ran, kept if it failed.
+    /// `text` is what was sent: the composer has already emptied itself by then.
+    fileprivate func runCommand(_ action: CommandQuery.Action, text: String) {
+        draft = ""
+        if action == .resume { return resuming = true }
+        Task {
+            do { try await store.run(action, agentId: agentId) } catch {
+                draft = text
+                actionError = APIError.from(error)
+            }
+        }
+    }
+
     fileprivate func grillCommand(_ c: GrillCommand) {
         if c == .end { interviewEnded() }
         Task {
@@ -979,6 +1008,67 @@ private struct QuickAckRow: View {
         .accessibilityLabel("Quick reply: \(text)")
         .accessibilityIdentifier("quickAck")
     }
+}
+
+/// The agent's running `/loop` with a Stop, and its `/schedule` entries each with a Cancel, above the composer.
+private struct LoopScheduleBar: View {
+    let agent: Agent
+    let stop: () -> Void
+    let cancel: (String) -> Void
+
+    private func every(_ minutes: Int) -> String {
+        minutes % 1440 == 0 ? "\(minutes / 1440)d" : minutes % 60 == 0 ? "\(minutes / 60)h" : "\(minutes)m"
+    }
+
+    // At the largest text sizes the rows would fill the screen: the bar stops growing at this height and scrolls.
+    @ScaledMetric(relativeTo: .body) private var maxHeight: CGFloat = 130
+    @State private var contentHeight: CGFloat = 0
+
+    var body: some View {
+        ScrollView {
+            rows
+                .background(GeometryReader { g in Color.clear.preference(key: BarHeightKey.self, value: g.size.height) })
+        }
+        .onPreferenceChange(BarHeightKey.self) { contentHeight = $0 }
+        .frame(height: contentHeight == 0 ? nil : min(contentHeight, min(maxHeight, 220)))
+        .scrollBounceBehavior(.basedOnSize)
+        .padding(10)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("loopSchedules")
+    }
+
+    private var rows: some View {
+        VStack(spacing: 8) {
+            if let l = agent.loop {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l.prompt).font(.footnote).lineLimit(1)
+                        Text("Looping every \(every(l.intervalMinutes)) · next \(AgentSchedule.nextLabel(l.nextAt))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Stop", action: stop).buttonStyle(.bordered).frame(minHeight: 44).fixedSize().accessibilityIdentifier("loopStop")
+                }
+            }
+            ForEach(agent.schedules ?? []) { s in
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(s.prompt).font(.footnote).lineLimit(1)
+                        Text("\(s.repeatLabel) · next \(AgentSchedule.nextLabel(s.nextAt))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Cancel") { cancel(s.id) }.buttonStyle(.bordered).frame(minHeight: 44).fixedSize().accessibilityIdentifier("scheduleCancel")
+                }
+            }
+        }
+    }
+}
+
+private struct BarHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 /// "Send to Web Dev?" above the composer. A tap sends the message there; nothing goes without it.

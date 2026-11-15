@@ -15,6 +15,8 @@ struct ComposerView: View {
     /// Who an auto-send goes to.
     let agentId: String
     let isOrchestrator: Bool
+    /// The agent's "/" menu.
+    var commands: [AgentCommand] = []
     /// Set by the parent to start or cancel dictation (the grill's hands-free loop); reset to nil once handled.
     var control: Binding<ComposerControl?> = .constant(nil)
     /// Each new piece of dictated text, without what was typed before dictation started.
@@ -138,6 +140,9 @@ struct ComposerView: View {
             if let v = attachments.wrappedValue.first(where: \.isVideo) {
                 VideoChip(draft: v) { remove(v) }
             }
+            if let q = CommandQuery.query(in: text), !commands.isEmpty {
+                CommandPicker(commands: CommandQuery.matches(commands, q)) { c in text = CommandQuery.insert(c) }
+            }
             if let q = MentionQuery.query(in: text) {
                 MentionPicker(sections: MentionQuery.sections(q, in: store.agents, excluding: recipient)) { a in
                     text = MentionQuery.insert(a, into: text)
@@ -242,7 +247,7 @@ struct ComposerView: View {
                 .accessibilityIdentifier("sendButton")
                 .sensoryFeedback(.impact(weight: .light), trigger: store.pending.count) { old, new in new > old }
             }
-            Text("@ agents and files · # specs, issues and PRs")
+            Text("/ commands · @ agents and files · # specs, issues and PRs")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("composerHint")
@@ -760,6 +765,42 @@ struct AutoSendBar: View {
 }
 
 /// The agents to mention while "@…" is typed: sticker and name. Picking one puts its exact name in the message.
+/// The "/" menu: a searchable, scrolling list; a terminal-only command is dimmed and says so.
+struct CommandPicker: View {
+    let commands: [AgentCommand]
+    let pick: (AgentCommand) -> Void
+
+    var body: some View {
+        if commands.isEmpty {
+            Text("No command by that name").font(.footnote).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(commands) { c in
+                        Button { pick(c) } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack {
+                                    Text(c.name).font(.subheadline.monospaced()).foregroundStyle(Theme.accent)
+                                    if c.isTerminal { Text("terminal only").font(.caption2).foregroundStyle(.secondary) }
+                                }
+                                Text(c.description).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .opacity(c.isTerminal ? 0.5 : 1)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("command-\(c.name)")
+                    }
+                }
+            }
+            .frame(maxHeight: 240)
+            .accessibilityIdentifier("commandPicker")
+        }
+    }
+}
+
 struct MentionPicker: View {
     let sections: [(title: String, agents: [Agent])]
     let pick: (Agent) -> Void

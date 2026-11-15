@@ -7,6 +7,7 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
 import { HttpsAccess } from "./HttpsAccess";
+import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
 import { cleanLineText, cx, fmtBytes, oneLine, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
@@ -651,6 +652,8 @@ export default function SettingsPage() {
         <PushSettings />
 
         <HttpsAccess />
+
+        <ClaudeLoginSection />
 
         <MacAccess />
 
