@@ -98,7 +98,13 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func usage() async throws -> PlanUsage { try check(); return planUsage }
     func system() async throws -> SystemReading { try check(); return SystemReading(cpuTempC: 61, level: "nominal", sampledAt: .now) }
     func agentSummaries() async throws -> [AgentSummary] { try check(); return [] }
-    func cleanVoice(text: String) async throws -> VoiceCleanResponse { VoiceCleanResponse(text: text, cleaned: false, reason: nil) }
+    /// What cleanup returns (nil: nothing to change), and how long it takes.
+    var cleanedText: String?
+    var cleanDelay: Duration = .zero
+    func cleanVoice(text: String) async throws -> VoiceCleanResponse {
+        try await Task.sleep(for: cleanDelay)
+        return VoiceCleanResponse(text: cleanedText ?? text, cleaned: cleanedText != nil, reason: nil)
+    }
     func eventLines() async throws -> AsyncThrowingStream<String, Error> {
         try check()
         return AsyncThrowingStream { c in

@@ -26,6 +26,9 @@ public final class VoiceSession {
     }
 
     public private(set) var phase: Phase = .idle
+    /// Bumped when a dictation starts, is discarded or closed, so a `finish()` still flushing or tidying up
+    /// can tell its dictation is gone, even when a newer one has reached `.cleaning` meanwhile.
+    private var dictation = 0
     /// In `.failed`: true when the fix is allowing access in Loft's page in iOS Settings, so the UI can offer to open it.
     public private(set) var failureNeedsPermission = false
     public private(set) var agentId: String?
@@ -65,6 +68,9 @@ public final class VoiceSession {
         get { UserDefaults.standard.bool(forKey: Prefs.voiceHandsFree) }
         set { UserDefaults.standard.set(newValue, forKey: Prefs.voiceHandsFree) }
     }
+    /// In hands-free mode, listen again after the next question is read. The Mac's voice panel turns it off: it hides
+    /// after a send, and nothing may listen with nothing on screen to stop it.
+    public var listensAgain = true
     public var readReplies: Bool {
         get { UserDefaults.standard.bool(forKey: Prefs.voiceReadReplies) }
         set { UserDefaults.standard.set(newValue, forKey: Prefs.voiceReadReplies) }
@@ -120,6 +126,7 @@ public final class VoiceSession {
     public func start(agentId: String) async {
         guard phase == .idle || isFailed || phase == .review || phase == .speaking || phase == .replied else { return }
         speaker.stop()
+        dictation += 1
         failureNeedsPermission = false
         failedSend = nil
         self.agentId = agentId
@@ -208,9 +215,12 @@ public final class VoiceSession {
         clock?.invalidate()
         stopAudio()
         phase = .cleaning
+        let mine = dictation
         let r = recognizer
         recognizer = nil
         await r?.flush()
+        // Discarded or closed meanwhile (Esc while tidying up), maybe with a newer dictation since: nothing more happens.
+        guard phase == .cleaning, dictation == mine else { return }
         live = ""
         // A command at the very end of what was said isn't part of the message.
         let reading = VoiceSend.command(in: committed, sincePause: pauseBase)
@@ -220,7 +230,10 @@ public final class VoiceSession {
             phase = .idle
             return
         }
-        await clean()
+        let (text, note) = await clean()
+        guard phase == .cleaning, dictation == mine else { return }
+        cleaned = text
+        cleanupNote = note
         phase = .review
         switch reason {
         case .send where store.canWrite:
@@ -334,11 +347,12 @@ public final class VoiceSession {
         autoSendAt = nil
     }
 
-    /// The cleaned text goes in `cleaned`; if cleanup isn't possible, the original stays (never lost).
-    private func clean() async {
+    /// The cleaned text, and a note when cleanup wasn't possible (the original stays, never lost).
+    private func clean() async -> (cleaned: String?, note: String?) {
         let (text, how) = await store.cleanDictation(raw)
         VoiceLog.shared.add("talk: cleanup: \(how)")
-        if text != raw { cleaned = text } else if !how.hasPrefix("nothing") { cleanupNote = "Couldn't tidy this up; showing what was heard." }
+        if text != raw { return (text, nil) }
+        return (nil, how.hasPrefix("nothing") ? nil : "Couldn't tidy this up; showing what was heard.")
     }
 
     private func heard(partial: String) {
@@ -628,7 +642,7 @@ public final class VoiceSession {
             phase = .replied
             return
         }
-        if handsFree {
+        if handsFree, listensAgain {
             phase = .idle
             await start(agentId: agentId)
         } else {
@@ -642,6 +656,7 @@ public final class VoiceSession {
 
     /// Throw away the dictation and stop everything.
     public func discard() {
+        dictation += 1
         gate.cancel()
         autoSend?.cancel()
         autoSend = nil
@@ -665,6 +680,7 @@ public final class VoiceSession {
 
     /// Leave the session (e.g. closing the screen) without losing the draft.
     public func close() {
+        dictation += 1
         gate.cancel()
         // Leaving mid-countdown keeps the text for review instead of sending behind your back.
         if autoSendAt != nil { autoSend?.cancel(); autoSend = nil; autoSendAt = nil }
@@ -822,7 +838,7 @@ public final class VoiceSession {
         setCommitted(d.text)
         live = ""
         phase = .cleaning
-        await clean()
+        (cleaned, cleanupNote) = await clean()
         phase = .review
     }
 

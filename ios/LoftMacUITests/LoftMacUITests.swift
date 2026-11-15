@@ -18,6 +18,8 @@ final class LoftMacUITests: XCTestCase {
         app.launchArguments = args
         app.launch()
         app.activate()
+        // macOS can restore Loft with its window closed, leaving only the menu bar item: Go › Agents (⌘2) opens it.
+        if !app.windows.firstMatch.waitForExistence(timeout: 5) { app.typeKey("2", modifierFlags: .command) }
     }
 
     private func shot(_ name: String) {
@@ -41,17 +43,33 @@ final class LoftMacUITests: XCTestCase {
         XCTAssertTrue(field.exists, "Still on the address screen")
     }
 
+    /// #484: the demo address opens the bundled demo with its banner, and Exit goes back to the address screen.
+    func testDemoAddressOpensTheDemoAndExitLeavesIt() {
+        launch(["-ui-onboarding"])
+        let field = app.textFields["serverAddressField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.click()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText("demo-loft-dev.get-loft.com\r")
+        XCTAssertTrue(app.otherElements["demoBanner"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["section-Agents"].exists, "the main window, on sample data")
+        shot("Demo")
+        app.buttons["exitDemo"].click()
+        XCTAssertTrue(field.waitForExistence(timeout: 10), "back on the address screen")
+        XCTAssertFalse(app.otherElements["demoBanner"].exists)
+    }
+
     /// Leads first, then groups; an agent's settings save.
     func testAgentsLeadsFirstAndSettingsSave() {
         launch(["-ui-testing", "-fixture-lead"])
-        let list = app.outlines["agentsList"]
+        let list = app.scrollViews["agentsList"]
         XCTAssertTrue(list.waitForExistence(timeout: 10))
         let leads = list.staticTexts["Leads"], loft = list.staticTexts["Loft"]
         XCTAssertTrue(leads.waitForExistence(timeout: 10))
         XCTAssertTrue(loft.exists)
         XCTAssertLessThan(leads.frame.minY, loft.frame.minY, "Leads come before the groups")
 
-        list.cells.containing(.any, identifier: "agentRow-Backend Agent").firstMatch.click()
+        list.buttons["agentRow-Backend Agent"].click()
         app.buttons["agentSettingsButton"].click()
         let name = app.textFields["settingsName"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
@@ -63,12 +81,26 @@ final class LoftMacUITests: XCTestCase {
         shot("Agents and settings")
     }
 
+    /// #485: the search field sits on the agents list, not the toolbar, and filters it as you type.
+    func testAgentSearchFiltersList() {
+        launch(["-ui-testing"])
+        let list = app.scrollViews["agentsList"]
+        XCTAssertTrue(list.buttons["agentRow-Backend Agent"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.toolbars.searchFields.firstMatch.exists, "no search in the toolbar")
+        let search = app.textFields["agentSearch"]
+        search.click()
+        search.typeText("back")
+        XCTAssertTrue(list.buttons["agentRow-Backend Agent"].exists)
+        XCTAssertTrue(list.buttons["agentRow-QA Agent"].waitForNonExistence(timeout: 5))
+        shot("Agents search")
+    }
+
     /// @ and # pick from lists as on the web, and the message is sent with both tags.
     func testSendWithMentionAndTag() {
         launch(["-ui-testing"])
-        let list = app.outlines["agentsList"]
+        let list = app.scrollViews["agentsList"]
         XCTAssertTrue(list.waitForExistence(timeout: 10))
-        list.cells.containing(.any, identifier: "agentRow-Orchestrator").firstMatch.click()
+        list.buttons["agentRow-Orchestrator"].click()
         // Another agent's handover is incoming, not one of the user's own messages.
         let handover = app.descendants(matching: .any).matching(identifier: "agentMessage")
             .matching(NSPredicate(format: "label BEGINSWITH %@", "From Backend Agent")).firstMatch
@@ -100,11 +132,36 @@ final class LoftMacUITests: XCTestCase {
         shot("Sent with @ and #")
     }
 
+    /// #487: Shift-Return adds a line without sending; Return sends the message with its line breaks.
+    func testShiftReturnAddsLineAndReturnSends() {
+        launch(["-ui-testing"])
+        let list = app.scrollViews["agentsList"]
+        XCTAssertTrue(list.waitForExistence(timeout: 10))
+        list.buttons["agentRow-Orchestrator"].click()
+        let field = app.textFields["composerField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.click()
+        field.typeText("first line")
+        field.typeKey(.return, modifierFlags: .shift)
+        field.typeText("second line")
+        XCTAssertEqual(field.value as? String, "first line\nsecond line", "Shift-Return adds a line and doesn't send")
+        let sent = app.descendants(matching: .any).matching(identifier: "userMessage")
+            .matching(NSPredicate(format: "label CONTAINS %@", "first line")).firstMatch
+        XCTAssertFalse(sent.exists)
+        shot("Multi-line before sending")
+
+        field.typeText("\r")
+        XCTAssertTrue(sent.waitForExistence(timeout: 10))
+        XCTAssertTrue((sent.label).contains("first line\nsecond line"), sent.label)
+        XCTAssertEqual(field.value as? String, "")
+        shot("Multi-line sent")
+    }
+
     /// Settings › Apple Intelligence on the fixture model status: unavailable says why and disables the switches;
     /// available enables them.
     func testAppleIntelligenceSettingsFollowTheModelStatus() {
         launch(["-ui-testing", "-fixture-ai-status", "off"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("5", modifierFlags: .command)
         let status = app.staticTexts["onDeviceModelStatus"]
         XCTAssertTrue(status.waitForExistence(timeout: 5))
@@ -113,7 +170,7 @@ final class LoftMacUITests: XCTestCase {
         shot("Apple Intelligence off")
         app.terminate()
         launch(["-ui-testing", "-fixture-ai-status", "available"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("5", modifierFlags: .command)
         XCTAssertTrue(app.checkBoxes["aiRouteToggle"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.checkBoxes["aiRouteToggle"].isEnabled)
@@ -124,9 +181,9 @@ final class LoftMacUITests: XCTestCase {
     /// Clicking the chat's mic opens Talk with that agent in To:; Cancel returns to the chat.
     func testMicOpensTalkWithTheAgent() {
         launch(["-ui-testing", "-no-speech"])
-        let list = app.outlines["agentsList"]
+        let list = app.scrollViews["agentsList"]
         XCTAssertTrue(list.waitForExistence(timeout: 10))
-        list.cells.containing(.any, identifier: "agentRow-Orchestrator").firstMatch.click()
+        list.buttons["agentRow-Orchestrator"].click()
         let mic = app.descendants(matching: .any)["micButton"]
         XCTAssertTrue(mic.waitForExistence(timeout: 10))
         mic.click()
@@ -137,10 +194,37 @@ final class LoftMacUITests: XCTestCase {
         XCTAssertTrue(app.textFields["composerField"].waitForExistence(timeout: 5))
     }
 
+    /// The floating voice panel's More opens the recipient list, while listening and on review, and the pick becomes
+    /// the To chip (#491: it crashed, the panel had no `VoiceSession` in its environment).
+    func testVoicePanelMorePicksTheRecipient() {
+        for fixture in ["listening", "review"] {
+            launch(["-ui-testing", "-no-speech", "-show-voice-panel", fixture])
+            let more = app.buttons["talkMore"]
+            XCTAssertTrue(more.waitForExistence(timeout: 10), fixture)
+            more.click()
+            let search = app.textFields["talkMoreSearch"]
+            XCTAssertTrue(search.waitForExistence(timeout: 5), "More opened the list (\(fixture))")
+            search.click()
+            search.typeText("QA")
+            let row = app.buttons["talkMoreRow-QA Agent"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5), fixture)
+            let a = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            a.name = "Voice panel More (\(fixture))"
+            a.lifetime = .keepAlways
+            add(a)
+            row.click()
+            XCTAssertTrue(app.buttons["talkTo-QA Agent"].waitForExistence(timeout: 5), "the pick is the To chip (\(fixture))")
+            XCTAssertTrue(app.buttons["talkSend"].isEnabled, "the panel still sends (\(fixture))")
+            app.buttons["talkCancel"].click()
+            XCTAssertFalse(app.buttons["talkCancel"].waitForExistence(timeout: 2), "Cancel closes the panel (\(fixture))")
+            app.terminate()
+        }
+    }
+
     /// ⌘N opens New message, and picking an agent opens its chat.
     func testNewMessageShortcut() {
         launch(["-ui-testing"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("5", modifierFlags: .command)
         XCTAssertTrue(app.textFields["serverAddressField"].waitForExistence(timeout: 5), "⌘5 opens Settings")
         app.typeKey("n", modifierFlags: .command)
@@ -154,7 +238,7 @@ final class LoftMacUITests: XCTestCase {
     /// ⌘1: the web's home summary, and a card per agent.
     func testOverviewShowsSummary() {
         launch(["-ui-testing"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("1", modifierFlags: .command)
         let stats = app.descendants(matching: .any)["overviewStats"]
         XCTAssertTrue(stats.waitForExistence(timeout: 10))
@@ -169,7 +253,7 @@ final class LoftMacUITests: XCTestCase {
     /// languages, contributors and recent commits.
     func testOverviewActivityAndRepoDetail() {
         launch(["-ui-testing"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("1", modifierFlags: .command)
         XCTAssertTrue(app.descendants(matching: .any)["overviewActivity"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["MOST ACTIVE · 30D"].exists)
@@ -191,7 +275,7 @@ final class LoftMacUITests: XCTestCase {
     /// Needs you behind another app: the window is inactive and the accent buttons still read (the screenshot shows it).
     func testNeedsYouInactiveWindow() {
         launch(["-ui-testing", "-no-ai"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("4", modifierFlags: .command)
         XCTAssertTrue(app.descendants(matching: .any)["needsYou-question:1"].waitForExistence(timeout: 10))
         XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
@@ -204,7 +288,7 @@ final class LoftMacUITests: XCTestCase {
     func testNeedsYouReply() {
         // The on-device model's summaries would move the row under the click; off, as on a Mac without it.
         launch(["-ui-testing", "-no-ai"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("4", modifierFlags: .command)
         let row = app.descendants(matching: .any)["needsYou-question:1"]
         XCTAssertTrue(row.waitForExistence(timeout: 10))
@@ -226,7 +310,7 @@ final class LoftMacUITests: XCTestCase {
     /// Settings › Disk › Check space: tick one item, Delete selected, and the log says what was freed.
     func testCleanRun() {
         launch(["-ui-testing"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("5", modifierFlags: .command)
         let check = app.buttons["checkSpace"]
         XCTAssertTrue(check.waitForExistence(timeout: 10))
@@ -252,7 +336,7 @@ final class LoftMacUITests: XCTestCase {
     /// Settings: a change shows Save, and saving keeps it.
     func testSettingsSave() {
         launch(["-ui-testing"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("5", modifierFlags: .command)
         let toggle = app.descendants(matching: .any)["messagingRulesToggle"].firstMatch
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
@@ -275,7 +359,7 @@ final class LoftMacUITests: XCTestCase {
     /// can be removed.
     func testSettingsHerdrAndPush() {
         launch(["-ui-testing"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("5", modifierFlags: .command)
         let open = app.buttons["herdrOpen"]
         XCTAssertTrue(open.waitForExistence(timeout: 10))
@@ -306,7 +390,7 @@ final class LoftMacUITests: XCTestCase {
     /// delivery on a spec that waits for one.
     func testIssuesBoardFilterOpensASpecAndStartsDelivery() {
         launch(["-ui-testing", "-fixture-specs"])
-        XCTAssertTrue(app.outlines["agentsList"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         app.typeKey("3", modifierFlags: .command)
         let issues = app.descendants(matching: .any)["boardColumn-issues"]
         let planned = app.descendants(matching: .any)["boardColumn-planned"]
@@ -347,5 +431,29 @@ final class LoftMacUITests: XCTestCase {
         shot("Delivery started")
     }
 
+    /// #468: a click on each sidebar item shows its section, and the arrow keys move between them.
+    func testSidebarClicksOpenEachSection() {
+        launch(["-ui-testing", "-no-ai"])
+        XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
+        let screens = [
+            ("Overview", "overviewStats"), ("Issues", "boardColumn-issues"), ("Needs you", "needsYou-question:1"),
+            ("Settings", "messagingRulesToggle"), ("Agents", "agentsList"),
+        ]
+        for (title, screen) in screens {
+            card("section-\(title)").click()
+            XCTAssertTrue(card(screen).waitForExistence(timeout: 5), "a click on \(title) shows it")
+            XCTAssertTrue(sidebarRow(title).isSelected, "\(title) is highlighted")
+        }
+        shot("Sidebar Agents")
+        card("section-Agents").click()
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(card("boardColumn-issues").waitForExistence(timeout: 5), "↓ from Agents goes to Issues")
+        shot("Sidebar Issues")
+    }
+
     private func card(_ id: String) -> XCUIElement { app.descendants(matching: .any)[id].firstMatch }
+
+    private func sidebarRow(_ title: String) -> XCUIElement {
+        app.outlines.cells.containing(.any, identifier: "section-\(title)").firstMatch
+    }
 }
