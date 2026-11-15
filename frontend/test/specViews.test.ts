@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, specRef, stageOf, ticketLabel, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, specRef, stageOf, ticketState, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -30,12 +30,12 @@ test("the stage follows the Delivery and the issue", () => {
 });
 
 test("ticket states read in words", () => {
-  assert.deepEqual(ticketLabel("closed"), { text: "done", tone: "good" });
-  assert.equal(ticketLabel("needs_human").tone, "warn");
-  assert.equal(ticketLabel("needs_human").text, "Needs you");
-  assert.equal(ticketLabel("whatever").text, "open");
-  assert.deepEqual(ticketLabel("changes"), { text: "fixing", tone: "accent" });
-  assert.equal(ticketLabel("review", [], true).text, "waiting for CI");
+  assert.deepEqual(ticketState({ state: "closed" }), { text: "done", tone: "good" });
+  assert.equal(ticketState({ state: "needs_human" }).tone, "warn");
+  assert.equal(ticketState({ state: "needs_human" }).text, "Needs you");
+  assert.equal(ticketState({ state: "whatever" }).text, "open");
+  assert.deepEqual(ticketState({ state: "changes" }), { text: "fixing", tone: "accent" });
+  assert.equal(ticketState({ state: "review", waiting_for_ci: true }).text, "waiting for CI");
 });
 
 const task = (o: Record<string, unknown>) => ({ labels: ["spec"], state: "open", status: "inbox", parent_id: null, updated_at: "2026-01-01", github: null, ...o }) as unknown as Task;
@@ -137,12 +137,12 @@ test("the Issues column holds the issues that are no spec and no spec's ticket, 
 });
 
 test("a ticket in review whose reviewers all passed reads waiting for CI", () => {
-  assert.deepEqual(ticketLabel("review", [], true), { text: "waiting for CI", tone: "accent" });
-  assert.equal(ticketLabel("review", []).text, "in review");
-  assert.equal(ticketLabel("started", [], true).text, "building", "only a ticket in review waits for CI");
+  assert.deepEqual(ticketState({ state: "review", waiting_for_ci: true }), { text: "waiting for CI", tone: "accent" });
+  assert.equal(ticketState({ state: "review" }).text, "in review");
+  assert.equal(ticketState({ state: "started", waiting_for_ci: true }).text, "building", "only a ticket in review waits for CI");
   const s = task({ id: "s", github: { repo: "o/r", number: 9 } });
   const d = del({ tickets: [{ number: 10, title: "A", state: "review", skipped: "", agent_id: null, waiting_for_ci: true, ci_since: "2026-11-13T10:00:00Z", verdicts: { qa: "pass", ci: "pending" } }] });
-  assert.deepEqual(ticketsOf(s, d, [s]).map((t) => [t.waitingForCi, t.current, t.agentId]), [[true, false, null]]);
+  assert.deepEqual(ticketsOf(s, d, [s]).map((t) => [t.waiting_for_ci, t.current, t.agentId]), [[true, false, null]]);
 });
 
 test("the spec card badge reads Waiting for CI when only CI is left", () => {
@@ -156,7 +156,21 @@ test("the spec card badge reads Waiting for CI when only CI is left", () => {
 });
 
 test("an open ticket waiting on another spec's ticket says which", () => {
-  assert.deepEqual(ticketLabel("open", ["o/ext#9", "o/ext#10"]), { text: "waiting on o/ext#9, o/ext#10", tone: "warn" });
-  assert.equal(ticketLabel("open", []).text, "open");
-  assert.equal(ticketLabel("started", ["o/ext#9"]).text, "building");
+  assert.deepEqual(ticketState({ state: "open", waiting_on: ["o/ext#9", "o/ext#10"] }), { text: "waiting on o/ext#9, o/ext#10", tone: "warn" });
+  assert.equal(ticketState({ state: "open", waiting_on: [] }).text, "open");
+  assert.equal(ticketState({ state: "started", waiting_on: ["o/ext#9"] }).text, "building");
+});
+
+test("one state for every ticket, whichever page asks", () => {
+  const at = (state: string, more: object = {}) => ticketState({ state, ...more });
+  assert.deepEqual(at("open"), { text: "open", tone: "muted" });
+  assert.deepEqual(at("started"), { text: "building", tone: "accent" });
+  assert.deepEqual(at("review"), { text: "in review", tone: "accent" });
+  assert.deepEqual(at("changes"), { text: "fixing", tone: "accent" });
+  assert.deepEqual(at("review", { waiting_for_ci: true }), { text: "waiting for CI", tone: "accent" });
+  assert.deepEqual(at("needs_human"), { text: "Needs you", tone: "warn" });
+  assert.deepEqual(at("closing"), { text: "closing", tone: "accent" });
+  assert.deepEqual(at("closed"), { text: "done", tone: "good" });
+  assert.deepEqual(at("started", { waiting: "the lead" }), { text: "waiting", tone: "muted" }, "a Dev's own wait");
+  assert.equal(at("closed", { waiting: "stale" }).text, "done");
 });

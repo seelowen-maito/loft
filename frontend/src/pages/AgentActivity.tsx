@@ -7,6 +7,7 @@ import { byActivity, cardsPerRow } from "../lib/agentRow";
 import { cx, fmtSchedule } from "../lib/format";
 import { dayLabel, relTime } from "../lib/time";
 import { costChange, exactDollars, wholeDollars } from "../lib/usage";
+import { NEEDS_YOU_LABEL } from "../lib/taskStatus";
 import { Sticker } from "../components/Sticker";
 import { Tip } from "../components/Charts";
 import { StatusPill } from "./agents/Status";
@@ -224,7 +225,7 @@ export function AgentActivity() {
             ) : (
               <>
                 <span className={totals.working ? "text-accent" : "text-fg-2"}>{totals.working} working</span>
-                {totals.waiting > 0 && <span className="text-warn"> · {totals.waiting} waiting on you</span>}
+                {totals.waiting > 0 && <span className="text-warn"> · {NEEDS_YOU_LABEL}: {totals.waiting}</span>}
                 {period && (
                   <span className="text-fg-2">
                     {" "}

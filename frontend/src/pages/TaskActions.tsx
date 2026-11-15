@@ -3,7 +3,8 @@ import { Link, useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Pause, Pencil, Play, RotateCcw, Trash2, TriangleAlert, UserRoundPlus, X } from "lucide-react";
 import { api, roleLabel, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
-import { ticketLabel } from "../lib/specViews";
+import { ticketState } from "../lib/specViews";
+import { DeliveryWaits, TONE_TEXT } from "./SpecViews";
 import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
@@ -298,7 +299,6 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
   const skipped = tickets.filter((x) => x.state === "elsewhere");
   // With a Lead, several tickets run at once, each with its own agent.
   const running = tickets.filter((x) => x.agent_id);
-  const waiting = d?.waiting_for_lead ?? [];
   return (
     <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -333,18 +333,13 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
             <li key={x.number} className="flex flex-wrap items-baseline gap-x-2">
               <span className="font-mono text-fg-3">#{x.number}</span>
               <span>{x.title}</span>
-              <span className="text-fg-3" title={x.waiting ?? undefined}>· {x.waiting ? "waiting" : ticketLabel(x.state, x.waiting_on, x.waiting_for_ci).text} ·</span>
+              <span className={TONE_TEXT[ticketState(x).tone]} title={x.waiting ?? undefined}>· {ticketState(x).text} ·</span>
               <Link to={`/agents/${x.agent_id}`} className="text-accent hover:underline">{x.agent_name}</Link>
             </li>
           ))}
         </ul>
       )}
-      {(d?.waiting_on_you ?? []).length > 0 && (
-        <div className="mt-2 text-[12.5px] text-warn">Needs you: {(d?.waiting_on_you ?? []).map((n) => `#${n}`).join(", ")}</div>
-      )}
-      {waiting.length > 0 && (
-        <div className="mt-2 text-[12.5px] text-fg-3">Waiting for the Lead to assign {waiting.map((n) => `#${n}`).join(", ")}</div>
-      )}
+      <DeliveryWaits d={d} className="mt-2 text-[12.5px]" />
       {skipped.length > 0 && (
         <ul className="mt-2 space-y-0.5 text-[12px] text-fg-3">
           {skipped.map((x) => (
