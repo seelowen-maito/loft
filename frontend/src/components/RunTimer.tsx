@@ -1,16 +1,12 @@
-import { useEffect, useState } from "react";
-import { fmtDone, fmtElapsed, runElapsed } from "../lib/runTimer";
+import { useNow } from "../lib/useNow";
+import { fmtDuration } from "../lib/time";
+import { fmtDone, runElapsed } from "../lib/runTimer";
 import { cx } from "../lib/format";
 
 /** Time since `startedAt` (the agent's `last_run_at`), ticking every second. Only this span re-renders. */
 export function RunTimer({ startedAt, className }: { startedAt: string | null | undefined; className?: string }) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    setNow(Date.now());
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [startedAt]);
-  return <span className={cx("tabular-nums", className)}>{fmtElapsed(runElapsed(startedAt, now))}</span>;
+  const now = useNow(1000);
+  return <span className={cx("tabular-nums", className)}>{fmtDuration(runElapsed(startedAt, now))}</span>;
 }
 
 /** The chat's run line: `✻ 2m 23s · Reading CI logs` while running, `✻ Done in 2m 23s · Thu 16:23` after. */

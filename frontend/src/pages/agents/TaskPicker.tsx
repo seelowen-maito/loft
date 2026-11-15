@@ -4,15 +4,17 @@ import type { Agent } from "../../lib/api";
 import { ATTACH, filterIssues, SOURCES, type Source } from "../../lib/issueFilter";
 import { Origin } from "../../components/Origin";
 import { IssueRow } from "../../components/IssueRow";
-import { cx, timeAgo } from "../../lib/format";
-import { STATUS_TONE, useTasks } from "../../components/TaskChip";
+import { cx } from "../../lib/format";
+import { relTime } from "../../lib/time";
+import { taskStatus, toneText } from "../../lib/taskStatus";
+import { useTasks } from "../../hooks/lists";
 
 /** Open tasks first, the ones waiting on you on top; then the most recently updated. */
 const ORDER = ["waiting_approval", "blocked", "failed", "in_progress", "ready", "inbox", "done", "cancelled"];
 
 /** "Attach an issue" above the composer: Loft and GitHub issues, search (or #42), pick one with the mouse or ↑↓ + Enter, Esc closes. */
 export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPick: (id: string) => void; onClose: () => void }) {
-  const all = useTasks();
+  const all = useTasks().items;
   const [q, setQ] = useState("");
   const [source, setSource] = useState<Source>("all");
   const [index, setIndex] = useState(0);
@@ -27,7 +29,8 @@ export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPic
   const name = (id: string | null) => agents.find((a) => a.id === id)?.name;
 
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="dialog" aria-label={ATTACH}>
+    // A popover inside the composer, not a dialog: Needs you and the shortcuts look for open dialogs by role.
+    <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="group" aria-label={ATTACH}>
       <label className="flex items-center gap-2 border-b border-line px-3 py-2">
         <Search className="size-3.5 text-fg-3" />
         <input
@@ -62,10 +65,10 @@ export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPic
         {list.map((t, i) => (
           <IssueRow
             key={t.id}
-            tone={STATUS_TONE[t.status]}
+            tone={toneText(taskStatus(t.status).tone)}
             github={!!t.github}
             title={t.title}
-            meta={[t.github && `#${t.github.number}`, t.status.replace("_", " "), name(t.agent_id), t.project, timeAgo(t.updated_at)]}
+            meta={[t.github && `#${t.github.number}`, taskStatus(t.status).label, name(t.agent_id), t.project, relTime(t.updated_at)]}
             selected={i === index}
             onHover={() => setIndex(i)}
             onPick={() => onPick(t.id)}

@@ -3,8 +3,12 @@ import { Link, useLocation, useNavigate } from "react-router";
 import { Check, ExternalLink, Inbox, Send, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "../lib/events";
-import { cx, timeAgo } from "../lib/format";
+import { cx } from "../lib/format";
+import { relTime } from "../lib/time";
 import { isTyping } from "../lib/shortcuts";
+import { ActionButton } from "../components/ActionButton";
+import { ErrorLine } from "../components/Callout";
+import { errorText, useAction } from "../lib/useAction";
 import { answerBody, beingLookedAt, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
 
 const TONE = { bad: "bg-bad", warn: "bg-warn", accent: "bg-accent", muted: "bg-fg-3/40" } as const;
@@ -14,28 +18,29 @@ const TONE = { bad: "bg-bad", warn: "bg-warn", accent: "bg-accent", muted: "bg-f
 function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean; onDone: () => void }) {
   const view = itemView(item, window.location.hostname);
   const urgency = urgencyOf(item.urgency);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const act = useAction();
+  // Which button is working, by kind and label: the list of calls is the item's.
+  const [doing, setDoing] = useState<string | null>(null);
+  const keyOf = (a: NeedsYouAction) => `${a.kind}:${a.label}`;
+  const busy = act.busy;
+  const [msg, setMsg] = useState<string | null>(null);
   const [answering, setAnswering] = useState(false);
   const [answer, setAnswer] = useState("");
 
-  const send = async (a: NeedsYouAction, body?: Record<string, unknown>, done?: string) => {
-    setBusy(true);
+  const send = (a: NeedsYouAction, body?: Record<string, unknown>, done?: string) => {
     setMsg(null);
-    try {
+    setDoing(keyOf(a));
+    act.run(async () => {
       const r = await api.needsYouCall(a, body);
       setAnswer("");
       setAnswering(false);
       // A reply on an issue nobody works on stays a note there.
-      if (a.kind === "answer" && "delivered_to" in r && r.delivered_to === null) setMsg({ ok: true, text: "Kept as a note on the issue: no agent is on it." });
-      else if (done) setMsg({ ok: true, text: done });
+      if (a.kind === "answer" && "delivered_to" in r && r.delivered_to === null) setMsg("Kept as a note on the issue: no agent is on it.");
+      else if (done) setMsg(done);
       onDone();
-    } catch (e) {
-      setMsg({ ok: false, text: (e as Error).message });
-    } finally {
-      setBusy(false);
-    }
+    });
   };
+  const pending = (a: NeedsYouAction | undefined) => busy && !!a && doing === keyOf(a);
 
   return (
     <li
@@ -49,7 +54,7 @@ function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean;
           {fresh && <span className="self-center rounded-full bg-accent/15 px-1.5 py-px font-mono text-[10px] font-medium uppercase tracking-wide text-accent">New</span>}
           <h2 className={cx("min-w-0 text-[14px] [overflow-wrap:anywhere]", fresh ? "font-medium" : "font-normal text-fg-2")}>{item.title}</h2>
           <span className="font-mono text-[11px] text-fg-3">
-            {[item.agent?.name, item.project, timeAgo(item.created_at)].filter(Boolean).join(" · ")}
+            {[item.agent?.name, item.project, relTime(item.created_at)].filter(Boolean).join(" · ")}
           </span>
         </div>
         <p className="text-[13px] text-fg-2 [overflow-wrap:anywhere]">{item.reason}</p>
@@ -61,9 +66,9 @@ function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean;
         )}
         <div className="flex flex-wrap items-center gap-2">
           {view.calls.map((a) => (
-            <button key={`${a.kind}:${a.label}`} type="button" className={a.kind === "deny" ? "btn" : "btn-primary"} disabled={busy} onClick={() => send(a, undefined, `${a.label}: sent.`)}>
+            <ActionButton key={keyOf(a)} type="button" variant={a.kind === "deny" ? "secondary" : "primary"} pending={pending(a)} pendingLabel="Sending…" disabled={busy} onClick={() => send(a, undefined, `${a.label}: sent.`)}>
               {a.label}
-            </button>
+            </ActionButton>
           ))}
           {view.answer && !answering && (
             <button type="button" className="btn" disabled={busy} onClick={() => setAnswering(true)}>
@@ -82,16 +87,20 @@ function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean;
             ),
           )}
           {view.dismiss && (
-            <button
+            <ActionButton
               type="button"
-              className="btn ml-auto inline-flex items-center gap-1.5 text-[12.5px] hover:border-good/50 hover:text-good"
+              variant="secondary"
+              className="ml-auto inline-flex items-center gap-1.5 text-[12.5px] hover:border-good/50 hover:text-good"
               title="Done: take it off the list"
               data-needs-you-done
+              icon={<Check className="size-3.5" />}
+              pending={pending(view.dismiss)}
+              pendingLabel="Saving…"
               disabled={busy}
               onClick={() => send(view.dismiss!)}
             >
-              <Check className="size-3.5" /> {view.dismiss.label}
-            </button>
+              {view.dismiss.label}
+            </ActionButton>
           )}
         </div>
         {view.answer && answering && (
@@ -110,15 +119,16 @@ function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean;
               placeholder={item.agent ? `Reply to ${item.agent.name}` : "Your reply"}
               className="min-w-0 flex-1 resize-y rounded-lg border border-line bg-ink-900 px-3 py-2 text-[13px] outline-none focus:border-line-strong"
             />
-            <button type="submit" className="btn-primary" disabled={busy || !answer.trim()}>
-              <Send className="size-3.5" /> Send
-            </button>
+            <ActionButton type="submit" icon={<Send className="size-3.5" />} pending={pending(view.answer)} pendingLabel="Sending…" disabled={busy || !answer.trim()}>
+              Send
+            </ActionButton>
             <button type="button" className="btn-ghost text-[12px]" onClick={() => setAnswering(false)}>
               Cancel
             </button>
           </form>
         )}
-        {msg && <p className={cx("text-[12px]", msg.ok ? "text-good" : "text-bad")}>{msg.text}</p>}
+        {msg && <p className="text-[12px] text-good">{msg}</p>}
+        <ErrorLine error={act.error} />
       </div>
     </li>
   );
@@ -175,7 +185,7 @@ export default function NeedsYouPage() {
         markSeen();
         setErr(null);
       })
-      .catch((e) => setErr((e as Error).message));
+      .catch((e) => setErr(errorText(e)));
   }, [markSeen]);
   useEffect(() => {
     document.addEventListener("visibilitychange", markSeen);

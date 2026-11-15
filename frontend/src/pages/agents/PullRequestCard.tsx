@@ -4,8 +4,12 @@ import {
   GitPullRequestDraft, Loader2, RefreshCw, ShieldAlert, X,
 } from "lucide-react";
 import { api, type PullRequest } from "../../lib/api";
-import { cx, timeAgo } from "../../lib/format";
+import { cx } from "../../lib/format";
+import { ActionButton } from "../../components/ActionButton";
+import { Callout } from "../../components/Callout";
+import { relTime } from "../../lib/time";
 import { verdicts } from "../../lib/verdicts";
+import { useAction } from "../../lib/useAction";
 
 const METHOD_LABEL: Record<string, string> = { squash: "Squash and merge", merge: "Create merge commit", rebase: "Rebase and merge" };
 
@@ -25,7 +29,7 @@ function mergeability(pr: PullRequest): { tone: Tone; icon: React.ReactNode; lab
       tone: "merged",
       icon: <GitMerge className="size-4" />,
       label: "Merged",
-      detail: [pr.merged_by && `by ${pr.merged_by}`, pr.merged_at && timeAgo(pr.merged_at)].filter(Boolean).join(" · "),
+      detail: [pr.merged_by && `by ${pr.merged_by}`, pr.merged_at && relTime(pr.merged_at)].filter(Boolean).join(" · "),
       canMerge: false,
     };
   if (pr.state === "closed")
@@ -87,8 +91,8 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
   const methods = pr.merge_methods.length ? pr.merge_methods : ["squash", "merge", "rebase"];
   const [method, setMethod] = useState(methods[0]);
   const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState<"merge" | "refresh" | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const refreshing = useAction();
+  const merging = useAction();
   const m = mergeability(pr);
 
   // Catch up right away when an open PR's status is stale (e.g. merged on GitHub meanwhile).
@@ -102,30 +106,20 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
     if (pr.state !== "open") setConfirming(false);
   }, [pr.state]);
 
-  const refresh = async () => {
-    setBusy("refresh");
-    setErr(null);
-    try {
-      await api.refreshPullRequest(pr.id);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
+  // One error line for both: each clears the other's.
+  const refresh = () => {
+    merging.setError(null);
+    return refreshing.run(() => api.refreshPullRequest(pr.id));
   };
 
-  const merge = async () => {
-    setBusy("merge");
-    setErr(null);
-    try {
+  const merge = () => {
+    refreshing.setError(null);
+    return merging.run(async () => {
       await api.mergePullRequest(pr.id, method);
       setConfirming(false);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
+    });
   };
+  const err = refreshing.error ?? merging.error;
 
   const borderTone =
     pr.state === "merged" ? "border-merged/25" : pr.state === "closed" ? "border-line" : m.tone === "bad" ? "border-bad/25" : "border-line-strong";
@@ -143,11 +137,12 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
             <button
               className="ml-auto rounded-full p-1 text-fg-3 transition hover:bg-white/5 hover:text-fg disabled:opacity-40"
               onClick={refresh}
-              disabled={busy !== null}
-              title={pr.checked_at ? `Checked ${timeAgo(pr.checked_at)}. Click to refresh` : "Refresh"}
+              disabled={refreshing.busy || merging.busy}
+              aria-busy={refreshing.busy}
+              title={pr.checked_at ? `Checked ${relTime(pr.checked_at)}. Click to refresh` : "Refresh"}
               aria-label="Refresh pull request status"
             >
-              <RefreshCw className={cx("size-3.5", busy === "refresh" && "animate-spin")} />
+              <RefreshCw className={cx("size-3.5", refreshing.busy && "animate-spin")} />
             </button>
           </div>
           <a
@@ -201,17 +196,19 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
             </button>
           ) : confirming ? (
             <div className="flex items-center gap-1.5">
-              <button className="btn-ghost" onClick={() => setConfirming(false)} disabled={busy === "merge"}>
+              <button className="btn-ghost" onClick={() => setConfirming(false)} disabled={merging.busy}>
                 Cancel
               </button>
-              <button
-                className="inline-flex items-center gap-1.5 rounded-full bg-merged px-3.5 py-1.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110 disabled:opacity-50"
+              <ActionButton
+                variant="bare"
+                className="gap-1.5 rounded-full bg-merged px-3.5 py-1.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110"
                 onClick={merge}
-                disabled={busy === "merge"}
+                pending={merging.busy}
+                pendingLabel="Merging…"
+                icon={<GitMerge className="size-3.5" />}
               >
-                {busy === "merge" ? <Loader2 className="size-3.5 animate-spin" /> : <GitMerge className="size-3.5" />}
                 Confirm {method}
-              </button>
+              </ActionButton>
             </div>
           ) : (
             <div className="flex items-center">
@@ -243,9 +240,7 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
           )}
         </div>
         {(err || pr.error) && (
-          <div className="flex items-center gap-1.5 border-t border-bad/20 bg-bad/[0.06] px-4 py-2 text-[12px] text-bad">
-            <AlertTriangle className="size-3.5 shrink-0" /> {err ?? pr.error}
-          </div>
+          <Callout tone="bad" icon={<AlertTriangle />} className="mx-4 mb-3">{err ?? pr.error}</Callout>
         )}
       </div>
     </div>

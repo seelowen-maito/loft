@@ -2,7 +2,11 @@ import { canAlwaysAllow } from "../../lib/permission";
 import { useState } from "react";
 import { Check, CheckCheck, MessageCircleQuestion, ShieldAlert, ShieldCheck, ShieldX, X } from "lucide-react";
 import { api, type PermissionRequest } from "../../lib/api";
-import { cx, timeAgo } from "../../lib/format";
+import { cx } from "../../lib/format";
+import { relTime } from "../../lib/time";
+import { useAction } from "../../lib/useAction";
+import { ActionButton } from "../../components/ActionButton";
+import { ErrorLine } from "../../components/Callout";
 import { ASK_TOOL, answerFor, answersOf, questionsOf, toggle, typeOther, type Pick } from "../../lib/questions";
 
 function describeInput(p: PermissionRequest) {
@@ -22,6 +26,8 @@ const RESOLVED: Record<string, { label: string; icon: React.ReactNode; cls: stri
   expired: { label: "Expired", icon: <ShieldX className="size-3.5" />, cls: "text-fg-3" },
 };
 
+type Decision = "allow_once" | "allow_always" | "deny";
+
 export function PermissionCard({ req, compact = false }: { req: PermissionRequest; compact?: boolean }) {
   if (req.source === "questions") return <QuestionsCard req={req} compact={compact} />;
   return <ToolCard req={req} compact={compact} />;
@@ -31,23 +37,18 @@ export function PermissionCard({ req, compact = false }: { req: PermissionReques
 function QuestionsCard({ req, compact }: { req: PermissionRequest; compact: boolean }) {
   const qs = questionsOf(req.input);
   const [picks, setPicks] = useState<Record<number, Pick>>({});
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const decide = useAction();
+  const [choice, setChoice] = useState<"allow_once" | "deny" | null>(null);
+  const busy = decide.busy;
   const pending = req.status === "pending";
   const answers = answersOf(qs, picks);
   const pick = (i: number) => picks[i] ?? { chosen: [], other: "" };
   const set = (i: number, p: Pick) => setPicks((ps) => ({ ...ps, [i]: p }));
 
-  const act = async (d: "allow_once" | "deny") => {
-    setBusy(true);
-    setErr(null);
-    try {
-      await api.decide(req.id, d, undefined, d === "deny" ? undefined : (answers ?? undefined));
-    } catch (e) {
-      setErr(String((e as Error).message));
-    } finally {
-      setBusy(false);
-    }
+  const act = (d: "allow_once" | "deny") => {
+    if (busy) return;
+    setChoice(d);
+    return decide.run(() => api.decide(req.id, d, undefined, d === "deny" ? undefined : (answers ?? undefined)));
   };
 
   const status = req.status === "denied" ? "Skipped" : req.status === "expired" ? "Expired" : null;
@@ -62,7 +63,7 @@ function QuestionsCard({ req, compact }: { req: PermissionRequest; compact: bool
       <div className="flex items-center gap-2 text-[13px]">
         <MessageCircleQuestion className={cx("size-4", pending ? "text-warn" : "text-fg-3")} />
         <span className="text-fg">{qs.length === 1 ? "Has a question for you" : "Has questions for you"}</span>
-        <span className="ml-auto font-mono text-[11px] text-fg-3">{timeAgo(req.created_at)}</span>
+        <span className="ml-auto font-mono text-[11px] text-fg-3">{relTime(req.created_at)}</span>
       </div>
       <div className="mt-3 space-y-4">
         {qs.map((q, i) => {
@@ -120,14 +121,14 @@ function QuestionsCard({ req, compact }: { req: PermissionRequest; compact: bool
       {pending ? (
         <div className="mt-4 space-y-2">
           <div className="flex flex-wrap gap-2">
-            <button className="btn-primary" disabled={busy || !answers} onClick={() => act("allow_once")}>
-              <Check className="size-3.5" /> Send answers
-            </button>
-            <button className="btn-ghost text-fg-2" disabled={busy} onClick={() => act("deny")}>
-              <X className="size-3.5" /> Skip
-            </button>
+            <ActionButton icon={<Check className="size-3.5" />} pending={busy && choice === "allow_once"} pendingLabel="Sending…" disabled={busy || !answers} onClick={() => act("allow_once")}>
+              Send answers
+            </ActionButton>
+            <ActionButton variant="ghost" className="text-fg-2" icon={<X className="size-3.5" />} pending={busy && choice === "deny"} pendingLabel="Skipping…" disabled={busy} onClick={() => act("deny")}>
+              Skip
+            </ActionButton>
           </div>
-          {err && <div className="text-[12px] text-bad">{err}</div>}
+          <ErrorLine error={decide.error} />
         </div>
       ) : (
         status && (
@@ -144,22 +145,18 @@ function ToolCard({ req, compact }: { req: PermissionRequest; compact: boolean }
   const [rule, setRule] = useState(req.rule);
   // A kill with no program to name has no rule to save: Allow once or Deny only. Its rule is Loft's, not editable.
   const noRule = !canAlwaysAllow(req);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const decide = useAction();
+  // Which button the running decision came from: it shows the spinner, the others just wait.
+  const [choice, setChoice] = useState<Decision | null>(null);
   const pending = req.status === "pending";
   const detail = describeInput(req);
 
-  const act = async (d: "allow_once" | "allow_always" | "deny") => {
-    setBusy(true);
-    setErr(null);
-    try {
-      await api.decide(req.id, d, rule);
-    } catch (e) {
-      setErr(String((e as Error).message));
-    } finally {
-      setBusy(false);
-    }
+  const act = (d: Decision) => {
+    if (decide.busy) return;
+    setChoice(d);
+    return decide.run(() => api.decide(req.id, d, rule));
   };
+  const pendingOn = (d: Decision) => decide.busy && choice === d;
 
   const res = RESOLVED[req.status];
   return (
@@ -175,7 +172,7 @@ function ToolCard({ req, compact }: { req: PermissionRequest; compact: boolean }
         <span className="text-fg">
           {req.source === "request" ? "Requests permission" : "Wants to use"} <code className="font-mono text-[12.5px] text-accent">{req.tool_name}</code>
         </span>
-        <span className="ml-auto font-mono text-[11px] text-fg-3">{timeAgo(req.created_at)}</span>
+        <span className="ml-auto font-mono text-[11px] text-fg-3">{relTime(req.created_at)}</span>
       </div>
       {req.reason && <p className="mt-2 text-[13px] text-fg-2">“{req.reason}”</p>}
       {detail && !compact && (
@@ -191,20 +188,20 @@ function ToolCard({ req, compact }: { req: PermissionRequest; compact: boolean }
           )}
           <div className="flex flex-wrap gap-2">
             {req.source === "prompt" && (
-              <button className="btn" disabled={busy} onClick={() => act("allow_once")}>
-                <Check className="size-3.5" /> Allow once
-              </button>
+              <ActionButton variant="secondary" icon={<Check className="size-3.5" />} pending={pendingOn("allow_once")} pendingLabel="Allowing…" disabled={decide.busy} onClick={() => act("allow_once")}>
+                Allow once
+              </ActionButton>
             )}
             {!noRule && (
-              <button className="btn-primary" disabled={busy} onClick={() => act("allow_always")}>
-                <CheckCheck className="size-3.5" /> {req.source === "prompt" ? "Always allow" : "Grant"}
-              </button>
+              <ActionButton icon={<CheckCheck className="size-3.5" />} pending={pendingOn("allow_always")} pendingLabel={req.source === "prompt" ? "Allowing…" : "Granting…"} disabled={decide.busy} onClick={() => act("allow_always")}>
+                {req.source === "prompt" ? "Always allow" : "Grant"}
+              </ActionButton>
             )}
-            <button className="btn-ghost text-bad hover:text-bad" disabled={busy} onClick={() => act("deny")}>
-              <X className="size-3.5" /> Deny
-            </button>
+            <ActionButton variant="ghost" className="text-bad hover:text-bad" icon={<X className="size-3.5" />} pending={pendingOn("deny")} pendingLabel="Denying…" disabled={decide.busy} onClick={() => act("deny")}>
+              Deny
+            </ActionButton>
           </div>
-          {err && <div className="text-[12px] text-bad">{err}</div>}
+          <ErrorLine error={decide.error} />
         </div>
       ) : (
         res && (

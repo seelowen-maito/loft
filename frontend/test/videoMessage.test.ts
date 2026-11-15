@@ -37,7 +37,7 @@ test("a sent video plays inline and shows its length once known", () => {
   assert.equal(host.textContent, "");
   Object.defineProperty(video, "duration", { value: 42.3 });
   act(() => video.dispatchEvent(new dom.window.Event("loadedmetadata")));
-  assert.equal(host.querySelector("figcaption")?.textContent, "Video · 0:42");
+  assert.equal(host.querySelector("figcaption")?.textContent, "Video · 42s");
 });
 
 test("a video attachment previews as a video, not an image", () => {

@@ -31,15 +31,3 @@ export function unreadBadge(count: number): string {
 export function unreadTitle(count: number): string {
   return count > 0 ? `(${count}) Loft` : "Loft";
 }
-
-/** A loaded agent list, with the live updates that arrived while it loaded laid over it (null: deleted meanwhile), as they're newer. */
-export function mergeLoaded<T extends { id: string }>(loaded: T[], fresh: Map<string, T | null>): T[] {
-  const kept = loaded.flatMap((a) => {
-    if (!fresh.has(a.id)) return [a];
-    const f = fresh.get(a.id);
-    return f ? [{ ...a, ...f }] : [];
-  });
-  const known = new Set(loaded.map((a) => a.id));
-  const added = [...fresh].flatMap(([id, a]) => (a && !known.has(id) ? [a] : []));
-  return [...kept, ...added];
-}

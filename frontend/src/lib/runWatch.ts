@@ -1,4 +1,5 @@
 import type { Agent } from "./api";
+import { fmtDuration } from "./time.ts";
 
 /** A run that has gone quiet this long is shown as possibly stuck, with a restart. */
 export const QUIET_MINUTES = 10;
@@ -15,5 +16,5 @@ export function runWatch(a: Pick<Agent, "running" | "waiting_on" | "waiting_sinc
   // The run's start counts too: a quiet run (a Redraw, a grill) posts nothing to the chat.
   const last = [a.last_output_at, a.last_run_at, lastMessageAt].filter(Boolean).sort().pop();
   const m = mins(last);
-  return last && m >= QUIET_MINUTES ? { kind: "quiet", minutes: m, text: `No activity for ${m} min` } : null;
+  return last && m >= QUIET_MINUTES ? { kind: "quiet", minutes: m, text: `No activity for ${fmtDuration(m * 60000)}` } : null;
 }

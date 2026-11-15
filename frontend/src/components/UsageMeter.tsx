@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Gauge } from "lucide-react";
 import { api, type Usage } from "../lib/api";
 import { cx } from "../lib/format";
 import { HoverTip } from "./HoverTip";
 import { resetText } from "../lib/usage";
+import { usePoll } from "../hooks/usePoll";
 
 const POLL_MS = 120_000;
 
@@ -12,13 +13,7 @@ const tone = (p: number) => (p >= 90 ? "text-bad" : p >= 75 ? "text-warn" : "tex
 /** Navbar readout of Claude plan usage, as in Claude Code's /usage: the 5-hour session and the week. */
 export function UsageMeter({ live }: { live: boolean }) {
   const [u, setU] = useState<Usage | null>(null);
-  useEffect(() => {
-    if (!live) return;
-    const load = () => api.usage().then(setU).catch(() => {});
-    load();
-    const t = setInterval(load, POLL_MS);
-    return () => clearInterval(t);
-  }, [live]);
+  usePoll(live ? () => api.usage().then(setU).catch(() => {}) : null, POLL_MS);
   // Hidden for anything unexpected (e.g. an older backend without /api/usage serves index.html).
   if (!u || !Array.isArray(u.windows)) return null;
 

@@ -1,15 +1,8 @@
-import { useEffect, useState } from "react";
 import { Star, X } from "lucide-react";
-import { api } from "../../lib/api";
+import { useRepos } from "../../hooks/lists";
 import { cx } from "../../lib/format";
 import { withProject } from "../../lib/team";
 
-// Repo names are fetched once per page load; the projects folder rarely changes.
-let reposOnce: Promise<string[]> | null = null;
-function repoNames(): Promise<string[]> {
-  reposOnce ??= api.repos().then((rs) => rs.map((r) => r.name)).catch(() => []);
-  return reposOnce;
-}
 
 /** An agent's group: free text, with the groups in use as suggestions. */
 export function GroupInput({ value, groups, onChange }: { value: string; groups: string[]; onChange: (v: string) => void }) {
@@ -26,10 +19,7 @@ export function GroupInput({ value, groups, onChange }: { value: string; groups:
  * Add one from the projects in use and the git repos in the projects folder, or type a new name.
  */
 export function ProjectsField({ value, projects, adding, onAdding, onChange }: { value: string[]; projects: string[]; adding: string; onAdding: (v: string) => void; onChange: (v: string[]) => void }) {
-  const [repos, setRepos] = useState<string[]>([]);
-  useEffect(() => {
-    repoNames().then(setRepos);
-  }, []);
+  const repos = (useRepos().items ?? []).map((r) => r.name);
   const choices = [...new Set([...projects, ...repos])].filter((p) => !value.includes(p)).sort((a, b) => a.localeCompare(b));
   const add = () => {
     onChange(withProject(value, adding));
