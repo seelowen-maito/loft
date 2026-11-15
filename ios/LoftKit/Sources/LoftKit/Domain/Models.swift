@@ -18,27 +18,36 @@ public struct AgentSchedule: Codable, Hashable, Identifiable {
     public var time: String? = nil
     public var nextAt: Date
 
-    /// "Every weekday 08:00" or "Once": short enough for one line.
-    public var repeatLabel: String {
+    /// "Every weekday 8:00 AM" or "Once", the time in the user's locale; short enough for one line.
+    public var repeatLabel: String { repeatLabel() }
+
+    func repeatLabel(locale: Locale = .current) -> String {
         guard let every else { return "Once" }
-        return "Every \(every) \(Self.hhmm(time ?? ""))"
+        return "Every \(every) \(Self.clock(time ?? "", locale: locale))"
     }
 
-    /// "8:00" or "08:00" as "08:00", so the row never mixes the two.
-    static func hhmm(_ t: String) -> String {
+    /// "HH:MM" from the server as a time of day in the user's locale ("8:00 AM", "08:00"); as is when unreadable.
+    static func clock(_ t: String, locale: Locale) -> String {
         let p = t.split(separator: ":")
-        guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]) else { return t }
-        return String(format: "%02d:%02d", h, m)
+        guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]), (0..<24).contains(h), (0..<60).contains(m) else { return t }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        guard let d = cal.date(from: DateComponents(year: 2000, month: 1, day: 1, hour: h, minute: m)) else { return t }
+        return format(d, "jmm", locale: locale, timeZone: cal.timeZone)
     }
 
-    /// A next-run time as "Tue, 13 Oct, 08:00": the same short shape for a loop and a schedule, in the user's
-    /// locale (so 12 or 24 hour and the language follow the phone).
-    public static func nextLabel(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+    private static func format(_ d: Date, _ template: String, locale: Locale, timeZone: TimeZone) -> String {
         let f = DateFormatter()
         f.locale = locale
         f.timeZone = timeZone
-        f.setLocalizedDateFormatFromTemplate("EEEdMMMjmm")
-        return f.string(from: date)
+        f.setLocalizedDateFormatFromTemplate(template)
+        return f.string(from: d)
+    }
+
+    /// A next-run time as "Mon 16 Nov 8:00 AM": the same short shape for a loop and a schedule, built from the
+    /// user's locale pieces (12 or 24 hour, language) without the commas and "at" a full format adds.
+    public static func nextLabel(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        ["EEE", "d", "MMM", "jmm"].map { format(date, $0, locale: locale, timeZone: timeZone) }.joined(separator: " ")
     }
 }
 

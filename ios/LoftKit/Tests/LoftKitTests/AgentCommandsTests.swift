@@ -67,15 +67,18 @@ final class AgentCommandsTests: XCTestCase {
         XCTAssertNil(old.loop)
     }
 
-    func testScheduleRowsUseOneTimeFormat() throws {
-        let json = #"{"id":"s1","prompt":"p","every":"weekday","time":"8:00","next_at":"2026-10-13T08:00:00Z"}"#
+    func testScheduleRowsAreShortInTheUsersLocale() throws {
+        let json = #"{"id":"s1","prompt":"p","every":"weekday","time":"08:00","next_at":"2026-11-16T08:00:00Z"}"#
         let s = try JSONCoding.decoder.decode(AgentSchedule.self, from: Data(json.utf8))
-        XCTAssertEqual(s.repeatLabel, "Every weekday 08:00")
-        XCTAssertEqual(AgentSchedule(id: "o", prompt: "p", nextAt: s.nextAt).repeatLabel, "Once")
         let utc = TimeZone(identifier: "UTC")!
-        let us = AgentSchedule.nextLabel(s.nextAt, locale: Locale(identifier: "en_US"), timeZone: utc)
-        XCTAssertTrue(us.contains("8:00") && us.contains("AM") && us.contains("Oct"), us)
-        let de = AgentSchedule.nextLabel(s.nextAt, locale: Locale(identifier: "de_DE"), timeZone: utc)
-        XCTAssertTrue(de.contains("08:00") && de.contains("Okt") && !de.contains("AM"), de)
+        let us = Locale(identifier: "en_US"), de = Locale(identifier: "de_DE")
+        XCTAssertEqual(s.repeatLabel(locale: us), "Every weekday 8:00 AM".replacingOccurrences(of: " AM", with: "\u{202F}AM"))
+        XCTAssertEqual(s.repeatLabel(locale: de), "Every weekday 08:00")
+        XCTAssertEqual(AgentSchedule(id: "o", prompt: "p", nextAt: s.nextAt).repeatLabel, "Once")
+        XCTAssertEqual(AgentSchedule.nextLabel(s.nextAt, locale: us, timeZone: utc), "Mon 16 Nov 8:00\u{202F}AM", "no comma, no \"at\"")
+        let germanNext = AgentSchedule.nextLabel(s.nextAt, locale: de, timeZone: utc)
+        XCTAssertTrue(germanNext.hasPrefix("Mo") && germanNext.hasSuffix("16 Nov 08:00"), germanNext)
+        XCTAssertEqual(AgentSchedule.clock("8:00", locale: us), "8:00\u{202F}AM", "8:00 and 08:00 read the same")
+        XCTAssertEqual(AgentSchedule.clock("bad", locale: us), "bad")
     }
 }
