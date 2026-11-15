@@ -279,7 +279,8 @@ export function PushSettings() {
           <p className="text-[12.5px] text-fg-3">None yet. Open the iPhone app and allow notifications; it registers itself.</p>
         ) : (
           devices.map((d) => (
-            <div key={d.token} className="flex items-center gap-3 rounded-xl border border-line px-3 py-2">
+            <div key={d.token} className="rounded-xl border border-line px-3 py-2">
+             <div className="flex items-center gap-3">
               <Smartphone className="size-4 shrink-0 text-fg-3" />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px]">{d.name || "iPhone"}</div>
@@ -290,16 +291,17 @@ export function PushSettings() {
               <button type="button" className="btn shrink-0" disabled={off} onClick={() => test(d)} title={off ? "Add a relay key or your own key first" : undefined}>
                 <BellRing className="size-3.5" /> Send test push
               </button>
-              {removing === d.token ? (
-                <>
-                  <button type="button" className="btn shrink-0 border-bad/40 bg-bad/20 text-fg" onClick={() => { setRemoving(null); remove(d); }}>Remove</button>
-                  <button type="button" className="btn-ghost shrink-0" onClick={() => setRemoving(null)}>Keep</button>
-                </>
-              ) : (
-                <button type="button" className="btn-ghost shrink-0 text-fg-3 hover:text-bad" onClick={() => setRemoving(d.token)} aria-label="Remove this phone" title="Remove this phone">
-                  <Trash2 className="size-3.5" />
-                </button>
-              )}
+              <button type="button" className="btn-ghost shrink-0 text-fg-3 hover:text-bad" onClick={() => setRemoving(d.token)} aria-label="Remove this phone" title="Remove this phone">
+                <Trash2 className="size-3.5" />
+              </button>
+             </div>
+             {removing === d.token && (
+               <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
+                 <span className="text-[12.5px] text-fg-2">Remove this phone?</span>
+                 <button type="button" className="btn shrink-0 border-bad/40 bg-bad/20 text-fg" onClick={() => { setRemoving(null); remove(d); }}>Remove</button>
+                 <button type="button" className="btn-ghost shrink-0" onClick={() => setRemoving(null)}>Keep</button>
+               </div>
+             )}
             </div>
           ))
         )}
