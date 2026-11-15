@@ -31,7 +31,7 @@ function Clock() {
   const now = useNow(1000);
   return (
     <span className="font-mono text-[11px] tabular-nums text-fg-3">
-      {fmtClock(now, { seconds: true })}
+      {fmtClock(new Date(now), { seconds: true })}
     </span>
   );
 }
