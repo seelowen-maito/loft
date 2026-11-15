@@ -208,8 +208,8 @@ mod tests {
     async fn starting_a_loop_replaces_the_one_running() {
         let (st, a) = agents::tests::fake_claude_state();
         let go = |interval: &str, prompt: &str| start(State(st.clone()), Path(a.id.clone()), Json(Start { interval: interval.into(), prompt: prompt.into() }));
-        go("10m", "first").await.ok().unwrap();
-        go("2h", "second").await.ok().unwrap();
+        let _ = go("10m", "first").await.ok().unwrap();
+        let _ = go("2h", "second").await.ok().unwrap();
         let l = st.db.get_agent(&a.id).unwrap().unwrap().repeat.unwrap();
         assert_eq!((l.prompt.as_str(), l.interval_minutes), ("second", 120));
         assert!(go("5", "x").await.is_err() && go("5m", "  ").await.is_err());

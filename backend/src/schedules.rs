@@ -226,8 +226,8 @@ mod tests {
     }
 
     #[test]
-    fn a_time_that_does_not_exist_is_skipped_not_lost() {
-        // Every day 2:30 on a day the clock jumps over it: the day is skipped, the next day is found.
+    fn a_repeat_always_finds_a_time_after_now() {
+        // A local time the clock jumps over (a DST gap) has no instant: that day is skipped, the next day is used.
         let t = NaiveTime::from_hms_opt(2, 30, 0).unwrap();
         let from = at(12, 10, 0);
         let n = next_occurrence("day", t, from).unwrap();
