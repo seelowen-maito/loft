@@ -7,7 +7,12 @@ import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtInterval, fmtQuiet, fmtSchedule, nextRunText } from "../../lib/format";
+import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
+import { Callout, ErrorLine, ResultLine } from "../../components/Callout";
+import { ActionButton } from "../../components/ActionButton";
+import { errorText, useAction } from "../../lib/useAction";
+import { fmtClock, fmtDate, fmtDuration, fmtDayTime, nextRunText } from "../../lib/time";
+import { useNow } from "../../lib/useNow";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
@@ -123,8 +128,26 @@ export function Chat({
   const { text, setText, attachments, setAttachments, images, taskId, setTaskId, putDraft, removeImage } = useDraft(agent.id);
   const commands = useCommands(agent.id, !!agent.running);
   const commandNames = useMemo(() => commands.map((c) => c.name), [commands]);
-  const [sending, setSending] = useState(false);
+  const sending = useAction();
+  const stop = useAction();
+  const wake = useAction();
+  const clear = useAction();
+  const restart = useAction();
+  const loopStop = useAction();
+  const scheduleCancel = useAction();
+  // The schedule being cancelled, so its row shows the spinner.
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const [cmdError, setCmdError] = useState<string | null>(null);
+  // Commands' and buttons' errors share the one line under the composer; a new attempt clears it.
+  const clearErrors = () => {
+    setCmdError(null);
+    for (const a of [sending, stop, wake, clear, restart, loopStop, scheduleCancel]) a.setError(null);
+  };
+  const shownError = cmdError ?? sending.error ?? stop.error ?? wake.error ?? clear.error ?? restart.error ?? loopStop.error ?? scheduleCancel.error;
+  const act = <T,>(a: ReturnType<typeof useAction>, fn: () => Promise<T>) => {
+    clearErrors();
+    return a.run(fn);
+  };
   const [cmdNote, setCmdNote] = useState<string | null>(null);
   const [menuIndex, setMenuIndex] = useState(0);
   const [showEarlier, setShowEarlier] = useState(false);
@@ -228,7 +251,7 @@ export function Chat({
     if (shownFor.current !== location.key) stick.current = true;
     setShowEarlier(false);
     drop.reset();
-    setCmdError(null);
+    clearErrors();
     setCmdNote(null);
   }, [agent.id]);
 
@@ -249,21 +272,17 @@ export function Chat({
   }, [text]);
 
   // `keep`: the rest of a message /clear was sent in, left in the composer.
-  const clearContext = async (keep = "") => {
-    setCmdError(null);
-    try {
+  const clearContext = (keep = "") =>
+    act(clear, async () => {
       await api.resetSession(agent.id);
       putDraft(agent.id, { ...EMPTY_DRAFT, text: keep });
       stick.current = true;
-    } catch (e) {
-      setCmdError((e as Error).message);
-    }
-  };
+    });
 
   // The end-of-planning card: a fresh session, with the suggested next message waiting in the composer, unsent.
   // Stable, so a grill event doesn't re-render every memoized MessageRow.
   const clearWith = useCallback(async (next: string) => {
-    setCmdError(null);
+    clearErrors();
     await api.resetSession(agent.id);
     putDraft(agent.id, { ...EMPTY_DRAFT, text: next });
     stick.current = true;
@@ -271,76 +290,70 @@ export function Chat({
   }, [agent.id]);
 
   const compactContext = async (instructions: string) => {
-    setCmdError(null);
+    clearErrors();
     try {
       await api.compact(agent.id, instructions);
       putDraft(agent.id, EMPTY_DRAFT);
       stick.current = true;
     } catch (e) {
-      setCmdError((e as Error).message);
+      setCmdError(errorText(e));
     }
   };
 
   const loopCommand = async (rest: string) => {
     const l = parseLoop(rest);
     if (!l) return setCmdError("Use /loop 10m <prompt> to repeat a prompt (m, h or d), or /loop stop.");
-    setCmdError(null);
+    clearErrors();
     stick.current = true;
     try {
       if ("stop" in l) await api.loopStop(agent.id);
       else await api.loopStart(agent.id, l.interval, l.prompt);
       putDraft(agent.id, EMPTY_DRAFT);
     } catch (e) {
-      setCmdError((e as Error).message);
+      setCmdError(errorText(e));
     }
   };
 
   const scheduleCommand = async (rest: string) => {
-    setCmdError(null);
+    clearErrors();
     stick.current = true;
     try {
       await api.scheduleAdd(agent.id, rest);
       putDraft(agent.id, EMPTY_DRAFT);
     } catch (e) {
-      setCmdError((e as Error).message);
+      setCmdError(errorText(e));
     }
   };
 
   /** /model, /effort, /cost and /status: Loft answers with a notice in the chat. */
   const infoCommand = async (name: string, arg: string) => {
-    setCmdError(null);
+    clearErrors();
     stick.current = true;
     try {
       await api.agentCommand(agent.id, name, arg);
       putDraft(agent.id, EMPTY_DRAFT);
     } catch (e) {
-      setCmdError((e as Error).message);
+      setCmdError(errorText(e));
     }
   };
 
   const openEditor = async (keep = "") => {
-    setCmdError(null);
+    clearErrors();
     try {
       const r = await api.openEditor(agent.id);
       putDraft(agent.id, { ...loadDraft(agent.id), text: keep });
       setCmdNote(r.url ? `Opening ${r.path} in VS Code over Remote-SSH` : `Opened ${r.path} in VS Code`);
     } catch (e) {
-      setCmdError((e as Error).message);
+      setCmdError(errorText(e));
     }
   };
 
-  const startGrill = async (topic: string) => {
-    setSending(true);
-    setCmdError(null);
+  const startGrill = (topic: string) => {
     stick.current = true;
-    try {
+    return act(sending, async () => {
       await api.grillStart(agent.id, topic ? `Grill me on ${topic}` : "Grill me");
       putDraft(agent.id, { ...loadDraft(agent.id), text: "" });
-    } catch (e) {
-      setCmdError((e as Error).message);
-    } finally {
-      setSending(false);
-    }
+    });
   };
 
   // `keep`: the rest of the message the command was sent in, put back in the composer once it has run.
@@ -394,17 +407,11 @@ export function Chat({
     if (!v && images.length === 0) return;
     if (uploading || failed) return;
     if (images.length > 0) {
-      setSending(true);
-      setCmdError(null);
       stick.current = true;
-      try {
+      await act(sending, async () => {
         await api.send(agent.id, v, images, taskId ?? undefined);
         putDraft(agent.id, EMPTY_DRAFT);
-      } catch (e) {
-        setCmdError((e as Error).message);
-      } finally {
-        setSending(false);
-      }
+      });
       return;
     }
     // The message's one command, leading or picked wherever it sits: /compact and /grill take the rest as their
@@ -419,40 +426,17 @@ export function Chat({
     // A command the CLI knows, typed first, goes to it as the message ("/review 12"); a terminal-only one doesn't.
     const known = cmd && commands.find((c) => c.name === cmd.command);
     if (cmd && known?.tag !== "passthrough") return runCommand(cmd.command, cmd.rest);
-    setSending(true);
-    setCmdError(null);
     stick.current = true;
-    try {
+    await act(sending, async () => {
       await api.send(agent.id, v, [], taskId ?? undefined);
       putDraft(agent.id, EMPTY_DRAFT);
-    } finally {
-      setSending(false);
-    }
+    });
   };
 
   const running = !!agent.running;
   // Re-render every 30 s so the "for N min" counts move while nothing else does.
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!running) return;
-    setNow(Date.now());
-    const t = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(t);
-  }, [running]);
+  const now = useNow(30_000, running);
   const watch = runWatch(agent, messages[messages.length - 1]?.created_at, now);
-  const [restarting, setRestarting] = useState(false);
-  const restart = async () => {
-    setRestarting(true);
-    setCmdError(null);
-    try {
-      await api.restartRun(agent.id);
-      stick.current = true;
-    } catch (e) {
-      setCmdError((e as Error).message);
-    } finally {
-      setRestarting(false);
-    }
-  };
 
   return (
     <div
@@ -500,22 +484,37 @@ export function Chat({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {running ? (
-            <button className="btn" title="Stop" onClick={() => api.stop(agent.id)}>
-              <Square className="size-3 fill-current" /> <span className="max-sm:hidden">Stop</span>
-            </button>
+            <ActionButton
+              variant="secondary"
+              title="Stop"
+              icon={<Square className="size-3 fill-current" />}
+              pending={stop.busy}
+              pendingLabel={<span className="max-sm:hidden">Stopping…</span>}
+              onClick={() => act(stop, () => api.stop(agent.id))}
+            >
+              <span className="max-sm:hidden">Stop</span>
+            </ActionButton>
           ) : (
-            <button className="btn" onClick={() => api.run(agent.id)} title="Wake: run an autonomous check-in now">
-              <Play className="size-3 fill-current" /> <span className="max-sm:hidden">Wake</span>
-            </button>
+            <ActionButton
+              variant="secondary"
+              title="Wake: run an autonomous check-in now"
+              icon={<Play className="size-3 fill-current" />}
+              pending={wake.busy}
+              pendingLabel={<span className="max-sm:hidden">Waking…</span>}
+              onClick={() => act(wake, () => api.run(agent.id))}
+            >
+              <span className="max-sm:hidden">Wake</span>
+            </ActionButton>
           )}
-          <button
-            className="btn-ghost"
+          <ActionButton
+            variant="ghost"
             title="Clear context (/clear). Memory is kept."
+            icon={<RotateCcw className="size-3.5" />}
+            pending={clear.busy}
+            aria-label={clear.busy ? "Clearing context…" : "Clear context"}
             onClick={() => clearContext()}
             disabled={running}
-          >
-            <RotateCcw className="size-3.5" />
-          </button>
+          />
           {headerActions}
         </div>
       </div>
@@ -596,19 +595,41 @@ export function Chat({
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] text-fg">
                   {watch.text}
-                  {watch.kind === "waiting" && <span className="text-fg-3"> · {watch.minutes} min</span>}
+                  {watch.kind === "waiting" && <span className="text-fg-3"> · {fmtDuration(watch.minutes * 60000)}</span>}
                 </div>
                 <div className="truncate font-mono text-[11px] text-fg-3">
                   {watch.kind === "waiting" ? "Already replied. Sending a message stops the run." : "It may be stuck. Restart keeps queued messages."}
                 </div>
               </div>
-              <button className="btn shrink-0" onClick={restart} disabled={restarting} title="Stops this run. Queued messages are kept and run next.">
-                <RefreshCw className={cx("size-3.5", restarting && "animate-spin")} /> Restart
-              </button>
+              <ActionButton
+                variant="secondary"
+                className="shrink-0"
+                icon={<RefreshCw className="size-3.5" />}
+                pending={restart.busy}
+                pendingLabel="Restarting…"
+                onClick={() =>
+                  act(restart, async () => {
+                    await api.restartRun(agent.id);
+                    stick.current = true;
+                  })
+                }
+                title="Stops this run. Queued messages are kept and run next."
+              >
+                Restart
+              </ActionButton>
             </div>
           )}
-          {agent.loop && <LoopBar agent={agent} onError={setCmdError} />}
-          {!!agent.schedules?.length && <ScheduleList agentId={agent.id} list={agent.schedules} onError={setCmdError} />}
+          {agent.loop && <LoopBar agent={agent} stopping={loopStop.busy} onStop={() => act(loopStop, () => api.loopStop(agent.id))} />}
+          {!!agent.schedules?.length && (
+            <ScheduleList
+              list={agent.schedules}
+              cancelling={scheduleCancel.busy ? cancelling : null}
+              onCancel={(sid) => {
+                setCancelling(sid);
+                act(scheduleCancel, () => api.scheduleCancel(agent.id, sid));
+              }}
+            />
+          )}
           <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
           {pickingTask && (
@@ -754,19 +775,19 @@ export function Chat({
               <button className="btn-ghost size-8 justify-center p-0" onClick={() => openTalk(agent.id)} aria-label="Talk" title={`Talk to ${agent.name}`}>
                 <Mic className="size-4" />
               </button>
-              <button
-                className="btn-primary size-8 justify-center p-0"
-                disabled={(!text.trim() && images.length === 0) || uploading || failed || sending}
+              <ActionButton
+                className="size-8 justify-center p-0"
+                icon={<ArrowUp className="size-4" />}
+                pending={sending.busy}
+                disabled={(!text.trim() && images.length === 0) || uploading || failed}
                 onClick={() => send()}
                 aria-label="Send"
                 title={failed ? "Remove the image that failed to upload" : uploading ? "Waiting for images to upload" : undefined}
-              >
-                <ArrowUp className="size-4" />
-              </button>
+              />
             </div>
           </div>
-          {cmdError && <div className="mt-2 text-[12px] text-bad">{cmdError}</div>}
-          {cmdNote && <div className="mt-2 truncate font-mono text-[11.5px] text-good">✓ {cmdNote}</div>}
+          <ErrorLine error={shownError} className="mt-2" />
+          <ResultLine said={cmdNote ? { ok: true, text: cmdNote } : null} className="mt-2 truncate" />
           <div className="mt-2 font-mono text-[10.5px] text-fg-3">@ agents and files · # specs, issues and PRs</div>
           <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
             {/* Mouse down keeps focus in the chat box, so it returns there when the search or sheet closes. */}
@@ -866,7 +887,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex items-center gap-3 py-2">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80">
-          /clear · context cleared, memory kept · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          /clear · context cleared, memory kept · {fmtClock(m.created_at)}
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
       </div>
@@ -877,7 +898,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex items-center gap-3 py-2">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80" title={m.meta?.first_message}>
-          /resume · resumed the Session from {new Date(m.meta?.started_at ?? m.created_at).toLocaleDateString(undefined, { dateStyle: "medium" })} · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          /resume · resumed the Session from {fmtDate(m.meta?.started_at ?? m.created_at)} · {fmtClock(m.created_at)}
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
       </div>
@@ -889,7 +910,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex items-center gap-3 py-2">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-accent/30" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-accent/80">
-          {m.meta?.trigger === "auto" ? "auto-compacted" : "/compact"} · context {k(m.meta?.pre_tokens)} → {k(m.meta?.post_tokens)} tokens · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          {m.meta?.trigger === "auto" ? "auto-compacted" : "/compact"} · context {k(m.meta?.pre_tokens)} → {k(m.meta?.post_tokens)} tokens · {fmtClock(m.created_at)}
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-accent/30" />
       </div>
@@ -901,7 +922,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       <div className="flex items-center gap-3 pt-3">
         <span className="h-px flex-1 bg-line" />
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">
-          {label} · {new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          {label} · {fmtClock(m.created_at)}
         </span>
         <span className="h-px flex-1 bg-line" />
       </div>
@@ -920,10 +941,9 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   }
   if (m.kind === "error") {
     return (
-      <div className="flex items-start gap-2 rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[13px] text-fg-2">
-        <AlertCircle className="mt-0.5 size-4 shrink-0 text-bad" />
+      <Callout tone="bad" icon={<AlertCircle />}>
         <pre className="whitespace-pre-wrap [overflow-wrap:anywhere] font-sans">{m.content}</pre>
-      </div>
+      </Callout>
     );
   }
   if (m.kind === "notice" && m.meta?.plan_task_id) return <PlanCard taskId={m.meta.plan_task_id} agents={agents} />;
@@ -1090,19 +1110,8 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
 }
 
 /** The agent's running /loop, with its Stop. */
-function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => void }) {
+function LoopBar({ agent, stopping, onStop }: { agent: Agent; stopping: boolean; onStop: () => void }) {
   const l = agent.loop!;
-  const [busy, setBusy] = useState(false);
-  const stop = async () => {
-    setBusy(true);
-    try {
-      await api.loopStop(agent.id);
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
   return (
     <div className="mb-3 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2" role="status">
       <RefreshCw className="size-4 shrink-0 text-accent" />
@@ -1112,34 +1121,23 @@ function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => voi
           Looping {fmtInterval(l.interval_minutes)} · {agent.running && new Date(l.next_at).getTime() <= Date.now() ? "next: when this run ends" : nextRunText(l.next_at)}
         </div>
       </div>
-      <button className="btn shrink-0" onClick={stop} disabled={busy}>
-        <Square className="size-3.5" /> Stop
-      </button>
+      <ActionButton variant="secondary" className="shrink-0" icon={<Square className="size-3.5" />} pending={stopping} pendingLabel="Stopping…" onClick={onStop}>
+        Stop
+      </ActionButton>
     </div>
   );
 }
 
 /** The agent's /schedule entries: one summary row that opens to the list, each with its next run and a Cancel. */
-function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNullable<Agent["schedules"]>; onError: (e: string) => void }) {
+function ScheduleList({ list, cancelling, onCancel }: { list: NonNullable<Agent["schedules"]>; cancelling: string | null; onCancel: (id: string) => void }) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const cancel = async (sid: string) => {
-    setBusy(sid);
-    try {
-      await api.scheduleCancel(agentId, sid);
-    } catch (e) {
-      onError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
   const next = [...list].sort((a, b) => a.next_at.localeCompare(b.next_at))[0];
   return (
     <div className="mb-3 rounded-xl border border-accent/30 bg-accent/[0.07] px-3 py-2">
       <button className="flex w-full items-center gap-3 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
         <Clock className="size-4 shrink-0 text-accent" />
         <span className="min-w-0 flex-1 truncate text-[13px] text-fg">
-          {list.length} schedule{list.length === 1 ? "" : "s"} · next {fmtNext(next.next_at)}
+          {list.length} schedule{list.length === 1 ? "" : "s"} · next {fmtDayTime(next.next_at)}
         </span>
         <ChevronRight className={cx("size-4 shrink-0 text-fg-3 transition-transform", open && "rotate-90")} />
       </button>
@@ -1150,24 +1148,17 @@ function ScheduleList({ agentId, list, onError }: { agentId: string; list: NonNu
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] text-fg">{s.prompt}</div>
                 <div className="font-mono text-[11px] text-fg-3">{s.every ? `Every ${s.every} at ${s.time}` : "Once"}</div>
-                <div className="font-mono text-[11px] text-fg-3">next {fmtNext(s.next_at)}</div>
+                <div className="font-mono text-[11px] text-fg-3">next {fmtDayTime(s.next_at)}</div>
               </div>
-              <button className="btn shrink-0" onClick={() => cancel(s.id)} disabled={busy === s.id}>
+              <ActionButton variant="secondary" className="shrink-0" pending={cancelling === s.id} disabled={!!cancelling} pendingLabel="Cancelling…" onClick={() => onCancel(s.id)}>
                 Cancel
-              </button>
+              </ActionButton>
             </div>
           ))}
         </div>
       )}
     </div>
   );
-}
-
-/** "Mon 09:30", with the date when it's more than 6 days away. */
-function fmtNext(iso: string): string {
-  const d = new Date(iso);
-  const far = d.getTime() - Date.now() > 6 * 86400_000;
-  return d.toLocaleString([], { weekday: "short", ...(far ? { month: "short", day: "numeric" } : {}), hour: "numeric", minute: "2-digit" });
 }
 
 /** Loft commands that answer with a notice: they show or change a setting, or show usage. */

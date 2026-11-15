@@ -4,8 +4,10 @@ import { AlertCircle, ArrowRight, Brain, ChevronDown, ChevronUp, GitMerge, GitPu
 import { api, type AgentSummary, type AgentsSummary } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { byActivity, cardsPerRow } from "../lib/agentRow";
-import { cx, fmtSchedule, timeAgo } from "../lib/format";
+import { cx, fmtSchedule } from "../lib/format";
+import { dayLabel, relTime } from "../lib/time";
 import { costChange, exactDollars, wholeDollars } from "../lib/usage";
+import { NEEDS_YOU_LABEL } from "../lib/taskStatus";
 import { Sticker } from "../components/Sticker";
 import { Tip } from "../components/Charts";
 import { StatusPill } from "./agents/Status";
@@ -20,12 +22,6 @@ function onResize(cb: () => void) {
 
 function sum(a: number[]) {
   return a.reduce((x, y) => x + y, 0);
-}
-
-function dayLabel(offsetFromToday: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - offsetFromToday);
-  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
 function toolName(n: string) {
@@ -153,7 +149,7 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
             <>
               <p className="line-clamp-2 text-[12.5px] leading-relaxed text-fg-2">{reply}</p>
               <div className="mt-1.5 flex justify-between font-mono text-[10.5px] text-fg-3">
-                <span>last reply {timeAgo(s.last_reply!.at)}</span>
+                <span>last reply {relTime(s.last_reply!.at)}</span>
                 <span>{fmtSchedule(a)}</span>
               </div>
             </>
@@ -229,7 +225,7 @@ export function AgentActivity() {
             ) : (
               <>
                 <span className={totals.working ? "text-accent" : "text-fg-2"}>{totals.working} working</span>
-                {totals.waiting > 0 && <span className="text-warn"> · {totals.waiting} waiting on you</span>}
+                {totals.waiting > 0 && <span className="text-warn"> · {NEEDS_YOU_LABEL}: {totals.waiting}</span>}
                 {period && (
                   <span className="text-fg-2">
                     {" "}

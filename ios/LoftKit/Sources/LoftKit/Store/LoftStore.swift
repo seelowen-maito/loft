@@ -124,6 +124,15 @@ public final class LoftStore {
 
     public var supportsNeedsYou: Bool { info?.supports(.needsYou) == true }
 
+    /// The Overview tab's badge (#543): what's new in Needs you, the same number as the app icon and the web.
+    /// Before Needs you, servers fall back to pending approvals plus failed or blocked issues plus failed agents.
+    public var attentionBadge: Int {
+        if supportsNeedsYou { return needsYou?.unseen ?? 0 }
+        return pendingApprovals().count
+            + tasks.filter { $0.state == .failed || $0.state == .blocked }.count
+            + agents.filter { state(of: $0) == .failed }.count
+    }
+
     /// Redraws the widgets; called when Needs you changes, so an item answered here leaves the widget too (spec #462).
     public var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
     /// Redraws the Usage widget; called when the plan's numbers change (#489).
@@ -1132,6 +1141,7 @@ public final class LoftStore {
     public func removePushDevice(token: String) async throws { try await requireWrite().unregisterDevice(token: token) }
     public func herdrStatus() async throws -> JSONValue { try await requireWrite().herdrStatus() }
     public func herdrSetup() async throws -> JSONValue { try await requireWrite().herdrSetup() }
+    public func herdrFocus(agentId: String) async throws { try await requireWrite().herdrFocus(agentId: agentId) }
 
     /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
     public func saveIssueSettings(_ s: IssueSettings) async throws {

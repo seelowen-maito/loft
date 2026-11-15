@@ -52,6 +52,12 @@ struct ChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             ChatHeader(agent: agent, showsSettings: $showsSettings)
+            if let note = nav.chatNote, note.agentId == agent.id {
+                ChatNoteBanner(text: note.text) { nav.chatNote = nil }
+                .accessibilityIdentifier("chatNote")
+                .onDisappear { if nav.chatNote?.agentId == agent.id { nav.chatNote = nil } }  // shown once
+                Divider()
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     if store.historyHasMore[agent.id] == true, !shown.isEmpty {
@@ -442,7 +448,8 @@ private struct Composer: View {
                 .strokeBorder(focused ? Theme.accent.opacity(0.4) : WebTheme.lineStrong))
         }
         .padding(12)
-        .onAppear { focused = true }
+        // Takes the keyboard when the chat opens, but not from the sidebar: ↑/↓ there keep moving between sections.
+        .onAppear { focused = !(NSApp.keyWindow?.firstResponder is NSTableView) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             // Switching away (or a system prompt) can swallow the mouse-up: the mic never stays on behind another app.
             pressing = false
@@ -631,3 +638,34 @@ private struct AttachmentChip: View {
         .overlay(Capsule().strokeBorder(WebTheme.line))
     }
 }
+
+/// The line at the top of a chat that was opened here because Herdr couldn't (`MacNav.chatNote`).
+struct ChatNoteBanner: View {
+    let text: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack {
+            Text(text).font(.callout).foregroundStyle(Theme.attentionInk)
+            Spacer()
+            Button(action: dismiss) { Image(systemName: "xmark") }
+                .buttonStyle(.borderless).accessibilityLabel("Dismiss")
+        }
+        .padding(.horizontal, 24).padding(.vertical, 8)
+    }
+}
+
+#if DEBUG
+/// `-render-chat-note <file.png>`: the banner as a fallback from Herdr shows it, drawn to a PNG, then quits. For screenshots.
+@MainActor
+func renderChatNote(to file: String) {
+    let view = ChatNoteBanner(text: "Opened here: Herdr isn't running.") {}
+        .frame(width: 720).background(Color(white: 0.07)).environment(\.colorScheme, .dark)
+    let renderer = ImageRenderer(content: view)
+    renderer.scale = 2
+    if let tiff = renderer.nsImage?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: file))
+    }
+    NSApp.terminate(nil)
+}
+#endif

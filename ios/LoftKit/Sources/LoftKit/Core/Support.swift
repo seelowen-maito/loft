@@ -133,6 +133,8 @@ public enum Prefs {
     public static let openLoftShortcut = "openLoftShortcut"
     /// Where Enter opens a quick search result on the Mac: "app" or "browser" (⌥Enter opens it in the other).
     public static let quickSearchOpensIn = "quickSearchOpensIn"
+    /// Where Spotlight and quick search's Enter open an agent on the Mac: "loft" (its chat) or "herdr" (its Herdr tab).
+    public static let agentsOpenIn = "agentsOpenIn"
     /// The Mac puts Loft's agents, issues and specs in Spotlight; off clears them from it.
     public static let spotlight = "spotlight"
     /// When the app was last in front: the digest covers what happened since.

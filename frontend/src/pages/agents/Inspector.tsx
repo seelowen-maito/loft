@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Terminal, Trash2, X,
+  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Terminal, Trash2, X,
 } from "lucide-react";
 import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { pendingClick, redrawBusy, redrawClick, type RedrawClick } from "../../lib/redraw";
-import { cx, fmtBytes, timeAgo } from "../../lib/format";
+import { cx, fmtBytes } from "../../lib/format";
+import { relTime } from "../../lib/time";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { GroupInput, ProjectsField } from "./ProjectsField";
@@ -13,6 +14,9 @@ import { projectsOf, withTyped } from "../../lib/team";
 import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
 import { CommandsPanel } from "./CommandsPanel";
+import { ActionButton, DANGER } from "../../components/ActionButton";
+import { ErrorLine } from "../../components/Callout";
+import { errorText, useAction } from "../../lib/useAction";
 
 type Tab = "config" | "permissions" | "memory" | "commands" | "workspace";
 
@@ -135,8 +139,8 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
     seen.current = { model: agent.model, effort: agent.effort };
     setDraft((d) => ({ ...d, model: d.model === prev.model ? agent.model : d.model, effort: d.effort === prev.effort ? agent.effort : d.effort }));
   }, [agent.model, agent.effort]);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const saving = useAction();
+  const [redrawErr, setRedrawErr] = useState<string | null>(null);
   // Redraw: busy from the click until the agent's `redrawing` flag says it's done (it survives a reload and shows in other tabs).
   const [click, setClick] = useState<RedrawClick>(null);
   useEffect(() => {
@@ -150,19 +154,14 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
   const team = draft.group.trim();
 
-  const save = async () => {
-    setSaving(true);
-    setErr(null);
+  const save = () => {
+    setRedrawErr(null);
     setNotice(null);
-    try {
+    return saving.run(async () => {
       const saved = await api.updateAgent(agent.id, draft);
       setTyped("");
       setNotice(saved.notice ?? null);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setSaving(false);
-    }
+    });
   };
 
   return (
@@ -170,20 +169,24 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
       <div className="flex items-center gap-4">
         <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={88} />
         <div className="space-y-2">
-          <button
-            className="btn"
+          <ActionButton
+            variant="secondary"
+            icon={<Paintbrush className="size-3.5" />}
             // One drawing run at a time: a second click would pay for another.
-            disabled={redrawing}
+            pending={redrawing}
+            pendingLabel="Drawing…"
             onClick={() => {
               setClick(redrawClick(agent));
+              setRedrawErr(null);
               api.redrawAvatar(agent.id).catch((e) => {
                 setClick(null);
-                setErr((e as Error).message);
+                setRedrawErr(errorText(e));
               });
             }}
           >
-            {redrawing ? <><Loader2 className="size-3.5 animate-spin" /> Drawing…</> : <><Paintbrush className="size-3.5" /> Redraw</>}
-          </button>
+            Redraw
+          </ActionButton>
+          <ErrorLine error={redrawErr} />
           <p className="text-[11.5px] leading-snug text-fg-3">{agent.name} draws a new sticker from its role, instructions and main project. Its chat and context stay as they are.</p>
         </div>
       </div>
@@ -306,12 +309,12 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
       </Field>
 
       <div className="sticky bottom-0 -mx-5 flex flex-wrap items-center gap-2 border-t border-line bg-ink-900/95 px-5 py-3 backdrop-blur">
-        <button className="btn-primary" disabled={!dirty || saving} onClick={save}>
-          <Save className="size-3.5" /> {saving ? "Saving…" : "Save changes"}
-        </button>
+        <ActionButton icon={<Save className="size-3.5" />} pending={saving.busy} pendingLabel="Saving…" disabled={!dirty} onClick={save}>
+          Save changes
+        </ActionButton>
         {dirty && <button className="btn-ghost" onClick={discard}>Discard</button>}
-        {err && <span className="min-w-0 basis-full break-words text-[12px] text-bad">{err}</span>}
-        {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
+        <ErrorLine error={saving.error} className="min-w-0 basis-full break-words" />
+        {notice && !saving.error && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>
 
       <WorkspaceSize id={agent.id} />
@@ -331,10 +334,12 @@ function WorkspaceSize({ id }: { id: string }) {
   return <div className="text-[12.5px] text-fg-3">Workspace {bytes === null ? "…" : fmtBytes(bytes)}</div>;
 }
 
-function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void }) {
+export function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void }) {
   const [confirm, setConfirm] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [purge, setPurge] = useState(true);
+  const clear = useAction();
+  const remove = useAction();
   const [size, setSize] = useState<number | null>(null);
   useEffect(() => {
     if (confirm) api.workspaceSize(agent.id).then((r) => setSize(r.bytes)).catch(() => {});
@@ -345,8 +350,8 @@ function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void 
       <div className="flex flex-wrap gap-2">
         {clearing ? (
           <span className="flex items-center gap-2">
-            <button className="btn border-bad/40 bg-bad/20 text-fg" onClick={() => api.clearMessages(agent.id).then(() => { setClearing(false); onCleared(); })}>Clear it</button>
-            <button className="btn-ghost" onClick={() => setClearing(false)}>Keep it</button>
+            <ActionButton variant="danger" pending={clear.busy} pendingLabel="Clearing…" onClick={() => clear.run(async () => { await api.clearMessages(agent.id); setClearing(false); onCleared(); })}>Clear it</ActionButton>
+            <button className="btn-ghost" disabled={clear.busy} onClick={() => { clear.setError(null); setClearing(false); }}>Keep it</button>
           </span>
         ) : (
           <button className="btn" onClick={() => setClearing(true)}>Clear chat history</button>
@@ -354,7 +359,7 @@ function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void 
         {agent.builtin ? (
           <span className="self-center text-[12.5px] text-fg-3">{agent.name} comes with Loft and can't be deleted.</span>
         ) : !confirm ? (
-          <button className="btn border-bad/30 text-bad" onClick={() => { setPurge(true); setConfirm(true); }}>
+          <button className={DANGER} onClick={() => { setPurge(true); setConfirm(true); }}>
             <Trash2 className="size-3.5" /> Delete agent
           </button>
         ) : (
@@ -364,22 +369,25 @@ function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void 
               Also delete its workspace{size !== null && ` (frees ${fmtBytes(size)})`}
             </label>
             <div className="flex gap-2">
-              <button className="btn border-bad/40 bg-bad/20 text-fg" onClick={() => api.deleteAgent(agent.id, purge)}>Delete {agent.name}</button>
-              <button className="btn-ghost" onClick={() => setConfirm(false)}>Cancel</button>
+              <ActionButton variant="danger" pending={remove.busy} pendingLabel="Deleting…" onClick={() => remove.run(() => api.deleteAgent(agent.id, purge))}>Delete {agent.name}</ActionButton>
+              <button className="btn-ghost" disabled={remove.busy} onClick={() => { remove.setError(null); setConfirm(false); }}>Cancel</button>
             </div>
           </div>
         )}
       </div>
+      <ErrorLine error={clear.error ?? remove.error} />
     </div>
   );
 }
 
-function ToolList({ title, hint, items, onChange, presets, tone }: {
-  title: string; hint: string; items: string[]; onChange: (v: string[]) => void; presets?: string[]; tone: "good" | "bad";
+/** `saving`: a change is being saved; the list waits for it and shows it on its add button. */
+function ToolList({ title, hint, items, onChange, saving, error, presets, tone }: {
+  title: string; hint: string; items: string[]; onChange: (v: string[]) => void; saving: boolean; error: string | null; presets?: string[]; tone: "good" | "bad";
 }) {
   const [val, setVal] = useState("");
   const add = (v: string) => {
     const t = v.trim();
+    if (saving) return;
     if (t && !items.includes(t)) onChange([...items, t]);
     setVal("");
   };
@@ -394,7 +402,7 @@ function ToolList({ title, hint, items, onChange, presets, tone }: {
         {items.map((t) => (
           <span key={t} title={t} className={cx("chip max-w-full gap-1.5 bg-ink-850 py-1 pr-1", tone === "good" ? "border-good/20" : "border-bad/25")}>
             <span className={cx("truncate", tone === "good" ? "text-fg" : "text-bad")}>{t}</span>
-            <button className="shrink-0 rounded-full p-0.5 text-fg-3 hover:bg-white/10 hover:text-fg" onClick={() => onChange(items.filter((x) => x !== t))} aria-label={`Remove ${t}`}>
+            <button className="shrink-0 rounded-full p-0.5 text-fg-3 hover:bg-white/10 hover:text-fg disabled:opacity-40" disabled={saving} onClick={() => onChange(items.filter((x) => x !== t))} aria-label={`Remove ${t}`}>
               <X className="size-3" />
             </button>
           </span>
@@ -402,12 +410,13 @@ function ToolList({ title, hint, items, onChange, presets, tone }: {
       </div>
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); add(val); }}>
         <input className="input py-1.5 font-mono text-[12px]" placeholder="e.g. Bash(npm test *) or mcp__github" value={val} onChange={(e) => setVal(e.target.value)} />
-        <button className="btn shrink-0" type="submit"><Plus className="size-3.5" /></button>
+        <ActionButton variant="secondary" className="shrink-0" type="submit" icon={<Plus className="size-3.5" />} pending={saving} aria-label={saving ? "Saving…" : `Add to ${title.toLowerCase()}`} />
       </form>
+      <ErrorLine error={error} />
       {presets && (
         <div className="flex flex-wrap gap-1">
           {presets.filter((p) => !items.includes(p)).map((p) => (
-            <button key={p} className="rounded-full border border-dashed border-line-strong px-2 py-0.5 font-mono text-[10.5px] text-fg-3 hover:border-accent/40 hover:text-accent" onClick={() => add(p)}>
+            <button key={p} className="rounded-full border border-dashed border-line-strong px-2 py-0.5 font-mono text-[10.5px] text-fg-3 hover:border-accent/40 hover:text-accent disabled:opacity-40" disabled={saving} onClick={() => add(p)}>
               + {p}
             </button>
           ))}
@@ -419,6 +428,8 @@ function ToolList({ title, hint, items, onChange, presets, tone }: {
 
 function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] }) {
   const save = (patch: Partial<Agent>) => api.updateAgent(agent.id, patch);
+  const allow = useAction();
+  const deny = useAction();
   const [mcpText, setMcpText] = useState(() => JSON.stringify(agent.mcp_servers ?? {}, null, 2));
   const [mcpErr, setMcpErr] = useState<string | null>(null);
   const [mcpSaved, setMcpSaved] = useState(true);
@@ -427,15 +438,14 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
     setMcpSaved(true);
   }, [agent.id, agent.mcp_servers]);
 
-  const saveMcp = async () => {
-    try {
+  const savingMcp = useAction();
+  const saveMcp = () => {
+    setMcpErr(null);
+    return savingMcp.run(async () => {
       const parsed = JSON.parse(mcpText);
       await save({ mcp_servers: parsed });
-      setMcpErr(null);
       setMcpSaved(true);
-    } catch (e) {
-      setMcpErr((e as Error).message);
-    }
+    });
   };
   const addTemplate = (name: string) => {
     try {
@@ -455,7 +465,7 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
     <div className="space-y-7 p-5">
       {pending.length > 0 && (
         <div className="space-y-2">
-          <div className="eyebrow text-warn">Waiting on you</div>
+          <div className="eyebrow text-warn">Needs you</div>
           {pending.map((p) => <PermissionCard key={p.id} req={p} />)}
         </div>
       )}
@@ -464,7 +474,9 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
         title="Allowed tools"
         hint="Used without asking. Anything else is asked in chat, and “Always allow” adds it here."
         items={agent.allowed_tools}
-        onChange={(v) => save({ allowed_tools: v })}
+        onChange={(v) => allow.run(() => save({ allowed_tools: v }))}
+        saving={allow.busy}
+        error={allow.error}
         presets={TOOL_PRESETS}
         tone="good"
       />
@@ -472,7 +484,9 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
         title="Denied tools"
         hint="Always blocked, even when bypassing permissions."
         items={agent.disallowed_tools}
-        onChange={(v) => save({ disallowed_tools: v })}
+        onChange={(v) => deny.run(() => save({ disallowed_tools: v }))}
+        saving={deny.busy}
+        error={deny.error}
         tone="bad"
       />
 
@@ -498,13 +512,13 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
           onChange={(e) => { setMcpText(e.target.value); setMcpSaved(false); }}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <button className="btn-primary" onClick={saveMcp} disabled={mcpSaved}><Save className="size-3.5" /> Save servers</button>
+          <ActionButton icon={<Save className="size-3.5" />} pending={savingMcp.busy} pendingLabel="Saving…" onClick={saveMcp} disabled={mcpSaved}>Save servers</ActionButton>
           <span className="text-[11px] text-fg-3">Templates:</span>
           {Object.keys(MCP_TEMPLATES).map((t) => (
             <button key={t} className="rounded-full border border-dashed border-line-strong px-2 py-0.5 font-mono text-[10.5px] text-fg-3 hover:text-accent" onClick={() => addTemplate(t)}>+ {t}</button>
           ))}
         </div>
-        {mcpErr && <div className="text-[12px] text-bad">{mcpErr}</div>}
+        <ErrorLine error={mcpErr ?? savingMcp.error} />
       </div>
 
       {history.length > 0 && (
@@ -517,10 +531,14 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
   );
 }
 
-function MemoryTab({ agent }: { agent: Agent }) {
+export function MemoryTab({ agent }: { agent: Agent }) {
   const [mems, setMems] = useState<Memory[] | null>(null);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const add = useAction();
+  const forget = useAction();
+  // The memory being forgotten, so its row shows the spinner and the error.
+  const [forgetting, setForgetting] = useState<number | null>(null);
   const [open, setOpen] = useState<Set<number>>(new Set());
   const [q, setQ] = useState("");
   const load = useCallback(() => { api.memories(agent.id).then(setMems); }, [agent.id]);
@@ -532,11 +550,12 @@ function MemoryTab({ agent }: { agent: Agent }) {
       <p className="text-[12.5px] leading-relaxed text-fg-2">
         Long-term memory is private to {agent.name}. It survives new sessions and is loaded when a session starts, so what you add or delete here reaches the agent's prompt from its next session. The agent writes here with its <code className="font-mono text-[11.5px]">remember</code> tool.
       </p>
-      <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); if (title.trim()) api.addMemory(agent.id, title, body).then(() => { setTitle(""); setBody(""); }); }}>
+      <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); if (title.trim()) add.run(async () => { await api.addMemory(agent.id, title, body); setTitle(""); setBody(""); }); }}>
         <div className="flex gap-2">
           <input className="input" placeholder="Teach it something: a one-line title" value={title} onChange={(e) => setTitle(e.target.value)} />
-          <button className="btn shrink-0" type="submit" disabled={!title.trim()} aria-label="Add memory"><Plus className="size-3.5" /></button>
+          <ActionButton variant="secondary" className="shrink-0" type="submit" icon={<Plus className="size-3.5" />} pending={add.busy} disabled={!title.trim()} aria-label={add.busy ? "Adding memory…" : "Add memory"} />
         </div>
+        <ErrorLine error={add.error} />
         {title.trim() && <textarea className="input min-h-[64px] resize-y" placeholder="Details (optional): the agent reads them with recall" value={body} onChange={(e) => setBody(e.target.value)} />}
       </form>
       {(mems?.length ?? 0) > 6 && <input className="input py-1.5" placeholder="Search memories" value={q} onChange={(e) => setQ(e.target.value)} />}
@@ -556,12 +575,19 @@ function MemoryTab({ agent }: { agent: Agent }) {
             {open.has(m.id) && <div className="mt-1.5 whitespace-pre-wrap pl-5 text-[12.5px] leading-relaxed text-fg-2">{m.content}</div>}
             <div className="mt-1.5 flex items-center gap-2 pl-5 font-mono text-[10.5px] text-fg-3">
               <span>#{m.id}</span>
-              <span>{timeAgo(m.created_at)}</span>
+              <span>{relTime(m.created_at)}</span>
               {m.tags && m.tags.split(",").map((t) => <span key={t} className="chip py-0 text-[10px]">{t.trim()}</span>)}
-              <button className="ml-auto opacity-0 transition hover:text-bad group-hover:opacity-100" onClick={() => api.deleteMemory(agent.id, m.id)} aria-label="Forget">
-                <Trash2 className="size-3.5" />
-              </button>
+              <ActionButton
+                variant="bare"
+                className={cx("ml-auto transition hover:text-bad group-hover:opacity-100", forgetting === m.id && (forget.busy || forget.error) ? "opacity-100" : "opacity-0")}
+                icon={<Trash2 className="size-3.5" />}
+                pending={forget.busy && forgetting === m.id}
+                disabled={forget.busy}
+                onClick={() => { setForgetting(m.id); forget.run(() => api.deleteMemory(agent.id, m.id)); }}
+                aria-label={forget.busy && forgetting === m.id ? "Forgetting…" : "Forget"}
+              />
             </div>
+            {forgetting === m.id && <ErrorLine error={forget.error} className="mt-1.5 pl-5" />}
           </li>
         ))}
       </ul>
@@ -571,7 +597,7 @@ function MemoryTab({ agent }: { agent: Agent }) {
 
 function FilesTab({ agent }: { agent: Agent }) {
   const [files, setFiles] = useState<FileEntry[] | null>(null);
-  const [editorErr, setEditorErr] = useState<string | null>(null);
+  const opening = useAction();
   const load = useCallback(() => { api.files(agent.id).then(setFiles); }, [agent.id]);
   useEffect(load, [load]);
   // refresh when a run finishes
@@ -589,13 +615,17 @@ function FilesTab({ agent }: { agent: Agent }) {
           <span className="truncate">{agent.workspace}</span>
           <Copy className="ml-auto size-3.5 shrink-0 text-fg-3 group-hover:text-fg" />
         </button>
-        <button
-          className="btn mt-2"
-          onClick={() => api.openEditor(agent.id).then(() => setEditorErr(null), (e) => setEditorErr((e as Error).message))}
+        <ActionButton
+          variant="secondary"
+          className="mt-2"
+          icon={<Code2 className="size-3.5" />}
+          pending={opening.busy}
+          pendingLabel="Opening…"
+          onClick={() => opening.run(() => api.openEditor(agent.id))}
         >
-          <Code2 className="size-3.5" /> Open in VS Code
-        </button>
-        {editorErr && <div className="mt-1.5 text-[12px] text-bad">{editorErr}</div>}
+          Open in VS Code
+        </ActionButton>
+        <ErrorLine error={opening.error} className="mt-1.5" />
       </div>
       {!files && <div className="skeleton h-40 rounded-xl" />}
       <ul className="font-mono text-[12px]">

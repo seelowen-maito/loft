@@ -6,7 +6,9 @@ import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, MessageS
 import { api, type MirrorSync, type Agent, type Task, type TaskComment } from "../lib/api";
 import { parseFilters, resolveFrom, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
-import { cx, timeAgo } from "../lib/format";
+import { useAgents, useRepos, useTasks } from "../hooks/lists";
+import { cx } from "../lib/format";
+import { fmtDate, fmtDateTime, relTime } from "../lib/time";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
 import { GithubUser } from "../components/GithubUser";
@@ -16,26 +18,18 @@ import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialo
 import { isSpec } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
 import { BoardPage, boardSpecs } from "./SpecBoard";
-import { closesOnEscape } from "../lib/dialogKeys";
+import { Dialog } from "../components/Dialog";
+import { ActionButton } from "../components/ActionButton";
+import { ErrorLine } from "../components/Callout";
+import { useAction } from "../lib/useAction";
+import { TaskStatus } from "../components/TaskStatus";
+import { taskStatus, toneText } from "../lib/taskStatus";
 import { boardIssues, NEEDS_YOU, parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
 import { agentInGroup, groupAgents, groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
-const STATUS_TONE: Record<string, string> = {
-  waiting_approval: "text-warn",
-  blocked: "text-warn",
-  failed: "text-bad",
-  in_progress: "text-accent",
-  ready: "text-info",
-  inbox: "text-fg-3",
-  done: "text-good",
-  cancelled: "text-fg-3",
-};
-
-const statusLabel = (s: string) => (s === "waiting_approval" ? "waiting for you" : s.replace("_", " "));
-
 /** Open or closed, as on GitHub: the green dot, or the purple check (grey when cancelled, like "not planned"). */
 function StateIcon({ task: t, className }: { task: Task; className?: string }) {
-  if (t.state === "open") return <CircleDot className={cx(className, STATUS_TONE[t.status])} aria-label="Open" />;
+  if (t.state === "open") return <CircleDot className={cx(className, toneText(taskStatus(t.status).tone))} aria-label="Open" />;
   return <CircleCheck className={cx(className, t.status === "cancelled" ? "text-fg-3" : "text-merged")} aria-label="Closed" />;
 }
 
@@ -46,9 +40,12 @@ function LabelChip({ name }: { name: string }) {
 export default function TasksPage() {
   const { id: routeId } = useParams();
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState<Task[] | null>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [repos, setRepos] = useState<Record<string, string>>({});
+  const tasks = useTasks().items;
+  const { items: agentList, failed: agentsFailed } = useAgents();
+  const agents = useMemo(() => agentList ?? [], [agentList]);
+  // Which projects have a GitHub repo: only their Loft issues can be published there.
+  const repoList = useRepos().items;
+  const repos = useMemo(() => Object.fromEntries((repoList ?? []).filter((r) => r.github).map((r) => [r.name, r.github!])), [repoList]);
   // The filters live in the URL (lib/issueFilters), so back/forward, reload and shared links keep them.
   // A click is a history step; typing replaces the entry, once it pauses.
   const [params, setParams] = useSearchParams();
@@ -81,33 +78,15 @@ export default function TasksPage() {
     setSyncing(true);
     api.syncIssues().then(setMirror).catch(() => {}).finally(() => setSyncing(false));
   }, []);
-  useEffect(() => {
-    api.tasks().then(setTasks);
-    api.agents().then(setAgents).catch(() => {});
-    // Which projects have a GitHub repo: only their Loft issues can be published there.
-    api.repos().then((rs) => setRepos(Object.fromEntries(rs.filter((r) => r.github).map((r) => [r.name, r.github!])))).catch(() => {});
-    sync();
-  }, [sync]);
+  useEffect(sync, [sync]);
 
   useServerEvents(
     useCallback((e: ServerEvent) => {
-      if (e.type === "task")
-        setTasks((ts) => {
-          if (!ts) return ts;
-          const i = ts.findIndex((t) => t.id === e.task.id);
-          if (i < 0) return [e.task, ...ts];
-          const next = [...ts];
-          next[i] = e.task;
-          return next;
-        });
       // The board reloads the Deliveries once after a burst of changes.
       if (e.type === "task") {
         clearTimeout(reload.current);
         reload.current = setTimeout(loadDeliveries, 1500);
       }
-      if (e.type === "agent_updated") setAgents((as) => (as.some((a) => a.id === e.agent.id) ? as.map((a) => (a.id === e.agent.id ? { ...a, ...e.agent } : a)) : [...as, e.agent]));
-      if (e.type === "agent_deleted") setAgents((as) => as.filter((a) => a.id !== e.agent_id));
-      if (e.type === "task_deleted") setTasks((ts) => ts?.filter((t) => t.id !== e.task_id) ?? ts);
     }, [loadDeliveries]),
   );
   const reload = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -206,6 +185,7 @@ export default function TasksPage() {
         </button>
         {tasks && <span className="font-mono text-[11px] text-fg-3">{count}</span>}
       </div>
+      {agentsFailed && <p className="mt-2 text-[12.5px] text-bad">Couldn't load agents: {agentsFailed}</p>}
     </div>
   );
 
@@ -217,43 +197,8 @@ export default function TasksPage() {
           <BoardPage kept={kept} issues={issues} tasks={tasks} deliveries={deliveries} loaded={deliveriesLoaded} agentById={agentById} params={params} setParams={(n) => setParams(n)} openSpec={(id) => openOnBoard(id)} openTicket={(id) => openOnBoard(id)} />
         )}
       </div>
-      {openId && <Modal onClose={() => openOnBoard(null)}>{detail}</Modal>}
+      {openId && <Dialog title="Issue" size="page" onClose={() => openOnBoard(null)}>{detail}</Dialog>}
       {creating && <NewTaskDialog agents={agents} projects={projects} onClose={() => setCreating(false)} />}
-    </div>
-  );
-}
-
-/** The board's large modal over the full-width board: background click, ✕ or Esc close it; Tab stays inside and focus goes back to the card on close. Full screen at phone width. */
-function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
-  const box = useRef<HTMLDivElement>(null);
-  const close = useRef(onClose);
-  close.current = onClose;
-  useEffect(() => {
-    const from = document.activeElement as HTMLElement | null;
-    box.current?.focus();
-    return () => { if (from?.isConnected) from.focus(); };
-  }, []);
-  const onKey = (e: React.KeyboardEvent) => {
-    const el = e.target as HTMLElement;
-    if (e.key === "Escape") {
-      // Not while a field or another dialog (new issue, confirm…) has it.
-      if (!closesOnEscape(e) || document.querySelectorAll('[role="dialog"]').length > 1) return;
-      e.stopPropagation();
-      close.current();
-    } else if (e.key === "Tab" && box.current) {
-      const f = [...box.current.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')];
-      if (f.length === 0) return e.preventDefault();
-      const first = f[0], last = f[f.length - 1];
-      if (e.shiftKey && (el === first || el === box.current)) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && el === last) { e.preventDefault(); first.focus(); }
-    }
-  };
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-[2px] sm:p-6" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={box} role="dialog" aria-modal="true" aria-label="Issue" tabIndex={-1} onKeyDown={onKey}
-        className="h-full w-full animate-rise overflow-y-auto bg-ink-950 shadow-2xl outline-none sm:h-auto sm:max-h-full sm:max-w-[960px] sm:rounded-2xl sm:border sm:border-line-strong">
-        {children}
-      </div>
     </div>
   );
 }
@@ -322,7 +267,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
             {t.state === "open" ? <CircleDot className="size-3" /> : <CircleCheck className="size-3" />}
             {t.state === "open" ? "Open" : t.status === "cancelled" ? "Closed · not planned" : "Closed"}
           </span>
-          <span className={cx("chip", STATUS_TONE[t.status])}>{statusLabel(t.status)}</span>
+          <TaskStatus status={t.status} variant="chip" />
           {t.priority !== "normal" && <span className={cx("chip", (t.priority === "high" || t.priority === "urgent") && "text-warn")}>{t.priority}</span>}
           {t.project && <span className="chip">{t.project}</span>}
           {t.github && (
@@ -330,8 +275,8 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
               {t.github.repo}#{t.github.number} <ExternalLink className="size-3" />
             </a>
           )}
-          <span className="text-fg-3">created by {creator} · {timeAgo(t.created_at)}</span>
-          {t.due_at && <span className="text-fg-3">· due {new Date(t.due_at).toLocaleDateString()}</span>}
+          <span className="text-fg-3">created by {creator} · {relTime(t.created_at)}</span>
+          {t.due_at && <span className="text-fg-3">· due {fmtDate(t.due_at)}</span>}
         </div>
         {!t.github && (t.labels.length > 0 || t.owner) && (
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-1">
@@ -431,7 +376,7 @@ function OwnedBy({ task: t, agent, deps }: { task: Task; agent?: Agent; deps: Ta
       </section>
       <section className="panel p-4">
         <div className="eyebrow mb-2">In Loft</div>
-        <Fact label="Status"><span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span></Fact>
+        <Fact label="Status"><TaskStatus status={t.status} /></Fact>
         <Fact label="Agent">{agent ? <><Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={18} /> {agent.name}</> : <span className="text-fg-3">nobody yet</span>}</Fact>
         <Fact label="Priority">{t.priority}</Fact>
         <Fact label="When done">closes #{g.number} on GitHub</Fact>
@@ -471,12 +416,12 @@ function TaskLinks({ title, tasks, to }: { title: string; tasks: Task[]; to: (id
 function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
   const name = c.author === "user" ? "You" : agent?.name ?? c.meta.author_name ?? "Agent";
   const gh = c.meta.github?.state;
-  const when = new Date(c.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const when = fmtDateTime(c.created_at);
   if (c.kind === "status") {
     const extra = c.meta.summary || c.meta.error;
     return (
       <li className="flex gap-3 pl-1">
-        <span className={cx("mt-1.5 size-1.5 shrink-0 rounded-full bg-current", STATUS_TONE[c.meta.status ?? ""] ?? "text-fg-3")} />
+        <TaskStatus status={c.meta.status} variant="dot" className="mt-1.5" />
         <div className="min-w-0 flex-1">
           <div className="font-mono text-[11.5px] text-fg-2">
             {c.text} <span className="text-fg-3">· {when}</span>
@@ -523,18 +468,14 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
 /** Approve (optionally after editing) or Keep in Loft, for a comment waiting to go to GitHub. */
 function Approval({ c }: { c: TaskComment }) {
   const [editing, setEditing] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const run = async (f: () => Promise<unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await f();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+  const approve = useAction();
+  const keep = useAction();
+  const busy = approve.busy || keep.busy;
+  // One error line for both: the last action's.
+  const run = (a: ReturnType<typeof useAction>, f: () => Promise<unknown>) => {
+    approve.setError(null);
+    keep.setError(null);
+    a.run(f);
   };
   return (
     <div className="mt-2 space-y-2 border-t border-line pt-2">
@@ -542,12 +483,12 @@ function Approval({ c }: { c: TaskComment }) {
         <textarea value={editing} onChange={(e) => setEditing(e.target.value)} rows={3} aria-label="Text to post" className="w-full resize-y rounded-lg border border-line-strong bg-ink-900 px-2.5 py-1.5 text-[13px] outline-none" />
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <button className="btn-primary" disabled={busy} onClick={() => run(() => api.approveComment(c.task_id, c.id, editing ?? undefined))}>
+        <ActionButton pending={approve.busy} pendingLabel="Posting…" disabled={busy} onClick={() => run(approve, () => api.approveComment(c.task_id, c.id, editing ?? undefined))}>
           {editing === null ? "Approve" : "Post edited"}
-        </button>
+        </ActionButton>
         {editing === null && <button className="btn" disabled={busy} onClick={() => setEditing(c.text)}>Edit first</button>}
-        <button className="btn-ghost" disabled={busy} onClick={() => run(() => api.keepComment(c.task_id, c.id))}>Keep in Loft</button>
-        {error && <span className="text-[12px] text-bad">{error}</span>}
+        <ActionButton variant="ghost" pending={keep.busy} pendingLabel="Saving…" disabled={busy} onClick={() => run(keep, () => api.keepComment(c.task_id, c.id))}>Keep in Loft</ActionButton>
+        <ErrorLine error={approve.error ?? keep.error} />
       </div>
     </div>
   );

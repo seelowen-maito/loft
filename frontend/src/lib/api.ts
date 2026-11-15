@@ -1,4 +1,5 @@
 import type { NeedsYouAction, NeedsYouList } from "./needsYou";
+import { errorText } from "./useAction.ts";
 
 export type Avatar = { svg: string };
 
@@ -330,7 +331,9 @@ export type Memory = { id: number; agent_id: string; title: string; content: str
 export type PermissionRequest = {
   id: string;
   agent_id: string;
-  source: "prompt" | "request";
+  /** prompt: a blocked tool call. request: the agent asked explicitly. questions: an allowed `AskUserQuestion`'s
+   *  questions, answered rather than allowed. */
+  source: "prompt" | "request" | "questions";
   tool_name: string;
   input: Record<string, any>;
   reason: string;
@@ -656,7 +659,7 @@ async function answer<T>(res: Response): Promise<T> {
 /** A grill request's error as text for the user: the 409 codes the server sends when the round was sent or the
  * interview ended elsewhere. Same list as the app's `LoftStore.grillFailure`. */
 export function grillError(e: unknown) {
-  const m = (e as Error).message;
+  const m = errorText(e);
   if (m === "grill_closed") return "This interview has already ended.";
   if (m === "round_closed" || m === "question_closed") return "This round was already sent.";
   return m;
@@ -875,6 +878,7 @@ export const api = {
   pullRequests: (agentId?: string) => req<PullRequest[]>("GET", `/pull-requests${agentId ? `?agent_id=${agentId}` : ""}`),
   refreshPullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/refresh`),
   mergePullRequest: (id: string, method: string) => req<PullRequest>("POST", `/pull-requests/${id}/merge`, { method }),
-  decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string) =>
-    req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule }),
+  /** `answers` answers an `AskUserQuestion` prompt: the pick per question text. */
+  decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string, answers?: Record<string, string>) =>
+    req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule, answers }),
 };

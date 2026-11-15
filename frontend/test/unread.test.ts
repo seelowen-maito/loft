@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupUnread, mergeLoaded, shouldMarkRead, showsUnreadDot, unreadBadge, unreadCount, unreadTitle } from "../src/lib/unread.ts";
+import { groupUnread, shouldMarkRead, showsUnreadDot, unreadBadge, unreadCount, unreadTitle } from "../src/lib/unread.ts";
 
 const dev = { id: "dev", unread_reply: true };
 
@@ -51,15 +51,4 @@ test("the browser tab title shows the count only while there are Unread replies"
   assert.equal(unreadTitle(0), "Loft");
   assert.equal(unreadTitle(3), "(3) Loft");
   assert.equal(unreadTitle(12), "(12) Loft");
-});
-
-test("updates that arrive while the agent list loads win over it", () => {
-  const loaded = [dev, { id: "lead", unread_reply: true }, { id: "rev" }];
-  const fresh = new Map<string, { id: string; unread_reply?: boolean } | null>([
-    ["dev", { id: "dev", unread_reply: false }],
-    ["rev", null],
-    ["new", { id: "new", unread_reply: true }],
-  ]);
-  assert.deepEqual(mergeLoaded(loaded, fresh), [{ id: "dev", unread_reply: false }, { id: "lead", unread_reply: true }, { id: "new", unread_reply: true }]);
-  assert.deepEqual(mergeLoaded(loaded, new Map()), loaded);
 });

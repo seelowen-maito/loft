@@ -67,6 +67,8 @@ fn main() -> anyhow::Result<()> {
         Some(kill_guard::ARG) => kill_guard::hook(),
         // And as their `kill`, `pkill` and `killall`.
         Some(processes::ARG) => processes::cli(),
+        // And as setup.sh's way to sign the build before the background service points at its signed copy.
+        Some(signing::ARG) => signing::cli(),
         _ => {}
     }
     serve()
@@ -167,6 +169,7 @@ fn api_routes() -> Router<AppState> {
         // Herdr UI: Loft's agents in the Herdr terminal multiplexer (herdr.rs, herdr/ at the root).
         .route("/herdr", get(herdr::status))
         .route("/herdr/setup", post(herdr::setup_local))
+        .route("/herdr/focus/{agent_id}", post(herdr::focus))
         .route("/herdr/install.sh", get(herdr::install_script))
         .route("/herdr/files/{name}", get(herdr::file))
         .route("/herdr/bin/{platform}", get(herdr::binary))

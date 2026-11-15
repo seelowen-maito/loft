@@ -3,13 +3,15 @@ import { useNavigate } from "react-router";
 import { ArrowLeft, Hourglass } from "lucide-react";
 import type { Agent, GrillSession } from "../../lib/api";
 import { interviewShows } from "../../lib/interview";
+import { useDialogKeys } from "../../components/Dialog";
 import { GrillBar } from "./GrillBar";
 import { QuestionCard } from "./GrillRound";
 
 /**
  * The open interview on its own page, over everything: the round bar (progress, Send round, Pause, End) and the
  * round's question cards, the same cards the chat shows, so answer Drafts are shared with it. Esc or Back to chat
- * returns; it returns by itself when the interview ends, like the app's.
+ * returns; it returns by itself when the interview ends, like the app's. Not a `Dialog`: it's a page of its own (a
+ * route, full screen, no backdrop), but it keeps a dialog's keys: Esc on the top dialog only, Tab inside, focus back.
  */
 export function InterviewView({ agent, session }: { agent: Agent; session: GrillSession | null }) {
   const navigate = useNavigate();
@@ -18,12 +20,9 @@ export function InterviewView({ agent, session }: { agent: Agent; session: Grill
   const backRef = useRef(back);
   backRef.current = back;
 
-  useEffect(() => {
-    // A handler that already used Esc (the End confirmation, the @ menu) keeps it.
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && !e.isComposing && backRef.current();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  // The End confirmation goes above it; an @ menu that took Esc keeps it.
+  const box = useRef<HTMLDivElement>(null);
+  useDialogKeys(box, () => backRef.current());
 
   // Only an interview seen open here closes the page: on a direct load the session is still on its way.
   const seen = useRef(false);
@@ -33,7 +32,7 @@ export function InterviewView({ agent, session }: { agent: Agent; session: Grill
   }, [shows]);
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-ink-950" role="dialog" aria-modal aria-label="Interview">
+    <div ref={box} tabIndex={-1} className="fixed inset-0 z-50 overflow-y-auto bg-ink-950 outline-none" role="dialog" aria-modal aria-label="Interview">
       {/* Opaque, no backdrop blur: a filter here would trap the End confirmation's fixed overlay inside the header. */}
       <div className="sticky top-0 z-10 border-b border-line bg-ink-950">
         <div className="mx-auto flex max-w-3xl items-center gap-3 px-4 py-3">

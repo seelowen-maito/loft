@@ -139,6 +139,8 @@ public protocol LoftAPI: Sendable {
     /// Settings › Herdr UI: `GET /api/herdr`, and Set up on this machine (`POST /api/herdr/setup`).
     func herdrStatus() async throws -> JSONValue
     func herdrSetup() async throws -> JSONValue
+    /// Shows the agent's tab in Herdr and brings its terminal forward (`POST /api/herdr/focus/{id}`).
+    func herdrFocus(agentId: String) async throws
     /// The agent's "/" menu: `GET /api/agents/{id}/commands`.
     func commands(agentId: String) async throws -> [AgentCommand]
 }
@@ -489,6 +491,7 @@ public struct LiveLoftAPI: LoftAPI {
     public func pushDevices() async throws -> [JSONValue] { try await get("/devices") }
     public func herdrStatus() async throws -> JSONValue { try await get("/herdr") }
     public func herdrSetup() async throws -> JSONValue { try decode(JSONValue.self, try await send("POST", "/herdr/setup", body: [:], timeout: 300)) }
+    public func herdrFocus(agentId: String) async throws { _ = try await send("POST", "/herdr/focus/\(agentId)", body: [:], timeout: 30) }
     public func commands(agentId: String) async throws -> [AgentCommand] { try await get("/agents/\(agentId)/commands") }
 
     public func eventLines() async throws -> AsyncThrowingStream<String, Error> {
@@ -607,5 +610,6 @@ extension LoftAPI {
     public func pushDevices() async throws -> [JSONValue] { throw APIError.unsupported("Push") }
     public func herdrStatus() async throws -> JSONValue { throw APIError.unsupported("Herdr UI") }
     public func herdrSetup() async throws -> JSONValue { throw APIError.unsupported("Herdr UI") }
+    public func herdrFocus(agentId: String) async throws { throw APIError.unsupported("Herdr UI") }
     public func commands(agentId: String) async throws -> [AgentCommand] { [] }
 }

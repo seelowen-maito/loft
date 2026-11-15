@@ -161,6 +161,7 @@ h2 { margin: 12px 0 16px; font-size: clamp(30px, 4.4vw, 46px); line-height: 1.1;
 .feature > * { min-width: 0; }
 .feature + .feature { margin-top: 128px; }
 .feature.flip .copytext { order: 2; }
+.feature.solo { grid-template-columns: minmax(0, 640px); justify-content: center; }
 .feature h3 { margin: 12px 0 14px; font-size: clamp(26px, 3.4vw, 36px); line-height: 1.12; letter-spacing: -.025em; font-weight: 600; }
 .feature p { margin: 0; color: var(--fg-2); font-size: 17px; }
 .feature ul { margin: 22px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
@@ -300,6 +301,14 @@ footer a:hover { color: var(--fg); }
 }
 .shots figcaption { margin-top: 18px; color: var(--fg-2); font-size: 14px; }
 .shots figcaption b { display: block; color: var(--fg); font-size: 16px; font-weight: 500; margin-bottom: 4px; }
+/* the Mac page: window screenshots instead of phones */
+.mac-shot { display: block; width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line-strong); box-shadow: 0 50px 120px -50px rgba(200, 242, 109, .25); }
+.shots.mac { grid-template-columns: repeat(2, 1fr); }
+.shots.mac img { max-width: none; border-radius: 12px; border: 1px solid var(--line-strong); outline: 0; }
+.brief { list-style: none; margin: 48px auto 0; padding: 0; max-width: 860px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 40px; }
+.brief li { color: var(--fg-2); font-size: 15px; }
+.brief b { display: block; color: var(--fg); font-weight: 500; margin-bottom: 2px; }
+kbd { font-family: var(--mono); font-size: .85em; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line-strong); background: var(--ink-800); color: var(--fg); }
 .g-step a, .guide-note a { color: var(--accent); }
 .guide-note { margin-top: 22px; text-align: center; font-size: 14px; color: var(--fg-3); }
 
@@ -315,9 +324,12 @@ footer a:hover { color: var(--fg); }
   .guide, .gallery { margin-top: 72px; }
   .shots { grid-auto-flow: column; grid-template-columns: none; grid-auto-columns: 62%; gap: 20px; overflow-x: auto; scroll-snap-type: x mandatory; padding-bottom: 12px; }
   .shots figure { scroll-snap-align: center; }
+  .shots.mac { grid-template-columns: none; grid-auto-columns: 86%; }
+  .brief { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 560px) {
   .wrap { padding: 0 16px; }
+  .nav-links { gap: 16px; }
   .hero { padding: 48px 0 56px; }
   section { padding: 80px 0; }
   .app { margin-top: 48px; border-radius: 14px; }

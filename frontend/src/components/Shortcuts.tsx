@@ -1,7 +1,8 @@
-import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { CircleDot, ExternalLink, FileText, GitPullRequest, Search, X } from "lucide-react";
 import { api, roleLabel, type Agent, type PullRequest, type Task } from "../lib/api";
+import { useAgents, usePullRequests, useTasks } from "../hooks/lists";
 import { isSpec, specProgress } from "../lib/issueOrder";
 import { cx } from "../lib/format";
 import { teamOf } from "../lib/team";
@@ -10,6 +11,8 @@ import {
   searchRows, SHORTCUTS_CHANGED, switcherAgents, type Combos, type Openable,
 } from "../lib/shortcuts";
 import { statusOf } from "../pages/agents/Status";
+import { Dialog } from "./Dialog";
+import { toast } from "./FloatingBar";
 import { Sticker } from "./Sticker";
 
 const G_WINDOW_MS = 1500;
@@ -18,26 +21,13 @@ const G_WINDOW_MS = 1500;
 export function Shortcuts() {
   const navigate = useNavigate();
   const [open, setOpen] = useState<"switcher" | "sheet" | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   const combos = useRef<Combos>(loadCombos());
   const gAt = useRef(0);
-  const returnTo = useRef<HTMLElement | null>(null);
-  // Focus goes back to where it was, e.g. the chat box.
-  const close = useCallback(() => {
-    setOpen(null);
-    returnTo.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 2500);
-    return () => clearTimeout(t);
-  }, [toast]);
+  const close = useCallback(() => setOpen(null), []);
 
   useEffect(() => {
     const onChanged = () => (combos.current = loadCombos());
     const onOpen = (e: Event) => {
-      returnTo.current = document.activeElement as HTMLElement | null;
       setOpen((e as CustomEvent<Openable>).detail);
     };
     // Capture, so a focused input can't swallow ⌘K first.
@@ -53,10 +43,7 @@ export function Shortcuts() {
       e.preventDefault();
       if (a.type === "switcher" || a.type === "sheet") {
         if (a.type === "switcher" && shown?.getAttribute("aria-label") === SWITCHER) close();
-        else {
-          if (!shown) returnTo.current = document.activeElement as HTMLElement | null;
-          setOpen(a.type);
-        }
+        else setOpen(a.type);
       }
       else if (a.type === "g") gAt.current = Date.now();
       else if (a.type === "go") navigate(a.path);
@@ -70,9 +57,9 @@ export function Shortcuts() {
             if (id) {
               setOpen(null);
               navigate(`/agents/${id}`);
-            } else setToast("Nothing needs you");
+            } else toast("Nothing needs you");
           })
-          .catch(() => setToast("Couldn't load Needs you"));
+          .catch(() => toast("Couldn't load Needs you"));
       }
     };
     window.addEventListener(SHORTCUTS_CHANGED, onChanged);
@@ -89,11 +76,6 @@ export function Shortcuts() {
     <>
       {open === "switcher" && <Switcher onClose={close} />}
       {open === "sheet" && <Sheet combos={combos.current} onClose={close} />}
-      {toast && (
-        <div role="status" className="fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">
-          <div className="rounded-full border border-line-strong bg-ink-850/95 px-4 py-2 text-[13px] text-fg-2 shadow-2xl backdrop-blur">{toast}</div>
-        </div>
-      )}
     </>
   );
 }
@@ -113,44 +95,22 @@ export function Keys({ keys }: { keys: string }) {
   );
 }
 
-/** A dialog's keyboard: Escape closes it from anywhere in it and Tab stays on `stay`. */
-function useDialogKeys(onClose: () => void, stay: RefObject<HTMLElement | null>) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.isComposing) {
-        e.preventDefault();
-        onClose();
-      } else if (e.key === "Tab") {
-        e.preventDefault();
-        stay.current?.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, stay]);
-}
-
 function Sheet({ combos, onClose }: { combos: Combos; onClose: () => void }) {
-  const closeRef = useRef<HTMLButtonElement>(null);
-  useDialogKeys(onClose, closeRef);
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[12vh]">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div role="dialog" data-shortcuts aria-label="Keyboard shortcuts" className="relative max-h-[76vh] w-full max-w-[420px] animate-rise overflow-y-auto rounded-2xl border border-line-strong bg-ink-900 p-5 shadow-2xl">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[15px] font-medium tracking-tight">Keyboard shortcuts</h2>
-          <button ref={closeRef} autoFocus className="btn-ghost" onClick={onClose} aria-label="Close"><X className="size-4" /></button>
-        </div>
-        <ul className="space-y-2">
-          {shortcutRows(combos).map((r) => (
-            <li key={r.label} className="flex items-center justify-between gap-3 text-[13px]">
-              <span className="min-w-0 text-fg-2">{r.label}</span>
-              <Keys keys={r.keys} />
-            </li>
-          ))}
-        </ul>
+    <Dialog title="Keyboard shortcuts" data-shortcuts="" top onClose={onClose} className="p-5">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-[15px] font-medium tracking-tight">Keyboard shortcuts</h2>
+        <button autoFocus className="btn-ghost" onClick={onClose} aria-label="Close"><X className="size-4" /></button>
       </div>
-    </div>
+      <ul className="space-y-2">
+        {shortcutRows(combos).map((r) => (
+          <li key={r.label} className="flex items-center justify-between gap-3 text-[13px]">
+            <span className="min-w-0 text-fg-2">{r.label}</span>
+            <Keys keys={r.keys} />
+          </li>
+        ))}
+      </ul>
+    </Dialog>
   );
 }
 
@@ -170,25 +130,13 @@ const SWITCHER = "Search";
 
 function Switcher({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
-  const [agents, setAgents] = useState<Agent[] | null>(null);
-  const [tasks, setTasks] = useState<Task[] | null>(null);
-  const [prs, setPrs] = useState<PullRequest[] | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [tasksFailed, setTasksFailed] = useState(false);
-  const [prsFailed, setPrsFailed] = useState(false);
+  const { items: agents, failed } = useAgents();
+  const { items: tasks, failed: tasksFailed } = useTasks();
+  const { items: prs, failed: prsFailed } = usePullRequests();
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
   const recent = useMemo(() => loadRecent(), []);
-  useDialogKeys(onClose, inputRef);
-
-  // Loaded once when the switcher opens; typing searches what's here.
-  useEffect(() => {
-    api.agents().then(setAgents).catch(() => setFailed(true));
-    api.tasks().then(setTasks).catch(() => setTasksFailed(true));
-    api.pullRequests().then(setPrs).catch(() => setPrsFailed(true));
-  }, []);
 
   const shown = useMemo<Hit[]>(() => {
     const found = switcherAgents(agents ?? [], query, recent, (a) => roleLabel(a.role));
@@ -223,61 +171,61 @@ function Switcher({ onClose }: { onClose: () => void }) {
   const loading = (tasks === null && !tasksFailed) || (prs === null && !prsFailed);
   const failedNote = tasksFailed && prsFailed ? "issues or pull requests" : tasksFailed ? "issues" : prsFailed ? "pull requests" : null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[12vh]">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div role="dialog" data-shortcuts aria-label={SWITCHER} className="relative flex max-h-[70vh] w-full max-w-[560px] animate-rise flex-col overflow-clip rounded-2xl border border-line-strong bg-ink-900 shadow-2xl">
-        <div className="flex items-center gap-2.5 border-b border-line px-4">
-          <Search className="size-4 shrink-0 text-fg-3" />
-          <input
-            ref={inputRef}
-            autoFocus
-            className="min-w-0 flex-1 bg-transparent py-3.5 text-[14px] outline-none placeholder:text-fg-3"
-            placeholder="Search agents, specs, issues and pull requests…"
-            aria-label="Search agents, specs, issues and pull requests"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                e.preventDefault();
-                const n = shown.length;
-                if (n) setSel((s) => (s + (e.key === "ArrowDown" ? 1 : -1) + n) % n);
-              } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                go(shown[sel]);
-              }
-            }}
-          />
-        </div>
-        <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto p-1.5" role="listbox" aria-label="Results">
-          {failed && <p className="px-3 py-4 text-[12.5px] text-fg-3">Couldn't load agents.</p>}
-          {typed && failedNote && <p className="px-3 py-2 text-[12px] text-fg-3">Couldn't load {failedNote}.</p>}
-          {agents && shown.length === 0 && <p className="px-3 py-4 text-[12.5px] text-fg-3">{!typed ? "No agents yet." : loading ? "Searching…" : "Nothing matches."}</p>}
-          {GROUPS.map((g) => {
-            const hits = shown.flatMap((h, i) => (h.kind === g.kind ? [{ h, i }] : []));
-            if (!hits.length) return null;
-            return (
-              <div key={g.kind} role="group" aria-label={g.label}>
-                {typed && <div className="px-2.5 pb-1 pt-2.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{g.label}</div>}
-                {hits.map(({ h, i }) => (
-                  <button
-                    key={h.key}
-                    data-i={i}
-                    tabIndex={-1}
-                    role="option"
-                    aria-selected={i === sel}
-                    onMouseMove={() => setSel(i)}
-                    onClick={() => go(h)}
-                    className={cx("flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left", i === sel && "bg-white/[0.06]")}
-                  >
-                    <HitRow h={h} />
-                  </button>
-                ))}
-              </div>
-            );
-          })}
-        </div>
+    <Dialog title={SWITCHER} data-shortcuts="" top size="lg" onClose={onClose} className="flex flex-col">
+      <div className="flex items-center gap-2.5 border-b border-line px-4">
+        <Search className="size-4 shrink-0 text-fg-3" />
+        <input
+          autoFocus
+          className="min-w-0 flex-1 bg-transparent py-3.5 text-[14px] outline-none placeholder:text-fg-3"
+          placeholder="Search agents, specs, issues and pull requests…"
+          aria-label="Search agents, specs, issues and pull requests"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              e.preventDefault();
+              const n = shown.length;
+              if (n) setSel((s) => (s + (e.key === "ArrowDown" ? 1 : -1) + n) % n);
+            } else if (e.key === "Escape" && !e.nativeEvent.isComposing) {
+              // The search box is the dialog: Esc in it closes it.
+              e.preventDefault();
+              onClose();
+            } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              go(shown[sel]);
+            }
+          }}
+        />
       </div>
-    </div>
+      <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto p-1.5" role="listbox" aria-label="Results">
+        {failed && <p className="px-3 py-4 text-[12.5px] text-fg-3">Couldn't load agents.</p>}
+        {typed && failedNote && <p className="px-3 py-2 text-[12px] text-fg-3">Couldn't load {failedNote}.</p>}
+        {agents && shown.length === 0 && <p className="px-3 py-4 text-[12.5px] text-fg-3">{!typed ? "No agents yet." : loading ? "Searching…" : "Nothing matches."}</p>}
+        {GROUPS.map((g) => {
+          const hits = shown.flatMap((h, i) => (h.kind === g.kind ? [{ h, i }] : []));
+          if (!hits.length) return null;
+          return (
+            <div key={g.kind} role="group" aria-label={g.label}>
+              {typed && <div className="px-2.5 pb-1 pt-2.5 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{g.label}</div>}
+              {hits.map(({ h, i }) => (
+                <button
+                  key={h.key}
+                  data-i={i}
+                  tabIndex={-1}
+                  role="option"
+                  aria-selected={i === sel}
+                  onMouseMove={() => setSel(i)}
+                  onClick={() => go(h)}
+                  className={cx("flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left", i === sel && "bg-white/[0.06]")}
+                >
+                  <HitRow h={h} />
+                </button>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </Dialog>
   );
 }
 

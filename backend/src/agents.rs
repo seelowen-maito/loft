@@ -264,6 +264,45 @@ pub fn rule_matches(rule: &str, tool: &str, input: &Value) -> bool {
     false
 }
 
+/// Claude Code's multiple-choice question tool. Headless, it reaches the user only through the permission prompt,
+/// whose `updatedInput` must carry the user's `answers`; a plain allow leaves them empty ("The user did not answer").
+/// So once it is allowed (a prompt, or a rule), Loft asks the questions themselves as a second request.
+pub const ASK_TOOL: &str = "AskUserQuestion";
+
+/// The source of that second request: the questions, answered rather than allowed.
+pub const QUESTIONS: &str = "questions";
+
+/// Longest answer Loft takes for one question (chosen labels joined by ", ", plus what's typed under "Other").
+const MAX_ANSWER: usize = 4000;
+
+/// `input` with the user's answers, one per question text (choices joined by ", "). `Ok(Err(why))` tells the agent
+/// the user gave none; `Err` refuses the decision itself (it stays pending), naming what's wrong for the client.
+/// Only answers to this request's questions are kept, and every question needs one.
+fn with_answers(input: &Value, answers: Option<Value>) -> Result<Result<Value, String>> {
+    let Some(answers) = answers.filter(|a| !a.is_null()) else {
+        // An allow from a client that can't show the questions (an older app's plain "Allow").
+        return Ok(Err("The user couldn't answer your questions where they saw them. Ask them in your reply instead and end your run.".into()));
+    };
+    let Some(answers) = answers.as_object() else { anyhow::bail!("answers must be an object of answer text by question text") };
+    let Some(questions) = input.as_object().and_then(|i| i.get("questions")).and_then(Value::as_array) else {
+        anyhow::bail!("this request has no questions to answer: deny it instead")
+    };
+    let mut kept = serde_json::Map::new();
+    for q in questions.iter().filter_map(|q| q["question"].as_str()) {
+        let a = match answers.get(q) {
+            Some(Value::String(a)) if !a.trim().is_empty() => a,
+            Some(Value::String(_)) | None => anyhow::bail!("the question \"{q}\" has no answer"),
+            Some(_) => anyhow::bail!("the answer to \"{q}\" must be text"),
+        };
+        anyhow::ensure!(a.chars().count() <= MAX_ANSWER, "the answer to \"{q}\" is longer than {MAX_ANSWER} characters");
+        kept.insert(q.to_string(), Value::String(a.clone()));
+    }
+    anyhow::ensure!(!kept.is_empty(), "this request has no questions to answer: deny it instead");
+    let mut done = input.clone();
+    done["answers"] = Value::Object(kept);
+    Ok(Ok(done))
+}
+
 /// Rule suggested for "always allow" on a blocked tool call.
 pub fn suggest_rule(tool: &str, input: &Value) -> String {
     match tool {
@@ -343,12 +382,13 @@ pub async fn ask_permission_for(
     let (tx, rx) = oneshot::channel();
     state.rt.lock().unwrap().waiters.insert(req.id.clone(), tx);
     if let Err(e) = state.db.save_permission(&req) {
-        return Decision { allow: false, message: Some(format!("loft error: {e}")) };
+        return Decision { allow: false, message: Some(format!("loft error: {e}")), input: None };
     }
     add_msg(state, agent_id, None, "system", "permission", &req.tool_name, json!({ "request_id": req.id }));
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
     let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
-    set_status(state, agent_id, "waiting", &format!("Waiting for permission: {tool_name}"));
+    let waiting = if source == QUESTIONS { "Waiting for your answers".into() } else { format!("Waiting for permission: {tool_name}") };
+    set_status(state, agent_id, "waiting", &waiting);
 
     let mut pending = Unanswered { state, id: req.id.clone(), answered: false };
     let decision = match tokio::time::timeout(timeout, rx).await {
@@ -356,7 +396,7 @@ pub async fn ask_permission_for(
             pending.answered = true;
             d
         }
-        _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()) },
+        _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()), input: None },
     };
     drop(pending);
     if is_running(state, agent_id) {
@@ -365,15 +405,29 @@ pub async fn ask_permission_for(
     decision
 }
 
-/// Resolve a pending request from the UI. `always` persists the rule into the agent config.
-pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, note: Option<String>) -> Result<PermissionRequest> {
+/// Resolve a pending request from the UI. `always` persists the rule into the agent config. `answers` answers an
+/// `AskUserQuestion` prompt.
+pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, note: Option<String>, answers: Option<Value>) -> Result<PermissionRequest> {
     let mut req = state.db.get_permission(id)?.ok_or_else(|| anyhow::anyhow!("no such request"))?;
     anyhow::ensure!(req.status == "pending", "request already {}", req.status);
     // A kill's rule is the one Loft made from the processes, not one posted with the answer.
     if let Some(r) = rule.filter(|r| !r.trim().is_empty() && req.tool_name != "Kill") {
         req.rule = r.trim().to_string();
     }
-    let allow = decision != "deny";
+    let mut allow = decision != "deny";
+    let (mut note, mut input) = (note, None);
+    let asks = req.source == QUESTIONS;
+    if asks && allow {
+        match with_answers(&req.input, answers)? {
+            Ok(done) => {
+                req.input = done.clone();
+                input = Some(done);
+            }
+            Err(why) => (allow, note) = (false, Some(why)),
+        }
+    } else if asks {
+        note = Some(note.map_or_else(|| "The user chose not to answer your questions.".into(), |n| format!("The user chose not to answer your questions: {n}")));
+    }
     // Explicit requests are always about config, so any grant persists. A kill of a process the agent didn't start
     // saves only a rule naming a program (`Kill(<path>)`), never a bare `Kill`.
     if req.tool_name == "Kill" && decision == "allow_always" {
@@ -381,7 +435,8 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     }
     // A change to a user's checkout is allowed one command at a time: a saved rule would turn the guard off there.
     anyhow::ensure!(!(req.tool_name == "Checkout" && decision == "allow_always"), "a change to your checkout can only be allowed once");
-    let persist = decision == "allow_always" || (allow && req.source == "request");
+    // Answers are for these questions only: they are never saved.
+    let persist = !asks && (decision == "allow_always" || (allow && req.source == "request"));
     req.status = match (allow, persist) {
         (false, _) => "denied",
         (true, true) => "allowed_always",
@@ -403,7 +458,7 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
     let waiter = state.rt.lock().unwrap().waiters.remove(id);
     if let Some(tx) = waiter {
-        let _ = tx.send(Decision { allow, message: note });
+        let _ = tx.send(Decision { allow, message: note, input });
     }
     Ok(req)
 }
@@ -1854,6 +1909,31 @@ pub async fn scheduler(state: AppState) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn answers_keep_only_this_requests_questions_and_need_one_each() {
+        let input = json!({ "questions": [{ "question": "Which store?" }, { "question": "Region?" }] });
+        let refused = |a: Value| with_answers(&input, Some(a)).unwrap_err().to_string();
+        let done = with_answers(&input, Some(json!({ "Which store?": "B2", "Region?": "EU", "rm -rf": "x" }))).unwrap().unwrap();
+        assert_eq!(done["answers"], json!({ "Which store?": "B2", "Region?": "EU" }), "an answer to no question is dropped");
+        assert_eq!(done["questions"], input["questions"]);
+        assert_eq!(refused(json!({ "Which store?": "B2" })), "the question \"Region?\" has no answer");
+        assert_eq!(refused(json!({ "Which store?": "B2", "Region?": " " })), "the question \"Region?\" has no answer");
+        assert_eq!(refused(json!({ "Which store?": "B2", "Region?": ["EU"] })), "the answer to \"Region?\" must be text");
+        assert!(refused(json!({ "Which store?": "B2", "Region?": "E".repeat(MAX_ANSWER + 1) })).contains("longer than 4000 characters"));
+        assert!(refused(json!(["B2", "EU"])).starts_with("answers must be an object"));
+        // No answers at all is an older app's plain allow: the agent hears why, the request isn't refused.
+        assert!(with_answers(&input, None).unwrap().is_err());
+        assert!(with_answers(&input, Some(Value::Null)).unwrap().is_err());
+    }
+
+    #[test]
+    fn answers_to_an_input_without_questions_are_refused_not_a_panic() {
+        for input in [json!("ask me"), json!([1, 2]), json!(7), json!({}), json!({ "questions": "x" }), json!({ "questions": [{ "question": 1 }] })] {
+            let e = with_answers(&input, Some(json!({ "x": "y" }))).unwrap_err().to_string();
+            assert!(e.contains("no questions to answer"), "{input}: {e}");
+        }
+    }
 
     #[test]
     fn prompt_says_background_work_ends_with_the_reply() {

@@ -14,7 +14,7 @@ test("a quiet run started past QUIET_MINUTES is", () => {
   const w = runWatch(run(QUIET_MINUTES + 2, QUIET_MINUTES + 30), ago(QUIET_MINUTES + 60), now);
   assert.equal(w?.kind, "quiet");
   assert.equal(w?.minutes, QUIET_MINUTES + 2);
-  assert.equal(w?.text, `No activity for ${QUIET_MINUTES + 2} min`);
+  assert.equal(w?.text, `No activity for ${QUIET_MINUTES + 2}m 0s`);
 });
 
 test("recent output or a recent message keeps it from being flagged", () => {
@@ -29,4 +29,8 @@ test("an agent that isn't running is never flagged", () => {
 test("waiting on background work reads as waiting, from when it started waiting", () => {
   const w = runWatch({ ...run(30, 30), waiting_on: ["Run the QA suite", "Watch the logs"], waiting_since: ago(4) }, undefined, now);
   assert.deepEqual(w, { kind: "waiting", minutes: 4, text: "Waiting on a background task: Run the QA suite (+1 more)" });
+});
+
+test("a long quiet reads in hours and minutes, like every duration", () => {
+  assert.equal(runWatch({ running: true, last_output_at: ago(135) } as any, undefined, now)?.text, "No activity for 2h 15m");
 });

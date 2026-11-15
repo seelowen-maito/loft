@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
-import { RotateCw } from "lucide-react";
+import { RotateCw, TriangleAlert } from "lucide-react";
 import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
@@ -8,11 +8,19 @@ import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
 import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
+import { SettingsCard } from "../components/SettingsCard";
+import { Callout, ErrorLine } from "../components/Callout";
+import { ActionButton } from "../components/ActionButton";
+import { errorText, useAction } from "../lib/useAction";
+import { FloatingBar } from "../components/FloatingBar";
+import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
-import { cleanLineText, cx, fmtBytes, oneLine, timeAgo } from "../lib/format";
+import { cleanLineText, cx, fmtBytes, oneLine } from "../lib/format";
+import { fmtClock, fmtDateTime, relTime } from "../lib/time";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
+import { usePoll } from "../hooks/usePoll";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
@@ -73,16 +81,11 @@ const SOURCE_LABELS: Record<string, string> = {
 /** What's left of GitHub's hourly limit (shared with the agents' own `gh`), and where Loft's requests went. */
 function GithubUsage() {
   const [b, setB] = useState<GithubBudget | null>(null);
-  useEffect(() => {
-    const load = () => api.githubBudget().then(setB).catch(() => {});
-    load();
-    const id = setInterval(load, 15_000);
-    return () => clearInterval(id);
-  }, []);
-  const at = (s: number) => new Date(s * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  usePoll(() => api.githubBudget().then(setB).catch(() => {}), 15_000);
+  const at = (s: number) => fmtClock(s);
   const rows = Object.entries(b?.by_source ?? {}).sort((x, y) => y[1].requests - x[1].requests);
   return (
-    <Section title="GitHub API">
+    <SettingsCard title="GitHub API">
       {!b || Object.keys(b.resources).length === 0 ? (
         <p className="text-[12.5px] text-fg-3">No answer from GitHub yet since Loft started.</p>
       ) : (
@@ -121,7 +124,7 @@ function GithubUsage() {
           )}
         </div>
       )}
-    </Section>
+    </SettingsCard>
   );
 }
 
@@ -130,65 +133,59 @@ const chip = (on: boolean) => cx("chip text-[12px]", on && "border-accent/40 tex
 /** Backups of Loft's database: the folder (saved with the other settings), the last backup, its error, and Back up now. */
 function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v: string) => void; folderErr: string | null }) {
   const [s, setS] = useState<BackupStatus | null>(null);
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const card = useRef<HTMLDivElement>(null);
+  const backUp = useAction();
   useEffect(() => {
-    api.backups().then((v) => {
-      setS(v);
-      // Needs you links here when backups fail.
-      if (window.location.hash === "#backups") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
-    }).catch((e) => setErr((e as Error).message));
+    api.backups().then(setS).catch((e) => setErr(errorText(e)));
   }, []);
-  const now = async () => {
-    setBusy(true);
+  const now = () => {
     setErr(null);
-    try {
-      setS(await api.backUpNow());
-    } catch (e) {
-      setErr((e as Error).message);
-      // The failure is recorded: show the last good backup next to it.
-      api.backups().then(setS).catch(() => {});
-    } finally {
-      setBusy(false);
-    }
+    backUp.run(async () => {
+      try {
+        setS(await api.backUpNow());
+      } catch (e) {
+        // The failure is recorded: show the last good backup next to it.
+        api.backups().then(setS).catch(() => {});
+        throw e;
+      }
+    });
   };
   const last = s?.last;
   return (
-    <div ref={card} id="backups">
-      <Section title="Backups">
+    <SettingsCard
+      id="backups"
+      title="Backups"
+      action={
+        <ActionButton type="button" variant="secondary" className="shrink-0" pending={backUp.busy} pendingLabel="Backing up…" onClick={now}>
+          Back up now
+        </ActionButton>
+      }
+      error={backUp.error ?? err ?? (s?.error ? `The last backup failed ${relTime(s.error.at)}: ${s.error.message}` : null)}
+      loading={!s && !err && !backUp.error}
+    >
         <div className="flex flex-wrap items-center gap-3">
           <p className="min-w-0 flex-1 text-[13px] text-fg">
             {!s ? " " : last ? (
               <span title={last.path}>
-                Last backup {timeAgo(last.at)} · {new Date(last.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · {(last.bytes / 1e6).toFixed(1)} MB
+                Last backup {relTime(last.at)} · {fmtDateTime(last.at)} · {(last.bytes / 1e6).toFixed(1)} MB
               </span>
             ) : "No backup yet."}
           </p>
-          <button type="button" className="btn shrink-0" disabled={busy} onClick={now}>
-            {busy ? "Backing up…" : "Back up now"}
-          </button>
         </div>
-        {(s?.error || err) && (
-          <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad [overflow-wrap:anywhere]">
-            {err ?? `The last backup failed ${timeAgo(s!.error!.at)}: ${s!.error!.message}`}
-          </p>
-        )}
         <div className="flex flex-wrap gap-2">
           <button type="button" className={chip(folder === "")} aria-pressed={folder === ""} onClick={() => onFolder("")}>This Mac</button>
           {s?.icloud && <button type="button" className={chip(folder === s.icloud)} aria-pressed={folder === s.icloud} onClick={() => onFolder(s.icloud!)}>iCloud Drive</button>}
         </div>
         {s?.icloud && folder === s.icloud && (
-          <p className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
+          <Callout tone="warn" icon={<TriangleAlert />}>
             Backups in iCloud Drive leave this Mac: all your chats and your GitHub token are then stored by Apple. Save to use it.
-          </p>
+          </Callout>
         )}
         <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
           <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
         </Field>
         {folderErr && <p className="text-[12.5px] text-bad [overflow-wrap:anywhere]">{folderErr}</p>}
-      </Section>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -207,13 +204,13 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
     load().then(() => {
       // Needs you links here when the disk is almost full.
       if (window.location.hash === "#workspaces") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
-    }).catch((e) => setErr((e as Error).message));
+    }).catch((e) => setErr(errorText(e)));
   }, []);
   const name = (id: string) => s?.agents.find((a) => a.id === id)?.name ?? `Deleted agent ${id.slice(0, 8)}`;
   const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
   return (
     <div ref={card} id="workspaces">
-      <Section title="Disk">
+      <SettingsCard title="Disk">
         <div className="flex flex-wrap items-center gap-3">
           <p className={cx("min-w-0 flex-1 text-[13px]", low ? "text-warn" : "text-fg")}>
             {!s ? " " : s.free_bytes == null ? "Free space unknown." : `${fmtBytes(s.free_bytes)} free${low ? " · disk almost full" : ""}`}
@@ -222,11 +219,11 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
             Check space
           </Link>
         </div>
-        {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
+        {err && <Callout tone="bad" icon={<TriangleAlert />}>{err}</Callout>}
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
             <span>
-              {last.title || last.what} {timeAgo(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} item{last.removed === 1 ? "" : "s"}
+              {last.title || last.what} {relTime(last.at)} · freed {fmtBytes(last.freed_bytes)} from {last.removed} item{last.removed === 1 ? "" : "s"}
               {last.failed > 0 && <span className="text-bad"> · {last.failed} failed</span>}
             </span>
             <button type="button" className="text-accent hover:underline" onClick={() => setShown(last)}>
@@ -260,18 +257,8 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
         <p className="text-[12px] text-fg-3">
           Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily, a ticket's scratch folder once the ticket is closed, and other scratch and test output in notes after 7 days.
         </p>
-      </Section>
+      </SettingsCard>
       {shown && <CleanLogView log={shown} name={name} onClose={() => setShown(null)} />}
-    </div>
-  );
-}
-
-function Modal({ onClose, children }: { onClose?: () => void; children: React.ReactNode }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div className="panel flex max-h-[85vh] w-full max-w-2xl flex-col gap-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
-        {children}
-      </div>
     </div>
   );
 }
@@ -327,9 +314,9 @@ function Skipped({ skipped, name }: { skipped: CleanSkip[]; name: (id: string) =
 /** A clean's log: each removal (or its error) as it happens, with the running total, then the summary. */
 export function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id: string) => string; onClose: () => void }) {
   return (
-    <Modal onClose={log.running ? undefined : onClose}>
+    <Dialog title={log.running ? "Cleaning" : "Clean log"} size="xl" onClose={log.running ? undefined : onClose} className="flex flex-col gap-4 p-5">
       <div>
-        <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? timeAgo(log.at) : ""}`}</h3>
+        <h3 className="text-[15px] font-medium">{log.running ? log.title || "Cleaning…" : `${log.title || log.what || "Clean"} ${log.at ? relTime(log.at) : ""}`}</h3>
         <p className="mt-1 text-[13px] text-fg-2">
           {log.running && log.lines.length === 0 ? "Removing…" : `Freed ${fmtBytes(log.freed_bytes)} · ${log.removed} removed`} · {log.skipped.length} skipped
           {log.failed > 0 && <span className="text-bad"> · {log.failed} failed</span>}
@@ -360,7 +347,7 @@ export function CleanLogView({ log, name, onClose }: { log: CleanLog; name: (id:
           {log.running ? "Cleaning…" : "Done"}
         </button>
       </div>
-    </Modal>
+    </Dialog>
   );
 }
 
@@ -371,12 +358,12 @@ function Spend() {
     api.agentsSummary().then((r) => setAll(r.all_time)).catch(() => {});
   }, []);
   return (
-    <Section title="Spend">
+    <SettingsCard title="Spend">
       <p className="text-[13px] text-fg" title="Every run since Loft started counting, deleted agents and cleared chats included">
         {all ? `All time: ${all.runs.toLocaleString("en-US")} runs · est. ${exactDollars(all.cost_usd)}` : " "}
       </p>
       <p className="text-[11.5px] text-fg-3">Estimated at API list prices.</p>
-    </Section>
+    </SettingsCard>
   );
 }
 
@@ -448,32 +435,24 @@ function ShortcutSettings() {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="panel space-y-4 p-5">
-      <h2 className="text-[15px] font-medium tracking-tight">{title}</h2>
-      {children}
-    </section>
-  );
-}
-
 export default function SettingsPage() {
   const [view, setView] = useState<SettingsView | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   // Write-only: undefined keeps the saved token, "" clears it.
   const [token, setToken] = useState<string | undefined>(undefined);
-  const [saving, setSaving] = useState(false);
+  const save = useAction();
   const [err, setErr] = useState<string | null>(null);
   const [folderErr, setFolderErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const restartAsk = useAction();
 
   const load = useCallback(() => api.settings().then((v) => {
     setView(v);
     return v;
   }), []);
   useEffect(() => {
-    load().then((v) => setDraft(v.settings)).catch((e) => setErr((e as Error).message));
+    load().then((v) => setDraft(v.settings)).catch((e) => setErr(errorText(e)));
   }, [load]);
   // Keep the running-agents count fresh; it gates the restart.
   useServerEvents(
@@ -483,7 +462,7 @@ export default function SettingsPage() {
   );
 
   if (!view || !draft) {
-    return <div className="mx-auto max-w-3xl px-5 py-8">{err ? <p className="text-bad">{err}</p> : <div className="skeleton h-96 rounded-2xl" />}</div>;
+    return <div className="mx-auto max-w-3xl px-5 py-8">{err ? <ErrorLine error={err} /> : <div className="skeleton h-96 rounded-2xl" />}</div>;
   }
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setDraft({ ...draft, [k]: v });
@@ -491,11 +470,10 @@ export default function SettingsPage() {
   const restartFields = view.restart_fields as string[];
   const dirtyRestart = restartFields.filter((f) => JSON.stringify(draft[f as keyof Settings]) !== JSON.stringify(view.settings[f as keyof Settings]));
 
-  const save = async () => {
-    setSaving(true);
+  const saveAll = () => {
     setErr(null);
     setFolderErr(null);
-    try {
+    save.run(async () => {
       // The backups folder goes on its own, after the rest: a folder the server refuses fails only that field.
       let v = await api.saveSettings({ ...draft, github_token: token, backup_dir: undefined });
       if (draft.backup_dir !== v.settings.backup_dir) {
@@ -503,30 +481,21 @@ export default function SettingsPage() {
           // No github_token: the view's is blank, and blank would clear it.
           v = await api.saveSettings({ ...v.settings, github_token: undefined, backup_dir: draft.backup_dir });
         } catch (e) {
-          setFolderErr((e as Error).message);
+          setFolderErr(errorText(e));
         }
       }
       setView(v);
       setDraft({ ...v.settings, backup_dir: draft.backup_dir });
       setToken(undefined);
       window.dispatchEvent(new CustomEvent(SETTINGS_SAVED, { detail: v.settings }));
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setSaving(false);
-    }
+    });
   };
 
   const restart = async () => {
     setErr(null);
-    try {
-      await api.restart();
-    } catch (e) {
-      setConfirming(false);
-      setErr((e as Error).message);
-      return;
-    }
+    const sent = await restartAsk.run(async () => (await api.restart(), true));
     setConfirming(false);
+    if (!sent) return;
     setRestarting(true);
     // Wait for the new process to answer.
     for (let i = 0; i < 60; i++) {
@@ -549,27 +518,27 @@ export default function SettingsPage() {
         <h1 className="text-[22px] font-medium tracking-tight">Settings</h1>
 
         {(view.pending_restart.length > 0 || restarting) && (
-          <div className="flex items-center gap-3 rounded-2xl border border-warn/25 bg-warn/[0.06] px-4 py-3 text-[13px]">
-            <RotateCw className={cx("size-4 shrink-0 text-warn", restarting && "animate-spin")} />
-            <div className="flex-1 text-fg-2">
-              {restarting ? (
-                "Restarting loft…"
-              ) : (
-                <>
-                  <span className="text-fg">Restart to apply</span> {view.pending_restart.map((f) => LABELS[f] ?? f).join(", ")}.
-                  {running > 0 && <> Waiting for {running} running agent{running > 1 ? "s" : ""} to finish.</>}
-                </>
-              )}
-            </div>
-            {!restarting && (
-              <button className="btn" disabled={running > 0} onClick={() => setConfirming(true)}>
+          <Callout
+            tone="warn"
+            icon={<RotateCw className={cx(restarting && "animate-spin")} />}
+            action={!restarting && (
+              <button className="btn shrink-0" disabled={running > 0} onClick={() => setConfirming(true)}>
                 Restart now
               </button>
             )}
-          </div>
+          >
+            {restarting ? (
+              "Restarting loft…"
+            ) : (
+              <>
+                <span className="text-fg">Restart to apply</span> {view.pending_restart.map((f) => LABELS[f] ?? f).join(", ")}.
+                {running > 0 && <> Waiting for {running} running agent{running > 1 ? "s" : ""} to finish.</>}
+              </>
+            )}
+          </Callout>
         )}
 
-        <Section title="General">
+        <SettingsCard title="General">
           <Field label="Projects folder" hint="Where your git repos live." restart>
             <input className="input font-mono" value={draft.projects_dir} onChange={(e) => set("projects_dir", e.target.value)} />
           </Field>
@@ -596,7 +565,7 @@ export default function SettingsPage() {
               )}
             </div>
           </Field>
-        </Section>
+        </SettingsCard>
 
         <Backups folder={draft.backup_dir ?? ""} onFolder={(v) => set("backup_dir", v)} folderErr={folderErr} />
 
@@ -605,25 +574,25 @@ export default function SettingsPage() {
         <GithubUsage />
         <Spend />
 
-        <Section title="Updates">
+        <SettingsCard title="Updates">
           <Toggle
             on={draft.auto_update}
             onChange={(v) => set("auto_update", v)}
             label="Update automatically"
             hint="Checks for new commits every minute. Installs once no agent is running, then restarts."
           />
-        </Section>
+        </SettingsCard>
 
-        <Section title="Agents">
+        <SettingsCard title="Agents">
           <Toggle
             on={draft.messaging_rules}
             onChange={(v) => set("messaging_rules", v)}
             label="Messaging rules"
             hint="Tells every agent to message other agents only with a finding, report, verdict or request, never thanks or waiting notes."
           />
-        </Section>
+        </SettingsCard>
 
-        <Section title="GitHub issues">
+        <SettingsCard title="GitHub issues">
           <Field label="Comments going to GitHub" hint="Every comment on a GitHub issue waits for your approval unless this says otherwise.">
             <ModeSelect value={draft.comment_approval_default} onChange={(m) => set("comment_approval_default", m)} />
           </Field>
@@ -633,20 +602,20 @@ export default function SettingsPage() {
             label="Publish new Loft issues to GitHub automatically"
             hint="Each new Loft issue in a project with a GitHub repo becomes a GitHub issue right away. Off: it stays in Loft until you press Publish to GitHub."
           />
-        </Section>
+        </SettingsCard>
 
-        <Section title="Navigation">
+        <SettingsCard title="Navigation">
           <Toggle
             on={draft.show_simulator}
             onChange={(v) => set("show_simulator", v)}
             label="Show Simulator"
             hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
           />
-        </Section>
+        </SettingsCard>
 
-        <Section title="Keyboard shortcuts">
+        <SettingsCard title="Keyboard shortcuts">
           <ShortcutSettings />
-        </Section>
+        </SettingsCard>
 
         <HerdrSetup />
 
@@ -659,48 +628,44 @@ export default function SettingsPage() {
 
         <MacAccess />
 
-        {(dirty || err) && (
-          <div className="fixed inset-x-0 bottom-5 z-40 flex justify-center px-4">
-            <div className="flex items-center gap-3 rounded-full border border-line-strong bg-ink-850/95 py-1.5 pl-4 pr-1.5 text-[13px] shadow-2xl backdrop-blur">
-              {err ? (
-                <span className="text-bad">{err}</span>
-              ) : (
-                <span className="text-fg-2">
-                  Unsaved changes{dirtyRestart.length > 0 && <> · {dirtyRestart.map((f) => LABELS[f] ?? f).join(", ")} needs a restart</>}
-                </span>
-              )}
-              {dirty && (
-                <>
-                  <button className="btn-ghost" onClick={() => { setDraft(view.settings); setToken(undefined); setErr(null); }}>
-                    Discard
-                  </button>
-                  <button className="btn-primary" disabled={saving} onClick={save}>
-                    {saving ? "Saving…" : "Save"}
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
+        {(dirty || err || save.error || restartAsk.error) && (
+          <FloatingBar at="bottom">
+            {err || save.error || restartAsk.error ? (
+              <ErrorLine error={save.error ?? restartAsk.error ?? err} />
+            ) : (
+              <span className="text-fg-2">
+                Unsaved changes{dirtyRestart.length > 0 && <> · {dirtyRestart.map((f) => LABELS[f] ?? f).join(", ")} needs a restart</>}
+              </span>
+            )}
+            {dirty && (
+              <>
+                <button className="btn-ghost" onClick={() => { setDraft(view.settings); setToken(undefined); setErr(null); save.setError(null); }}>
+                  Discard
+                </button>
+                <ActionButton pending={save.busy} pendingLabel="Saving…" onClick={saveAll}>
+                  Save
+                </ActionButton>
+              </>
+            )}
+          </FloatingBar>
         )}
 
         {confirming && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setConfirming(false)}>
-            <div className="panel w-full max-w-sm space-y-4 bg-ink-900 p-5" onClick={(e) => e.stopPropagation()}>
-              <h3 className="text-[15px] font-medium">Restart loft?</h3>
-              <p className="text-[13px] text-fg-2">
+          <ConfirmDialog
+            title="Restart loft?"
+            body={
+              <>
                 This applies {view.pending_restart.map((f) => LABELS[f] ?? f).join(", ")}. It takes a few seconds; open tabs reconnect on their own.
                 {running > 0 && <span className="mt-2 block text-warn">{running} agent{running > 1 ? "s are" : " is"} running. Restart once they finish.</span>}
-              </p>
-              <div className="flex justify-end gap-2">
-                <button className="btn-ghost" onClick={() => setConfirming(false)}>
-                  Cancel
-                </button>
-                <button className="btn-primary" disabled={running > 0} onClick={restart}>
-                  Restart
-                </button>
-              </div>
-            </div>
-          </div>
+              </>
+            }
+            confirmLabel="Restart"
+            pendingLabel="Restarting…"
+            pending={restartAsk.busy}
+            disabled={running > 0}
+            onConfirm={restart}
+            onClose={() => setConfirming(false)}
+          />
         )}
       </div>
     </div>

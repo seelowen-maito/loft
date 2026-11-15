@@ -1,29 +1,5 @@
 import type { Agent, CleanItem, CleanLog, GitCheck, QuietWindow } from "./api";
 
-
-export function timeAgo(input: string | number | null | undefined): string {
-  if (input === null || input === undefined || input === "") return "never";
-  const t = typeof input === "number" ? input * 1000 : new Date(input).getTime();
-  const s = Math.round((Date.now() - t) / 1000);
-  const future = s < 0;
-  const a = Math.abs(s);
-  const unit =
-    a < 45 ? "just now"
-    : a < 3600 ? `${Math.round(a / 60)}m`
-    : a < 86400 ? `${Math.round(a / 3600)}h`
-    : a < 86400 * 30 ? `${Math.round(a / 86400)}d`
-    : a < 86400 * 365 ? `${Math.round(a / (86400 * 30))}mo`
-    : `${Math.round(a / (86400 * 365))}y`;
-  if (unit === "just now") return unit;
-  return future ? `in ${unit}` : `${unit} ago`;
-}
-
-/** When a check-in is next: "next in 5m", or "next: any moment" once it is due, overdue or under 45 s away (never "next just now"). */
-export function nextRunText(at: string | number, now = Date.now()): string {
-  const ms = (typeof at === "number" ? at * 1000 : new Date(at).getTime()) - now;
-  return ms < 45_000 ? "next: any moment" : `next ${timeAgo(at)}`;
-}
-
 export function fmtNum(n: number): string {
   if (n >= 10000) return `${(n / 1000).toFixed(0)}k`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;

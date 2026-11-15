@@ -154,6 +154,8 @@ struct ChatView: View {
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: items.last?.id) { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: store.pending(for: agentId).count) { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            // The questions card replaces the permission card: keep it in view.
+            .onChange(of: store.pendingApprovals(for: agentId).map(\.id)) { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: quickAck) { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
         }
         .background(Theme.background)
@@ -308,7 +310,8 @@ struct ChatView: View {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 0) {
                     Text(agent.name).font(.headline)
-                    Text(store.orchestratorId == agent.id ? "Orchestrator · \(state.label)" : "Direct · \(state.label)")
+                    let label = state.label(pending: store.pendingApprovals(for: agent.id))
+                    Text(store.orchestratorId == agent.id ? "Orchestrator · \(label)" : "Direct · \(label)")
                         .font(.caption2)
                         .foregroundStyle(state.color)
                 }

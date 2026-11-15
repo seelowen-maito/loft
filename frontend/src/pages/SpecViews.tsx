@@ -3,7 +3,7 @@ import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { specProgress } from "../lib/issueOrder";
-import { badgeText, deliveryOf, stageOf, ticketLabel, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
+import { badgeText, deliveryWaits, deliveryOf, stageOf, ticketState, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
 import { DeliveryLine } from "../components/DeliveryLine";
 
 /* Pieces shared by the Issues page's Specs board (./SpecBoard) and a spec's own page, which opens with its Delivery timeline (`SpecPanel`). */
@@ -35,6 +35,11 @@ export function Bar({ done, total, stage }: { done: number; total: number; stage
   );
 }
 
+/** The "Needs you" and "waiting for the Lead" lines of a Delivery, the same on the spec panel and the Delivery card. */
+export function DeliveryWaits({ d, className }: { d: { waiting_on_you?: number[]; waiting_for_lead?: number[] } | null; className?: string }) {
+  return <>{deliveryWaits(d).map((l) => <div key={l.text} className={cx(TONE_TEXT[l.tone], className)}>{l.text}</div>)}</>;
+}
+
 export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Map<string, Agent> }) {
   const running = d?.tickets.filter((t) => t.agent_id) ?? [];
   // Waiting for CI: no agent is on it, Loft follows its CI on GitHub.
@@ -54,21 +59,19 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
       {onCi.map((t) => (
         <div key={t.number} className="flex min-w-0 items-center gap-1.5">
           <span className="min-w-0 truncate"><span className="font-mono text-[10.5px] text-fg-3">#{t.number}</span> {t.title}</span>
-          <span className="shrink-0 font-mono text-[10.5px] text-accent">{ticketLabel(t.state, t.waiting_on, true).text}</span>
+          <span className={cx("shrink-0 font-mono text-[10.5px]", TONE_TEXT[ticketState(t).tone])}>{ticketState(t).text}</span>
           <span className="shrink-0 font-mono text-[10px] text-fg-3" title="ci: pending">ci …</span>
         </div>
       ))}
-      {!!d.waiting_on_you?.length && <div className="text-warn">Waiting on you: {d.waiting_on_you.map((n) => `#${n}`).join(", ")}</div>}
-      {!!d.waiting_for_lead?.length && <div className="text-warn">Waiting for the Lead: {d.waiting_for_lead.map((n) => `#${n}`).join(", ")}</div>}
+      <DeliveryWaits d={d} />
     </div>
   );
 }
 
 const prUrl = (spec: Task, d: DeliverySummary | null) => (d?.pr && spec.github ? `https://github.com/${spec.github.repo}/pull/${d.pr}` : null);
 
-function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number]; current: boolean; open?: () => void }) {
-  // A ticket its Dev reported waiting says so, with what on in its tooltip.
-  const l = t.waiting ? { text: "waiting", tone: "muted" as const } : ticketLabel(t.state, t.waiting_on, t.waiting_for_ci);
+function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number] & { waiting_for_lead?: boolean }; current: boolean; open?: () => void }) {
+  const l = ticketState(t);
   const row = "flex w-full items-center gap-2 py-0.5 text-left text-[12.5px]";
   const body = (
     <>
@@ -114,7 +117,7 @@ export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTi
             </div>
           )}
           <ol className="relative ml-2 border-l border-line pl-4">
-            {d.tickets.map((t, i) => <TicketLine key={t.number} t={t} current={!!t.agent_id} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
+            {d.tickets.map((t, i) => <TicketLine key={t.number} t={{ ...t, waiting_for_lead: !!d.waiting_for_lead?.includes(t.number) }} current={!!t.agent_id} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
           </ol>
         </>
       )}

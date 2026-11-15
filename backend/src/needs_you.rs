@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::api::{ApiError, not_found};
-use crate::db::{Agent, Message, Task};
+use crate::db::{Agent, Message, PermissionRequest, Task};
 use crate::state::{AppState, Event};
 
 /// A run quiet this long counts as possibly stuck (the clients' watchdog uses the same).
@@ -197,7 +197,36 @@ fn permission_text(tool: &str, input: &Value) -> String {
         }
         "Edit" | "Write" | "MultiEdit" | "Read" => s("file_path"),
         "WebFetch" => s("url"),
+        crate::agents::ASK_TOOL => question_texts(input).join("\n"),
         _ => serde_json::to_string_pretty(input).unwrap_or_default(),
+    }
+}
+
+/// What an `AskUserQuestion` call asks, one line per question.
+fn question_texts(input: &Value) -> Vec<String> {
+    input["questions"].as_array().into_iter().flatten().filter_map(|q| q["question"].as_str().map(String::from)).collect()
+}
+
+/// An agent's multiple-choice questions, once it may ask them: answered on its chat, where the options show.
+fn questions_item(p: &PermissionRequest, who: Option<(String, String)>, project: Option<String>) -> Item {
+    let asked = question_texts(&p.input);
+    let name = who.as_ref().map_or("An agent", |w| w.1.as_str()).to_string();
+    Item {
+        id: format!("permission:{}", p.id),
+        kind: "permission",
+        urgency: 3,
+        title: text(&format!("{name} has questions for you"), MAX_TITLE),
+        reason: text("Answer them in the chat.", MAX_REASON),
+        text: text(&asked.join("\n"), MAX_TEXT),
+        agent: who,
+        task_id: None,
+        created_at: p.created_at.clone(),
+        links: vec![],
+        actions: vec![open_chat(&p.agent_id), action("deny", "Skip", "POST", format!("/api/permissions/{}", p.id), json!({ "decision": "deny" }))],
+        // Fixed text: the questions can hold anything the agent read, and a push leaves the machine.
+        push: (format!("{name} has questions for you"), "Open the chat to answer".into()),
+        project,
+        pr: None,
     }
 }
 
@@ -214,6 +243,10 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for p in state.db.list_permissions(None).map_err(e)?.into_iter().filter(|p| p.status == "pending") {
         let who = name(&p.agent_id);
         let base = format!("/api/permissions/{}", p.id);
+        if p.source == crate::agents::QUESTIONS {
+            items.push(questions_item(&p, who, agent_project(&p.agent_id)));
+            continue;
+        }
         // A kill with no program to name has no rule to save, so no Always; a change to the user's checkout is only
         // ever allowed once.
         let always = match p.tool_name.as_str() {
@@ -1241,6 +1274,30 @@ mod tests {
         let (_, v) = tick_lists(&st).unwrap();
         emit_if_changed(&st, &v);
         assert_eq!(events(), 1, "the mark emits at once, and the next tick doesn't send it again");
+    }
+
+    #[tokio::test]
+    async fn questions_are_answered_on_the_chat_not_allowed() {
+        let st = state();
+        let dev = agent(&st, "Dev");
+        st.db.save_permission(&PermissionRequest {
+            id: "q1".into(), agent_id: dev.id.clone(), source: crate::agents::QUESTIONS.into(), tool_name: crate::agents::ASK_TOOL.into(),
+            input: json!({ "questions": [{ "question": "Which store?" }, { "question": "Which region?" }] }),
+            reason: String::new(), rule: String::new(), status: "pending".into(), created_at: now(),
+        }).unwrap();
+        let items = collect(&st).unwrap();
+        let q = &items[0];
+        assert_eq!((q.title.as_str(), q.text.as_str()), ("Dev has questions for you", "Which store?\nWhich region?"));
+        let labels: Vec<&str> = q.actions.iter().filter_map(|a| a["label"].as_str()).collect();
+        assert_eq!(labels, ["Open chat", "Skip"], "no Allow: it would answer nothing");
+        assert_eq!(q.push, ("Dev has questions for you".to_string(), "Open the chat to answer".to_string()), "the push never carries the questions");
+
+        // Before that, the permission to ask lists the questions too.
+        st.db.save_permission(&PermissionRequest { id: "q0".into(), source: "prompt".into(), rule: crate::agents::ASK_TOOL.into(), ..st.db.get_permission("q1").unwrap().unwrap() }).unwrap();
+        let items = collect(&st).unwrap();
+        let p = items.iter().find(|i| i.id == "permission:q0").unwrap();
+        assert_eq!((p.title.as_str(), p.text.as_str()), ("Dev wants to use AskUserQuestion", "Which store?\nWhich region?"));
+        assert_eq!(p.actions[0]["label"], "Allow once");
     }
 
     #[tokio::test]

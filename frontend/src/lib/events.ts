@@ -58,6 +58,19 @@ export function useServerEvents(fn: Listener) {
   }, [fn]);
 }
 
+/** Listens to the live event stream for the page's lifetime (a shared store). */
+export function onServerEvent(fn: Listener) {
+  connect();
+  listeners.add(fn);
+}
+
+/** Tells `fn` each time the event stream opens or drops, for the page's lifetime. */
+export function onConnection(fn: (live: boolean) => void) {
+  connect();
+  statusListeners.add(() => fn(connected));
+  if (connected) fn(true);
+}
+
 export function useLiveConnection() {
   useEffect(connect, []);
   return useSyncExternalStore(
