@@ -31,12 +31,13 @@ public struct AgentSchedule: Codable, Hashable, Identifiable {
         return String(format: "%02d:%02d", h, m)
     }
 
-    /// A next-run time as "Tue 13 Oct 08:00", the same for a loop and a schedule.
-    public static func nextLabel(_ date: Date, timeZone: TimeZone = .current) -> String {
+    /// A next-run time as "Tue, 13 Oct, 08:00": the same short shape for a loop and a schedule, in the user's
+    /// locale (so 12 or 24 hour and the language follow the phone).
+    public static func nextLabel(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
         let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
+        f.locale = locale
         f.timeZone = timeZone
-        f.dateFormat = "EEE d MMM HH:mm"
+        f.setLocalizedDateFormatFromTemplate("EEEdMMMjmm")
         return f.string(from: date)
     }
 }

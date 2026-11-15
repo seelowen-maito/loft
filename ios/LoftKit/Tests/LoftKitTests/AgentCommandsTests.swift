@@ -72,6 +72,10 @@ final class AgentCommandsTests: XCTestCase {
         let s = try JSONCoding.decoder.decode(AgentSchedule.self, from: Data(json.utf8))
         XCTAssertEqual(s.repeatLabel, "Every weekday 08:00")
         XCTAssertEqual(AgentSchedule(id: "o", prompt: "p", nextAt: s.nextAt).repeatLabel, "Once")
-        XCTAssertEqual(AgentSchedule.nextLabel(s.nextAt, timeZone: TimeZone(identifier: "UTC")!), "Tue 13 Oct 08:00")
+        let utc = TimeZone(identifier: "UTC")!
+        let us = AgentSchedule.nextLabel(s.nextAt, locale: Locale(identifier: "en_US"), timeZone: utc)
+        XCTAssertTrue(us.contains("8:00") && us.contains("AM") && us.contains("Oct"), us)
+        let de = AgentSchedule.nextLabel(s.nextAt, locale: Locale(identifier: "de_DE"), timeZone: utc)
+        XCTAssertTrue(de.contains("08:00") && de.contains("Okt") && !de.contains("AM"), de)
     }
 }

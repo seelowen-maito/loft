@@ -1020,7 +1020,25 @@ private struct LoopScheduleBar: View {
         minutes % 1440 == 0 ? "\(minutes / 1440)d" : minutes % 60 == 0 ? "\(minutes / 60)h" : "\(minutes)m"
     }
 
+    // At the largest text sizes the rows would fill the screen: the bar stops growing at this height and scrolls.
+    @ScaledMetric(relativeTo: .body) private var maxHeight: CGFloat = 130
+    @State private var contentHeight: CGFloat = 0
+
     var body: some View {
+        ScrollView {
+            rows
+                .background(GeometryReader { g in Color.clear.preference(key: BarHeightKey.self, value: g.size.height) })
+        }
+        .onPreferenceChange(BarHeightKey.self) { contentHeight = $0 }
+        .frame(height: contentHeight == 0 ? nil : min(contentHeight, min(maxHeight, 220)))
+        .scrollBounceBehavior(.basedOnSize)
+        .padding(10)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("loopSchedules")
+    }
+
+    private var rows: some View {
         VStack(spacing: 8) {
             if let l = agent.loop {
                 HStack(spacing: 8) {
@@ -1045,11 +1063,12 @@ private struct LoopScheduleBar: View {
                 }
             }
         }
-        .padding(10)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("loopSchedules")
     }
+}
+
+private struct BarHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 /// "Send to Web Dev?" above the composer. A tap sends the message there; nothing goes without it.
