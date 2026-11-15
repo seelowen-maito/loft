@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
-import { RotateCw } from "lucide-react";
+import { RotateCw, TriangleAlert } from "lucide-react";
 import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
@@ -9,6 +9,8 @@ import { MacAccess } from "./MacAccess";
 import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { SettingsCard } from "../components/SettingsCard";
+import { Callout } from "../components/Callout";
+import { FloatingBar } from "../components/FloatingBar";
 import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
@@ -174,9 +176,9 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
           {s?.icloud && <button type="button" className={chip(folder === s.icloud)} aria-pressed={folder === s.icloud} onClick={() => onFolder(s.icloud!)}>iCloud Drive</button>}
         </div>
         {s?.icloud && folder === s.icloud && (
-          <p className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
+          <Callout tone="warn" icon={<TriangleAlert />}>
             Backups in iCloud Drive leave this Mac: all your chats and your GitHub token are then stored by Apple. Save to use it.
-          </p>
+          </Callout>
         )}
         <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
           <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
@@ -216,7 +218,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
             Check space
           </Link>
         </div>
-        {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
+        {err && <Callout tone="bad" icon={<TriangleAlert />}>{err}</Callout>}
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
             <span>
@@ -524,24 +526,24 @@ export default function SettingsPage() {
         <h1 className="text-[22px] font-medium tracking-tight">Settings</h1>
 
         {(view.pending_restart.length > 0 || restarting) && (
-          <div className="flex items-center gap-3 rounded-2xl border border-warn/25 bg-warn/[0.06] px-4 py-3 text-[13px]">
-            <RotateCw className={cx("size-4 shrink-0 text-warn", restarting && "animate-spin")} />
-            <div className="flex-1 text-fg-2">
-              {restarting ? (
-                "Restarting loft…"
-              ) : (
-                <>
-                  <span className="text-fg">Restart to apply</span> {view.pending_restart.map((f) => LABELS[f] ?? f).join(", ")}.
-                  {running > 0 && <> Waiting for {running} running agent{running > 1 ? "s" : ""} to finish.</>}
-                </>
-              )}
-            </div>
-            {!restarting && (
-              <button className="btn" disabled={running > 0} onClick={() => setConfirming(true)}>
+          <Callout
+            tone="warn"
+            icon={<RotateCw className={cx(restarting && "animate-spin")} />}
+            action={!restarting && (
+              <button className="btn shrink-0" disabled={running > 0} onClick={() => setConfirming(true)}>
                 Restart now
               </button>
             )}
-          </div>
+          >
+            {restarting ? (
+              "Restarting loft…"
+            ) : (
+              <>
+                <span className="text-fg">Restart to apply</span> {view.pending_restart.map((f) => LABELS[f] ?? f).join(", ")}.
+                {running > 0 && <> Waiting for {running} running agent{running > 1 ? "s" : ""} to finish.</>}
+              </>
+            )}
+          </Callout>
         )}
 
         <SettingsCard title="General">
@@ -635,27 +637,25 @@ export default function SettingsPage() {
         <MacAccess />
 
         {(dirty || err) && (
-          <div className="fixed inset-x-0 bottom-5 z-40 flex justify-center px-4">
-            <div className="flex items-center gap-3 rounded-full border border-line-strong bg-ink-850/95 py-1.5 pl-4 pr-1.5 text-[13px] shadow-2xl backdrop-blur">
-              {err ? (
-                <span className="text-bad">{err}</span>
-              ) : (
-                <span className="text-fg-2">
-                  Unsaved changes{dirtyRestart.length > 0 && <> · {dirtyRestart.map((f) => LABELS[f] ?? f).join(", ")} needs a restart</>}
-                </span>
-              )}
-              {dirty && (
-                <>
-                  <button className="btn-ghost" onClick={() => { setDraft(view.settings); setToken(undefined); setErr(null); }}>
-                    Discard
-                  </button>
-                  <button className="btn-primary" disabled={saving} onClick={save}>
-                    {saving ? "Saving…" : "Save"}
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
+          <FloatingBar at="bottom">
+            {err ? (
+              <span role="alert" className="text-bad">{err}</span>
+            ) : (
+              <span className="text-fg-2">
+                Unsaved changes{dirtyRestart.length > 0 && <> · {dirtyRestart.map((f) => LABELS[f] ?? f).join(", ")} needs a restart</>}
+              </span>
+            )}
+            {dirty && (
+              <>
+                <button className="btn-ghost" onClick={() => { setDraft(view.settings); setToken(undefined); setErr(null); }}>
+                  Discard
+                </button>
+                <button className="btn-primary" disabled={saving} onClick={save}>
+                  {saving ? "Saving…" : "Save"}
+                </button>
+              </>
+            )}
+          </FloatingBar>
         )}
 
         {confirming && (

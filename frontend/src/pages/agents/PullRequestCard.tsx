@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { api, type PullRequest } from "../../lib/api";
 import { cx } from "../../lib/format";
+import { Callout } from "../../components/Callout";
 import { relTime } from "../../lib/time";
 import { verdicts } from "../../lib/verdicts";
 
@@ -244,9 +245,7 @@ export function PullRequestCard({ pr }: { pr: PullRequest }) {
           )}
         </div>
         {(err || pr.error) && (
-          <div className="flex items-center gap-1.5 border-t border-bad/20 bg-bad/[0.06] px-4 py-2 text-[12px] text-bad">
-            <AlertTriangle className="size-3.5 shrink-0" /> {err ?? pr.error}
-          </div>
+          <Callout tone="bad" icon={<AlertTriangle />} className="mx-4 mb-3">{err ?? pr.error}</Callout>
         )}
       </div>
     </div>

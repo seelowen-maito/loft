@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2 } from "lucide-react";
+import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2, TriangleAlert } from "lucide-react";
 import { SettingsCard } from "../components/SettingsCard";
+import { Callout, ResultLine } from "../components/Callout";
 import { api, portalHome, type PushDevice, type PushStatus } from "../lib/api";
 import { cx } from "../lib/format";
 import { relTime } from "../lib/time";
@@ -128,10 +129,10 @@ export function PushSettings() {
       error={loadErr}
     >
       {off && status.devices > 0 && (
-        <p role="alert" className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
+        <Callout tone="warn" icon={<TriangleAlert />}>
           Push is off: Loft drops every alert for {status.devices === 1 ? "your paired phone" : `your ${status.devices} paired phones`}. Sign in below to get push through the
           Loft relay, or add your own APNs key.
-        </p>
+        </Callout>
       )}
 
       <div className="space-y-1.5">
@@ -152,7 +153,7 @@ export function PushSettings() {
           </div>
         ) : (
           <>
-            {status.relay_refused && <p className="text-[12.5px] text-bad">Your relay key no longer works: Sign in again. Pushes through the relay are paused.</p>}
+            {status.relay_refused && <Callout tone="bad" icon={<TriangleAlert />}>Your relay key no longer works: Sign in again. Pushes through the relay are paused.</Callout>}
             <p className="text-[12px] text-fg-3">
               Sign in to get push: the relay sends your alerts to Apple for you, with no Apple developer account. Agent names and titles pass through it
               and are never stored. {portal ? "Press Sign in and allow it on the portal; or paste a relay key." : "Paste the relay key you were given."}
@@ -266,7 +267,7 @@ export function PushSettings() {
             Remove key
           </button>
         )}
-        {msg && <span className={cx("text-[12px]", msg.ok ? "text-good" : "text-bad")}>{msg.text}</span>}
+        <ResultLine said={msg} />
       </div>
 
       <div className="space-y-2 border-t border-line pt-4">

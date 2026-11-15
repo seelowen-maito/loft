@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, TriangleAlert } from "lucide-react";
 import { api } from "../lib/api";
 import { useCheck } from "../lib/useCheck";
 import { SettingsCard } from "../components/SettingsCard";
+import { Callout } from "../components/Callout";
 import { herdrInstallCommand, isLocalOrigin } from "../lib/herdr";
 
 /** Settings → Herdr UI: every agent as an agent in Herdr UI, on this machine or another one. */
@@ -97,9 +98,9 @@ export function HerdrSetup() {
               </button>
             </div>
             {isLocalOrigin(origin) ? (
-              <p className="text-[12px] text-warn">
+              <Callout tone="warn" icon={<TriangleAlert />}>
                 You opened Loft at {origin}, which other machines can't reach. Open it by an address they can, such as its Tailscale name, to get the right command.
-              </p>
+              </Callout>
             ) : (
               <p className="text-[12px] text-fg-3">
                 That machine talks to this Loft at {origin}. It downloads a ready-made build when it has the same system as this one

@@ -21,6 +21,7 @@ import { UpdateStatus } from "./components/UpdateStatus";
 import { UsageMeter } from "./components/UsageMeter";
 import { TempMeter } from "./components/TempMeter";
 import { Shortcuts } from "./components/Shortcuts";
+import { Toaster } from "./components/FloatingBar";
 import { Talk } from "./components/Talk";
 import { openTalk } from "./lib/talk";
 import { fmtClock } from "./lib/time";
@@ -251,6 +252,7 @@ export default function App() {
       </header>
       <UpdateBanner live={live} />
       <Shortcuts />
+      <Toaster />
       <Talk />
       <main className="min-h-0 flex-1">
         <Routes>

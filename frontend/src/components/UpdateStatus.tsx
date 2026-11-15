@@ -4,12 +4,12 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
 import { restartDisabled } from "../lib/restartButton";
 import { usePoll } from "../hooks/usePoll";
+import { toast } from "./FloatingBar";
 
 /** Navbar light for auto-update (LOFT_AUTO_UPDATE); hidden when it's off. */
 export function UpdateStatus({ live }: { live: boolean }) {
   const [s, setS] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
-  const [restartError, setRestartError] = useState<string | null>(null);
   // Refetch on (re)connect: a restart after an update drops the event stream.
   useEffect(() => {
     if (live) api.update().then(setS).catch(() => {});
@@ -43,9 +43,8 @@ export function UpdateStatus({ live }: { live: boolean }) {
 
   const restart = () => {
     setBusy(true);
-    setRestartError(null);
     api.restart().catch((e) => {
-      setRestartError((e as Error).message);
+      toast(`Couldn't restart: ${(e as Error).message}`);
       setBusy(false);
     });
   };
@@ -58,7 +57,6 @@ export function UpdateStatus({ live }: { live: boolean }) {
           Restart
         </button>
       )}
-      {restartError && <span className="text-bad" role="alert">{restartError}</span>}
     </span>
   );
 }

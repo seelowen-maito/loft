@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pause, Pencil, Play, RotateCcw, Trash2, UserRoundPlus, X } from "lucide-react";
+import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pause, Pencil, Play, RotateCcw, Trash2, TriangleAlert, UserRoundPlus, X } from "lucide-react";
 import { api, roleLabel, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { ticketLabel } from "../lib/specViews";
@@ -12,6 +12,7 @@ import { issuePickerOrder, outsideWarning, projectChoices, projectsOf } from "..
 import { MentionMenu } from "../components/MentionMenu";
 import { StartDeliveryButton } from "../components/StartDeliveryButton";
 import { StartWarning } from "../components/StartWarning";
+import { Callout, ResultLine } from "../components/Callout";
 import { deliveryButtons } from "../lib/deliveryState";
 import { DeliveryLine } from "../components/DeliveryLine";
 import { useServerEvents, type ServerEvent } from "../lib/events";
@@ -234,10 +235,6 @@ function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<type
   );
 }
 
-function Said({ said }: { said: { ok: boolean; text: string } | null }) {
-  if (!said) return null;
-  return <div className={cx("mt-2 text-[12px]", said.ok ? "text-fg-3" : "text-bad")}>{said.text}</div>;
-}
 
 /** On a standalone ticket: Start delivery, which makes its branch (and on GitHub its draft PR) and hands it to the team's Dev. */
 export function DeliveryCard({ task: t }: { task: Task }) {
@@ -285,7 +282,7 @@ export function DeliveryCard({ task: t }: { task: Task }) {
         {/* From the Delivery itself: a stalled one whose Dev was deleted still resumes, on the team's builder. */}
         <DeliveryButtons d={d} a={r} />
       </div>
-      <Said said={r.said} />
+      <ResultLine said={r.said} className="mt-2" />
       {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
     </section>
   );
@@ -344,7 +341,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
         <DeliveryButtons d={started} a={r} />
       </div>
       {warn && !started && !!d?.waits_on?.length && <StartWarning waits={d.waits_on} onStart={start} onCancel={() => setWarn(false)} onStarted={reload} />}
-      <Said said={r.said} />
+      <ResultLine said={r.said} className="mt-2" />
       {running.length > 0 && (
         <ul className="mt-3 space-y-1 text-[12.5px]">
           {running.map((x) => (
@@ -792,7 +789,7 @@ export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent
       </div>
       <div className="flex justify-between font-mono text-[10.5px] text-fg-3">
         <span>⌘↵ to send</span>
-        {note && <span className="text-good">✓ {note}</span>}
+        <ResultLine said={note ? { ok: true, text: note } : null} />
       </div>
       {error && <div className="text-[12px] text-bad">{error}</div>}
     </div>
@@ -867,7 +864,7 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
           ))}
         </div>
       )}
-      {warning && <div className="rounded-xl border border-warn/25 bg-warn/[0.06] px-3 py-2 text-[12px] text-fg-2">{warning}</div>}
+      {warning && <Callout tone="warn" icon={<TriangleAlert />}>{warning}</Callout>}
       {agentId && (
         <label className="flex items-center gap-1.5 font-mono text-[11px] text-fg-2">
           <input type="checkbox" checked={start} onChange={(e) => setStart(e.target.checked)} className="accent-[var(--color-accent)]" />

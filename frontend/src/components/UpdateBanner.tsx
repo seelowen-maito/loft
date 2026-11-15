@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { usePoll } from "../hooks/usePoll";
+import { FloatingBar } from "./FloatingBar";
 
 /** The hashed entry bundle a page was built with, e.g. "/assets/index-AbC123.js". */
 function entryOf(html: string): string | null {
@@ -47,14 +48,12 @@ export function UpdateBanner({ live }: { live: boolean }) {
 
   if (!stale) return null;
   return (
-    <div className="fixed top-[68px] left-1/2 z-50 -translate-x-1/2 animate-rise">
-      <div className="flex items-center gap-3 rounded-full border border-accent/30 bg-ink-850/95 py-1.5 pl-4 pr-1.5 text-[13px] shadow-2xl backdrop-blur">
-        <span className="size-1.5 rounded-full bg-accent" />
-        <span className="text-fg-2">Loft was updated. This tab is running an older version.</span>
-        <button className="btn-primary" onClick={() => location.reload()}>
-          <RefreshCw className="size-3.5" /> Reload
-        </button>
-      </div>
-    </div>
+    <FloatingBar at="top" accent>
+      <span className="size-1.5 shrink-0 rounded-full bg-accent" />
+      <span className="text-fg-2">Loft was updated. This tab is running an older version.</span>
+      <button className="btn-primary shrink-0" onClick={() => location.reload()}>
+        <RefreshCw className="size-3.5" /> Reload
+      </button>
+    </FloatingBar>
   );
 }

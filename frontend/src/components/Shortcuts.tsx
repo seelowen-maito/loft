@@ -12,6 +12,7 @@ import {
 } from "../lib/shortcuts";
 import { statusOf } from "../pages/agents/Status";
 import { Dialog } from "./Dialog";
+import { toast } from "./FloatingBar";
 import { Sticker } from "./Sticker";
 
 const G_WINDOW_MS = 1500;
@@ -20,16 +21,9 @@ const G_WINDOW_MS = 1500;
 export function Shortcuts() {
   const navigate = useNavigate();
   const [open, setOpen] = useState<"switcher" | "sheet" | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   const combos = useRef<Combos>(loadCombos());
   const gAt = useRef(0);
   const close = useCallback(() => setOpen(null), []);
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 2500);
-    return () => clearTimeout(t);
-  }, [toast]);
 
   useEffect(() => {
     const onChanged = () => (combos.current = loadCombos());
@@ -63,9 +57,9 @@ export function Shortcuts() {
             if (id) {
               setOpen(null);
               navigate(`/agents/${id}`);
-            } else setToast("Nothing needs you");
+            } else toast("Nothing needs you");
           })
-          .catch(() => setToast("Couldn't load Needs you"));
+          .catch(() => toast("Couldn't load Needs you"));
       }
     };
     window.addEventListener(SHORTCUTS_CHANGED, onChanged);
@@ -82,11 +76,6 @@ export function Shortcuts() {
     <>
       {open === "switcher" && <Switcher onClose={close} />}
       {open === "sheet" && <Sheet combos={combos.current} onClose={close} />}
-      {toast && (
-        <div role="status" className="fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">
-          <div className="rounded-full border border-line-strong bg-ink-850/95 px-4 py-2 text-[13px] text-fg-2 shadow-2xl backdrop-blur">{toast}</div>
-        </div>
-      )}
     </>
   );
 }
