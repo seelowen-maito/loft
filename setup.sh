@@ -130,9 +130,52 @@ elif command -v gh >/dev/null; then warn "GitHub CLI not logged in (optional: PR
 else warn "GitHub CLI not installed (optional: PRs, issues, private repos)"; tip "Run: $(pkg gh) && gh auth login   or add a token under Settings → GitHub token"; fi
 if [ "$failed" = 1 ]; then printf '\n  %sFix the items above, then run setup again:%s\n    %ssetup.sh\n\n' "$R" "$N" "$HERE"; exit 1; fi
 
+section "Restore a backup"
+. scripts/restore-backup.sh
+# Only an install with no database yet is offered one; an existing Loft is never touched.
+if [ -f .loft/loft.db ]; then
+  ok "this install already has its data ${D}(nothing to restore)${N}"
+else
+  dirs=(); while IFS= read -r d; do dirs+=("$d"); done < <(backup_dirs)
+  while :; do
+    list=(); while IFS= read -r l; do [ -n "$l" ] && list+=("$l"); done < <(find_backups ${dirs[@]+"${dirs[@]}"})
+    if [ ${#list[@]} -eq 0 ]; then
+      ok "no backups found ${D}(a fresh loft)${N}"
+      answer=$(ask "Folder with backups to restore from, or Enter to start fresh:" "")
+    else
+      i=0; for l in "${list[@]}"; do i=$((i + 1)); IFS='|' read -r _ date size <<<"$l"; printf '    %s) %s  %s\n' "$i" "$date" "$size"; done
+      answer=$(ask "Restore which one? A number, another folder, or Enter to start fresh:" "")
+    fi
+    [ -z "$answer" ] && { ok "starting fresh"; break; }
+    if [[ $answer =~ ^[0-9]+$ ]] && [ "$answer" -ge 1 ] && [ "$answer" -le ${#list[@]} ]; then
+      chosen=${list[answer - 1]%%|*}
+    elif [[ $answer =~ ^[0-9]+$ ]]; then
+      warn "no backup $answer"; [ -t 0 ] || break; continue
+    else
+      answer=${answer/#\~/$HOME}
+      if [ -d "$answer" ]; then dirs+=("$answer"); continue; fi
+      warn "Not a folder: $answer"; [ -t 0 ] || break; continue
+    fi
+    # Loft writes its database while it runs: stop it first.
+    if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null; sleep 1; fi
+    if curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/api/info"; then
+      fail "loft is running on port $PORT; stop it (quit the app or ${HERE}start.sh), then run ${HERE}setup.sh again"; exit 1
+    fi
+    if why=$(restore_backup "$chosen" .loft); then
+      ok "restored ${chosen##*/} ${D}(any older database is in .loft/before-restore)${N}"
+      tip "Agent workspaces aren't in backups: agents start with empty ones and clone their repos again."
+      tip "Settings came back with it, including the projects folder and your GitHub token."
+      break
+    fi
+    fail "$why"
+    [ -t 0 ] || exit 1
+  done
+fi
+
 section "Projects folder"
 if [ -f "$SETTINGS" ]; then
   ok "$(setting projects_dir) ${D}(change it under Settings)${N}"
+  [ -d "$(setting projects_dir)" ] || warn "that folder isn't on this Mac: change it under Settings → Projects folder"
 else
   while :; do
     dir=$(ask "Folder with your git repos [~/projects]:" "~/projects")
