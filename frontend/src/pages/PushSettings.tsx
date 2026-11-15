@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2 } from "lucide-react";
 import { api, portalHome, type PushDevice, type PushStatus } from "../lib/api";
 import { cx, timeAgo } from "../lib/format";
+import { usePoll } from "../hooks/usePoll";
 
 /** Settings → Push notifications: which path pushes take (the user's own APNs key, the Loft relay with a relay key, or none), the phones registered, and a test push. */
 const CHIP: Record<PushStatus["path"], string> = { own_key: "Your own key", relay: "Using the Loft relay", none: "Sign in to get push" };
@@ -42,11 +43,7 @@ export function PushSettings() {
   }, [shown]);
   // After Sign in the backend collects the key; look until it has it or the code is gone.
   const signingIn = status?.signing_in;
-  useEffect(() => {
-    if (!signingIn) return;
-    const t = setInterval(load, 2000);
-    return () => clearInterval(t);
-  }, [signingIn]);
+  usePoll(signingIn ? load : null, 2000);
   useEffect(() => {
     if (status?.relay_key) setPortalLink(null);
   }, [status?.relay_key]);

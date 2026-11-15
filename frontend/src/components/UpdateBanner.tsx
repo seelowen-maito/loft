@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
+import { usePoll } from "../hooks/usePoll";
 
 /** The hashed entry bundle a page was built with, e.g. "/assets/index-AbC123.js". */
 function entryOf(html: string): string | null {
@@ -20,29 +21,23 @@ export function UpdateBanner({ live }: { live: boolean }) {
   const [stale, setStale] = useState(false);
   const wasLive = useRef(live);
 
+  const [mine] = useState(() => (import.meta.env.DEV ? null : currentEntry()));
+  const check = async () => {
+    try {
+      const html = await (await fetch("/", { cache: "no-store" })).text();
+      const theirs = entryOf(html);
+      if (theirs && theirs !== mine) setStale(true);
+    } catch {
+      /* backend down; we'll check again */
+    }
+  };
+  usePoll(mine ? check : null, 60_000);
   useEffect(() => {
-    if (import.meta.env.DEV) return;
-    const mine = currentEntry();
     if (!mine) return;
-    const check = async () => {
-      try {
-        const html = await (await fetch("/", { cache: "no-store" })).text();
-        const theirs = entryOf(html);
-        if (theirs && theirs !== mine) setStale(true);
-      } catch {
-        /* backend down; we'll check again */
-      }
-    };
-    check();
-    const t = setInterval(check, 60_000);
-    const onFocus = () => check();
-    window.addEventListener("focus", onFocus);
+    window.addEventListener("focus", check);
     (window as any).__loftCheckUpdate = check;
-    return () => {
-      clearInterval(t);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, []);
+    return () => window.removeEventListener("focus", check);
+  }, [mine]);
 
   // A backend restart (live stream reconnecting) is the usual moment a new build lands.
   useEffect(() => {

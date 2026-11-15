@@ -4,14 +4,15 @@ import type { Agent } from "../../lib/api";
 import { ATTACH, filterIssues, SOURCES, type Source } from "../../lib/issueFilter";
 import { Origin } from "../../components/Origin";
 import { cx, timeAgo } from "../../lib/format";
-import { STATUS_TONE, useTasks } from "../../components/TaskChip";
+import { STATUS_TONE } from "../../components/TaskChip";
+import { useTasks } from "../../hooks/lists";
 
 /** Open tasks first, the ones waiting on you on top; then the most recently updated. */
 const ORDER = ["waiting_approval", "blocked", "failed", "in_progress", "ready", "inbox", "done", "cancelled"];
 
 /** "Attach an issue" above the composer: Loft and GitHub issues, search (or #42), pick one with the mouse or ↑↓ + Enter, Esc closes. */
 export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPick: (id: string) => void; onClose: () => void }) {
-  const all = useTasks();
+  const all = useTasks().items;
   const [q, setQ] = useState("");
   const [source, setSource] = useState<Source>("all");
   const [index, setIndex] = useState(0);

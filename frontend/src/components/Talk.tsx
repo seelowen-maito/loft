@@ -1,7 +1,8 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { Check, Loader2, Mic, MicOff, Search } from "lucide-react";
-import { api, type Agent } from "../lib/api";
+import { api } from "../lib/api";
+import { useAgents } from "../hooks/lists";
 import { DRAFT_SET, loadDraft, saveDraft } from "../lib/draft";
 import { cx } from "../lib/format";
 import { loadLastAgent } from "../lib/lastAgent";
@@ -65,7 +66,8 @@ async function record(onLevel: (level: number) => void): Promise<Recorder> {
 function TalkDialog({ wanted, close }: { wanted: string | null; close: () => void }) {
   const navigate = useNavigate();
   const [step, dispatch] = useReducer(next, START);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const list = useAgents().items;
+  const agents = list ?? [];
   const [to, setTo] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
   const [query, setQuery] = useState("");
@@ -78,11 +80,8 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
   const rec = useRef<{ session: TalkSession; mic: Recorder | null; timer: number } | null>(null);
 
   useEffect(() => {
-    api.agents().then((as) => {
-      setAgents(as);
-      setTo((t) => t ?? starter(as, wanted, loadLastAgent()));
-    }).catch(() => {});
-  }, [wanted]);
+    if (list) setTo((t) => t ?? starter(list, wanted, loadLastAgent()));
+  }, [list, wanted]);
 
   /** Stops the microphone; `discard` also deletes the session's audio on the Mac. */
   const stopRecording = (discard: boolean) => {

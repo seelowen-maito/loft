@@ -2,6 +2,7 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useNavigate } from "react-router";
 import { CircleDot, ExternalLink, FileText, GitPullRequest, Search, X } from "lucide-react";
 import { api, roleLabel, type Agent, type PullRequest, type Task } from "../lib/api";
+import { useAgents, usePullRequests, useTasks } from "../hooks/lists";
 import { isSpec, specProgress } from "../lib/issueOrder";
 import { cx } from "../lib/format";
 import { teamOf } from "../lib/team";
@@ -170,25 +171,15 @@ const SWITCHER = "Search";
 
 function Switcher({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
-  const [agents, setAgents] = useState<Agent[] | null>(null);
-  const [tasks, setTasks] = useState<Task[] | null>(null);
-  const [prs, setPrs] = useState<PullRequest[] | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [tasksFailed, setTasksFailed] = useState(false);
-  const [prsFailed, setPrsFailed] = useState(false);
+  const { items: agents, failed } = useAgents();
+  const { items: tasks, failed: tasksFailed } = useTasks();
+  const { items: prs, failed: prsFailed } = usePullRequests();
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const recent = useMemo(() => loadRecent(), []);
   useDialogKeys(onClose, inputRef);
-
-  // Loaded once when the switcher opens; typing searches what's here.
-  useEffect(() => {
-    api.agents().then(setAgents).catch(() => setFailed(true));
-    api.tasks().then(setTasks).catch(() => setTasksFailed(true));
-    api.pullRequests().then(setPrs).catch(() => setPrsFailed(true));
-  }, []);
 
   const shown = useMemo<Hit[]>(() => {
     const found = switcherAgents(agents ?? [], query, recent, (a) => roleLabel(a.role));

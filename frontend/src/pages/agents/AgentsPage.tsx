@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useLocation, useNavigate, useParams } from "react-router";
 import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
-import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
+import { api, roleLabel, type Agent, type GrillSession, type Message } from "../../lib/api";
+import { agentsList, useAgents, usePermissions, usePullRequests } from "../../hooks/lists";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx, fmtNum, timeAgo } from "../../lib/format";
 import { contextWarns, listedContext } from "../../lib/context";
@@ -36,10 +37,12 @@ export default function AgentsPage() {
   const navigate = useNavigate();
   // `/agents/:id/interview`: the open interview full screen, in place of the chat.
   const interview = useLocation().pathname.endsWith("/interview");
-  const [agents, setAgents] = useState<Agent[] | null>(null);
+  const agents = useAgents().items;
   const [messages, setMessages] = useState<Message[]>([]);
-  const [perms, setPerms] = useState<PermissionRequest[]>([]);
-  const [prs, setPrs] = useState<PullRequest[]>([]);
+  const permList = usePermissions().items;
+  const perms = useMemo(() => permList ?? [], [permList]);
+  const prList = usePullRequests().items;
+  const prs = useMemo(() => prList ?? [], [prList]);
   const [creating, setCreating] = useState(false);
   const [grill, setGrill] = useState<GrillSession | null>(null);
   // Groups folded away in the roster, remembered per browser.
@@ -77,12 +80,6 @@ export default function AgentsPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [overlay]);
 
-  useEffect(() => {
-    api.agents().then(setAgents);
-    api.permissions().then(setPerms);
-    api.pullRequests().then(setPrs);
-  }, []);
-
   // `/agents` opens on the last agent viewed in this browser, or the first if it is gone.
   const selectedId = selectedAgent(routeId, agents);
   const selected = agents?.find((a) => a.id === selectedId) ?? null;
@@ -96,7 +93,7 @@ export default function AgentsPage() {
   const visible = useSyncExternalStore(onVisibilityChange, () => document.visibilityState === "visible");
   useEffect(() => {
     if (!shouldMarkRead(selected, selectedId, visible)) return;
-    setAgents((as) => as?.map((a) => (a.id === selectedId ? { ...a, unread_reply: false } : a)) ?? as);
+    agentsList.set((as) => as.map((a) => (a.id === selectedId ? { ...a, unread_reply: false } : a)));
     api.markRead(selectedId!).catch(() => {});
   }, [selected?.unread_reply, selectedId, visible]);
 
@@ -131,18 +128,7 @@ export default function AgentsPage() {
     useCallback(
       (e: ServerEvent) => {
         switch (e.type) {
-          case "agent_updated":
-            setAgents((as) => {
-              if (!as) return as;
-              const i = as.findIndex((a) => a.id === e.agent.id);
-              if (i < 0) return [...as, e.agent];
-              const next = [...as];
-              next[i] = { ...next[i], ...e.agent };
-              return next;
-            });
-            break;
           case "agent_deleted":
-            setAgents((as) => as?.filter((a) => a.id !== e.agent_id) ?? as);
             if (e.agent_id === selectedId) navigate("/agents");
             break;
           case "message":
@@ -151,26 +137,8 @@ export default function AgentsPage() {
               setMessages((ms) => (ms.some((m) => m.id === e.message.id) ? ms.map((m) => (m.id === e.message.id ? e.message : m)) : [...ms, e.message]));
             }
             break;
-          case "pull_request":
-            setPrs((ps) => {
-              const i = ps.findIndex((p) => p.id === e.pr.id);
-              if (i < 0) return [e.pr, ...ps];
-              const next = [...ps];
-              next[i] = e.pr;
-              return next;
-            });
-            break;
           case "grill":
             if (e.session.agent_id === selectedId) setGrill(e.session.state === "ended" ? null : e.session);
-            break;
-          case "permission":
-            setPerms((ps) => {
-              const i = ps.findIndex((p) => p.id === e.request.id);
-              if (i < 0) return [e.request, ...ps];
-              const next = [...ps];
-              next[i] = e.request;
-              return next;
-            });
             break;
         }
       },
@@ -191,7 +159,7 @@ export default function AgentsPage() {
   // The ref is read by drag handlers, which can fire before React re-renders with the new state.
   const dragging = useRef<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
-  const saveOrder = (as: Agent[] | null) => as && api.reorderAgents(as.map((a) => a.id)).catch(() => api.agents().then(setAgents));
+  const saveOrder = (as: Agent[] | null) => as && api.reorderAgents(as.map((a) => a.id)).catch(() => agentsList.reload());
 
   const working = agents?.filter((a) => a.running).length ?? 0;
   const groups = useMemo(() => groupByTeam(agents ?? []), [agents]);
@@ -252,7 +220,7 @@ export default function AgentsPage() {
                         const from = agents?.find((x) => x.id === id);
                         if (!id || !from || teamOf(from) !== teamOf(a)) return;
                         e.preventDefault();
-                        setAgents((as) => as && moved(as, id, a.id));
+                        agentsList.set((as) => moved(as, id, a.id));
                       }}
                       onDrop={(e) => e.preventDefault()}
                       onDragEnd={() => {
@@ -266,7 +234,7 @@ export default function AgentsPage() {
                         if (!target || !agents) return;
                         e.preventDefault();
                         const next = moved(agents, a.id, target.id);
-                        setAgents(next);
+                        agentsList.set(() => next);
                         saveOrder(next);
                       }}
                       title="Drag or Alt+↑/↓ to reorder"
@@ -383,7 +351,7 @@ export default function AgentsPage() {
           onClose={() => setCreating(false)}
           onCreated={(a) => {
             setCreating(false);
-            setAgents((as) => (as?.some((x) => x.id === a.id) ? as : [...(as ?? []), a]));
+            agentsList.set((as) => (as.some((x) => x.id === a.id) ? as : [...as, a]));
             navigate(`/agents/${a.id}`);
           }}
         />

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Terminal } from "lucide-react";
 import { api, type ClaudeLogin } from "../lib/api";
+import { usePoll } from "../hooks/usePoll";
 
 /** Settings → Claude login: whether the claude CLI is logged in and as whom, with Open Terminal to log in. */
 export function ClaudeLoginSection() {
@@ -9,11 +10,7 @@ export function ClaudeLoginSection() {
   const [busy, setBusy] = useState(false);
   const load = () => api.claudeLogin().then(setS).catch((e) => setErr((e as Error).message));
   // Read again while the page is open, so the status turns once the login in Terminal is done.
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
+  usePoll(load, 5000);
   const open = async () => {
     setBusy(true);
     setErr(null);

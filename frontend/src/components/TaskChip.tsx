@@ -1,50 +1,10 @@
-import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { Link } from "react-router";
 import { CircleDot, X } from "lucide-react";
-import { api, type Task } from "../lib/api";
-import { useServerEvents, type ServerEvent } from "../lib/events";
+import { useTasks } from "../hooks/lists";
 import { cx } from "../lib/format";
 
 /** Task ids in links: `…/issues/<id>` (or the old `…/tasks/<id>`) (the web app) or `loft://task/<id>` (the iOS app). */
 export const TASK_LINK = /(?:\/(?:issues|tasks)\/|loft:\/\/task\/)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-
-// One shared, live copy of the task list for chips and pickers across the chat.
-let tasks: Task[] | null = null;
-let loading = false;
-const listeners = new Set<() => void>();
-const notify = () => listeners.forEach((l) => l());
-
-function load() {
-  if (tasks || loading) return;
-  loading = true;
-  api.tasks().then((t) => {
-    tasks = t;
-    notify();
-  }).finally(() => (loading = false));
-}
-
-/** All tasks, kept current by task events. Null until loaded. */
-export function useTasks(): Task[] | null {
-  useEffect(load, []);
-  useServerEvents(
-    useCallback((e: ServerEvent) => {
-      if (!tasks) return;
-      if (e.type === "task") {
-        const i = tasks.findIndex((t) => t.id === e.task.id);
-        tasks = i < 0 ? [e.task, ...tasks] : tasks.map((t) => (t.id === e.task.id ? e.task : t));
-        notify();
-      }
-      if (e.type === "task_deleted") {
-        tasks = tasks.filter((t) => t.id !== e.task_id);
-        notify();
-      }
-    }, []),
-  );
-  return useSyncExternalStore(
-    (l) => (listeners.add(l), () => listeners.delete(l)),
-    () => tasks,
-  );
-}
 
 export const STATUS_TONE: Record<string, string> = {
   waiting_approval: "text-warn",
@@ -59,7 +19,7 @@ export const STATUS_TONE: Record<string, string> = {
 
 /** A task as a small chip: status, title, link to its page. `onRemove` shows an × (the composer). */
 export function TaskChip({ id, onRemove, className }: { id: string; onRemove?: () => void; className?: string }) {
-  const all = useTasks();
+  const all = useTasks().items;
   const t = all?.find((x) => x.id === id.toLowerCase());
   const label = t ? t.title : all ? "Deleted issue" : "Issue";
   return (

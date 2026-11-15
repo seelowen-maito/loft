@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { api, type Commit, type GithubInfo, type GithubItem, type Info, type Repo, type Site } from "../lib/api";
 import { cx, fmtNum, timeAgo } from "../lib/format";
+import { reposList, useRepos } from "../hooks/lists";
 import { Heatmap, ShareBars, WeeklyBars } from "../components/Charts";
 import { AgentActivity } from "./AgentActivity";
 import { pickGreeting } from "../lib/greetings";
@@ -27,7 +28,7 @@ function lastActivity(r: Repo) {
 }
 
 export default function ReposPage() {
-  const [repos, setRepos] = useState<Repo[] | null>(null);
+  const repos = useRepos().items;
   const [gh, setGh] = useState<Record<string, GithubInfo>>({});
   const [ghLoading, setGhLoading] = useState(true);
   const [info, setInfo] = useState<Info | null>(null);
@@ -38,21 +39,22 @@ export default function ReposPage() {
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [greeting] = useState(pickGreeting);
 
-  const load = async (refresh = false) => {
-    setRefreshing(true);
-    try {
-      const r = await api.repos(refresh);
-      setRepos(r);
-      setLoadedAt(new Date());
-    } finally {
-      setRefreshing(false);
-    }
+  // The list loads (again) on its own: a load or a Refresh marks the time.
+  useEffect(() => {
+    if (repos) setLoadedAt(new Date());
+  }, [repos]);
+  const loadGithub = (refresh: boolean) => {
     setGhLoading(true);
     api.github(refresh).then(setGh).finally(() => setGhLoading(false));
   };
+  const refresh = async () => {
+    setRefreshing(true);
+    await reposList.reload(() => api.repos(true)).finally(() => setRefreshing(false));
+    loadGithub(true);
+  };
 
   useEffect(() => {
-    load();
+    loadGithub(false);
     api.info().then(setInfo).catch(() => {});
   }, []);
 
@@ -120,7 +122,7 @@ export default function ReposPage() {
             </div>
             <div className="flex items-center gap-3">
               {loadedAt && <span className="font-mono text-[11px] text-fg-3">updated {timeAgo(loadedAt.toISOString())}</span>}
-              <button className="btn" onClick={() => load(true)} disabled={refreshing}>
+              <button className="btn" onClick={refresh} disabled={refreshing}>
                 <RefreshCw className={cx("size-3.5", refreshing && "animate-spin")} /> Refresh
               </button>
             </div>

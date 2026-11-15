@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router";
 import { Bot, GitBranch, Inbox, ListTodo, Mic, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
-import { api, type Agent, type Settings } from "./lib/api";
+import { api, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
 import { oldTasksTarget } from "./lib/oldTasks";
-import { mergeLoaded, unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
-import { pendingItems, type PendingItem } from "./lib/pending";
+import { unreadBadge, unreadCount, unreadTitle } from "./lib/unread";
+import { pendingItems } from "./lib/pending";
+import { useAgents, usePermissions } from "./hooks/lists";
 import { badgeText, badgeTitle, badgeTone, countAfter, countsOf, iconAction, type Counts } from "./lib/needsYou";
 import ReposPage from "./pages/Repos";
 import AgentsPage from "./pages/agents/AgentsPage";
@@ -48,20 +49,13 @@ function Logo() {
 
 /** Pending permission requests: opens the oldest one's card in its agent's chat; with several, also lists them all. */
 function PendingBadge() {
-  const [items, setItems] = useState<PendingItem[]>([]);
+  // Without the agents the requests still show, unnamed.
+  const perms = usePermissions().items;
+  const agents = useAgents().items;
+  const items = useMemo(() => pendingItems(perms ?? [], agents ?? []), [perms, agents]);
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
-  const refresh = useCallback(() => {
-    // Without the agents the requests still show, unnamed.
-    Promise.all([api.permissions(), api.agents().catch(() => [])]).then(([p, a]) => setItems(pendingItems(p, a))).catch(() => {});
-  }, []);
-  useEffect(refresh, [refresh]);
-  useServerEvents(
-    useCallback((e: ServerEvent) => {
-      if (e.type === "permission") refresh();
-    }, [refresh]),
-  );
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => {
@@ -145,28 +139,9 @@ function NeedsYouBadge({ live }: { live: boolean }) {
   );
 }
 
-/** Agents with an Unread reply, kept live from any page; it also sets the browser tab title. Reloads on reconnect, as events sent while offline are lost. */
-function useUnreadCount(live: boolean) {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  // Updates that arrive while the list loads are newer than it (opening an unread chat on a fresh load marks it read meanwhile).
-  const fresh = useRef(new Map<string, Agent | null>());
-  useEffect(() => {
-    if (!live) return;
-    fresh.current.clear();
-    api.agents().then((as) => setAgents(mergeLoaded(as, fresh.current))).catch(() => {});
-  }, [live]);
-  useServerEvents(
-    useCallback((e: ServerEvent) => {
-      if (e.type === "agent_updated") {
-        fresh.current.set(e.agent.id, e.agent);
-        setAgents((as) => (as.some((a) => a.id === e.agent.id) ? as.map((a) => (a.id === e.agent.id ? { ...a, ...e.agent } : a)) : [...as, e.agent]));
-      } else if (e.type === "agent_deleted") {
-        fresh.current.set(e.agent_id, null);
-        setAgents((as) => as.filter((a) => a.id !== e.agent_id));
-      }
-    }, []),
-  );
-  const count = unreadCount(agents);
+/** Agents with an Unread reply, kept live from any page; it also sets the browser tab title. */
+function useUnreadCount() {
+  const count = unreadCount(useAgents().items ?? []);
   useEffect(() => {
     document.title = unreadTitle(count);
   }, [count]);
@@ -174,8 +149,8 @@ function useUnreadCount(live: boolean) {
 }
 
 /** The Agents tab's Unread reply dot. Its own component so agent events re-render only the dot, not App and the page under it. */
-function UnreadDot({ live }: { live: boolean }) {
-  const unread = useUnreadCount(live);
+function UnreadDot() {
+  const unread = useUnreadCount();
   if (!unread) return null;
   return (
     <span className="absolute -right-2 -top-2 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-0.5 font-mono text-[9px] font-medium leading-none text-ink-950" title={`${unread} Unread repl${unread > 1 ? "ies" : "y"}`}>
@@ -238,7 +213,7 @@ export default function App() {
               {/* The dot sits on the icon so it still shows on phones, where the label hides. */}
               <span className="relative">
                 <Bot className="size-3.5" />
-                <UnreadDot live={live} />
+                <UnreadDot />
               </span>{" "}
               <span className="max-md:hidden">Agents</span>
             </NavLink>

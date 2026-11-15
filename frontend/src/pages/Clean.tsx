@@ -4,6 +4,7 @@ import { ArrowDown, ArrowUp, ChevronRight, Loader2 } from "lucide-react";
 import { api, type CleanItem, type CleanLog, type GitCheck, type LeftProcess, type WorkspaceSizes } from "../lib/api";
 import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, chosenRows, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, ticksAfter, timeAgo, type CleanFilter, type CleanSort } from "../lib/format";
 import { CleanLogView, CopyCommands, EQUIVALENT } from "./Settings";
+import { usePoll } from "../hooks/usePoll";
 
 /** Clean: every agent's workspace items in a full-screen table at `/settings/clean`, to filter, tick and delete. */
 export default function CleanPage() {
@@ -47,24 +48,19 @@ export default function CleanPage() {
   const confirm = async (paths: string[]) => {
     if (!table) return;
     setShown({ at: null, what: "", title: "Cleaning…", running: true, lines: [], skipped: [], freed_bytes: 0, removed: 0, failed: 0 });
-    // The log fills in as Loft removes each folder.
-    let done = false;
-    const poll = setInterval(() => api.cleanLog().then((l) => l.running && !done && setShown(l)).catch(() => {}), 500);
     try {
       const l = await api.clean(undefined, paths);
-      done = true;
       setShown(l);
       // The table shows what is left.
       setTable(null);
       await checkSpace();
     } catch (e) {
-      done = true;
       setShown(null);
       setErr((e as Error).message);
-    } finally {
-      clearInterval(poll);
     }
   };
+  // The log fills in as Loft removes each folder; an answer that lands after the clean ends is dropped.
+  usePoll(shown?.running ? () => api.cleanLog().then((l) => setShown((cur) => (cur?.running && l.running ? l : cur))).catch(() => {}) : null, 500);
   const tick = (paths: string[], on: boolean) =>
     setTable((t) => {
       if (!t) return t;

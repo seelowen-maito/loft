@@ -6,6 +6,7 @@ import { ArrowLeft, ChevronRight, CircleCheck, CircleDot, ExternalLink, MessageS
 import { api, type MirrorSync, type Agent, type Task, type TaskComment } from "../lib/api";
 import { parseFilters, resolveFrom, withFilters, type IssueFilters } from "../lib/issueFilters";
 import { useServerEvents, type ServerEvent } from "../lib/events";
+import { useAgents, useRepos, useTasks } from "../hooks/lists";
 import { cx, timeAgo } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { Origin } from "../components/Origin";
@@ -45,9 +46,12 @@ function LabelChip({ name }: { name: string }) {
 export default function TasksPage() {
   const { id: routeId } = useParams();
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState<Task[] | null>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [repos, setRepos] = useState<Record<string, string>>({});
+  const tasks = useTasks().items;
+  const agentList = useAgents().items;
+  const agents = useMemo(() => agentList ?? [], [agentList]);
+  // Which projects have a GitHub repo: only their Loft issues can be published there.
+  const repoList = useRepos().items;
+  const repos = useMemo(() => Object.fromEntries((repoList ?? []).filter((r) => r.github).map((r) => [r.name, r.github!])), [repoList]);
   // The filters live in the URL (lib/issueFilters), so back/forward, reload and shared links keep them.
   // A click is a history step; typing replaces the entry, once it pauses.
   const [params, setParams] = useSearchParams();
@@ -80,31 +84,15 @@ export default function TasksPage() {
     setSyncing(true);
     api.syncIssues().then(setMirror).catch(() => {}).finally(() => setSyncing(false));
   }, []);
-  useEffect(() => {
-    api.tasks().then(setTasks);
-    api.agents().then(setAgents);
-    // Which projects have a GitHub repo: only their Loft issues can be published there.
-    api.repos().then((rs) => setRepos(Object.fromEntries(rs.filter((r) => r.github).map((r) => [r.name, r.github!])))).catch(() => {});
-    sync();
-  }, [sync]);
+  useEffect(sync, [sync]);
 
   useServerEvents(
     useCallback((e: ServerEvent) => {
-      if (e.type === "task")
-        setTasks((ts) => {
-          if (!ts) return ts;
-          const i = ts.findIndex((t) => t.id === e.task.id);
-          if (i < 0) return [e.task, ...ts];
-          const next = [...ts];
-          next[i] = e.task;
-          return next;
-        });
       // The board reloads the Deliveries once after a burst of changes.
       if (e.type === "task") {
         clearTimeout(reload.current);
         reload.current = setTimeout(loadDeliveries, 1500);
       }
-      if (e.type === "task_deleted") setTasks((ts) => ts?.filter((t) => t.id !== e.task_id) ?? ts);
     }, [loadDeliveries]),
   );
   const reload = useRef<ReturnType<typeof setTimeout>>(undefined);

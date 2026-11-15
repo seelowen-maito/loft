@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CornerDownLeft, Delete, House, Lock, Send } from "lucide-react";
 import { api, type Simulator, type SimulatorInput } from "../lib/api";
 import { cx } from "../lib/format";
+import { usePoll } from "../hooks/usePoll";
 
 type Devices = { interactive: boolean; devices: Simulator[]; error?: string };
 type Ripple = { id: number; x: number; y: number };
@@ -32,12 +33,7 @@ export default function SimulatorPage() {
     }
   };
 
-  useEffect(() => {
-    const load = () => api.simulators().then(setData).catch(() => setData({ interactive: false, devices: [] }));
-    load();
-    const t = setInterval(load, 10_000);
-    return () => clearInterval(t);
-  }, []);
+  usePoll(() => api.simulators().then(setData).catch(() => setData({ interactive: false, devices: [] })), 10_000);
 
   const device = data?.devices.find((d) => d.udid === udid) ?? data?.devices[0];
 

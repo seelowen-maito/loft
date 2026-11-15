@@ -13,6 +13,7 @@ import { HerdrSetup } from "./HerdrSetup";
 import { cleanLineText, cx, fmtBytes, oneLine, timeAgo } from "../lib/format";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
+import { usePoll } from "../hooks/usePoll";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
@@ -73,12 +74,7 @@ const SOURCE_LABELS: Record<string, string> = {
 /** What's left of GitHub's hourly limit (shared with the agents' own `gh`), and where Loft's requests went. */
 function GithubUsage() {
   const [b, setB] = useState<GithubBudget | null>(null);
-  useEffect(() => {
-    const load = () => api.githubBudget().then(setB).catch(() => {});
-    load();
-    const id = setInterval(load, 15_000);
-    return () => clearInterval(id);
-  }, []);
+  usePoll(() => api.githubBudget().then(setB).catch(() => {}), 15_000);
   const at = (s: number) => new Date(s * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const rows = Object.entries(b?.by_source ?? {}).sort((x, y) => y[1].requests - x[1].requests);
   return (

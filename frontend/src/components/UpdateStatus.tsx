@@ -3,6 +3,7 @@ import { api, type UpdateStatus as Status } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
 import { restartDisabled } from "../lib/restartButton";
+import { usePoll } from "../hooks/usePoll";
 
 /** Navbar light for auto-update (LOFT_AUTO_UPDATE); hidden when it's off. */
 export function UpdateStatus({ live }: { live: boolean }) {
@@ -15,10 +16,9 @@ export function UpdateStatus({ live }: { live: boolean }) {
   // While a restart is due (or after a restart on its own) the page can't be told: ask again until it changes.
   const restarting = s?.phase === "restart";
   useEffect(() => {
-    if (!restarting) return setBusy(false);
-    const t = setInterval(() => api.update().then(setS).catch(() => {}), 3000);
-    return () => clearInterval(t);
+    if (!restarting) setBusy(false);
   }, [restarting]);
+  usePoll(restarting ? () => api.update().then(setS).catch(() => {}) : null, 3000);
   useServerEvents(
     useCallback((e: ServerEvent) => {
       if (e.type === "update") setS(e.status);

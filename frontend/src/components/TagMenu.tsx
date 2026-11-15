@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { CircleDot, FileText, GitPullRequest } from "lucide-react";
-import { api, type PullRequest } from "../lib/api";
 import { cx } from "../lib/format";
 import { hashToken, insertTag, tagMatches, tagRows, type TagRow } from "../lib/shortcuts";
-import { useTasks } from "./TaskChip";
+import { usePullRequests, useTasks } from "../hooks/lists";
 
 const ICON = { spec: FileText, issue: CircleDot, pr: GitPullRequest };
 
@@ -14,13 +13,9 @@ const ICON = { spec: FileText, issue: CircleDot, pr: GitPullRequest };
  */
 export function useTagMenu(project: string, text: string, setText: Dispatch<SetStateAction<string>>) {
   const query = hashToken(text);
-  const tasks = useTasks();
-  const [prs, setPrs] = useState<PullRequest[]>([]);
-  const wants = query !== undefined;
-  useEffect(() => {
-    if (wants) api.pullRequests().then(setPrs, () => {});
-  }, [wants]);
-  const rows = useMemo(() => tagRows(tasks ?? [], prs, project), [tasks, prs, project]);
+  const tasks = useTasks().items;
+  const prs = usePullRequests().items;
+  const rows = useMemo(() => tagRows(tasks ?? [], prs ?? [], project), [tasks, prs, project]);
   const [closedAt, setClosedAt] = useState<string>();
   const [index, setIndex] = useState(0);
   useEffect(() => setIndex(0), [text]);
