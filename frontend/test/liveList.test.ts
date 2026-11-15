@@ -15,13 +15,13 @@ Object.assign(globalThis, { EventSource: class { onopen = null; onerror = null; 
 type Item = { id: string; v: number };
 type Ev = { type: "put"; item: Item } | { type: "gone"; id: string } | { type: "other" };
 type Store = {
-  get: () => { items: Item[] | null; failed: boolean };
+  get: () => { items: Item[] | null; failed: string | null };
   ensure: () => void;
   reload: () => Promise<void>;
   event: (e: Ev) => void;
   connection: (live: boolean) => void;
   set: (fn: (items: Item[]) => Item[]) => void;
-  use: () => { items: Item[] | null; failed: boolean };
+  use: () => { items: Item[] | null; failed: string | null };
 };
 let vite: ViteDevServer;
 let createLiveList: (load: () => Promise<Item[]>, apply: (items: Item[], e: Ev) => Item[]) => Store;
@@ -62,7 +62,7 @@ test("it loads once however often it's asked for, and is null until then", async
   await l.answer([{ id: "a", v: 1 }]);
   l.store.ensure();
   assert.equal(l.loads(), 1);
-  assert.deepEqual(l.store.get(), { items: [{ id: "a", v: 1 }], failed: false });
+  assert.deepEqual(l.store.get(), { items: [{ id: "a", v: 1 }], failed: null });
 });
 
 test("events update the loaded list, and others leave it as it is", async () => {
@@ -112,10 +112,23 @@ test("a failed load says so, and the next ask tries again", async () => {
   const l = list();
   l.store.ensure();
   await l.fail();
-  assert.deepEqual(l.store.get(), { items: null, failed: true });
+  assert.deepEqual(l.store.get(), { items: null, failed: "down" });
   l.store.ensure();
   await l.answer([{ id: "a", v: 1 }]);
-  assert.deepEqual(l.store.get(), { items: [{ id: "a", v: 1 }], failed: false });
+  assert.deepEqual(l.store.get(), { items: [{ id: "a", v: 1 }], failed: null });
+});
+
+test("a first load that failed loads again when the stream opens", async () => {
+  const l = list();
+  l.store.ensure();
+  await l.fail();
+  l.store.connection(false);
+  l.store.connection(true);
+  assert.equal(l.loads(), 2, "the backend is back: the list doesn't wait for a remount");
+  await l.answer([{ id: "a", v: 1 }]);
+  assert.deepEqual(l.store.get(), { items: [{ id: "a", v: 1 }], failed: null });
+  l.store.connection(true);
+  assert.equal(l.loads(), 2, "loaded: an open stream alone doesn't load it again");
 });
 
 test("a failed reload keeps what was there", async () => {
@@ -124,7 +137,7 @@ test("a failed reload keeps what was there", async () => {
   await l.answer([{ id: "a", v: 1 }]);
   l.store.reload();
   await l.fail();
-  assert.deepEqual(l.store.get(), { items: [{ id: "a", v: 1 }], failed: false });
+  assert.deepEqual(l.store.get(), { items: [{ id: "a", v: 1 }], failed: null });
 });
 
 test("an edit in place shows in every component, from one load", async () => {

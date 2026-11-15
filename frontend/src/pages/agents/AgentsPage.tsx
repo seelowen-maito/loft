@@ -290,7 +290,7 @@ export default function AgentsPage() {
       {/* main */}
       <section className="min-h-0 min-w-0 border-r border-line max-xl:border-r-0">
         {agentsFailed ? (
-          <p className="p-6 text-[12.5px] text-bad">Couldn't load agents.</p>
+          <p className="p-6 text-[12.5px] text-bad">Couldn't load agents: {agentsFailed}</p>
         ) : agents && agents.length === 0 ? (
           <Empty onCreate={() => setCreating(true)} />
         ) : selected && interview ? (

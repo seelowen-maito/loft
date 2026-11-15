@@ -185,7 +185,7 @@ export default function TasksPage() {
         </button>
         {tasks && <span className="font-mono text-[11px] text-fg-3">{count}</span>}
       </div>
-      {agentsFailed && <p className="mt-2 text-[12.5px] text-bad">Couldn't load agents.</p>}
+      {agentsFailed && <p className="mt-2 text-[12.5px] text-bad">Couldn't load agents: {agentsFailed}</p>}
     </div>
   );
 
