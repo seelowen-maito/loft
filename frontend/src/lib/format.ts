@@ -18,6 +18,12 @@ export function timeAgo(input: string | number | null | undefined): string {
   return future ? `in ${unit}` : `${unit} ago`;
 }
 
+/** When a check-in is next: "next in 5m", or "next: any moment" once it is due, overdue or under 45 s away (never "next just now"). */
+export function nextRunText(at: string | number, now = Date.now()): string {
+  const ms = (typeof at === "number" ? at * 1000 : new Date(at).getTime()) - now;
+  return ms < 45_000 ? "next: any moment" : `next ${timeAgo(at)}`;
+}
+
 export function fmtNum(n: number): string {
   if (n >= 10000) return `${(n / 1000).toFixed(0)}k`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
