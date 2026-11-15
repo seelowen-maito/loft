@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
-import { fmtClock, fmtDate, fmtDayTime, nextRunText } from "../../lib/time";
+import { fmtClock, fmtDate, fmtDuration, fmtDayTime, nextRunText } from "../../lib/time";
 import { useNow } from "../../lib/useNow";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
@@ -592,7 +592,7 @@ export function Chat({
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] text-fg">
                   {watch.text}
-                  {watch.kind === "waiting" && <span className="text-fg-3"> · {watch.minutes} min</span>}
+                  {watch.kind === "waiting" && <span className="text-fg-3"> · {fmtDuration(watch.minutes * 60000)}</span>}
                 </div>
                 <div className="truncate font-mono text-[11px] text-fg-3">
                   {watch.kind === "waiting" ? "Already replied. Sending a message stops the run." : "It may be stuck. Restart keeps queued messages."}

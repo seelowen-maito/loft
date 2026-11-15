@@ -5,7 +5,9 @@ import { fmtDayTime, relTime } from "./time.ts";
 export function resetText(resetsAt: string | null | undefined, now: number, locale?: string): string {
   const t = resetsAt ? new Date(resetsAt) : null;
   if (!t || Number.isNaN(t.getTime())) return "Reset time unknown";
-  return `Resets ${relTime(t.getTime() / 1000, now)} · ${fmtDayTime(t, now, locale)}`;
+  // A reset is ahead: one due or already past (usage not refreshed yet) is "in a moment", never "just now" or "ago".
+  const when = t.getTime() - now < 45_000 ? "in a moment" : relTime(t.getTime() / 1000, now);
+  return `Resets ${when} · ${fmtDayTime(t, now, locale)}`;
 }
 
 /** "$183": whole dollars with thousands separators, for the home line's cost. */

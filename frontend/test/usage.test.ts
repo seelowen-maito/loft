@@ -11,8 +11,10 @@ test("a reset reads as relative, then day and time", () => {
   assert.equal(resetText(new Date(2026, 9, 30, 21, 5).toISOString(), NOW, "en-GB"), "Resets in 3d · Fri 21:05");
 });
 
-test("a reset already due reads as just now", () => {
-  assert.equal(resetText(new Date(2026, 9, 27, 11, 59, 30).toISOString(), NOW, "en-GB"), "Resets just now · Tue 11:59");
+test("a reset under 45 s away, due, or already past reads as in a moment", () => {
+  assert.equal(resetText(new Date(2026, 9, 27, 12, 0, 20).toISOString(), NOW, "en-GB"), "Resets in a moment · Tue 12:00");
+  assert.equal(resetText(new Date(2026, 9, 27, 11, 59, 30).toISOString(), NOW, "en-GB"), "Resets in a moment · Tue 11:59");
+  assert.equal(resetText(new Date(2026, 9, 27, 11, 55).toISOString(), NOW, "en-GB"), "Resets in a moment · Tue 11:55");
 });
 
 test("the time follows the locale's hour cycle", () => {
