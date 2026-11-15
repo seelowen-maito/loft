@@ -59,7 +59,7 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
       {onCi.map((t) => (
         <div key={t.number} className="flex min-w-0 items-center gap-1.5">
           <span className="min-w-0 truncate"><span className="font-mono text-[10.5px] text-fg-3">#{t.number}</span> {t.title}</span>
-          <span className="shrink-0 font-mono text-[10.5px] text-accent">{ticketState(t).text}</span>
+          <span className={cx("shrink-0 font-mono text-[10.5px]", TONE_TEXT[ticketState(t).tone])}>{ticketState(t).text}</span>
           <span className="shrink-0 font-mono text-[10px] text-fg-3" title="ci: pending">ci …</span>
         </div>
       ))}
@@ -70,7 +70,7 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
 
 const prUrl = (spec: Task, d: DeliverySummary | null) => (d?.pr && spec.github ? `https://github.com/${spec.github.repo}/pull/${d.pr}` : null);
 
-function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number]; current: boolean; open?: () => void }) {
+function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number] & { waiting_for_lead?: boolean }; current: boolean; open?: () => void }) {
   const l = ticketState(t);
   const row = "flex w-full items-center gap-2 py-0.5 text-left text-[12.5px]";
   const body = (
@@ -117,7 +117,7 @@ export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTi
             </div>
           )}
           <ol className="relative ml-2 border-l border-line pl-4">
-            {d.tickets.map((t, i) => <TicketLine key={t.number} t={t} current={!!t.agent_id} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
+            {d.tickets.map((t, i) => <TicketLine key={t.number} t={{ ...t, waiting_for_lead: !!d.waiting_for_lead?.includes(t.number) }} current={!!t.agent_id} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
           </ol>
         </>
       )}

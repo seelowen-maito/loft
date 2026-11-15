@@ -44,7 +44,7 @@ function TicketCard({ t, dense, agentById, open }: { t: BoardTicket; dense: bool
         <span className="font-mono text-[10.5px] text-fg-3">{t.number ? `#${t.number}` : "·"}</span>
         <span className={cx("min-w-0 flex-1 leading-snug", dense ? "truncate text-[12px]" : "text-[12.5px]", t.state === "closed" && "text-fg-3")}>{t.title}</span>
       </div>
-      {(!dense || t.current || !!t.waiting_on?.length || t.waiting_for_ci || !!t.waiting) && (
+      {(!dense || t.current || !!t.waiting_on?.length || t.waiting_for_ci || !!t.waiting || t.waiting_for_lead || t.state === "needs_human") && (
         <div className="mt-1 flex flex-wrap items-center gap-1">
           <span className={cx("min-w-0 font-mono text-[10px] [overflow-wrap:anywhere]", TONE_TEXT[l.tone])} title={t.waiting ?? undefined}>{l.text}</span>
           <Verdicts v={t.verdicts} />

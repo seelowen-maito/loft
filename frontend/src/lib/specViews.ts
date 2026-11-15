@@ -58,12 +58,13 @@ export function deliveryWaits(d: { waiting_on_you?: number[]; waiting_for_lead?:
 }
 
 /** A ticket's state in a few words and a tone: the one wording and colour for the board, the spec panel and the Delivery card. An open one waiting on tickets outside its spec says which (`owner/repo#n`); one in review whose reviewers all passed is waiting for CI. */
-export function ticketState(t: { state: string; waiting?: string | null; waiting_on?: string[]; waiting_for_ci?: boolean }): { text: string; tone: "good" | "accent" | "warn" | "muted" } {
+export function ticketState(t: { state: string; waiting?: string | null; waiting_on?: string[]; waiting_for_ci?: boolean; waiting_for_lead?: boolean }): { text: string; tone: "good" | "accent" | "warn" | "muted" } {
   const { state, waiting_on: waitingOn = [], waiting_for_ci: waitingForCi = false } = t;
   // A ticket its Dev reported waiting says so (what on is in its tooltip).
   if (t.waiting && state !== "closed") return { text: "waiting", tone: "muted" };
   if (state === "open" && waitingOn.length) return { text: `waiting on ${waitingOn.join(", ")}`, tone: "warn" };
   if (state === "review" && waitingForCi) return { text: "waiting for CI", tone: "accent" };
+  if (state === "open" && t.waiting_for_lead) return { text: "waiting for the Lead", tone: "muted" };
   switch (state) {
     case "closed": return { text: "done", tone: "good" };
     case "started": return { text: "building", tone: "accent" };
@@ -78,14 +79,14 @@ export function ticketState(t: { state: string; waiting?: string | null; waiting
 
 /* ---------- the board's tickets ---------- */
 
-export type BoardTicket = { key: string; number: number | null; title: string; state: string; taskId: string | null; verdicts: Record<string, string>; current: boolean; agentId: string | null; waiting?: string | null; waiting_on?: string[]; waiting_for_ci?: boolean };
+export type BoardTicket = { key: string; number: number | null; title: string; state: string; taskId: string | null; verdicts: Record<string, string>; current: boolean; agentId: string | null; waiting?: string | null; waiting_on?: string[]; waiting_for_ci?: boolean; waiting_for_lead?: boolean };
 
 /** A spec's tickets: its Delivery's when it has them, else its sub-issues in Loft. Each knows its own issue, to open it. */
 export function ticketsOf(spec: Task, d: DeliverySummary | null, tasks: Task[]): BoardTicket[] {
   if (d?.tickets.length)
     return d.tickets.map((t) => {
       const own = t.id ? tasks.find((x) => x.id === t.id) : tasks.find((x) => !!spec.github && x.github?.repo === spec.github.repo && x.github.number === t.number);
-      return { key: `${t.number}`, number: own?.github?.number ?? t.number, title: t.title, state: t.state, taskId: own?.id ?? null, verdicts: t.verdicts ?? {}, current: !!t.agent_id, agentId: t.agent_id ?? null, waiting: t.waiting, waiting_on: t.waiting_on, waiting_for_ci: !!t.waiting_for_ci };
+      return { key: `${t.number}`, number: own?.github?.number ?? t.number, title: t.title, state: t.state, taskId: own?.id ?? null, verdicts: t.verdicts ?? {}, current: !!t.agent_id, agentId: t.agent_id ?? null, waiting: t.waiting, waiting_on: t.waiting_on, waiting_for_ci: !!t.waiting_for_ci, waiting_for_lead: !!d.waiting_for_lead?.includes(t.number) };
     });
   return tasks
     .filter((x) => x.parent_id === spec.id && x.status !== "cancelled")

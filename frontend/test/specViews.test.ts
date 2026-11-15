@@ -180,3 +180,11 @@ test("the waiting lines read Needs you for the user and Waiting for the Lead", (
   assert.deepEqual(deliveryWaits({ waiting_on_you: [] }), []);
   assert.deepEqual(deliveryWaits(null), []);
 });
+
+test("a ready ticket the Lead hasn't assigned yet waits for the Lead", () => {
+  assert.deepEqual(ticketState({ state: "open", waiting_for_lead: true }), { text: "waiting for the Lead", tone: "muted" });
+  assert.equal(ticketState({ state: "started", waiting_for_lead: true }).text, "building");
+  const s = spec({ gh: ["o/r", 9] });
+  const d = del({ waiting_for_lead: [5], tickets: [{ number: 5, title: "t", state: "open", skipped: "" }, { number: 6, title: "u", state: "open", skipped: "" }] });
+  assert.deepEqual(ticketsOf(s, d, [s]).map((t) => t.waiting_for_lead), [true, false]);
+});
