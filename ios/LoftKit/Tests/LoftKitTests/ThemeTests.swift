@@ -96,7 +96,8 @@ final class ThemeTests: XCTestCase {
     func testWidgetRedTextIsReadableOnWhiteAndUnchangedInDark() {
         for red in [UsageTone.usage(95), UsageTone.level("hot"), UsageTone.level("critical"), WidgetTheme.failure] {
             XCTAssertGreaterThanOrEqual(contrastOnWhite(red), 4.5)
-            XCTAssertEqual(hex(red, .darkAqua), "FF6B66")
+            // Dark keeps the bright red: on the Mac that is the web's `bad` (#456).
+            XCTAssertEqual(hex(red, .darkAqua), hex(Theme.failure, .darkAqua))
         }
         XCTAssertLessThan(contrastOnWhite(Theme.failure), 4.5, "the bright red is why")
     }
