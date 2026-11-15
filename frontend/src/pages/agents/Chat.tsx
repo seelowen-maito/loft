@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
-import { Callout } from "../../components/Callout";
+import { Callout, ResultLine } from "../../components/Callout";
 import { fmtClock, fmtDate, fmtDuration, fmtDayTime, nextRunText } from "../../lib/time";
 import { useNow } from "../../lib/useNow";
 import { Sticker } from "../../components/Sticker";
@@ -762,8 +762,8 @@ export function Chat({
               </button>
             </div>
           </div>
-          {cmdError && <div className="mt-2 text-[12px] text-bad">{cmdError}</div>}
-          {cmdNote && <div className="mt-2 truncate font-mono text-[11.5px] text-good">✓ {cmdNote}</div>}
+          <ResultLine said={cmdError ? { ok: false, text: cmdError } : null} className="mt-2" />
+          <ResultLine said={cmdNote ? { ok: true, text: cmdNote } : null} className="mt-2 truncate" />
           <div className="mt-2 font-mono text-[10.5px] text-fg-3">@ agents and files · # specs, issues and PRs</div>
           <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
             {/* Mouse down keeps focus in the chat box, so it returns there when the search or sheet closes. */}

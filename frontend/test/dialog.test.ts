@@ -79,12 +79,24 @@ test("Esc closes only the top dialog, then the one under it", () => {
   m.unmount();
 });
 
-test("Esc doesn't close while typing in a field or composing in an IME, nor when something handled it", () => {
+test("Esc in an autofocused field closes the dialog", () => {
   let closed = 0;
-  const m = mount(h(Dialog, { title: "New", onClose: () => closed++ }, h("input", { "aria-label": "Title" }), h("button", null, "Save")));
+  const m = mount(h(Dialog, { title: "New agent", onClose: () => closed++ }, h("input", { autoFocus: true, "aria-label": "Name" })));
+  assert.equal(document.activeElement?.tagName, "INPUT");
+  press("Escape");
+  assert.equal(closed, 1);
+  m.unmount();
+});
+
+test("Esc doesn't close while composing in an IME, nor when a field's menu or something else handled it", () => {
+  let closed = 0;
+  // A field whose menu takes Esc, as TagMenu and the @-mention popup do.
+  const menu = h("input", { "aria-label": "Title", onKeyDown: (e: KeyboardEvent) => e.key === "Escape" && e.preventDefault() });
+  const m = mount(h(Dialog, { title: "New", onClose: () => closed++ }, menu, h("button", null, "Save")));
   const input = document.querySelector("input")!;
   input.focus();
   press("Escape", {}, input);
+  press("Escape", { isComposing: true }, input);
   document.querySelector<HTMLElement>("button")!.focus();
   press("Escape", { isComposing: true });
   const handled = new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
