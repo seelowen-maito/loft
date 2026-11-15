@@ -58,14 +58,7 @@ final class QuickSearchModel {
     /// Waits for the Herdr check, for a second at most; slower than that counts as not linked.
     func waitForHerdr() async {
         guard let check = herdrCheck else { return }
-        let done = await withTaskGroup(of: Bool.self) { group in
-            group.addTask { await check.value; return true }
-            group.addTask { try? await Task.sleep(for: .seconds(1)); return false }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
-        }
-        if !done { herdrReady = false }
+        if await within(seconds: 1, { await check.value; return true }) == nil { herdrReady = false }
     }
 
     /// Where an agent opens for these keys; the footer and Enter both ask this.
