@@ -5,27 +5,27 @@ import { cx, fmtNum } from "../../lib/format";
 import { fmtDateTime } from "../../lib/time";
 import { contextWarns } from "../../lib/context";
 import { Dialog } from "../../components/Dialog";
+import { ErrorLine } from "../../components/Callout";
+import { errorText, useAction } from "../../lib/useAction";
 
 /** `/resume`: the agent's past Sessions, newest first; picking one makes it the agent's Session. */
 export function ResumeDialog({ agentId, running, onClose }: { agentId: string; running: boolean; onClose: () => void }) {
   const [list, setList] = useState<{ sessions: PastSession[]; current: string | null } | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const resuming = useAction();
+  const [picked, setPicked] = useState<string | null>(null);
 
   useEffect(() => {
-    api.sessions(agentId).then(setList, (e) => setErr((e as Error).message));
+    api.sessions(agentId).then(setList, (e) => setLoadErr(errorText(e)));
   }, [agentId]);
 
-  const resume = async (id: string) => {
-    setBusy(id);
-    setErr(null);
-    try {
+  const resume = (id: string) => {
+    if (resuming.busy) return;
+    setPicked(id);
+    return resuming.run(async () => {
       await api.resumeSession(agentId, id);
       onClose();
-    } catch (e) {
-      setErr((e as Error).message);
-      setBusy(null);
-    }
+    });
   };
 
   return (
@@ -43,8 +43,8 @@ export function ResumeDialog({ agentId, running, onClose }: { agentId: string; r
 
       <div className="mt-4 min-h-0 flex-1 overflow-y-auto px-3 pb-4">
         {running && <p className="px-3 pb-2 text-[12.5px] text-warn">Stop the agent first.</p>}
-        {err && <p className="px-3 pb-2 text-[12.5px] text-bad">{err}</p>}
-        {!list && !err && (
+        <ErrorLine error={loadErr ?? resuming.error} className="px-3 pb-2" />
+        {!list && !loadErr && (
           <p className="flex items-center gap-2 px-3 py-4 text-[12.5px] text-fg-3"><Loader2 className="size-3.5 animate-spin" /> Reading the transcripts…</p>
         )}
         {list && list.sessions.length === 0 && <p className="px-3 py-4 text-[12.5px] text-fg-3">No past Sessions for this agent yet.</p>}
@@ -55,10 +55,11 @@ export function ResumeDialog({ agentId, running, onClose }: { agentId: string; r
               key={s.id}
               type="button"
               className="flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-white/5 disabled:opacity-50 disabled:hover:bg-transparent"
-              disabled={running || current || busy !== null}
+              disabled={running || current || resuming.busy}
+              aria-busy={resuming.busy && picked === s.id}
               onClick={() => resume(s.id)}
             >
-              {busy === s.id ? <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" /> : <History className="mt-0.5 size-3.5 shrink-0 text-fg-3" />}
+              {resuming.busy && picked === s.id ? <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" /> : <History className="mt-0.5 size-3.5 shrink-0 text-fg-3" />}
               <span className="min-w-0 flex-1">
                 <span className="flex items-baseline gap-2 text-[11.5px] text-fg-3">
                   <span>{fmtDateTime(s.started_at)}</span>

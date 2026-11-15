@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
-import { CircleDot, Eraser, ExternalLink, FileText, GitBranch, GitMerge, Loader2, Users } from "lucide-react";
+import { CircleDot, Eraser, ExternalLink, FileText, GitBranch, GitMerge, Play, Users } from "lucide-react";
 import { cx } from "../../lib/format";
 import { teamNote } from "../../lib/teamNote";
-import { StartDeliveryButton } from "../../components/StartDeliveryButton";
+import { ActionButton } from "../../components/ActionButton";
+import { ErrorLine } from "../../components/Callout";
+import { startDeliveryLabel } from "../../lib/startDelivery";
+import { errorText, useAction } from "../../lib/useAction";
 import { StartWarning } from "../../components/StartWarning";
 import { api, type WaitsOn, type DeliveryStarted, type EndCard as Card, type CardSpec, type PlannedIssue } from "../../lib/api";
 
@@ -30,10 +33,11 @@ function startedOf(card: Card | undefined, d: { repo: string; spec: number }): D
   return [card, ...(card?.more ?? [])].find((c) => c?.delivery && keyOf(c.delivery) === keyOf(d))?.delivery?.started ?? null;
 }
 
-type Run = (what: "clear" | "setup" | "start" | "merge", f: () => Promise<unknown>) => Promise<void>;
+type Action = ReturnType<typeof useAction>;
+type Run = (a: Action, f: () => Promise<unknown>) => Promise<unknown>;
 
 /** One published spec (or standalone ticket) with its tickets and its own Start delivery. */
-function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, note, extra }: { agentId: string; messageId: number; item: CardSpec; busy: string | null; run: Run; outcome?: DeliveryStarted | string; showRepo: boolean; note?: React.ReactNode; extra?: React.ReactNode }) {
+function SpecBlock({ agentId, messageId, item, busy, run, starting, merging, outcome, showRepo, note, extra }: { agentId: string; messageId: number; item: CardSpec; busy: boolean; run: Run; starting: Action; merging: Action; outcome?: DeliveryStarted | string; showRepo: boolean; note?: React.ReactNode; extra?: React.ReactNode }) {
   const [started, setStarted] = useState<DeliveryStarted | null>(null);
   // A plan kept in a folder with no git: Start delivery asks before setting it up.
   const [askGit, setAskGit] = useState<string | null>(null);
@@ -48,7 +52,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
   };
   useEffect(reloadWaits, [delivery?.repo, delivery?.spec, notStarted]);
   const start = (initGit: boolean) =>
-    run("start", async () => {
+    run(starting, async () => {
       setWarn(false);
       if (!delivery) return;
       const r = await api.startDelivery(agentId, messageId, delivery.repo, delivery.spec, initGit);
@@ -81,10 +85,10 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
             <span className="break-all font-mono text-[11.5px] text-fg">{askGit}</span> has no git yet. Set it up? Loft runs <span className="font-mono">git init</span>, adds a <span className="font-mono">.gitignore</span> for junk and secret files like <span className="font-mono">.env</span> and keys, and commits the folder as it is. Then the Delivery starts.
           </div>
           <div className="flex flex-wrap gap-2">
-            <button className="btn-primary text-[12px]" disabled={busy !== null} onClick={() => start(true)}>
-              {busy === "start" ? <Loader2 className="size-3.5 animate-spin" /> : <GitBranch className="size-3.5" />} Set up git and start
-            </button>
-            <button className="btn text-[12px]" disabled={busy !== null} onClick={() => { setAskGit(null); setDeclined(true); }}>
+            <ActionButton className="text-[12px]" icon={<GitBranch className="size-3.5" />} pending={starting.busy} pendingLabel="Setting up git…" disabled={busy} onClick={() => start(true)}>
+              Set up git and start
+            </ActionButton>
+            <button className="btn text-[12px]" disabled={busy} onClick={() => { setAskGit(null); setDeclined(true); }}>
               Not now
             </button>
           </div>
@@ -95,13 +99,17 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
       {warn && !startedOn && waits.length > 0 && <StartWarning waits={waits} onStart={() => start(false)} onCancel={() => setWarn(false)} onStarted={reloadWaits} />}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {delivery && !startedOn && !askGit && (
-          <StartDeliveryButton
+          <ActionButton
             className="text-[12.5px]"
-            pending={busy === "start"}
-            disabled={busy !== null}
+            icon={<Play className="size-3.5" />}
+            pending={starting.busy}
+            pendingLabel={startDeliveryLabel(true)}
+            disabled={busy}
             title={delivery.standalone ? `Opens #${delivery.spec}'s branch and draft PR and starts it on the team's Dev.` : `Starts spec #${delivery.spec}'s first ready ticket on the team's Dev.`}
             onClick={() => (waits.length ? setWarn(true) : start(false))}
-          />
+          >
+            {startDeliveryLabel(false)}
+          </ActionButton>
         )}
         {delivery && startedOn && (
           <Link to={`/agents/${startedOn.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
@@ -109,14 +117,17 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
           </Link>
         )}
         {delivery?.local && stage?.state === "ready" && !merged && (
-          <button
-            className="btn-primary text-[12.5px]"
-            disabled={busy !== null}
+          <ActionButton
+            className="text-[12.5px]"
+            icon={<GitMerge className="size-3.5" />}
+            pending={merging.busy}
+            pendingLabel="Merging…"
+            disabled={busy}
             title={`Merges ${stage.branch} into ${stage.base} in the Dev's clone. Your copy of the project isn't touched.`}
-            onClick={() => run("merge", async () => setMerged((await api.mergeDelivery(delivery.repo, delivery.spec)).message))}
+            onClick={() => run(merging, async () => setMerged((await api.mergeDelivery(delivery.repo, delivery.spec)).message))}
           >
-            {busy === "merge" ? <Loader2 className="size-3.5 animate-spin" /> : <GitMerge className="size-3.5" />} Merge
-          </button>
+            Merge
+          </ActionButton>
         )}
         {typeof outcome === "string" && !startedOn && <span className="text-[12px] text-bad">{outcome}</span>}
         {delivery?.local && (merged || stage?.state === "merged") && <span className="font-mono text-[11.5px] text-good">{merged ?? `Merged ${stage?.branch} into ${stage?.base}`}</span>}
@@ -129,19 +140,17 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
 /** The end of a planning grill: the specs and tickets it published, each with Start delivery when it has a
  *  Delivery (otherwise Clear context leaves the next message in the composer), and the team check. */
 export function EndCard({ agentId, messageId, card, onClear }: { agentId: string; messageId: number; card: Card; onClear: (next: string) => Promise<void> }) {
-  const [busy, setBusy] = useState<"clear" | "setup" | "start" | "merge" | null>(null);
+  const clear = useAction();
+  const sendSetup = useAction();
+  const starting = useAction();
+  const merging = useAction();
+  const all = [clear, sendSetup, starting, merging];
+  const busy = all.some((a) => a.busy);
   const [sent, setSent] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const run: Run = async (what, f) => {
-    setBusy(what);
-    setError(null);
-    try {
-      await f();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
+  // One error line for the card: the last action's.
+  const run: Run = (a, f) => {
+    for (const x of all) x.setError(null);
+    return a.run(f);
   };
   const setup = card.setup;
   const shown = sent || !!setup?.sent_at;
@@ -150,7 +159,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   const [outcome, setOutcome] = useState<Record<string, DeliveryStarted | string>>({});
   const todo = items.filter((i) => i.delivery && !i.delivery.started && typeof outcome[keyOf(i.delivery)] !== "object");
   const startAll = () =>
-    run("start", async () => {
+    run(starting, async () => {
       for (const { delivery } of todo) {
         if (!delivery) continue;
         let result: DeliveryStarted | string;
@@ -158,7 +167,7 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
           const r = await api.startDelivery(agentId, messageId, delivery.repo, delivery.spec);
           result = r.needs_git ? "Has no git yet: start it on its own." : (startedOf(r.message.meta?.grill?.end_card, delivery) ?? "Didn't start.");
         } catch (e) {
-          result = (e as Error).message;
+          result = errorText(e);
         }
         setOutcome((o) => ({ ...o, [keyOf(delivery)]: result }));
       }
@@ -171,26 +180,34 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
   );
   const actions = (
     <>
-      <button
-        className={cx("btn text-[12.5px]", items.some((i) => !i.delivery) && "btn-primary")}
-        disabled={busy !== null}
+      <ActionButton
+        variant="secondary"
+        className={cx("text-[12.5px]", items.some((i) => !i.delivery) && "btn-primary")}
+        icon={<Eraser className="size-3.5" />}
+        pending={clear.busy}
+        pendingLabel="Clearing…"
+        disabled={busy}
         title={card.next_message ? `Starts a fresh session and leaves "${card.next_message}" in the composer.` : "Starts a fresh session."}
-        onClick={() => run("clear", () => onClear(card.next_message))}
+        onClick={() => run(clear, () => onClear(card.next_message))}
       >
-        {busy === "clear" ? <Loader2 className="size-3.5 animate-spin" /> : <Eraser className="size-3.5" />} Clear context
-      </button>
+        Clear context
+      </ActionButton>
       {setup && !shown && (
-        <button
-          className="btn text-[12.5px]"
-          disabled={busy !== null}
+        <ActionButton
+          variant="secondary"
+          className="text-[12.5px]"
+          icon={<Users className="size-3.5" />}
+          pending={sendSetup.busy}
+          pendingLabel="Sending…"
+          disabled={busy}
           title={setup.message}
-          onClick={() => run("setup", async () => {
+          onClick={() => run(sendSetup, async () => {
             await api.sendTeamSetup(agentId, messageId);
             setSent(true);
           })}
         >
-          {busy === "setup" ? <Loader2 className="size-3.5 animate-spin" /> : <Users className="size-3.5" />} Set up the team with lofty
-        </button>
+          Set up the team with lofty
+        </ActionButton>
       )}
       {setup && shown && (
         <Link to={`/agents/${setup.agent_id}`} className="font-mono text-[11.5px] text-accent hover:underline">
@@ -204,26 +221,29 @@ export function EndCard({ agentId, messageId, card, onClear }: { agentId: string
       {/* No repo: the plan was kept as Loft issues. */}
       <div className="font-mono text-[10.5px] uppercase tracking-wider text-fg-3">Planning done{items.length === 1 && ` · ${card.repo || "kept in Loft"}`}</div>
       <div className="mt-2 space-y-3 divide-y divide-line [&>*:not(:first-child)]:pt-3">
-        {items.map((item, i) => <SpecBlock key={item.delivery ? keyOf(item.delivery) : (item.spec?.url ?? i)} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} outcome={item.delivery ? outcome[keyOf(item.delivery)] : undefined} showRepo={items.length > 1} note={items.length === 1 ? teamLine : undefined} extra={items.length === 1 ? actions : undefined} />)}
+        {items.map((item, i) => <SpecBlock key={item.delivery ? keyOf(item.delivery) : (item.spec?.url ?? i)} agentId={agentId} messageId={messageId} item={item} busy={busy} run={run} starting={starting} merging={merging} outcome={item.delivery ? outcome[keyOf(item.delivery)] : undefined} showRepo={items.length > 1} note={items.length === 1 ? teamLine : undefined} extra={items.length === 1 ? actions : undefined} />)}
       </div>
       {items.length > 1 && teamLine}
       {items.length > 1 && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {todo.length > 0 && (
-            <StartDeliveryButton
+            <ActionButton
               className="text-[12.5px]"
-              label={todo.length === items.length ? `Start all ${todo.length}` : `Start remaining ${todo.length}`}
-              pending={busy === "start"}
-              disabled={busy !== null}
+              icon={<Play className="size-3.5" />}
+              pending={starting.busy}
+              pendingLabel={startDeliveryLabel(true)}
+              disabled={busy}
               title={todo.length === 1 ? "Starts the spec that isn't started yet, on its own Lead." : `Starts the ${todo.length} specs that aren't started yet, each on its own Lead.`}
               onClick={startAll}
-            />
+            >
+              {todo.length === items.length ? `Start all ${todo.length}` : `Start remaining ${todo.length}`}
+            </ActionButton>
           )}
           {actions}
         </div>
       )}
       {card.next_message && <div className="mt-2 font-mono text-[10.5px] text-fg-3">Next: {card.next_message}</div>}
-      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={all.map((a) => a.error).find(Boolean)} className="mt-2" />
     </div>
   );
 }

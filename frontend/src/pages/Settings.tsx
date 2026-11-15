@@ -9,7 +9,9 @@ import { MacAccess } from "./MacAccess";
 import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { SettingsCard } from "../components/SettingsCard";
-import { Callout } from "../components/Callout";
+import { Callout, ErrorLine } from "../components/Callout";
+import { ActionButton } from "../components/ActionButton";
+import { errorText, useAction } from "../lib/useAction";
 import { FloatingBar } from "../components/FloatingBar";
 import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { ClaudeLoginSection } from "./ClaudeLogin";
@@ -131,23 +133,22 @@ const chip = (on: boolean) => cx("chip text-[12px]", on && "border-accent/40 tex
 /** Backups of Loft's database: the folder (saved with the other settings), the last backup, its error, and Back up now. */
 function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v: string) => void; folderErr: string | null }) {
   const [s, setS] = useState<BackupStatus | null>(null);
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const backUp = useAction();
   useEffect(() => {
-    api.backups().then(setS).catch((e) => setErr((e as Error).message));
+    api.backups().then(setS).catch((e) => setErr(errorText(e)));
   }, []);
-  const now = async () => {
-    setBusy(true);
+  const now = () => {
     setErr(null);
-    try {
-      setS(await api.backUpNow());
-    } catch (e) {
-      setErr((e as Error).message);
-      // The failure is recorded: show the last good backup next to it.
-      api.backups().then(setS).catch(() => {});
-    } finally {
-      setBusy(false);
-    }
+    backUp.run(async () => {
+      try {
+        setS(await api.backUpNow());
+      } catch (e) {
+        // The failure is recorded: show the last good backup next to it.
+        api.backups().then(setS).catch(() => {});
+        throw e;
+      }
+    });
   };
   const last = s?.last;
   return (
@@ -155,12 +156,12 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
       id="backups"
       title="Backups"
       action={
-        <button type="button" className="btn shrink-0" disabled={busy} onClick={now}>
-          {busy ? "Backing up…" : "Back up now"}
-        </button>
+        <ActionButton type="button" variant="secondary" className="shrink-0" pending={backUp.busy} pendingLabel="Backing up…" onClick={now}>
+          Back up now
+        </ActionButton>
       }
-      error={err ?? (s?.error ? `The last backup failed ${relTime(s.error.at)}: ${s.error.message}` : null)}
-      loading={!s && !err}
+      error={backUp.error ?? err ?? (s?.error ? `The last backup failed ${relTime(s.error.at)}: ${s.error.message}` : null)}
+      loading={!s && !err && !backUp.error}
     >
         <div className="flex flex-wrap items-center gap-3">
           <p className="min-w-0 flex-1 text-[13px] text-fg">
@@ -203,7 +204,7 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
     load().then(() => {
       // Needs you links here when the disk is almost full.
       if (window.location.hash === "#workspaces") setTimeout(() => card.current?.scrollIntoView({ block: "start" }));
-    }).catch((e) => setErr((e as Error).message));
+    }).catch((e) => setErr(errorText(e)));
   }, []);
   const name = (id: string) => s?.agents.find((a) => a.id === id)?.name ?? `Deleted agent ${id.slice(0, 8)}`;
   const low = s?.free_bytes != null && s.free_bytes < s.low_disk_bytes;
@@ -439,7 +440,7 @@ export default function SettingsPage() {
   const [draft, setDraft] = useState<Settings | null>(null);
   // Write-only: undefined keeps the saved token, "" clears it.
   const [token, setToken] = useState<string | undefined>(undefined);
-  const [saving, setSaving] = useState(false);
+  const save = useAction();
   const [err, setErr] = useState<string | null>(null);
   const [folderErr, setFolderErr] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -450,7 +451,7 @@ export default function SettingsPage() {
     return v;
   }), []);
   useEffect(() => {
-    load().then((v) => setDraft(v.settings)).catch((e) => setErr((e as Error).message));
+    load().then((v) => setDraft(v.settings)).catch((e) => setErr(errorText(e)));
   }, [load]);
   // Keep the running-agents count fresh; it gates the restart.
   useServerEvents(
@@ -468,11 +469,10 @@ export default function SettingsPage() {
   const restartFields = view.restart_fields as string[];
   const dirtyRestart = restartFields.filter((f) => JSON.stringify(draft[f as keyof Settings]) !== JSON.stringify(view.settings[f as keyof Settings]));
 
-  const save = async () => {
-    setSaving(true);
+  const saveAll = () => {
     setErr(null);
     setFolderErr(null);
-    try {
+    save.run(async () => {
       // The backups folder goes on its own, after the rest: a folder the server refuses fails only that field.
       let v = await api.saveSettings({ ...draft, github_token: token, backup_dir: undefined });
       if (draft.backup_dir !== v.settings.backup_dir) {
@@ -480,18 +480,14 @@ export default function SettingsPage() {
           // No github_token: the view's is blank, and blank would clear it.
           v = await api.saveSettings({ ...v.settings, github_token: undefined, backup_dir: draft.backup_dir });
         } catch (e) {
-          setFolderErr((e as Error).message);
+          setFolderErr(errorText(e));
         }
       }
       setView(v);
       setDraft({ ...v.settings, backup_dir: draft.backup_dir });
       setToken(undefined);
       window.dispatchEvent(new CustomEvent(SETTINGS_SAVED, { detail: v.settings }));
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setSaving(false);
-    }
+    });
   };
 
   const restart = async () => {
@@ -500,7 +496,7 @@ export default function SettingsPage() {
       await api.restart();
     } catch (e) {
       setConfirming(false);
-      setErr((e as Error).message);
+      setErr(errorText(e));
       return;
     }
     setConfirming(false);
@@ -636,10 +632,10 @@ export default function SettingsPage() {
 
         <MacAccess />
 
-        {(dirty || err) && (
+        {(dirty || err || save.error) && (
           <FloatingBar at="bottom">
-            {err ? (
-              <span role="alert" className="text-bad">{err}</span>
+            {err || save.error ? (
+              <ErrorLine error={save.error ?? err} />
             ) : (
               <span className="text-fg-2">
                 Unsaved changes{dirtyRestart.length > 0 && <> · {dirtyRestart.map((f) => LABELS[f] ?? f).join(", ")} needs a restart</>}
@@ -647,12 +643,12 @@ export default function SettingsPage() {
             )}
             {dirty && (
               <>
-                <button className="btn-ghost" onClick={() => { setDraft(view.settings); setToken(undefined); setErr(null); }}>
+                <button className="btn-ghost" onClick={() => { setDraft(view.settings); setToken(undefined); setErr(null); save.setError(null); }}>
                   Discard
                 </button>
-                <button className="btn-primary" disabled={saving} onClick={save}>
-                  {saving ? "Saving…" : "Save"}
-                </button>
+                <ActionButton pending={save.busy} pendingLabel="Saving…" onClick={saveAll}>
+                  Save
+                </ActionButton>
               </>
             )}
           </FloatingBar>

@@ -1,17 +1,18 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, TriangleAlert } from "lucide-react";
 import { api } from "../lib/api";
+import { useAction } from "../lib/useAction";
 import { useCheck } from "../lib/useCheck";
 import { SettingsCard } from "../components/SettingsCard";
 import { Callout } from "../components/Callout";
+import { ActionButton } from "../components/ActionButton";
 import { herdrInstallCommand, isLocalOrigin } from "../lib/herdr";
 
 /** Settings → Herdr UI: every agent as an agent in Herdr UI, on this machine or another one. */
 export function HerdrSetup() {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const setUp = useAction();
   const [result, setResult] = useState<{ done: string[]; message: string } | null>(null);
-  const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const check = useCheck(api.herdrStatus);
@@ -20,19 +21,13 @@ export function HerdrSetup() {
     if (status?.linked) setOpen(true);
   }, [status?.linked]);
 
-  const setUpHere = async () => {
-    setBusy(true);
-    setErr(null);
+  const setUpHere = () => {
     setResult(null);
-    try {
+    setUp.run(async () => {
       const r = await api.herdrSetup();
       setResult(r);
       await check.run();
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const origin = window.location.origin;
@@ -55,7 +50,7 @@ export function HerdrSetup() {
       id="herdr"
       title="Herdr UI"
       description="See every agent in Herdr UI, the terminal multiplexer for coding agents: one tab per agent with its chat, slash commands, approvals and this inspector as a sidebar. Herdr shows each one as an agent, working, idle or waiting for you."
-      error={err ?? check.err}
+      error={setUp.error ?? check.err}
       loading={check.loading}
     >
       {!open ? (
@@ -70,9 +65,9 @@ export function HerdrSetup() {
             <p className="text-[12px] text-fg-3">
               Builds the Herdr UI client, adds Loft's plugin to Herdr and opens a Loft workspace with your agents. The first build takes a minute.
             </p>
-            <button type="button" className="btn" disabled={busy || (status !== null && !status.herdr)} onClick={setUpHere}>
-              {busy ? "Setting up…" : status?.linked ? "Set up again" : "Set up on this machine"}
-            </button>
+            <ActionButton type="button" variant="secondary" pending={setUp.busy} pendingLabel="Setting up…" disabled={status !== null && !status.herdr} onClick={setUpHere}>
+              {status?.linked ? "Set up again" : "Set up on this machine"}
+            </ActionButton>
             {status && !status.herdr && (
               <p className="text-[12px] text-fg-3">
                 Install it from <a className="text-accent hover:underline" href="https://herdr.dev" target="_blank" rel="noreferrer">herdr.dev</a>, then come back.

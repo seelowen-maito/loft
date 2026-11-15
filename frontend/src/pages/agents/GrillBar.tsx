@@ -5,27 +5,30 @@ import { api, grillError, type GrillSession } from "../../lib/api";
 import { cx } from "../../lib/format";
 import { ConfirmDialog } from "../../components/Dialog";
 import { interviewPath, nextQuestion, questionAnchor } from "../../lib/interview";
+import { ActionButton } from "../../components/ActionButton";
+import { ErrorLine } from "../../components/Callout";
+import { useAction } from "../../lib/useAction";
 
 /** The round bar above the composer: which round, how much of it is answered, and Send / Pause / Resume / End (the app's buttons, same endpoint).
  * In the chat it also opens the full-screen interview; `fullScreen` is the bar on that page. */
+type Command = "send" | "pause" | "resume" | "end";
+
 export function GrillBar({ session, fullScreen = false }: { session: GrillSession; fullScreen?: boolean }) {
   const navigate = useNavigate();
   const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const commanding = useAction();
+  // The command running, so its button shows the spinner.
+  const [command, setCommand] = useState<Command | null>(null);
   const paused = session.state === "paused";
+  const busy = commanding.busy;
 
-  const send = async (command: "send" | "pause" | "resume" | "end") => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.grillCommand(session.session_id, command);
+  const send = (c: Command) => {
+    if (busy) return;
+    setCommand(c);
+    return commanding.run(async () => {
+      await api.grillCommand(session.session_id, c);
       setConfirming(false);
-    } catch (e) {
-      setError(grillError(e));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const answered = session.answered ?? 0;
@@ -72,13 +75,33 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
           </button>
         )}
         {session.round != null && !session.waiting && (
-          <button className="btn shrink-0" onClick={() => send("send")} disabled={busy} aria-label="Send round" title="Send your answers to the agent">
-            <Send className="size-3" /> <span className="max-md:hidden">Send round</span>
-          </button>
+          <ActionButton
+            variant="secondary"
+            className="shrink-0"
+            icon={<Send className="size-3" />}
+            pending={busy && command === "send"}
+            pendingLabel={<span className="max-md:hidden">Sending…</span>}
+            onClick={() => send("send")}
+            disabled={busy}
+            aria-label="Send round"
+            title="Send your answers to the agent"
+          >
+            <span className="max-md:hidden">Send round</span>
+          </ActionButton>
         )}
-        <button className="btn shrink-0" onClick={() => send(paused ? "resume" : "pause")} disabled={busy} aria-label={paused ? "Resume" : "Pause"} title={paused ? "Resume" : "Pause"}>
-          {paused ? <Play className="size-3 fill-current" /> : <Pause className="size-3 fill-current" />} <span className="max-md:hidden">{paused ? "Resume" : "Pause"}</span>
-        </button>
+        <ActionButton
+          variant="secondary"
+          className="shrink-0"
+          icon={paused ? <Play className="size-3 fill-current" /> : <Pause className="size-3 fill-current" />}
+          pending={busy && (command === "pause" || command === "resume")}
+          pendingLabel={<span className="max-md:hidden">{command === "resume" ? "Resuming…" : "Pausing…"}</span>}
+          onClick={() => send(paused ? "resume" : "pause")}
+          disabled={busy}
+          aria-label={paused ? "Resume" : "Pause"}
+          title={paused ? "Resume" : "Pause"}
+        >
+          <span className="max-md:hidden">{paused ? "Resume" : "Pause"}</span>
+        </ActionButton>
         <button className="btn shrink-0" onClick={() => setConfirming(true)} disabled={busy} aria-label="End interview" title="End interview">
           <Square className="size-3 fill-current" /> <span className="max-md:hidden">End interview</span>
         </button>
@@ -89,7 +112,7 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
         )}
         </div>
       </div>
-      {error && <div className="-mt-2 mb-2 text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={commanding.error && grillError(commanding.error)} className="-mt-2 mb-2" />
 
       {confirming && (
         <ConfirmDialog

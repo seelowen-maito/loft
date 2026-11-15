@@ -19,6 +19,9 @@ import { isSpec } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
 import { BoardPage, boardSpecs } from "./SpecBoard";
 import { Dialog } from "../components/Dialog";
+import { ActionButton } from "../components/ActionButton";
+import { ErrorLine } from "../components/Callout";
+import { useAction } from "../lib/useAction";
 import { TaskStatus } from "../components/TaskStatus";
 import { taskStatus, toneText } from "../lib/taskStatus";
 import { boardIssues, NEEDS_YOU, parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
@@ -464,18 +467,14 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
 /** Approve (optionally after editing) or Keep in Loft, for a comment waiting to go to GitHub. */
 function Approval({ c }: { c: TaskComment }) {
   const [editing, setEditing] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const run = async (f: () => Promise<unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await f();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+  const approve = useAction();
+  const keep = useAction();
+  const busy = approve.busy || keep.busy;
+  // One error line for both: the last action's.
+  const run = (a: ReturnType<typeof useAction>, f: () => Promise<unknown>) => {
+    approve.setError(null);
+    keep.setError(null);
+    a.run(f);
   };
   return (
     <div className="mt-2 space-y-2 border-t border-line pt-2">
@@ -483,12 +482,12 @@ function Approval({ c }: { c: TaskComment }) {
         <textarea value={editing} onChange={(e) => setEditing(e.target.value)} rows={3} aria-label="Text to post" className="w-full resize-y rounded-lg border border-line-strong bg-ink-900 px-2.5 py-1.5 text-[13px] outline-none" />
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <button className="btn-primary" disabled={busy} onClick={() => run(() => api.approveComment(c.task_id, c.id, editing ?? undefined))}>
+        <ActionButton pending={approve.busy} pendingLabel="Posting…" disabled={busy} onClick={() => run(approve, () => api.approveComment(c.task_id, c.id, editing ?? undefined))}>
           {editing === null ? "Approve" : "Post edited"}
-        </button>
+        </ActionButton>
         {editing === null && <button className="btn" disabled={busy} onClick={() => setEditing(c.text)}>Edit first</button>}
-        <button className="btn-ghost" disabled={busy} onClick={() => run(() => api.keepComment(c.task_id, c.id))}>Keep in Loft</button>
-        {error && <span className="text-[12px] text-bad">{error}</span>}
+        <ActionButton variant="ghost" pending={keep.busy} pendingLabel="Saving…" disabled={busy} onClick={() => run(keep, () => api.keepComment(c.task_id, c.id))}>Keep in Loft</ActionButton>
+        <ErrorLine error={approve.error ?? keep.error} />
       </div>
     </div>
   );

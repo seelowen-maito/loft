@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2, TriangleAlert } from "lucide-react";
 import { SettingsCard } from "../components/SettingsCard";
-import { Callout, ResultLine } from "../components/Callout";
+import { Callout, ErrorLine, ResultLine } from "../components/Callout";
+import { ActionButton } from "../components/ActionButton";
 import { api, portalHome, type PushDevice, type PushStatus } from "../lib/api";
 import { cx } from "../lib/format";
 import { relTime } from "../lib/time";
 import { usePoll } from "../hooks/usePoll";
+import { errorText, useAction } from "../lib/useAction";
 
 /** Settings → Push notifications: which path pushes take (the user's own APNs key, the Loft relay with a relay key, or none), the phones registered, and a test push. */
 const CHIP: Record<PushStatus["path"], string> = { own_key: "Your own key", relay: "Using the Loft relay", none: "Sign in to get push" };
@@ -23,7 +25,15 @@ export function PushSettings() {
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
   const [relayKey, setRelayKey] = useState("");
   const [relayAddr, setRelayAddr] = useState("");
-  const [busy, setBusy] = useState(false);
+  const signIn = useAction();
+  const save = useAction();
+  const removeRelayKey = useAction();
+  const saveRelayKey = useAction();
+  const saveAddress = useAction();
+  const removeKey = useAction();
+  const sendTest = useAction();
+  const [testing, setTesting] = useState<string | null>(null);
+  const busy = [signIn, save, removeRelayKey, saveRelayKey, saveAddress, removeKey].some((a) => a.busy);
   const [removing, setRemoving] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [portalLink, setPortalLink] = useState<string | null>(null);
@@ -37,7 +47,7 @@ export function PushSettings() {
       setTeamId(s.team_id);
       setRelayAddr(s.relay_address);
       setLoadErr(null);
-    }).catch((e) => setLoadErr((e as Error).message));
+    }).catch((e) => setLoadErr(errorText(e)));
     api.devices().then(setDevices).catch(() => {});
   };
   useEffect(load, []);
@@ -48,54 +58,50 @@ export function PushSettings() {
     if (status?.relay_key) setPortalLink(null);
   }, [status?.relay_key]);
 
-  const signIn = async () => {
-    setBusy(true);
+  const startSignIn = () => {
     setMsg(null);
-    try {
-      const { url } = await api.pushSignIn();
-      setPortalLink(url);
-      window.open(url, "_blank", "noopener");
-      load();
-    } catch (e) {
-      setMsg({ ok: false, text: (e as Error).message });
-      // A relay without a portal is remembered: Sign in goes away.
-      load();
-    } finally {
-      setBusy(false);
-    }
+    signIn.run(async () => {
+      try {
+        const { url } = await api.pushSignIn();
+        setPortalLink(url);
+        window.open(url, "_blank", "noopener");
+        load();
+      } catch (e) {
+        // A relay without a portal is remembered: Sign in goes away.
+        load();
+        throw e;
+      }
+    });
   };
 
-  const save = async () => {
-    setBusy(true);
+  const saveKey = () => {
     setMsg(null);
-    try {
+    save.run(async () => {
       const s = await api.configurePush({ key_id: keyId, team_id: teamId, key_p8: file?.text });
       setStatus(s);
       setFile(null);
       setMsg({ ok: true, text: s.path === "own_key" ? "Saved. Pushes go straight to Apple with your key." : "Saved." });
-    } catch (e) {
-      setMsg({ ok: false, text: (e as Error).message });
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const test = async (d: PushDevice) => {
+  const test = (d: PushDevice) => {
     setMsg(null);
-    try {
-      await api.testPush(d.token);
-      setMsg({ ok: true, text: `Sent to ${d.name || "the phone"}. It should arrive in a few seconds, even with the app closed.` });
-    } catch (e) {
-      setMsg({ ok: false, text: (e as Error).message });
-      load();
-    }
+    setTesting(d.token);
+    sendTest.run(async () => {
+      try {
+        await api.testPush(d.token);
+        setMsg({ ok: true, text: `Sent to ${d.name || "the phone"}. It should arrive in a few seconds, even with the app closed.` });
+      } catch (e) {
+        load();
+        throw e;
+      }
+    });
   };
 
   /** Sends a change to the push settings and says where pushes go now. */
-  const change = async (body: Parameters<typeof api.configurePush>[0], done: string) => {
-    setBusy(true);
+  const change = (action: ReturnType<typeof useAction>, body: Parameters<typeof api.configurePush>[0], done: string) => {
     setMsg(null);
-    try {
+    action.run(async () => {
       const s = await api.configurePush(body);
       setStatus(s);
       setKeyId(s.key_id);
@@ -103,11 +109,7 @@ export function PushSettings() {
       setRelayKey("");
       setRelayAddr(s.relay_address);
       setMsg({ ok: true, text: `${done} ${WHERE[s.path]}` });
-    } catch (e) {
-      setMsg({ ok: false, text: (e as Error).message });
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const remove = async (d: PushDevice) => {
@@ -142,14 +144,15 @@ export function PushSettings() {
             <span className="font-mono text-[11.5px] text-fg-3">
               A relay key is stored on this Mac (owner-only, never shown).{!status.relay_url && " The relay isn't set up: add its address below."}
             </span>
-            <button type="button" className="btn" disabled={busy} onClick={() => change({ remove_relay_key: true }, "Relay key removed.")}>
+            <ActionButton type="button" variant="secondary" pending={removeRelayKey.busy} pendingLabel="Removing…" disabled={busy} onClick={() => change(removeRelayKey, { remove_relay_key: true }, "Relay key removed.")}>
               Remove relay key
-            </button>
+            </ActionButton>
             {portal && (
               <a className="text-[12px] text-fg-3 underline hover:text-fg" href={portal} target="_blank" rel="noreferrer">
                 Manage keys
               </a>
             )}
+            <ErrorLine error={removeRelayKey.error} />
           </div>
         ) : (
           <>
@@ -160,9 +163,9 @@ export function PushSettings() {
             </p>
             {portal && (
               <div className="flex flex-wrap items-center gap-2">
-                <button type="button" className="btn-primary" disabled={busy} onClick={signIn}>
-                  <ExternalLink className="size-3.5" /> Sign in
-                </button>
+                <ActionButton type="button" icon={<ExternalLink className="size-3.5" />} pending={signIn.busy} pendingLabel="Signing in…" disabled={busy} onClick={startSignIn}>
+                  Sign in
+                </ActionButton>
                 {status.signing_in && (portalLink || status.signin_code) && (
                   <span className="text-[12px] text-fg-3">
                     {status.signin_code ? (
@@ -179,6 +182,7 @@ export function PushSettings() {
                     )}
                   </span>
                 )}
+                <ErrorLine error={signIn.error} />
               </div>
             )}
             <div className="flex gap-2">
@@ -191,10 +195,11 @@ export function PushSettings() {
                 onChange={(e) => setRelayKey(e.target.value.trim())}
                 aria-label="Relay key"
               />
-              <button type="button" className="btn-primary shrink-0" disabled={!relayKey || busy} onClick={() => change({ relay_key: relayKey }, "Relay key saved.")}>
+              <ActionButton type="button" className="shrink-0" pending={saveRelayKey.busy} pendingLabel="Saving…" disabled={!relayKey || busy} onClick={() => change(saveRelayKey, { relay_key: relayKey }, "Relay key saved.")}>
                 Save relay key
-              </button>
+              </ActionButton>
             </div>
+            <ErrorLine error={saveRelayKey.error} />
           </>
         )}
       </div>
@@ -212,9 +217,10 @@ export function PushSettings() {
             onChange={(e) => setRelayAddr(e.target.value)}
           />
         </label>
-        <button type="button" className="btn" disabled={!addrChanged || busy} onClick={() => change({ relay_url: relayAddr }, "Address saved.")}>
+        <ActionButton type="button" variant="secondary" pending={saveAddress.busy} pendingLabel="Saving…" disabled={!addrChanged || busy} onClick={() => change(saveAddress, { relay_url: relayAddr }, "Address saved.")}>
           Save address
-        </button>
+        </ActionButton>
+        <ErrorLine error={saveAddress.error} />
       </div>
 
       <div className="space-y-1.5 border-t border-line pt-4">
@@ -261,13 +267,15 @@ export function PushSettings() {
         </label>
       </div>
       <div className="flex items-center gap-3">
-        <button type="button" className="btn-primary" disabled={!changed || busy} onClick={save}>Save</button>
+        <ActionButton type="button" pending={save.busy} pendingLabel="Saving…" disabled={!changed || busy} onClick={saveKey}>Save</ActionButton>
         {status.key_present && (
-          <button type="button" className="btn" disabled={busy} onClick={() => change({ key_id: "", team_id: "", remove_key: true }, "Key removed.")}>
+          <ActionButton type="button" variant="secondary" pending={removeKey.busy} pendingLabel="Removing…" disabled={busy} onClick={() => change(removeKey, { key_id: "", team_id: "", remove_key: true }, "Key removed.")}>
             Remove key
-          </button>
+          </ActionButton>
         )}
         <ResultLine said={msg} />
+        <ErrorLine error={save.error} />
+        <ErrorLine error={removeKey.error} />
       </div>
 
       <div className="space-y-2 border-t border-line pt-4">
@@ -285,13 +293,14 @@ export function PushSettings() {
                   {d.environment === "production" ? "TestFlight / App Store" : "Xcode build (sandbox)"} · seen {relTime(d.last_seen_at)} · {d.kinds.length} kinds
                 </div>
               </div>
-              <button type="button" className="btn shrink-0" disabled={off} onClick={() => test(d)} title={off ? "Add a relay key or your own key first" : undefined}>
-                <BellRing className="size-3.5" /> Send test push
-              </button>
+              <ActionButton type="button" variant="secondary" className="shrink-0" icon={<BellRing className="size-3.5" />} pending={sendTest.busy && testing === d.token} pendingLabel="Sending…" disabled={off || sendTest.busy} onClick={() => test(d)} title={off ? "Add a relay key or your own key first" : undefined}>
+                Send test push
+              </ActionButton>
               <button type="button" className="btn-ghost shrink-0 text-fg-3 hover:text-bad" onClick={() => setRemoving(d.token)} aria-label="Remove this phone" title="Remove this phone">
                 <Trash2 className="size-3.5" />
               </button>
              </div>
+             {testing === d.token && <ErrorLine error={sendTest.error} className="mt-2" />}
              {removing === d.token && (
                <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
                  <span className="text-[12.5px] text-fg-2">Remove this phone?</span>

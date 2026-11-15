@@ -4,9 +4,11 @@ import { Check, Loader2, Mic, MicOff, Search } from "lucide-react";
 import { api } from "../lib/api";
 import { useAgents } from "../hooks/lists";
 import { Dialog } from "./Dialog";
+import { ActionButton } from "./ActionButton";
 import { DRAFT_SET, loadDraft, saveDraft } from "../lib/draft";
 import { cx } from "../lib/format";
 import { loadLastAgent } from "../lib/lastAgent";
+import { errorText } from "../lib/useAction";
 import { appendDraft, chipLabel, chips, listeningLabel, micBlocked, next, OPEN_TALK, pcm16k, sections, START, starter, talkSession, type TalkSession } from "../lib/talk";
 
 /** How often the session ticks: the audio so far goes to the Mac to be transcribed. */
@@ -162,7 +164,7 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
         if (rec.current === r) dispatch({ type: "final", text });
         rec.current = null;
       },
-      (e) => fail((e as Error).message),
+      (e) => fail(errorText(e)),
     );
   };
 
@@ -316,9 +318,15 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
               Edit in chat
             </button>
             {/* On a narrow screen just Send: the To row names the agent. */}
-            <button className="btn-primary whitespace-nowrap" disabled={step.kind === "sending" || !step.text.trim() || !to} onClick={() => dispatch({ type: "send" })}>
-              {step.kind === "sending" ? "Sending…" : <><span className="sm:hidden">Send</span><span className="hidden sm:inline">Send to {toName}</span></>}
-            </button>
+            <ActionButton
+              className="whitespace-nowrap"
+              pending={step.kind === "sending"}
+              pendingLabel="Sending…"
+              disabled={!step.text.trim() || !to}
+              onClick={() => dispatch({ type: "send" })}
+            >
+              <span className="sm:hidden">Send</span><span className="hidden sm:inline">Send to {toName}</span>
+            </ActionButton>
           </>
         )}
         {step.kind === "failed" && !needsHttps && (

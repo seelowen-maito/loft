@@ -4,6 +4,9 @@ import { Check, CheckCheck, ShieldAlert, ShieldCheck, ShieldX, X } from "lucide-
 import { api, type PermissionRequest } from "../../lib/api";
 import { cx } from "../../lib/format";
 import { relTime } from "../../lib/time";
+import { useAction } from "../../lib/useAction";
+import { ActionButton } from "../../components/ActionButton";
+import { ErrorLine } from "../../components/Callout";
 
 function describeInput(p: PermissionRequest) {
   const i = p.input ?? {};
@@ -21,26 +24,24 @@ const RESOLVED: Record<string, { label: string; icon: React.ReactNode; cls: stri
   expired: { label: "Expired", icon: <ShieldX className="size-3.5" />, cls: "text-fg-3" },
 };
 
+type Decision = "allow_once" | "allow_always" | "deny";
+
 export function PermissionCard({ req, compact = false }: { req: PermissionRequest; compact?: boolean }) {
   const [rule, setRule] = useState(req.rule);
   // A kill with no program to name has no rule to save: Allow once or Deny only. Its rule is Loft's, not editable.
   const noRule = !canAlwaysAllow(req);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const decide = useAction();
+  // Which button the running decision came from: it shows the spinner, the others just wait.
+  const [choice, setChoice] = useState<Decision | null>(null);
   const pending = req.status === "pending";
   const detail = describeInput(req);
 
-  const act = async (d: "allow_once" | "allow_always" | "deny") => {
-    setBusy(true);
-    setErr(null);
-    try {
-      await api.decide(req.id, d, rule);
-    } catch (e) {
-      setErr(String((e as Error).message));
-    } finally {
-      setBusy(false);
-    }
+  const act = (d: Decision) => {
+    if (decide.busy) return;
+    setChoice(d);
+    return decide.run(() => api.decide(req.id, d, rule));
   };
+  const pendingOn = (d: Decision) => decide.busy && choice === d;
 
   const res = RESOLVED[req.status];
   return (
@@ -72,20 +73,20 @@ export function PermissionCard({ req, compact = false }: { req: PermissionReques
           )}
           <div className="flex flex-wrap gap-2">
             {req.source === "prompt" && (
-              <button className="btn" disabled={busy} onClick={() => act("allow_once")}>
-                <Check className="size-3.5" /> Allow once
-              </button>
+              <ActionButton variant="secondary" icon={<Check className="size-3.5" />} pending={pendingOn("allow_once")} pendingLabel="Allowing…" disabled={decide.busy} onClick={() => act("allow_once")}>
+                Allow once
+              </ActionButton>
             )}
             {!noRule && (
-              <button className="btn-primary" disabled={busy} onClick={() => act("allow_always")}>
-                <CheckCheck className="size-3.5" /> {req.source === "prompt" ? "Always allow" : "Grant"}
-              </button>
+              <ActionButton icon={<CheckCheck className="size-3.5" />} pending={pendingOn("allow_always")} pendingLabel={req.source === "prompt" ? "Allowing…" : "Granting…"} disabled={decide.busy} onClick={() => act("allow_always")}>
+                {req.source === "prompt" ? "Always allow" : "Grant"}
+              </ActionButton>
             )}
-            <button className="btn-ghost text-bad hover:text-bad" disabled={busy} onClick={() => act("deny")}>
-              <X className="size-3.5" /> Deny
-            </button>
+            <ActionButton variant="ghost" className="text-bad hover:text-bad" icon={<X className="size-3.5" />} pending={pendingOn("deny")} pendingLabel="Denying…" disabled={decide.busy} onClick={() => act("deny")}>
+              Deny
+            </ActionButton>
           </div>
-          {err && <div className="text-[12px] text-bad">{err}</div>}
+          <ErrorLine error={decide.error} />
         </div>
       ) : (
         res && (

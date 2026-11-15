@@ -7,34 +7,26 @@ import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, PROJECTS_SUB, roleHint } from ".
 import { GroupInput, ProjectsField } from "./ProjectsField";
 import { teamOf, withTyped } from "../../lib/team";
 import { Dialog } from "../../components/Dialog";
+import { ActionButton } from "../../components/ActionButton";
+import { ErrorLine } from "../../components/Callout";
+import { useAction } from "../../lib/useAction";
 
 export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }: { groups: string[]; projects: string[]; agents: Agent[]; onClose: () => void; onCreated: (a: Agent) => void }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [typed, setTyped] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const creating = useAction();
   // Set when creating it took the Lead role from another agent: the dialog stays open to say so, as Save does in the settings.
   const [moved, setMoved] = useState<{ agent: Agent; notice: string } | null>(null);
   const set = (k: keyof typeof form, v: string | number) => setForm((f) => ({ ...f, [k]: v }));
   const team = teamOf({ group: form.group, project: form.projects[0] ?? "" });
   const close = () => (moved ? onCreated(moved.agent) : onClose());
 
-  const create = async () => {
-    setBusy(true);
-    setErr(null);
-    try {
+  const create = () =>
+    creating.run(async () => {
       const { notice, ...a } = await api.createAgent(createPayload(withTyped(form, typed)));
-      if (notice) {
-        setMoved({ agent: a, notice });
-        setBusy(false);
-      } else {
-        onCreated(a);
-      }
-    } catch (e) {
-      setErr((e as Error).message);
-      setBusy(false);
-    }
-  };
+      if (notice) setMoved({ agent: a, notice });
+      else onCreated(a);
+    });
 
   return (
     <Dialog title="New agent" size="xl" onClose={close}>
@@ -120,7 +112,7 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
             </select>
           </label>
         </div>
-        {err && <div className="text-[12.5px] text-bad">{err}</div>}
+        <ErrorLine error={creating.error} />
       </div>
 
       <div className="relative flex items-center justify-between border-t border-line bg-ink-950/40 px-7 py-4">
@@ -132,7 +124,7 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
         ) : (
           <>
             <span className="text-[12px] text-fg-3">It gets its own workspace, memory, and pixel face.</span>
-            <button className="btn-primary" disabled={busy} onClick={create}>{busy ? "Creating…" : "Create agent"}</button>
+            <ActionButton pending={creating.busy} pendingLabel="Creating…" onClick={create}>Create agent</ActionButton>
           </>
         )}
       </div>

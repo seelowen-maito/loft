@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Terminal, Trash2, X,
+  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Terminal, Trash2, X,
 } from "lucide-react";
 import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
@@ -14,6 +14,9 @@ import { projectsOf, withTyped } from "../../lib/team";
 import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
 import { CommandsPanel } from "./CommandsPanel";
+import { ActionButton } from "../../components/ActionButton";
+import { ErrorLine } from "../../components/Callout";
+import { errorText, useAction } from "../../lib/useAction";
 
 type Tab = "config" | "permissions" | "memory" | "commands" | "workspace";
 
@@ -136,8 +139,8 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
     seen.current = { model: agent.model, effort: agent.effort };
     setDraft((d) => ({ ...d, model: d.model === prev.model ? agent.model : d.model, effort: d.effort === prev.effort ? agent.effort : d.effort }));
   }, [agent.model, agent.effort]);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const saving = useAction();
+  const [redrawErr, setRedrawErr] = useState<string | null>(null);
   // Redraw: busy from the click until the agent's `redrawing` flag says it's done (it survives a reload and shows in other tabs).
   const [click, setClick] = useState<RedrawClick>(null);
   useEffect(() => {
@@ -151,19 +154,14 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
   const customInterval = !INTERVALS.some((i) => i.value === draft.interval_minutes);
   const team = draft.group.trim();
 
-  const save = async () => {
-    setSaving(true);
-    setErr(null);
+  const save = () => {
+    setRedrawErr(null);
     setNotice(null);
-    try {
+    return saving.run(async () => {
       const saved = await api.updateAgent(agent.id, draft);
       setTyped("");
       setNotice(saved.notice ?? null);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setSaving(false);
-    }
+    });
   };
 
   return (
@@ -171,20 +169,24 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
       <div className="flex items-center gap-4">
         <Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={88} />
         <div className="space-y-2">
-          <button
-            className="btn"
+          <ActionButton
+            variant="secondary"
+            icon={<Paintbrush className="size-3.5" />}
             // One drawing run at a time: a second click would pay for another.
-            disabled={redrawing}
+            pending={redrawing}
+            pendingLabel="Drawing…"
             onClick={() => {
               setClick(redrawClick(agent));
+              setRedrawErr(null);
               api.redrawAvatar(agent.id).catch((e) => {
                 setClick(null);
-                setErr((e as Error).message);
+                setRedrawErr(errorText(e));
               });
             }}
           >
-            {redrawing ? <><Loader2 className="size-3.5 animate-spin" /> Drawing…</> : <><Paintbrush className="size-3.5" /> Redraw</>}
-          </button>
+            Redraw
+          </ActionButton>
+          <ErrorLine error={redrawErr} />
           <p className="text-[11.5px] leading-snug text-fg-3">{agent.name} draws a new sticker from its role, instructions and main project. Its chat and context stay as they are.</p>
         </div>
       </div>
@@ -307,12 +309,12 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
       </Field>
 
       <div className="sticky bottom-0 -mx-5 flex flex-wrap items-center gap-2 border-t border-line bg-ink-900/95 px-5 py-3 backdrop-blur">
-        <button className="btn-primary" disabled={!dirty || saving} onClick={save}>
-          <Save className="size-3.5" /> {saving ? "Saving…" : "Save changes"}
-        </button>
+        <ActionButton icon={<Save className="size-3.5" />} pending={saving.busy} pendingLabel="Saving…" disabled={!dirty} onClick={save}>
+          Save changes
+        </ActionButton>
         {dirty && <button className="btn-ghost" onClick={discard}>Discard</button>}
-        {err && <span className="min-w-0 basis-full break-words text-[12px] text-bad">{err}</span>}
-        {notice && !err && <span className="text-[12px] text-fg-2">{notice}</span>}
+        <ErrorLine error={saving.error} className="min-w-0 basis-full break-words" />
+        {notice && !saving.error && <span className="text-[12px] text-fg-2">{notice}</span>}
       </div>
 
       <WorkspaceSize id={agent.id} />
@@ -428,15 +430,14 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
     setMcpSaved(true);
   }, [agent.id, agent.mcp_servers]);
 
-  const saveMcp = async () => {
-    try {
+  const savingMcp = useAction();
+  const saveMcp = () => {
+    setMcpErr(null);
+    return savingMcp.run(async () => {
       const parsed = JSON.parse(mcpText);
       await save({ mcp_servers: parsed });
-      setMcpErr(null);
       setMcpSaved(true);
-    } catch (e) {
-      setMcpErr((e as Error).message);
-    }
+    });
   };
   const addTemplate = (name: string) => {
     try {
@@ -499,13 +500,13 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
           onChange={(e) => { setMcpText(e.target.value); setMcpSaved(false); }}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <button className="btn-primary" onClick={saveMcp} disabled={mcpSaved}><Save className="size-3.5" /> Save servers</button>
+          <ActionButton icon={<Save className="size-3.5" />} pending={savingMcp.busy} pendingLabel="Saving…" onClick={saveMcp} disabled={mcpSaved}>Save servers</ActionButton>
           <span className="text-[11px] text-fg-3">Templates:</span>
           {Object.keys(MCP_TEMPLATES).map((t) => (
             <button key={t} className="rounded-full border border-dashed border-line-strong px-2 py-0.5 font-mono text-[10.5px] text-fg-3 hover:text-accent" onClick={() => addTemplate(t)}>+ {t}</button>
           ))}
         </div>
-        {mcpErr && <div className="text-[12px] text-bad">{mcpErr}</div>}
+        <ErrorLine error={mcpErr ?? savingMcp.error} />
       </div>
 
       {history.length > 0 && (
@@ -572,7 +573,7 @@ function MemoryTab({ agent }: { agent: Agent }) {
 
 function FilesTab({ agent }: { agent: Agent }) {
   const [files, setFiles] = useState<FileEntry[] | null>(null);
-  const [editorErr, setEditorErr] = useState<string | null>(null);
+  const opening = useAction();
   const load = useCallback(() => { api.files(agent.id).then(setFiles); }, [agent.id]);
   useEffect(load, [load]);
   // refresh when a run finishes
@@ -590,13 +591,17 @@ function FilesTab({ agent }: { agent: Agent }) {
           <span className="truncate">{agent.workspace}</span>
           <Copy className="ml-auto size-3.5 shrink-0 text-fg-3 group-hover:text-fg" />
         </button>
-        <button
-          className="btn mt-2"
-          onClick={() => api.openEditor(agent.id).then(() => setEditorErr(null), (e) => setEditorErr((e as Error).message))}
+        <ActionButton
+          variant="secondary"
+          className="mt-2"
+          icon={<Code2 className="size-3.5" />}
+          pending={opening.busy}
+          pendingLabel="Opening…"
+          onClick={() => opening.run(() => api.openEditor(agent.id))}
         >
-          <Code2 className="size-3.5" /> Open in VS Code
-        </button>
-        {editorErr && <div className="mt-1.5 text-[12px] text-bad">{editorErr}</div>}
+          Open in VS Code
+        </ActionButton>
+        <ErrorLine error={opening.error} className="mt-1.5" />
       </div>
       {!files && <div className="skeleton h-40 rounded-xl" />}
       <ul className="font-mono text-[12px]">

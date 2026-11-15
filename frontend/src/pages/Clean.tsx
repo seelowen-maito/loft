@@ -4,7 +4,9 @@ import { ArrowDown, ArrowUp, ChevronRight, Loader2, TriangleAlert } from "lucide
 import { api, type CleanItem, type CleanLog, type GitCheck, type LeftProcess, type WorkspaceSizes } from "../lib/api";
 import { fmtDuration } from "../lib/time";
 import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, chosenRows, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, ticksAfter, type CleanFilter, type CleanSort } from "../lib/format";
-import { Callout } from "../components/Callout";
+import { Callout, ErrorLine } from "../components/Callout";
+import { ActionButton } from "../components/ActionButton";
+import { errorText, useAction } from "../lib/useAction";
 import { relTime } from "../lib/time";
 import { CleanLogView, CopyCommands, EQUIVALENT } from "./Settings";
 import { usePoll } from "../hooks/usePoll";
@@ -13,6 +15,8 @@ import { usePoll } from "../hooks/usePoll";
 export default function CleanPage() {
   const [s, setS] = useState<WorkspaceSizes | null>(null);
   const [left, setLeft] = useState<Record<string, LeftProcess[]>>({});
+  const stop = useAction();
+  // The agent whose processes were last stopped: its row shows the spinner and the error.
   const [stopping, setStopping] = useState<string | null>(null);
   const [table, setTable] = useState<Picker | null>(null);
   const [shown, setShown] = useState<CleanLog | null>(null);
@@ -28,7 +32,7 @@ export default function CleanPage() {
       setS(sizes);
       setTable({ items, ticked: initialTicks(items) });
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(errorText(e));
     } finally {
       setChecking(false);
     }
@@ -36,17 +40,13 @@ export default function CleanPage() {
   useEffect(() => {
     checkSpace();
   }, []);
-  const stopThem = async (id: string) => {
+  const stopThem = (id: string) => {
     setStopping(id);
     setErr(null);
-    try {
+    stop.run(async () => {
       await api.stopLeftRunning(id);
       await checkSpace();
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setStopping(null);
-    }
+    });
   };
   const confirm = async (paths: string[]) => {
     if (!table) return;
@@ -59,7 +59,7 @@ export default function CleanPage() {
       await checkSpace();
     } catch (e) {
       setShown(null);
-      setErr((e as Error).message);
+      setErr(errorText(e));
     }
   };
   // The log fills in as Loft removes each folder; an answer that lands after the clean ends is dropped.
@@ -81,7 +81,7 @@ export default function CleanPage() {
           {checking && <Loader2 className="size-4 animate-spin text-fg-3" aria-label="Measuring workspaces" />}
         </div>
         {err && <Callout tone="bad" icon={<TriangleAlert />}>{err}</Callout>}
-        {table && <CleanTable table={table} name={name} left={left} stopping={stopping} busy={busy} onTick={tick} onStop={stopThem} onConfirm={confirm} />}
+        {table && <CleanTable table={table} name={name} left={left} stop={{ agent: stopping, busy: stop.busy, error: stop.error }} busy={busy} onTick={tick} onStop={stopThem} onConfirm={confirm} />}
       </div>
       {shown && <CleanLogView log={shown} name={name} onClose={() => setShown(null)} />}
     </div>
@@ -93,11 +93,12 @@ type Picker = { items: CleanItem[]; ticked: Set<string> };
 
 /** Every agent's top-level items in one table: agent, item, type, size, last change and status. Sort by size, agent or
  * last change; tick what to delete. A main clone opens up to its folders, loaded one level at a time. */
-function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfirm }: {
+function CleanTable({ table, name, left, stop, busy, onTick, onStop, onConfirm }: {
   table: Picker;
   name: (id: string) => string;
   left: Record<string, LeftProcess[]>;
-  stopping: string | null;
+  /** Stop them: the agent last stopped, whether it is going and its error. */
+  stop: { agent: string | null; busy: boolean; error: string | null };
   busy: boolean;
   onTick: (paths: string[], on: boolean) => void;
   onStop: (agent: string) => void;
@@ -129,7 +130,7 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
       setInside((cur) => new Map(cur).set(i.path, items));
     } catch (e) {
       setInside((cur) => { const n = new Map(cur); n.delete(i.path); return n; });
-      setErr((e as Error).message);
+      setErr(errorText(e));
     }
   };
   const check = async (i: CleanItem) => {
@@ -138,7 +139,7 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
     try {
       c = await api.cleanCheck(i.agent, i.rel);
     } catch (e) {
-      c = { state: "unknown", lines: [`Can't check: ${(e as Error).message}`] };
+      c = { state: "unknown", lines: [`Can't check: ${errorText(e)}`] };
     }
     setChecks((cur) => new Map(cur).set(i.path, c));
     // A clean check ticks the row; any other result unticks it.
@@ -245,10 +246,11 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
             <span className="min-w-0 flex-1 text-fg-2">
               {name(agent)}: {ps.length} process{ps.length === 1 ? "" : "es"} still running
             </span>
-            <button type="button" className="btn shrink-0 px-2.5 py-1 text-[12px]" disabled={stopping !== null || busy} onClick={() => onStop(agent)}>
-              {stopping === agent ? "Stopping…" : "Stop them"}
-            </button>
+            <ActionButton type="button" variant="secondary" className="shrink-0 px-2.5 py-1 text-[12px]" pending={stop.busy && stop.agent === agent} pendingLabel="Stopping…" disabled={stop.busy || busy} onClick={() => onStop(agent)}>
+              Stop them
+            </ActionButton>
           </div>
+          {stop.agent === agent && <ErrorLine error={stop.error} />}
           <ul className="space-y-0.5 text-fg-3">
             {ps.map((p) => (
               <li key={p.pid} className="flex gap-3">

@@ -35,3 +35,8 @@ export function ResultLine({ said, className }: { said: { ok: boolean; text: str
     </div>
   );
 }
+
+/** An action's error, under or beside its button: red, announced, nothing when there is none. */
+export function ErrorLine({ error, className }: { error: string | null | undefined; className?: string }) {
+  return <ResultLine said={error ? { ok: false, text: error } : null} className={className} />;
+}

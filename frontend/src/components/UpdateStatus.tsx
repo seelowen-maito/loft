@@ -5,6 +5,7 @@ import { cx } from "../lib/format";
 import { restartDisabled } from "../lib/restartButton";
 import { usePoll } from "../hooks/usePoll";
 import { toast } from "./FloatingBar";
+import { errorText } from "../lib/useAction";
 
 /** Navbar light for auto-update (LOFT_AUTO_UPDATE); hidden when it's off. */
 export function UpdateStatus({ live }: { live: boolean }) {
@@ -44,7 +45,7 @@ export function UpdateStatus({ live }: { live: boolean }) {
   const restart = () => {
     setBusy(true);
     api.restart().catch((e) => {
-      toast(`Couldn't restart: ${(e as Error).message}`);
+      toast(`Couldn't restart: ${errorText(e)}`);
       setBusy(false);
     });
   };

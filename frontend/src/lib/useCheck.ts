@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorText } from "./useAction.ts";
 
 type Check<T> = { data: T | null; err: string | null };
 
 /** What a Settings card shows after a check: a good one replaces the data and clears an earlier error; a failed one keeps the last data and shows its error. */
 export function afterCheck<T>(prev: Check<T>, r: { ok: T } | { error: unknown }): Check<T> {
-  return "ok" in r ? { data: r.ok, err: null } : { data: prev.data, err: r.error instanceof Error ? r.error.message : String(r.error) };
+  return "ok" in r ? { data: r.ok, err: null } : { data: prev.data, err: errorText(r.error) };
 }
 
 /** Whether a card shows its skeleton: only while its first, automatic check is out. A manual card has none. */

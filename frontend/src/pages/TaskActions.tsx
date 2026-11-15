@@ -1,22 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { ArrowUp, Check, CloudUpload, Link2, Loader2, Pause, Pencil, Play, RotateCcw, Trash2, TriangleAlert, UserRoundPlus, X } from "lucide-react";
+import { ArrowUp, Check, CloudUpload, Link2, Pause, Pencil, Play, RotateCcw, Trash2, TriangleAlert, UserRoundPlus, X } from "lucide-react";
 import { api, roleLabel, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { ticketLabel } from "../lib/specViews";
-import { ConfirmDialog, DANGER, Dialog } from "../components/Dialog";
+import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { isSpec } from "../lib/issueOrder";
 import { useAutoGrow } from "../lib/autoGrow";
 import { atQuery, insertMention, mentionedIn, mentionGroups } from "../lib/mentionPicker";
 import { issuePickerOrder, outsideWarning, projectChoices, projectsOf } from "../lib/team";
 import { MentionMenu } from "../components/MentionMenu";
-import { StartDeliveryButton } from "../components/StartDeliveryButton";
+import { ActionButton } from "../components/ActionButton";
 import { StartWarning } from "../components/StartWarning";
-import { Callout, ResultLine } from "../components/Callout";
+import { Callout, ErrorLine, ResultLine } from "../components/Callout";
 import { deliveryButtons } from "../lib/deliveryState";
 import { DeliveryLine } from "../components/DeliveryLine";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { latestOnly } from "../lib/latest";
+import { startDeliveryLabel } from "../lib/startDelivery";
+import { useAction } from "../lib/useAction";
 
 const ACTIVE = ["in_progress", "blocked", "waiting_approval"];
 const FINISHED = ["done", "failed", "cancelled"];
@@ -61,20 +63,7 @@ function EditDialog({ task: t, projects, onClose }: { task: Task; projects: stri
   const [labels, setLabels] = useState(t.labels.join(", "));
   const [owner, setOwner] = useState(t.owner);
   const [project, setProject] = useState(t.project);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.updateTask(t.id, { title: title.trim(), description, labels: parseLabels(labels), owner: owner.trim() || null, project: project.trim() });
-      onClose();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const save = useAction();
   return (
     <Dialog title="Edit Loft issue" onClose={onClose} className="space-y-4 p-5">
       <h3 className="text-[15px] font-medium">Edit Loft issue</h3>
@@ -90,9 +79,19 @@ function EditDialog({ task: t, projects, onClose }: { task: Task; projects: stri
       {ACTIVE.includes(t.status) && <p className="text-[12px] text-fg-3">The agent already has the old description: message it if the work changes.</p>}
       <div className="flex justify-end gap-2">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" disabled={!title.trim() || busy} onClick={save}>Save</button>
+        <ActionButton
+          pending={save.busy}
+          pendingLabel="Saving…"
+          disabled={!title.trim()}
+          onClick={() => save.run(async () => {
+            await api.updateTask(t.id, { title: title.trim(), description, labels: parseLabels(labels), owner: owner.trim() || null, project: project.trim() });
+            onClose();
+          })}
+        >
+          Save
+        </ActionButton>
       </div>
-      {error && <div className="text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={save.error} />
     </Dialog>
   );
 }
@@ -110,19 +109,7 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
   const has = (a: Agent) => projectsOf(a).includes(t.project);
   const sorted = issuePickerOrder(agents, t.project);
   const [agentId, setAgentId] = useState(sorted[0]?.id ?? "");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const start = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.runTask(t.id, agentId);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const start = useAction();
   return (
     <section className="rounded-2xl border border-accent/25 bg-accent/[0.05] p-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -135,11 +122,11 @@ export function HandOffCard({ task: t, agents }: { task: Task; agents: Agent[] }
         <select value={agentId} onChange={(e) => setAgentId(e.target.value)} className="chip bg-ink-850 text-[12px]" aria-label="Agent to hand it to">
           {sorted.map((a) => <option key={a.id} value={a.id}>{a.name}{has(a) ? "" : ` · ${a.project || "no project"}`}</option>)}
         </select>
-        <button className="btn-primary" disabled={!agentId || busy} onClick={start}>
-          <Play className="size-3 fill-current" /> Start
-        </button>
+        <ActionButton icon={<Play className="size-3 fill-current" />} pending={start.busy} pendingLabel="Starting…" disabled={!agentId} onClick={() => start.run(() => api.runTask(t.id, agentId))}>
+          Start
+        </ActionButton>
       </div>
-      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={start.error} className="mt-2" />
     </section>
   );
 }
@@ -193,23 +180,30 @@ function DeliveryState({ d }: { d: IssueDelivery | null }) {
  *  many changes rounds, checks what was done meanwhile, then wakes only the agent its step waits on (the Dev, with
  *  a fresh set of rounds, for one waiting for the user). The card shows what it did, or why it refused. */
 function useDeliveryActions(t: Task, setD: (d: IssueDelivery) => void) {
-  const [busy, setBusy] = useState<"pause" | "resume" | "reopen" | null>(null);
-  const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
-  const run = async (what: "pause" | "resume" | "reopen") => {
-    setBusy(what);
+  const pause = useAction();
+  const resume = useAction();
+  const reopen = useAction();
+  const [said, setSaid] = useState<string | null>(null);
+  const all = [pause, resume, reopen];
+  const run = (a: ReturnType<typeof useAction>, call: typeof api.pauseIssueDelivery) => {
     setSaid(null);
-    try {
-      const call = { pause: api.pauseIssueDelivery, resume: api.resumeIssueDelivery, reopen: api.reopenIssueDelivery }[what];
+    // One line under the buttons: the last action's.
+    for (const x of all) x.setError(null);
+    a.run(async () => {
       const r = await call(t.id);
       setD(r);
-      setSaid({ ok: true, text: r.message });
-    } catch (e) {
-      setSaid({ ok: false, text: (e as Error).message });
-    } finally {
-      setBusy(null);
-    }
+      setSaid(r.message);
+    });
   };
-  return { pause: () => run("pause"), resume: () => run("resume"), reopen: () => run("reopen"), busy, said };
+  return {
+    pause: () => run(pause, api.pauseIssueDelivery),
+    resume: () => run(resume, api.resumeIssueDelivery),
+    reopen: () => run(reopen, api.reopenIssueDelivery),
+    pending: { pause: pause.busy, resume: resume.busy, reopen: reopen.busy },
+    busy: all.some((x) => x.busy),
+    said: said ? { ok: true, text: said } : null,
+    error: pause.error ?? resume.error ?? reopen.error,
+  };
 }
 
 function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<typeof useDeliveryActions> }) {
@@ -217,19 +211,19 @@ function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<type
   return (
     <>
       {show.pause && (
-        <button className={cx("btn-ghost", a.busy === "pause" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "pause"} onClick={a.pause}>
-          {a.busy === "pause" ? <Loader2 className="size-3.5 animate-spin" /> : <Pause className="size-3.5" />} {a.busy === "pause" ? "Pausing…" : "Pause"}
-        </button>
+        <ActionButton variant="ghost" icon={<Pause className="size-3.5" />} pending={a.pending.pause} pendingLabel="Pausing…" disabled={a.busy} onClick={a.pause}>
+          Pause
+        </ActionButton>
       )}
       {show.resume && (
-        <button className={cx("btn-primary", a.busy === "resume" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "resume"} onClick={a.resume}>
-          {a.busy === "resume" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />} {a.busy === "resume" ? "Resuming…" : "Resume"}
-        </button>
+        <ActionButton icon={<Play className="size-3.5" />} pending={a.pending.resume} pendingLabel="Resuming…" disabled={a.busy} onClick={a.resume}>
+          Resume
+        </ActionButton>
       )}
       {show.reopen && (
-        <button className={cx("btn-primary", a.busy === "reopen" && "disabled:opacity-100")} disabled={!!a.busy} aria-busy={a.busy === "reopen"} onClick={a.reopen} title="Build the tickets published since; the spec PR goes back to draft">
-          {a.busy === "reopen" ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />} {a.busy === "reopen" ? "Reopening…" : "Reopen delivery"}
-        </button>
+        <ActionButton icon={<RotateCcw className="size-3.5" />} pending={a.pending.reopen} pendingLabel="Reopening…" disabled={a.busy} onClick={a.reopen} title="Build the tickets published since; the spec PR goes back to draft">
+          Reopen delivery
+        </ActionButton>
       )}
     </>
   );
@@ -238,22 +232,10 @@ function DeliveryButtons({ d, a }: { d: IssueDelivery | null; a: ReturnType<type
 
 /** On a standalone ticket: Start delivery, which makes its branch (and on GitHub its draft PR) and hands it to the team's Dev. */
 export function DeliveryCard({ task: t }: { task: Task }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const start = useAction();
   // Started before (here, on another device or from the end-of-planning card): say who has it.
   const [d, setD] = useIssueDelivery(t);
   const r = useDeliveryActions(t, setD);
-  const start = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      setD(await api.startIssueDelivery(t.id));
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
   const started = d?.started && d.agent_id ? d : null;
   const n = t.github?.number;
   return (
@@ -277,13 +259,16 @@ export function DeliveryCard({ task: t }: { task: Task }) {
           <DeliveryState d={d} />
         </div>
         {!d?.started && !d?.cannot_start && (
-          <StartDeliveryButton pending={busy} onClick={start} />
+          <ActionButton icon={<Play className="size-3.5" />} pending={start.busy} pendingLabel={startDeliveryLabel(true)} onClick={() => start.run(async () => setD(await api.startIssueDelivery(t.id)))}>
+            {startDeliveryLabel(false)}
+          </ActionButton>
         )}
         {/* From the Delivery itself: a stalled one whose Dev was deleted still resumes, on the team's builder. */}
         <DeliveryButtons d={d} a={r} />
       </div>
       <ResultLine said={r.said} className="mt-2" />
-      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={r.error} className="mt-2" />
+      <ErrorLine error={start.error} className="mt-2" />
     </section>
   );
 }
@@ -291,24 +276,21 @@ export function DeliveryCard({ task: t }: { task: Task }) {
 /** On an open spec on GitHub: Start delivery builds its Delivery from the spec's sub-issues, then shows who
  *  has which ticket, and the tickets it skips because they're being built elsewhere. */
 export function SpecDeliveryCard({ task: t }: { task: Task }) {
-  const [busy, setBusy] = useState(false);
+  const starting = useAction();
   const [warn, setWarn] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   // Started before (here, on another device or from the end-of-planning card): say who has it.
   const [d, setD, reload] = useIssueDelivery(t);
   const r = useDeliveryActions(t, setD);
-  const start = async () => {
-    setBusy(true);
+  const start = () => {
     setWarn(false);
-    setError(null);
-    try {
-      setD(await api.startIssueDelivery(t.id));
-    } catch (e) {
-      setError((e as Error).message);
-      reload();
-    } finally {
-      setBusy(false);
-    }
+    starting.run(async () => {
+      try {
+        setD(await api.startIssueDelivery(t.id));
+      } catch (e) {
+        reload();
+        throw e;
+      }
+    });
   };
   const started = d?.started ? d : null;
   const tickets = d?.tickets ?? [];
@@ -336,12 +318,15 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
           <DeliveryState d={started} />
         </div>
         {!started && (
-          <StartDeliveryButton pending={busy} onClick={d?.waits_on?.length ? () => setWarn(true) : start} />
+          <ActionButton icon={<Play className="size-3.5" />} pending={starting.busy} pendingLabel={startDeliveryLabel(true)} onClick={d?.waits_on?.length ? () => setWarn(true) : start}>
+            {startDeliveryLabel(false)}
+          </ActionButton>
         )}
         <DeliveryButtons d={started} a={r} />
       </div>
       {warn && !started && !!d?.waits_on?.length && <StartWarning waits={d.waits_on} onStart={start} onCancel={() => setWarn(false)} onStarted={reload} />}
       <ResultLine said={r.said} className="mt-2" />
+      <ErrorLine error={r.error} className="mt-2" />
       {running.length > 0 && (
         <ul className="mt-3 space-y-1 text-[12.5px]">
           {running.map((x) => (
@@ -369,7 +354,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
           ))}
         </ul>
       )}
-      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={starting.error} className="mt-2" />
     </section>
   );
 }
@@ -377,19 +362,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
 /** On an open Loft-only issue: what Publish to GitHub would create, and the button, or why it can't yet. */
 export function PublishCard({ task: t, repo, onEdit }: { task: Task; repo?: string; onEdit: () => void }) {
   const why = publishBlocked(t, repo);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const publish = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.publishTask(t.id);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const publish = useAction();
   return (
     <section className="rounded-2xl border border-line-strong bg-ink-850 p-4">
       <div className="flex flex-wrap items-start gap-3">
@@ -412,11 +385,11 @@ export function PublishCard({ task: t, repo, onEdit }: { task: Task; repo?: stri
             </>
           )}
         </div>
-        <button className="btn" disabled={busy || !!why} onClick={publish} title={why ?? `Create it on ${repo}`}>
-          <CloudUpload className="size-3.5" /> Publish to GitHub
-        </button>
+        <ActionButton variant="secondary" icon={<CloudUpload className="size-3.5" />} pending={publish.busy} pendingLabel="Publishing…" disabled={!!why} onClick={() => publish.run(() => api.publishTask(t.id))} title={why ?? `Create it on ${repo}`}>
+          Publish to GitHub
+        </ActionButton>
       </div>
-      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={publish.error} className="mt-2" />
     </section>
   );
 }
@@ -429,26 +402,31 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
   useEffect(() => {
     if (edit) setDialog("edit");
   }, [edit]);
-  const [error, setError] = useState<string | null>(null);
+  const runNow = useAction();
+  const markDone = useAction();
+  const reopen = useAction();
+  const stop = useAction();
+  const cancel = useAction();
+  const remove = useAction();
+  const all = [runNow, markDone, reopen, stop, cancel, remove];
+  const busy = all.some((a) => a.busy);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const error = copyError ?? all.map((a) => a.error).find(Boolean) ?? null;
   const [copied, setCopied] = useState(false);
-  const [busy, setBusy] = useState(false);
   const active = ACTIVE.includes(t.status);
   const spec = isSpec(t);
   const finished = FINISHED.includes(t.status);
   const stuck = STUCK.includes(t.status);
   const agent = agents.find((a) => a.id === t.agent_id);
 
-  const act = async (f: () => Promise<unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
+  // One error line for them all: the last action's.
+  const act = (a: ReturnType<typeof useAction>, f: () => Promise<unknown>) => {
+    for (const x of all) x.setError(null);
+    setCopyError(null);
+    a.run(async () => {
       await f();
       setDialog(null);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const copyLink = async () => {
@@ -457,7 +435,7 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      setError("Couldn't copy the link.");
+      setCopyError("Couldn't copy the link.");
     }
   };
 
@@ -467,9 +445,9 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
         {/* A spec is split into tickets; each ticket goes to an agent, never the spec as one task. */}
         {spec && <span className="font-mono text-[11px] text-fg-3">A spec: its tickets go to agents.</span>}
         {!spec && !active && !finished && agent && (
-          <button className="btn-primary" disabled={busy} onClick={() => act(() => api.runTask(t.id))}>
-            <Play className="size-3 fill-current" /> Run with {agent.name}
-          </button>
+          <ActionButton icon={<Play className="size-3 fill-current" />} pending={runNow.busy} pendingLabel="Starting…" disabled={busy} onClick={() => act(runNow, () => api.runTask(t.id))}>
+            Run with {agent.name}
+          </ActionButton>
         )}
         {/* Blocked or failed: the card with the reason has Send to…. */}
         {!spec && !active && !stuck && (
@@ -478,14 +456,14 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
           </button>
         )}
         {!active && t.status !== "done" && t.status !== "cancelled" && (
-          <button className="btn" disabled={busy} onClick={() => act(() => api.updateTask(t.id, { status: "done" }))}>
-            <Check className="size-3.5" /> Mark done
-          </button>
+          <ActionButton variant="secondary" icon={<Check className="size-3.5" />} pending={markDone.busy} pendingLabel="Marking done…" disabled={busy} onClick={() => act(markDone, () => api.updateTask(t.id, { status: "done" }))}>
+            Mark done
+          </ActionButton>
         )}
         {finished && (
-          <button className="btn" disabled={busy} onClick={() => act(() => api.updateTask(t.id, { status: "inbox" }))}>
-            <RotateCcw className="size-3.5" /> Reopen
-          </button>
+          <ActionButton variant="secondary" icon={<RotateCcw className="size-3.5" />} pending={reopen.busy} pendingLabel="Reopening…" disabled={busy} onClick={() => act(reopen, () => api.updateTask(t.id, { status: "inbox" }))}>
+            Reopen
+          </ActionButton>
         )}
         {!finished && (
           <button className="btn" disabled={busy} onClick={() => setDialog("cancel")}>
@@ -504,7 +482,7 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
           </button>
         )}
       </div>
-      {error && <div className="text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={error} />
 
       {dialog === "run" && <RunDialog task={t} agents={agents} onClose={() => setDialog(null)} />}
       {dialog === "edit" && <EditDialog task={t} projects={projects} onClose={() => setDialog(null)} />}
@@ -518,11 +496,11 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
           <div className="flex flex-wrap justify-end gap-2">
             <button className="btn-ghost" onClick={() => setDialog(null)}>Keep it</button>
             {active && agent?.running && (
-              <button className="btn" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, true))}>Cancel and stop {agent.name}</button>
+              <ActionButton variant="secondary" pending={stop.busy} pendingLabel="Stopping…" disabled={busy} onClick={() => act(stop, () => api.cancelTask(t.id, true))}>Cancel and stop {agent.name}</ActionButton>
             )}
-            <button className={DANGER} disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>Cancel issue</button>
+            <ActionButton variant="danger" pending={cancel.busy} pendingLabel="Cancelling…" disabled={busy} onClick={() => act(cancel, () => api.cancelTask(t.id, false))}>Cancel issue</ActionButton>
           </div>
-          {error && <div className="text-[12px] text-bad">{error}</div>}
+          <ErrorLine error={error} />
         </Dialog>
       )}
       {dialog === "delete" && (
@@ -534,7 +512,7 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
           danger
           pending={busy}
           error={error}
-          onConfirm={() => act(async () => { await api.deleteTask(t.id); navigate({ pathname: "/issues", search: window.location.search }); })}
+          onConfirm={() => act(remove, async () => { await api.deleteTask(t.id); navigate({ pathname: "/issues", search: window.location.search }); })}
           onClose={() => setDialog(null)}
         />
       )}
@@ -547,23 +525,15 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
   // The agent already on it stays picked; otherwise the first in the order.
   const [agentId, setAgentId] = useState(t.agent_id || ordered[0]?.id || "");
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const run = async () => {
-    setBusy(true);
-    setError(null);
-    try {
+  const send = useAction();
+  const run = () =>
+    send.run(async () => {
       // A done or cancelled task goes back to ready first: the server only runs open tasks. A blocked or failed
       // one goes as it is, so the agent gets why it stopped.
       if (t.status === "done" || t.status === "cancelled") await api.updateTask(t.id, { status: "ready" });
       await api.runTask(t.id, agentId, note);
       onClose();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+    });
   const again = STUCK.includes(t.status);
   const title = again ? `Send “${t.title}” to…` : `Run “${t.title}”`;
   return (
@@ -580,11 +550,17 @@ function RunDialog({ task: t, agents, onClose }: { task: Task; agents: Agent[]; 
       {again && <p className="text-[12px] text-fg-3">It goes back to in progress. The agent gets the description and why it was {t.status}.</p>}
       <div className="flex justify-end gap-2">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" disabled={!agentId || busy} onClick={run}>
-          {again ? <><UserRoundPlus className="size-3.5" /> Send</> : <><Play className="size-3 fill-current" /> Run</>}
-        </button>
+        <ActionButton
+          icon={again ? <UserRoundPlus className="size-3.5" /> : <Play className="size-3 fill-current" />}
+          pending={send.busy}
+          pendingLabel={again ? "Sending…" : "Starting…"}
+          disabled={!agentId}
+          onClick={run}
+        >
+          {again ? "Send" : "Run"}
+        </ActionButton>
       </div>
-      {error && <div className="text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={send.error} />
     </Dialog>
   );
 }
@@ -615,18 +591,14 @@ export function StuckCard({ task: t, agents }: { task: Task; agents: Agent[] }) 
 
 /** Closed on GitHub while an agent works on it: the work wasn't stopped; the user decides. */
 export function ClosedOnGithubCard({ task: t }: { task: Task }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const act = async (f: () => Promise<unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await f();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+  const cancel = useAction();
+  const keep = useAction();
+  const busy = cancel.busy || keep.busy;
+  // One error line for both: the last action's.
+  const act = (a: ReturnType<typeof useAction>, f: () => Promise<unknown>) => {
+    cancel.setError(null);
+    keep.setError(null);
+    a.run(f);
   };
   const n = t.github?.number;
   return (
@@ -636,14 +608,14 @@ export function ClosedOnGithubCard({ task: t }: { task: Task }) {
           <div className="text-[14px] text-fg">#{n} was closed on GitHub</div>
           <div className="mt-0.5 text-[12.5px] text-fg-2">It's still being worked on here. Cancel it, or keep working and reopen #{n} on GitHub.</div>
         </div>
-        <button className="btn" disabled={busy} onClick={() => act(() => api.cancelTask(t.id, false))}>
-          <X className="size-3.5" /> Cancel issue
-        </button>
-        <button className="btn-primary" disabled={busy} onClick={() => act(() => api.keepWorking(t.id))}>
-          <RotateCcw className="size-3.5" /> Keep working
-        </button>
+        <ActionButton variant="secondary" icon={<X className="size-3.5" />} pending={cancel.busy} pendingLabel="Cancelling…" disabled={busy} onClick={() => act(cancel, () => api.cancelTask(t.id, false))}>
+          Cancel issue
+        </ActionButton>
+        <ActionButton icon={<RotateCcw className="size-3.5" />} pending={keep.busy} pendingLabel="Saving…" disabled={busy} onClick={() => act(keep, () => api.keepWorking(t.id))}>
+          Keep working
+        </ActionButton>
       </div>
-      {error && <div className="mt-2 text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={cancel.error ?? keep.error} className="mt-2" />
     </section>
   );
 }
@@ -659,8 +631,7 @@ export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent
   const [send, setSend] = useState(true);
   const [github, setGithub] = useState(true);
   const [reopen, setReopen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const comment = useAction();
   const [note, setNote] = useState<string | null>(null);
   const finished = FINISHED.includes(t.status);
   // A failed issue always runs again with what you send; done or cancelled ones only when you ask.
@@ -683,8 +654,8 @@ export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent
     setText("");
     setReopen(false);
     setPicked("");
-    setError(null);
-  }, [t.id]);
+    comment.setError(null);
+  }, [t.id, comment.setError]);
   useEffect(() => {
     if (!note) return;
     const id = setTimeout(() => setNote(null), 4000);
@@ -694,9 +665,7 @@ export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent
   const post = async () => {
     const v = text.trim();
     if (!v) return;
-    setBusy(true);
-    setError(null);
-    try {
+    await comment.run(async () => {
       const sending = !!agent && send;
       const posting = !!t.github && github;
       const r = await api.commentTask(t.id, v, { send: sending, github: posting, reopen: sending && rerun, agent_id: onIt ? undefined : agent?.id });
@@ -709,11 +678,7 @@ export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent
         : posting ? "Saved; it goes to GitHub once approved."
         : "Saved as a private note.",
       );
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const label = !agent || !send ? (t.github && github ? "Comment" : "Add note") : rerun ? "Reopen and send" : `Send to ${agent.name}`;
@@ -782,16 +747,24 @@ export function CommentBox({ task: t, agent: onIt, agents }: { task: Task; agent
               {told.length > 0 ? `Private: only ${told.map((a) => `@${a.name}`).join(", ")} ${told.length > 1 ? "are" : "is"} told.` : "Private: no agent is told."}
             </span>
           )}
-          <button className={cx("ml-auto", agent && send ? "btn-primary" : "btn")} disabled={!text.trim() || busy} onClick={post}>
-            <ArrowUp className="size-3.5" /> {label}
-          </button>
+          <ActionButton
+            variant={agent && send ? "primary" : "secondary"}
+            className="ml-auto"
+            icon={<ArrowUp className="size-3.5" />}
+            pending={comment.busy}
+            pendingLabel={agent && send ? "Sending…" : "Saving…"}
+            disabled={!text.trim()}
+            onClick={post}
+          >
+            {label}
+          </ActionButton>
         </div>
       </div>
       <div className="flex justify-between font-mono text-[10.5px] text-fg-3">
         <span>⌘↵ to send</span>
         <ResultLine said={note ? { ok: true, text: note } : null} />
       </div>
-      {error && <div className="text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={comment.error} />
     </div>
   );
 }
@@ -816,22 +789,14 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
     if (!project.trim() || (agent && projectsOf(agent).includes(project.trim()))) setProject(next ? (projectsOf(next)[0] ?? "") : "");
     setAgentId(id);
   };
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const create = async () => {
-    setBusy(true);
-    setError(null);
-    try {
+  const creating = useAction();
+  const create = () =>
+    creating.run(async () => {
       const t = await api.createTask({ title: title.trim(), description, labels: parseLabels(labels), owner: owner.trim(), agent_id: agentId || null, priority, project });
       if (agentId && start) await api.runTask(t.id);
       onClose();
       navigate({ pathname: `/issues/${t.id}`, search: window.location.search });
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+    });
   const field = FIELD;
   return (
     <Dialog title="New Loft issue" onClose={onClose} className="space-y-4 p-5">
@@ -873,9 +838,9 @@ export function NewTaskDialog({ agents, projects, onClose }: { agents: Agent[]; 
       )}
       <div className="flex justify-end gap-2">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" disabled={!title.trim() || busy} onClick={create}>Create</button>
+        <ActionButton pending={creating.busy} pendingLabel="Creating…" disabled={!title.trim()} onClick={create}>Create</ActionButton>
       </div>
-      {error && <div className="text-[12px] text-bad">{error}</div>}
+      <ErrorLine error={creating.error} />
     </Dialog>
   );
 }
