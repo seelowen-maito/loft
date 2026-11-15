@@ -39,7 +39,7 @@ public enum MacSection: Int, CaseIterable, Identifiable, Sendable {
 
 /// Which section the window shows and the sidebar highlights (one value, so they can't differ: a click, ⌘1–⌘5, a link
 /// or an opened chat all set it), and when a chat's composer takes the keyboard.
-public struct MacSelection: Equatable, Sendable {
+public struct MacSelection: Sendable {
     public var section: MacSection = .agents
     /// Counts the chats opened from code, and how many of them a composer has answered.
     public private(set) var composerRequests = 0
@@ -48,10 +48,16 @@ public struct MacSelection: Equatable, Sendable {
     public init() {}
 
     /// ⌘1–⌘5, a link or a menu: shows the section and highlights its row.
-    public mutating func go(_ section: MacSection) { self.section = section }
+    public mutating func go(_ section: MacSection) {
+        self.section = section
+        composerAnswered = composerRequests  // a request for a chat that never showed doesn't wait for a later click
+    }
+    /// A line for the top of that agent's chat: why it opened here and not in Herdr.
+    public var chatNote: (agentId: String, text: String)?
 
     /// Spotlight, quick search, ⌘N, a notification: shows Agents, and asks for the cursor in the composer.
     public mutating func openChat() {
+        chatNote = nil  // it was for the open that fell back, not for this one
         section = .agents
         composerRequests += 1
     }

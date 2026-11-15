@@ -147,11 +147,12 @@ final class MacNav {
     var needsYouFocus: String?
     /// The chat to open Talk in, once it shows (the Talk widget or control).
     var talkIn: String?
-    /// A line for the top of that agent's chat: why it opened here and not in Herdr.
-    var chatNote: (agentId: String, text: String)?
+    var chatNote: (agentId: String, text: String)? {
+        get { selection.chatNote }
+        set { selection.chatNote = newValue }
+    }
 
     func openChat(_ agentId: String) {
-        chatNote = nil  // it was for the open that fell back, not for this one
         selection.openChat()
         self.agentId = agentId
     }

@@ -52,6 +52,23 @@ final class MacSelectionTests: XCTestCase {
         XCTAssertTrue(s.takeComposerRequest())
     }
 
+    func testARequestForAChatThatNeverShowedIsDropped() {
+        var s = MacSelection()
+        s.openChat()
+        s.go(.issues) // the chat never mounted
+        s.go(.agents) // a later sidebar click
+        XCTAssertFalse(s.takeComposerRequest())
+    }
+
+    func testOpeningAChatClearsTheNote() {
+        var s = MacSelection()
+        s.chatNote = (agentId: "a", text: "Herdr isn't linked")
+        s.go(.issues)
+        XCTAssertNotNil(s.chatNote) // a section change keeps it
+        s.openChat()
+        XCTAssertNil(s.chatNote)
+    }
+
     func testComposerKeyboardRule() {
         // Opened from code: the cursor goes to the composer even if the sidebar had the keyboard.
         XCTAssertTrue(MacSelection.composerTakesKeyboard(requested: true, sidebarHasKeyboard: true))
