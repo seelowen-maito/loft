@@ -29,7 +29,7 @@ impl Loft {
         Self { base: base.to_string(), http }
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+    pub fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
         let req = self.http.request(method, &format!("{}/api{path}", self.base));
         let res = match body {
             Some(b) => req.send_json(b),

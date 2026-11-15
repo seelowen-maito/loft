@@ -48,6 +48,8 @@ struct ChatView: View {
     @State private var pickingTask = false
     /// "Resume a session" in the context menu: the agent's past Sessions.
     @State private var resuming = false
+    /// The agent's "/" menu, read again each time a run ends (every run reports its list afresh).
+    @State private var commands: [AgentCommand] = []
     /// The on-device model's replies to the agent's latest message, when it ends on a question.
     @State private var suggested: (messageId: Int64, replies: [String])?
     private let dictate: Bool
@@ -238,6 +240,7 @@ struct ChatView: View {
                     .id(t)
                 }
                 ComposerView(text: $draft, recipient: agent.name, agentId: agentId, isOrchestrator: store.orchestratorId == agent.id,
+                             commands: currentQuestion == nil ? commands : [],
                              control: $composerControl,
                              onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
                              holdAutoSend: { grillSuggestion != nil },
@@ -249,7 +252,9 @@ struct ChatView: View {
                              onVoiceStop: stopByVoice,
                              attachTask: currentQuestion == nil ? { pickingTask = true } : nil,
                              videoAgentId: currentQuestion == nil ? agentId : nil, attachments: $attachments) { text, byVoice in
-                    if !attachments.isEmpty {
+                    if attachments.isEmpty, let action = CommandQuery.action(for: text, commands: commands), currentQuestion == nil {
+                        runCommand(action)
+                    } else if !attachments.isEmpty {
                         // A message with photos or a video is always plain chat.
                         let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
                         let files = attachments.compactMap(\.uploaded)
@@ -274,6 +279,7 @@ struct ChatView: View {
             }
         }
         .navigationTitle(agent.name)
+        .task(id: "\(agentId)-\(agent.running)") { commands = await store.commands(agentId) }
         // Undo on Talk's status screen: the text comes back to this message box (the chat stays the same view).
         .onChange(of: VoicePresentation.shared.returnedText, initial: true) { _, t in
             guard let t, VoicePresentation.shared.statusAgentId == agentId else { return }
@@ -653,6 +659,19 @@ extension ChatView {
             try await store.resetSession(agentId)
             draft = next
         } catch { actionError = APIError.from(error) }
+    }
+
+    /// A command typed or picked from the "/" menu, sent: the composer is emptied once it ran, kept if it failed.
+    fileprivate func runCommand(_ action: CommandQuery.Action) {
+        let text = draft
+        draft = ""
+        if action == .resume { return resuming = true }
+        Task {
+            do { try await store.run(action, agentId: agentId) } catch {
+                draft = text
+                actionError = APIError.from(error)
+            }
+        }
     }
 
     fileprivate func grillCommand(_ c: GrillCommand) {
