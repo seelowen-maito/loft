@@ -61,6 +61,7 @@ struct ChatView: View {
                 }
                 .padding(.horizontal, 24).padding(.vertical, 8)
                 .accessibilityIdentifier("chatNote")
+                .onDisappear { if nav.chatNote?.agentId == agent.id { nav.chatNote = nil } }  // shown once
                 Divider()
             }
             ScrollView {

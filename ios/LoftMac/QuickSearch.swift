@@ -44,8 +44,21 @@ final class QuickSearchModel {
     var opened = 0
     /// Herdr UI is set up on this Mac, so agents can open in it (checked each time the panel opens).
     var herdrReady = false
+    /// The check that sets `herdrReady`: Enter waits for it, so the first Enter already knows.
+    var herdrCheck: Task<Void, Never>?
     /// Enter opens agents in Herdr UI, ⌘Enter in the Mac app (Settings › Herdr UI).
     var herdrFirst: Bool { herdrReady && UserDefaults.standard.string(forKey: Prefs.agentsOpenIn) == "herdr" }
+    var browserDefault: Bool { UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser" }
+
+    func checkHerdr() {
+        guard !store.isDemo else { return }
+        herdrCheck = Task { herdrReady = (try? await store.herdrStatus())?["linked"]?["root"]?.stringValue != nil }
+    }
+
+    /// Where an agent opens for these keys; the footer and Enter both ask this.
+    func opening(command: Bool = false, option: Bool = false) -> AgentOpening {
+        AgentOpening.choose(herdrReady: herdrReady, herdrFirst: herdrFirst, browserDefault: browserDefault, command: command, option: option)
+    }
 
     init(store: LoftStore) { self.store = store }
 
@@ -96,9 +109,7 @@ final class QuickSearchController {
         let panel = panel ?? makePanel()
         model.query = ""
         model.opened += 1
-        if !model.store.isDemo {
-            Task { model.herdrReady = (try? await model.store.herdrStatus())?["linked"]?["root"]?.stringValue != nil }
-        }
+        model.checkHerdr()
         // Centred, a third of the way down the screen with the mouse, like Spotlight.
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
             let f = screen.visibleFrame
@@ -144,24 +155,26 @@ final class QuickSearchController {
             if let url = r.link(loftHost: model.store.api?.baseURL.host()) { NSWorkspace.shared.open(url) }
             return
         }
-        // With Herdr UI set up, ⌘ swaps Herdr and the Mac app's chat.
-        if r.kind == .agent, model.herdrReady {
-            if flags.contains(.command) != model.herdrFirst {
-                openInHerdr(r.target)
-                return
+        if r.kind == .agent {
+            Task {
+                await model.herdrCheck?.value
+                switch model.opening(command: flags.contains(.command), option: flags.contains(.option)) {
+                case .herdr: openInHerdr(r.target)
+                case .browser: openBrowser(r)
+                case .chat: go(.agent, r.target, webPath: r.webPath)
+                }
             }
-            if flags.contains(.command) {
-                go(.agent, r.target, webPath: r.webPath)
-                return
-            }
+            return
         }
-        let chat = flags.contains(.command) && r.kind == .agent
-        let browserDefault = UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser"
-        if !chat, r.webOnly || flags.contains(.option) != browserDefault, let base = model.store.api?.baseURL {
-            NSWorkspace.shared.open(base.appendingPathComponent(r.webPath))
+        if r.webOnly || flags.contains(.option) != model.browserDefault {
+            openBrowser(r)
             return
         }
         go(r.kind, r.target, webPath: r.webPath)
+    }
+
+    private func openBrowser(_ r: QuickSearch.Result) {
+        if let base = model.store.api?.baseURL { NSWorkspace.shared.open(base.appendingPathComponent(r.webPath)) } else { go(r.kind, r.target, webPath: r.webPath) }
     }
 
     /// A Loft item chosen in macOS Spotlight: an agent in Herdr when Settings › Herdr UI says so, else where
@@ -169,9 +182,18 @@ final class QuickSearchController {
     func open(spotlightItem identifier: String) {
         if !model.store.isDemo, UserDefaults.standard.string(forKey: Prefs.agentsOpenIn) == "herdr",
            let (kind, id) = SpotlightIndex.target(of: identifier), kind == .agent {
-            openInHerdr(id)
+            // Only when Herdr is linked, as in quick search: else it opens as Settings › Quick search says.
+            Task {
+                model.checkHerdr()
+                await model.herdrCheck?.value
+                if model.herdrReady { openInHerdr(id) } else { openSpotlight(identifier) }
+            }
             return
         }
+        openSpotlight(identifier)
+    }
+
+    private func openSpotlight(_ identifier: String) {
         let opensIn = model.store.isDemo ? nil : UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn)
         if let url = SpotlightIndex.webURL(of: identifier, opensIn: opensIn, base: model.store.api?.baseURL) {
             NSWorkspace.shared.open(url)
@@ -186,10 +208,9 @@ final class QuickSearchController {
         Task {
             do {
                 try await model.store.herdrFocus(agentId: agentId)
-                nav.chatNote = nil
             } catch {
-                nav.chatNote = (agentId, "Opened here: \(APIError.from(error).title)")
                 go(.agent, agentId, webPath: "")
+                nav.chatNote = (agentId, "Opened here: \(APIError.from(error).title)")
             }
         }
     }
@@ -265,7 +286,7 @@ struct QuickSearchView: View {
                     .onChange(of: model.selection) { proxy.scrollTo(model.selection) }
                 }
                 Divider()
-                Text("↵ Open   ⌘↵ \(model.herdrReady && !model.herdrFirst ? "Herdr" : "Chat")   ⌥↵ \(UserDefaults.standard.string(forKey: Prefs.quickSearchOpensIn) == "browser" ? "Mac app" : "Browser")   esc Close")
+                Text("↵ Open   ⌘↵ \(model.opening(command: true) == .herdr ? "Herdr" : "Chat")   ⌥↵ \(model.opening(option: true) == .browser ? "Browser" : "Mac app")   esc Close")
                     .font(.system(size: 11.5, design: .monospaced))
                     .foregroundStyle(WebTheme.fg3)
                     .frame(maxWidth: .infinity, alignment: .leading)

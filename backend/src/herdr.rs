@@ -177,22 +177,21 @@ async fn call(socket: &Path, method: &str, params: Value) -> Option<Value> {
     tokio::time::timeout(Duration::from_secs(10), talk).await.ok().flatten()
 }
 
-/// The pane showing this Loft agent's chat, if Herdr has one.
-async fn pane_of(socket: &Path, agent_id: &str) -> Option<String> {
-    let list = call(socket, "pane.list", json!({})).await?;
+/// The pane showing this Loft agent's chat in a `pane.list` reply, if Herdr has one.
+fn pane_in(list: &Value, agent_id: &str) -> Option<String> {
     list.get("panes")?.as_array()?.iter().find(|p| p.pointer(&format!("/tokens/{TOKEN}")).and_then(|v| v.as_str()) == Some(agent_id))?.get("pane_id")?.as_str().map(str::to_string)
 }
 
 /// Focuses the agent's pane; when it has none, runs `sync` (if given) to open its tab and looks again.
 async fn focus_pane(socket: &Path, agent_id: &str, sync: Option<&Path>) -> Result<(), ApiError> {
     let not_running = || ApiError(StatusCode::CONFLICT, "Herdr isn't running.".into());
-    call(socket, "pane.list", json!({})).await.ok_or_else(not_running)?;
-    let mut pane = pane_of(socket, agent_id).await;
+    let list = call(socket, "pane.list", json!({})).await.ok_or_else(not_running)?;
+    let mut pane = pane_in(&list, agent_id);
     if pane.is_none()
         && let Some(bin) = sync
     {
         let _ = run(bin, &["sync"], None).await;
-        pane = pane_of(socket, agent_id).await;
+        pane = call(socket, "pane.list", json!({})).await.and_then(|l| pane_in(&l, agent_id));
     }
     let pane = pane.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "This agent has no tab in Herdr.".into()))?;
     call(socket, "pane.focus", json!({ "pane_id": pane })).await.ok_or_else(not_running)?;
@@ -200,8 +199,8 @@ async fn focus_pane(socket: &Path, agent_id: &str, sync: Option<&Path>) -> Resul
 }
 
 /// The app a Herdr client runs in, from `ps -axo pid=,ppid=,args=`: the nearest ancestor of a `herdr` client
-/// process (not `herdr server`) that runs from an app bundle, as that bundle's path.
-fn terminal_app(ps: &str) -> Option<String> {
+/// process (not `herdr server`) that runs from an app bundle: the client's pid and that bundle's path.
+fn terminal_app(ps: &str) -> Option<(u32, String)> {
     let procs: Vec<(u32, u32, &str)> = ps
         .lines()
         .filter_map(|l| {
@@ -214,11 +213,11 @@ fn terminal_app(ps: &str) -> Option<String> {
         let mut words = args.split_whitespace();
         words.next().is_some_and(|cmd| cmd.rsplit('/').next() == Some("herdr")) && !words.any(|w| w == "server")
     };
-    procs.iter().filter(|p| is_client(p.2)).find_map(|&(_, mut ppid, _)| {
+    procs.iter().filter(|p| is_client(p.2)).find_map(|&(client, mut ppid, _)| {
         for _ in 0..32 {
             let &(_, up, args) = procs.iter().find(|p| p.0 == ppid)?;
             if let Some(end) = args.find(".app/Contents/MacOS/") {
-                return Some(args[..end + 4].to_string());
+                return Some((client, args[..end + 4].to_string()));
             }
             ppid = up;
         }
@@ -226,10 +225,16 @@ fn terminal_app(ps: &str) -> Option<String> {
     })
 }
 
-/// Brings the terminal running Herdr to the front; best effort (Herdr may run in tmux or over ssh).
+/// Brings the terminal running Herdr to the front; best effort (Herdr may run in tmux or over ssh). Only this
+/// user's processes count, and the client must really run the `herdr` executable Loft found (its path from the
+/// system, not the process's own argv[0]), so another process can't name an app for Loft to open.
 async fn raise_terminal() {
-    let Ok(ps) = run(Path::new("/bin/ps"), &["-axo", "pid=,ppid=,args="], None).await else { return };
-    if let Some(app) = terminal_app(&ps) {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() }.to_string();
+    let Ok(ps) = run(Path::new("/bin/ps"), &["-U", &uid, "-o", "pid=,ppid=,args="], None).await else { return };
+    let Some((client, app)) = terminal_app(&ps) else { return };
+    let (Some(herdr), Ok(exe)) = (find("herdr"), run(Path::new("/bin/ps"), &["-p", &client.to_string(), "-o", "comm="], None).await) else { return };
+    if std::fs::canonicalize(&exe).ok().is_some_and(|e| Some(e) == std::fs::canonicalize(&herdr).ok()) {
         let _ = run(Path::new("/usr/bin/open"), &["-a", &app], None).await;
     }
 }
@@ -237,6 +242,8 @@ async fn raise_terminal() {
 /// `POST /api/herdr/focus/{agent_id}`: shows the agent's tab in Herdr and brings its terminal forward.
 /// 409 when Herdr isn't running, 404 when the agent has no tab even after a sync.
 pub async fn focus(State(state): State<AppState>, UrlPath(agent_id): UrlPath<String>) -> ApiResult<Value> {
+    // Only Loft's agents: an unknown id would start `loft-herdr sync` on every call.
+    state.db.get_agent(&agent_id)?.ok_or_else(crate::api::not_found)?;
     let sync = Some(built(&state)).filter(|b| b.is_file()).or_else(|| find("loft-herdr"));
     focus_pane(&socket(), &agent_id, sync.as_deref()).await?;
     raise_terminal().await;
@@ -291,11 +298,19 @@ mod tests {
 
     /// A fake Herdr on a socket in a temp folder: answers `pane.list` with these panes and records `pane.focus`.
     async fn fake_herdr(panes: Value) -> (PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let (path, focused, _) = fake_herdr_counting(panes).await;
+        (path, focused)
+    }
+
+    /// The same, also counting the `pane.list` calls.
+    async fn fake_herdr_counting(panes: Value) -> (PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>, std::sync::Arc<std::sync::Mutex<u32>>) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let path = temp().join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let focused = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let seen = focused.clone();
+        let lists = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let counted = lists.clone();
         tokio::spawn(async move {
             while let Ok((s, _)) = listener.accept().await {
                 let (r, mut w) = s.into_split();
@@ -303,7 +318,10 @@ mod tests {
                 BufReader::new(r).read_line(&mut line).await.unwrap();
                 let req: Value = serde_json::from_str(&line).unwrap();
                 let result = match req["method"].as_str().unwrap() {
-                    "pane.list" => json!({ "panes": panes }),
+                    "pane.list" => {
+                        *counted.lock().unwrap() += 1;
+                        json!({ "panes": panes })
+                    }
                     "pane.focus" => {
                         seen.lock().unwrap().push(req["params"]["pane_id"].as_str().unwrap().to_string());
                         json!({})
@@ -313,7 +331,7 @@ mod tests {
                 w.write_all(format!("{}\n", json!({ "id": req["id"], "result": result })).as_bytes()).await.unwrap();
             }
         });
-        (path, focused)
+        (path, focused, lists)
     }
 
     #[tokio::test]
@@ -322,6 +340,21 @@ mod tests {
         let (sock, focused) = fake_herdr(panes).await;
         focus_pane(&sock, "a2", None).await.unwrap();
         assert_eq!(*focused.lock().unwrap(), vec!["w1:p2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_id_that_is_not_an_agent_is_refused_before_anything_runs() {
+        let st = crate::tasks::tests::state();
+        let err = focus(State(st), UrlPath("nobody".into())).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn asks_herdr_for_its_panes_once() {
+        let panes = json!([{ "pane_id": "w1:p1", "tokens": { "loft_agent": "a1" } }]);
+        let (sock, _, lists) = fake_herdr_counting(panes).await;
+        focus_pane(&sock, "a1", None).await.unwrap();
+        assert_eq!(*lists.lock().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -349,7 +382,7 @@ mod tests {
   600     1 /Users/gustavo/.local/bin/herdr server
   700     1 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
 ";
-        assert_eq!(terminal_app(ps).as_deref(), Some("/Applications/Ghostty.app"));
+        assert_eq!(terminal_app(ps), Some((503, "/Applications/Ghostty.app".to_string())));
         assert_eq!(terminal_app("  600     1 /Users/me/.local/bin/herdr server\n"), None, "the server has no terminal");
     }
 
