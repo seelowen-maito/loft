@@ -511,7 +511,7 @@ export function Chat({
             title="Clear context (/clear). Memory is kept."
             icon={<RotateCcw className="size-3.5" />}
             pending={clear.busy}
-            pendingLabel={<span className="max-sm:hidden">Clearing…</span>}
+            aria-label={clear.busy ? "Clearing context…" : "Clear context"}
             onClick={() => clearContext()}
             disabled={running}
           />

@@ -477,7 +477,8 @@ export function TaskActions({ task: t, agents, projects = [], edit = 0 }: { task
           </button>
         )}
       </div>
-      <ErrorLine error={error} />
+      {/* While Cancel or Delete asks, its error shows in the dialog only. */}
+      <ErrorLine error={dialog === "cancel" || dialog === "delete" ? null : error} />
 
       {dialog === "run" && <RunDialog task={t} agents={agents} onClose={() => setDialog(null)} />}
       {dialog === "edit" && <EditDialog task={t} projects={projects} onClose={() => setDialog(null)} />}
