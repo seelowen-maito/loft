@@ -3,13 +3,15 @@ import Foundation
 /// The chat header's lines and the agents list's context size, as the web tells them (frontend lib/format.ts,
 /// lib/context.ts, pages/agents/Chat.tsx).
 public enum AgentHeader {
-    /// "every 30m · custom · next in 12m": the interval (custom when quiet hours shape it), then the next wake-up.
-    /// "manual" with no interval.
+    /// "every 30m · custom · next in 12m": the interval (custom when quiet hours shape it), then the next wake-up,
+    /// "next: any moment" when it's under 45 s away or overdue (the web's `nextRunText`). "manual" with no interval.
     public static func schedule(_ a: Agent, now: Date = Date()) -> String {
         let minutes = a.intervalMinutes ?? 0
         var s = interval(minutes)
         if minutes > 0, a.quietHours?.isEmpty == false { s += " · custom" }
-        if minutes > 0, let next = a.nextRunAt { s += " · next \(timeAgo(next, now: now))" }
+        if minutes > 0, let next = a.nextRunAt {
+            s += next.timeIntervalSince(now) < 45 ? " · next: any moment" : " · next \(timeAgo(next, now: now))"
+        }
         return s
     }
 

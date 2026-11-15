@@ -18,7 +18,9 @@ final class AgentHeaderTests: XCTestCase {
 
     func testScheduleReadsLikeTheWeb() {
         XCTAssertEqual(AgentHeader.schedule(agent(), now: now), "every 30m · next in 12m")
-        XCTAssertEqual(AgentHeader.schedule(agent(interval: 120, next: -3 * 3600), now: now), "every 2h · next 3h ago")
+        XCTAssertEqual(AgentHeader.schedule(agent(interval: 120, next: -3 * 3600), now: now), "every 2h · next: any moment")
+        XCTAssertEqual(AgentHeader.schedule(agent(next: 0), now: now), "every 30m · next: any moment")
+        XCTAssertEqual(AgentHeader.schedule(agent(next: 30), now: now), "every 30m · next: any moment")
         XCTAssertEqual(AgentHeader.schedule(agent(interval: 1440, next: nil), now: now), "every 1d")
         XCTAssertEqual(AgentHeader.schedule(agent(interval: 0), now: now), "manual")
         XCTAssertEqual(AgentHeader.schedule(agent(interval: nil), now: now), "manual")
