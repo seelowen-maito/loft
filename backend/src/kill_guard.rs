@@ -280,34 +280,48 @@ const GIT_BUILTINS: &[&str] = &[
     "revert", "rev-parse", "rm", "show", "stash", "status", "submodule", "switch", "tag", "worktree",
 ];
 
+/// Git's global options that take no value and don't change where git looks or what it runs.
+const GIT_PLAIN_OPTIONS: &[&str] = &["-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--no-optional-locks", "--literal-pathspecs", "--no-advice"];
+
 /// Whether `command` is plain git, so it runs with the run's GIT_CEILING_DIRECTORIES: only `git <subcommand> <args>`,
-/// one or more joined by `&&` or `;`, each run directly (no wrapper, shell, pipe, redirection, subshell, expansion or
-/// `NAME=value` before it), with a built-in subcommand, no global option that sets config, the exec path or the
-/// repository, and any `-C` inside a `ceiling` folder. Anything else may move the ceiling, so the guard walks up.
+/// one or more joined by `&&` or `;`, each run directly (`plain_shell`), with only the global options git can't be
+/// moved by and a built-in subcommand (`plain_git_args`). Anything else may move the ceiling, so the guard walks up.
 fn plain_git(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> bool {
-    if command.contains(['$', '`', '\\', '|', '<', '>', '(', ')', '{', '}', '*', '?', '[', ']', '~', '#', '!', '\n']) || command.replace("&&", "").contains('&') {
-        return false;
-    }
-    let cmds = parse(command);
+    let cmds = if plain_shell(command) { parse(command) } else { vec![] };
     !cmds.is_empty()
-        && cmds.iter().all(|c| {
-            let Some(("git", args)) = c.words.split_first().map(|(n, a)| (n.as_str(), a)) else { return false };
-            let mut it = args.iter();
-            loop {
-                match it.next().map(String::as_str) {
-                    Some("-C") => {
-                        let inside = it.next().and_then(|d| resolve(cwd, d)).map(real).is_some_and(|d| ceiling.iter().any(|c| d.starts_with(c)));
-                        if !inside {
-                            return false;
-                        }
-                    }
-                    Some(o) if ["-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"].iter().any(|f| o.starts_with(f)) => return false,
-                    Some(o) if o.starts_with('-') => {}
-                    Some(sub) => return GIT_BUILTINS.contains(&sub),
-                    None => return false,
+        && cmds.iter().all(|c| match c.words.split_first() {
+            Some((git, args)) if git == "git" => plain_git_args(args, cwd, ceiling),
+            _ => false,
+        })
+}
+
+/// Whether `command` has no shell feature but quotes, `;` and `&&`: no wrapper syntax, pipe, redirection, subshell,
+/// expansion, glob, history, comment, background job or second line.
+fn plain_shell(command: &str) -> bool {
+    !command.contains(['$', '`', '\\', '|', '<', '>', '(', ')', '{', '}', '*', '?', '[', ']', '~', '#', '!', '\n']) && !command.replace("&&", "").contains('&')
+}
+
+/// Whether git's `args` are global options from `GIT_PLAIN_OPTIONS` or a `-C` inside a `ceiling` folder, then a
+/// built-in subcommand. Any other option before the subcommand may take a value (`--namespace x`) or move git.
+fn plain_git_args(args: &[String], cwd: &Path, ceiling: &[PathBuf]) -> bool {
+    let mut it = args.iter().map(String::as_str);
+    loop {
+        match it.next() {
+            Some("-C") => {
+                if !it.next().is_some_and(|d| inside_ceiling(d, cwd, ceiling)) {
+                    return false;
                 }
             }
-        })
+            Some(o) if GIT_PLAIN_OPTIONS.contains(&o) => {}
+            Some(sub) => return GIT_BUILTINS.contains(&sub),
+            None => return false,
+        }
+    }
+}
+
+/// Whether `dir`, from `cwd` with symlinks followed, is in one of the `ceiling` folders.
+fn inside_ceiling(dir: &str, cwd: &Path, ceiling: &[PathBuf]) -> bool {
+    resolve(cwd, dir).map(real).is_some_and(|d| ceiling.iter().any(|c| d.starts_with(c)))
 }
 
 /// The folders a git command changes, past its global options: its work tree (`--work-tree`, `GIT_WORK_TREE`) and
@@ -1724,7 +1738,7 @@ mod tests {
                 assert_eq!(asks_under(cmd, cwd, &ceiling), Vec::<PathBuf>::new(), "should run: {cmd} (in {})", cwd.display());
             }
         }
-        for cmd in ["git checkout main && git stash", "git status; git reset --hard origin/main", "git -C notes checkout main && git -C notes stash", "git commit -m 'a message'"] {
+        for cmd in ["git checkout main && git stash", "git status; git reset --hard origin/main", "git -C notes checkout main && git -C notes stash", "git commit -m 'a message'", "git --no-pager -C notes checkout main"] {
             assert_eq!(asks_under(cmd, &ws, &ceiling), Vec::<PathBuf>::new(), "should run: {cmd}");
         }
         assert_eq!(asks_under("git checkout main", &ws.join("loft"), &ceiling), Vec::<PathBuf>::new());
@@ -1777,6 +1791,11 @@ mod tests {
             "git --config-env=alias.x=X x",
             "git --exec-path=/tmp/bin checkout main",
             "git x",
+            // An option before the subcommand that takes a value: git runs the alias `x`, not `checkout`.
+            "git --namespace checkout x",
+            "git --attr-source checkout x",
+            "git --bare checkout main",
+            "git --unknown-option checkout main",
             // A startup file the shell reads before the command.
             "BASH_ENV=f bash -c 'git checkout main'",
             "ZDOTDIR=. zsh -c 'git checkout main'",
