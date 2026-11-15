@@ -198,7 +198,7 @@ async fn focus_pane(socket: &Path, agent_id: &str, sync: Option<&Path>) -> Resul
     Ok(())
 }
 
-/// The app a Herdr client runs in, from `ps -axo pid=,ppid=,uid=,args=` (only processes of user `uid` count): the nearest ancestor of a `herdr` client
+/// The app a Herdr client runs in, from `ps -axo pid=,ppid=,ruid=,args=` (only processes of user `uid` count; the real uid, since setuid `login` between the shell and the terminal shows uid 0): the nearest ancestor of a `herdr` client
 /// process (not `herdr server`) that runs from an app bundle: the client's pid and that bundle's path.
 fn terminal_app(ps: &str, uid: u32) -> Option<(u32, String)> {
     let procs: Vec<(u32, u32, &str)> = ps
@@ -240,7 +240,7 @@ fn is_herdr_exe(comm: &str, herdr: &Path) -> bool {
 async fn raise_terminal() {
     // SAFETY: geteuid has no preconditions and cannot fail.
     let uid = unsafe { libc::geteuid() };
-    let Ok(ps) = run(Path::new("/bin/ps"), &["-axo", "pid=,ppid=,uid=,args="], None).await else { return };
+    let Ok(ps) = run(Path::new("/bin/ps"), &["-axo", "pid=,ppid=,ruid=,args="], None).await else { return };
     let Some((client, app)) = terminal_app(&ps, uid) else { return };
     let (Some(herdr), Ok(exe)) = (find("herdr"), run(Path::new("/bin/ps"), &["-p", &client.to_string(), "-o", "comm="], None).await) else { return };
     if is_herdr_exe(&exe, &herdr) {
@@ -382,6 +382,7 @@ mod tests {
 
     #[test]
     fn finds_the_terminal_app_running_the_herdr_client() {
+        // `login` is setuid root: `ps -o uid=` shows 0 for it, `ruid=` (read here) the user, 501.
         let ps = "\
     1     0     0 /sbin/launchd
   500     1   501 /Applications/Ghostty.app/Contents/MacOS/ghostty
