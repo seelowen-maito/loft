@@ -582,10 +582,10 @@ export type MirrorSync = {
   skipped: { project: string; reason: string }[];
 };
 
-/** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
 /** Loft's https address on the tailnet (null when `tailscale serve` doesn't serve it), and the command that turns it on. */
 export type Https = { url: string | null; host: string | null; command: string };
 
+/** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
 export type MacAccess = {
   items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
   binary: string | null;
@@ -629,6 +629,11 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     headers: body !== undefined ? { "content-type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return answer<T>(res);
+}
+
+/** A response's JSON, or its `error` thrown. */
+async function answer<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as any).error ?? `${res.status} ${res.statusText}`);
   return data as T;
@@ -674,9 +679,7 @@ export const api = {
       headers: { "content-type": "application/octet-stream" },
       body: audio as BodyInit,
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((data as any).error ?? `${res.status} ${res.statusText}`);
-    return data as { text: string; final: boolean };
+    return answer<{ text: string; final: boolean }>(res);
   },
   /** Tidies a dictation; the original comes back (`cleaned: false`) when it can't. */
   voiceClean: (text: string) => req<{ text: string; cleaned: boolean }>("POST", "/voice/clean", { text }),
