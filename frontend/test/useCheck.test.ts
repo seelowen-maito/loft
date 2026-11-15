@@ -20,3 +20,25 @@ test("the Mac access card checks only on its button", async () => {
   const { readFileSync } = await import("node:fs");
   assert.match(readFileSync(new URL("../src/pages/MacAccess.tsx", import.meta.url), "utf8"), /useCheck\(api\.macAccess, \{ manual: true \}\)/);
 });
+
+test("a slow earlier check doesn't overwrite a newer one", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost/" });
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
+  const { act, createElement } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { useCheck } = await import("../src/lib/useCheck.ts");
+
+  const answers: ((v: string) => void)[] = [];
+  const check = () => new Promise<string>((ok) => answers.push(ok));
+  let shown: ReturnType<typeof useCheck<string>> | undefined;
+  const Card = () => ((shown = useCheck(check)), null);
+  const root = createRoot(document.body.appendChild(document.createElement("div")));
+  await act(async () => root.render(createElement(Card)));
+  await act(async () => void shown!.run()); // "Check again" while the automatic check is still out
+  await act(async () => answers[1]("new"));
+  await act(async () => answers[0]("old"));
+  assert.equal(shown!.data, "new");
+  assert.equal(shown!.busy, false);
+  await act(async () => root.unmount());
+});

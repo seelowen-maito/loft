@@ -20,15 +20,18 @@ export function useCheck<T>(fn: () => Promise<T>, { manual = false } = {}) {
   const [busy, setBusy] = useState(false);
   const latest = useRef(fn);
   latest.current = fn;
+  // Only the newest run shows: a slow earlier check ("Check again" right after the automatic one) can't overwrite it.
+  const runs = useRef(0);
   const run = useCallback(async () => {
+    const n = ++runs.current;
     setBusy(true);
     try {
       const ok = await latest.current();
-      setState((s) => afterCheck(s, { ok }));
+      if (n === runs.current) setState((s) => afterCheck(s, { ok }));
     } catch (error) {
-      setState((s) => afterCheck(s, { error }));
+      if (n === runs.current) setState((s) => afterCheck(s, { error }));
     } finally {
-      setBusy(false);
+      if (n === runs.current) setBusy(false);
     }
   }, []);
   useEffect(() => {
