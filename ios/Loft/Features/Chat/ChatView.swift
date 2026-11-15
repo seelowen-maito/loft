@@ -1026,22 +1026,22 @@ private struct LoopScheduleBar: View {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(l.prompt).font(.footnote).lineLimit(1)
-                        Text("Looping every \(every(l.intervalMinutes)) · next \(l.nextAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text("Looping every \(every(l.intervalMinutes)) · next \(AgentSchedule.nextLabel(l.nextAt))")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("Stop", action: stop).buttonStyle(.bordered).frame(minHeight: 44).accessibilityIdentifier("loopStop")
+                    Button("Stop", action: stop).buttonStyle(.bordered).frame(minHeight: 44).fixedSize().accessibilityIdentifier("loopStop")
                 }
             }
             ForEach(agent.schedules ?? []) { s in
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(s.prompt).font(.footnote).lineLimit(1)
-                        Text("\(s.every.map { "Every \($0) at \(s.time ?? "")" } ?? "Once") · next \(s.nextAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text("\(s.repeatLabel) · next \(AgentSchedule.nextLabel(s.nextAt))")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("Cancel") { cancel(s.id) }.buttonStyle(.bordered).frame(minHeight: 44).accessibilityIdentifier("scheduleCancel")
+                    Button("Cancel") { cancel(s.id) }.buttonStyle(.bordered).frame(minHeight: 44).fixedSize().accessibilityIdentifier("scheduleCancel")
                 }
             }
         }

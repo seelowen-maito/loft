@@ -26,8 +26,7 @@ pub fn status_from(creds: Result<Value, String>, email: Option<String>) -> Value
 }
 
 fn email() -> Option<String> {
-    let dir = std::env::var("CLAUDE_CONFIG_DIR").ok().map(std::path::PathBuf::from);
-    let path = match dir {
+    let path = match crate::sessions::config_dir() {
         Some(d) => d.join(".claude.json"),
         None => dirs::home_dir()?.join(".claude.json"),
     };

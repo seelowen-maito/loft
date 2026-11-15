@@ -24,18 +24,27 @@ const WINDOWS: &[(&str, &str)] = &[
     ("seven_day_sonnet", "week · Sonnet"),
 ];
 
-/// Claude Code's stored login, in the CLI's order: with `CLAUDE_CONFIG_DIR` set, `.credentials.json` there;
-/// otherwise the macOS keychain, else `.credentials.json` in `~/.claude`.
-pub async fn credentials() -> Result<Value> {
-    let from_file = |dir: std::path::PathBuf| std::fs::read_to_string(dir.join(".credentials.json")).context("no Claude Code login found; run `claude` and log in");
-    let raw = if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        from_file(dir.into())?
-    } else {
-        let out = tokio::process::Command::new("security").args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]).output().await;
-        match out {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            _ => from_file(dirs::home_dir().unwrap_or_default().join(".claude"))?,
+/// The keychain item the CLI keeps its login in: "Claude Code-credentials", with the first 8 hex digits of the
+/// SHA-256 of the config folder added after a dash when `CLAUDE_CONFIG_DIR` is set (read from the CLI's code, v2.1.323).
+pub fn keychain_service(config_dir: Option<&std::path::Path>) -> String {
+    use sha2::{Digest, Sha256};
+    match config_dir {
+        None => "Claude Code-credentials".into(),
+        Some(d) => {
+            let hash: String = Sha256::digest(d.to_string_lossy().as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+            format!("Claude Code-credentials-{}", &hash[..8])
         }
+    }
+}
+
+/// Claude Code's stored login, where the CLI keeps it: the macOS keychain (an item named for `CLAUDE_CONFIG_DIR`
+/// when that is set), else `.credentials.json` in the config folder.
+pub async fn credentials() -> Result<Value> {
+    let dir = crate::sessions::config_dir();
+    let out = tokio::process::Command::new("security").args(["find-generic-password", "-s", &keychain_service(dir.as_deref()), "-w"]).output().await;
+    let raw = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => std::fs::read_to_string(crate::sessions::claude_dir().join(".credentials.json")).context("no Claude Code login found; run `claude` and log in")?,
     };
     serde_json::from_str(&raw).context("unreadable Claude Code credentials")
 }
@@ -95,4 +104,16 @@ pub async fn get(state: &AppState) -> Value {
 #[cfg(test)]
 pub async fn fake(state: &AppState, v: Value) {
     *state.usage.0.lock().await = Some((Instant::now(), v));
+}
+
+#[cfg(test)]
+mod keychain_tests {
+    use super::keychain_service;
+
+    #[test]
+    fn the_keychain_item_is_named_for_the_config_folder_like_the_clis() {
+        assert_eq!(keychain_service(None), "Claude Code-credentials");
+        // sha256("x") starts 2d711642.
+        assert_eq!(keychain_service(Some(std::path::Path::new("x"))), "Claude Code-credentials-2d711642");
+    }
 }

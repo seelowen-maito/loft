@@ -17,6 +17,28 @@ public struct AgentSchedule: Codable, Hashable, Identifiable {
     public var every: String? = nil
     public var time: String? = nil
     public var nextAt: Date
+
+    /// "Every weekday 08:00" or "Once": short enough for one line.
+    public var repeatLabel: String {
+        guard let every else { return "Once" }
+        return "Every \(every) \(Self.hhmm(time ?? ""))"
+    }
+
+    /// "8:00" or "08:00" as "08:00", so the row never mixes the two.
+    static func hhmm(_ t: String) -> String {
+        let p = t.split(separator: ":")
+        guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]) else { return t }
+        return String(format: "%02d:%02d", h, m)
+    }
+
+    /// A next-run time as "Tue 13 Oct 08:00", the same for a loop and a schedule.
+    public static func nextLabel(_ date: Date, timeZone: TimeZone = .current) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "EEE d MMM HH:mm"
+        return f.string(from: date)
+    }
 }
 
 public struct Agent: Codable, Identifiable, Hashable {

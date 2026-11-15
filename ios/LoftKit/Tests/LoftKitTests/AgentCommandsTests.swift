@@ -66,4 +66,12 @@ final class AgentCommandsTests: XCTestCase {
         let old = try JSONCoding.decoder.decode(Agent.self, from: Data(#"{"id":"a1","name":"Dev","status":"idle"}"#.utf8))
         XCTAssertNil(old.loop)
     }
+
+    func testScheduleRowsUseOneTimeFormat() throws {
+        let json = #"{"id":"s1","prompt":"p","every":"weekday","time":"8:00","next_at":"2026-10-13T08:00:00Z"}"#
+        let s = try JSONCoding.decoder.decode(AgentSchedule.self, from: Data(json.utf8))
+        XCTAssertEqual(s.repeatLabel, "Every weekday 08:00")
+        XCTAssertEqual(AgentSchedule(id: "o", prompt: "p", nextAt: s.nextAt).repeatLabel, "Once")
+        XCTAssertEqual(AgentSchedule.nextLabel(s.nextAt, timeZone: TimeZone(identifier: "UTC")!), "Tue 13 Oct 08:00")
+    }
 }
