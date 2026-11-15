@@ -190,6 +190,10 @@ pub struct DeliveryTicket {
     /// When the commits were last submitted (RFC 3339): how long a commit with no check yet has waited for one.
     #[serde(default)]
     pub submitted_at: String,
+    /// When it started waiting for CI (RFC 3339): its last reviewer passed while the CI was pending, or it was
+    /// submitted to a team with no reviewers. Empty otherwise: cleared when the CI passes or a changes round starts.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ci_since: String,
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,

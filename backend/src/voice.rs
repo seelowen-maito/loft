@@ -350,6 +350,102 @@ pub async fn transcribe(State(state): State<AppState>, Query(q): Query<Transcrib
     Ok(Json(json!({ "text": String::from_utf8_lossy(&out.stdout).trim(), "final": q.last })))
 }
 
+/// `GET /api/voice/status` → `{ speech: { ready, text }, cleanup: { on_device, text } }`, for Settings › Voice on this
+/// Mac: whether this Mac can transcribe the web's voice (the helper's `--check`), and whether cleanup runs on Apple's
+/// on-device model (`fm available`) or on Haiku. `text` is the status, or the reason and the fix. Refused to other
+/// sites, one check at a time, and an answer is reused for `STATUS_REUSE`, so nothing can pile up processes on the Mac.
+pub async fn status(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Result<Json<Value>, ApiError> {
+    crate::guard::same_site_read(&headers)?;
+    Ok(Json(status_within(&state, STATUS_REUSE).await))
+}
+
+const STATUS_REUSE: Duration = Duration::from_secs(3);
+
+/// The status, or the last one when it is younger than `reuse`. Kept per helper path: one in Loft, one per test.
+async fn status_within(state: &AppState, reuse: Duration) -> Value {
+    type Last = std::collections::HashMap<std::path::PathBuf, (std::time::Instant, Value)>;
+    static LAST: std::sync::LazyLock<tokio::sync::Mutex<Last>> = std::sync::LazyLock::new(Default::default);
+    let mut last = LAST.lock().await;
+    let helper = helper(state);
+    if let Some((at, v)) = last.get(&helper)
+        && at.elapsed() < reuse
+    {
+        return v.clone();
+    }
+    let (speech, cleanup) = tokio::join!(speech_status(state), cleanup_status());
+    let v = json!({
+        "speech": { "ready": speech.is_ok(), "text": speech.unwrap_or_else(|e| e) },
+        "cleanup": { "on_device": cleanup.is_ok(), "text": cleanup.unwrap_or_else(|e| e) },
+    });
+    last.insert(helper, (std::time::Instant::now(), v.clone()));
+    v
+}
+
+const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A quick check's stdout on exit 0, or the first line it wrote on failure (at most 200 characters; empty if none).
+async fn check(bin: &std::path::Path, args: &[&str]) -> Result<String, (Option<i32>, String)> {
+    let out = Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).output();
+    match tokio::time::timeout(CHECK_TIMEOUT, out).await {
+        Err(_) => Err((None, "the check timed out".into())),
+        Ok(Err(e)) => Err((None, e.to_string())),
+        Ok(Ok(o)) => {
+            let text = |b: &[u8]| String::from_utf8_lossy(b).trim().to_string();
+            if o.status.success() {
+                return Ok(text(&o.stdout));
+            }
+            let said = [text(&o.stderr), text(&o.stdout)].join("\n");
+            Err((o.status.code(), said.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(200).collect()))
+        }
+    }
+}
+
+/// The transcribe helper's own status ("Ready"), or why it can't run here and what to do.
+async fn speech_status(state: &AppState) -> Result<String, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("Voice is transcribed on a Mac, and this Loft doesn't run on one.".into());
+    }
+    let helper = helper(state);
+    if !helper.is_file() {
+        return Err("This Mac hasn't built Loft's transcriber yet: run ./setup.sh, or let Loft update.".into());
+    }
+    match check(&helper, &["--check"]).await {
+        Ok(text) => Ok(text),
+        Err((Some(2), reason)) if !reason.is_empty() => Err(reason),
+        // A helper from before `--check` reads it as a file name and fails.
+        Err((_, reason)) if !reason.is_empty() => Err(format!("Couldn't check the transcriber ({reason}): run ./setup.sh, or let Loft update.")),
+        Err(_) => Err("Couldn't check the transcriber: run ./setup.sh, or let Loft update.".into()),
+    }
+}
+
+/// The on-device model's status in the Mac app's words (`OnDeviceModel.Status.text`), Ok when cleanup runs on it.
+async fn cleanup_status() -> Result<String, String> {
+    let fm = fm_bin();
+    if !fm.is_file() {
+        return Err("Needs macOS 26 or later".into());
+    }
+    match check(&fm, &["available"]).await {
+        Ok(_) => Ok("Available".into()),
+        Err((_, reason)) => Err(model_status(&reason)),
+    }
+}
+
+/// `fm available`'s reason for an unavailable model, as the Mac app's Settings › Apple Intelligence shows it.
+fn model_status(reason: &str) -> String {
+    let r = reason.to_lowercase().replace([' ', '_'], "");
+    if r.contains("appleintelligencenotenabled") {
+        "Turned off in System Settings › Apple Intelligence & Siri".into()
+    } else if r.contains("devicenoteligible") {
+        "This Mac doesn't support it".into()
+    } else if r.contains("modelnotready") {
+        "Getting ready (downloading)".into()
+    } else if reason.is_empty() {
+        "Unavailable".into()
+    } else {
+        format!("Unavailable ({reason})")
+    }
+}
+
 /// Adds `audio` to the session's file, readable only by this user; returns its size.
 fn append(file: &std::path::Path, audio: &[u8]) -> Result<u64, ApiError> {
     use std::io::Write;
@@ -523,6 +619,67 @@ esac
         for (body, why) in [("exit 1", "fails"), ("exec sleep 60", "hangs"), ("echo 'Corrija o total do carrinho.'", "translates"), ("echo 'Sure! Fix it in cart.rs.'", "answers")] {
             fake_fm(&st, body);
             assert_eq!(clean_call(&st, said).await, haiku, "fm {why}");
+        }
+    }
+
+    async fn status_call(st: &AppState) -> Value {
+        status_within(st, Duration::ZERO).await
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn status_reuses_an_answer_for_a_few_seconds() {
+        let st = crate::tasks::tests::state();
+        fake_helper(&st, "echo Ready");
+        let first = status(State(st.clone()), axum::http::HeaderMap::new()).await.ok().unwrap().0;
+        assert_eq!(first["speech"]["text"], "Ready");
+        // Asked again at once: the same answer, without running the checks again.
+        fake_helper(&st, "echo 'should not run' >&2; exit 2");
+        assert_eq!(status(State(st.clone()), axum::http::HeaderMap::new()).await.ok().unwrap().0, first);
+        // Once it is older than the window, the checks run again.
+        assert_eq!(status_within(&st, Duration::ZERO).await["speech"]["text"], "should not run");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn status_says_whether_speech_and_on_device_cleanup_are_ready_and_why_not() {
+        let st = crate::tasks::tests::state();
+        // Nothing built, no fm: transcribing says how to build it, and cleanup falls back to Haiku.
+        let s = status_call(&st).await;
+        assert_eq!(s["speech"], json!({ "ready": false, "text": "This Mac hasn't built Loft's transcriber yet: run ./setup.sh, or let Loft update." }));
+        assert_eq!(s["cleanup"], json!({ "on_device": false, "text": "Needs macOS 26 or later" }));
+        // Both ready.
+        fake_helper(&st, r#"[ "$1" = --check ] && echo Ready"#);
+        fake_fm(&st, "echo 'System model available'");
+        let s = status_call(&st).await;
+        assert_eq!(s["speech"], json!({ "ready": true, "text": "Ready" }));
+        assert_eq!(s["cleanup"], json!({ "on_device": true, "text": "Available" }));
+        // The helper's own reason; a helper from before --check.
+        fake_helper(&st, "echo \"Needs macOS 26 or later with Apple's speech model.\" >&2; exit 2");
+        assert_eq!(status_call(&st).await["speech"]["text"], "Needs macOS 26 or later with Apple's speech model.");
+        fake_helper(&st, "echo 'usage: loft-transcribe <audio.pcm>' >&2; exit 1");
+        assert_eq!(status_call(&st).await["speech"]["text"], "Couldn't check the transcriber (usage: loft-transcribe <audio.pcm>): run ./setup.sh, or let Loft update.");
+        // A reason is its first line only; no reason at all gets a fixed text, never "()" or nothing.
+        fake_helper(&st, "printf '\\ndyld: missing symbol\\n  in /some/path\\n' >&2; exit 1");
+        assert_eq!(status_call(&st).await["speech"]["text"], "Couldn't check the transcriber (dyld: missing symbol): run ./setup.sh, or let Loft update.");
+        for code in [1, 2] {
+            fake_helper(&st, &format!("exit {code}"));
+            assert_eq!(status_call(&st).await["speech"], json!({ "ready": false, "text": "Couldn't check the transcriber: run ./setup.sh, or let Loft update." }), "exit {code}");
+        }
+        // Another site's page can't make it run the checks.
+        let mut cross = axum::http::HeaderMap::new();
+        cross.insert("sec-fetch-site", "cross-site".parse().unwrap());
+        assert_eq!(status(State(st.clone()), cross).await.err().unwrap().0, StatusCode::FORBIDDEN);
+        // Each model reason in the Mac app's words; an unknown one as fm wrote it.
+        for (said, shown) in [
+            ("System model unavailable: appleIntelligenceNotEnabled", "Turned off in System Settings › Apple Intelligence & Siri"),
+            ("System model unavailable: deviceNotEligible", "This Mac doesn't support it"),
+            ("System model unavailable: modelNotReady", "Getting ready (downloading)"),
+            ("something new", "Unavailable (something new)"),
+            ("", "Unavailable"),
+        ] {
+            fake_fm(&st, &format!("echo '{said}'; exit 1"));
+            assert_eq!(status_call(&st).await["cleanup"], json!({ "on_device": false, "text": shown }), "{said}");
         }
     }
 

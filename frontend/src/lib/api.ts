@@ -137,11 +137,16 @@ export type IssueDelivery = {
   agent_id: string | null;
   agent_name: string | null;
   pr: number | null;
+  /** Its PR's Checks tab on GitHub (the spec PR, or a standalone ticket's PR); null in a plan kept in Loft or before the PR opens. An older server doesn't send it. */
+  checks_url?: string | null;
+  /** When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included; null when none is. An older server doesn't send it. */
+  ci_since?: string | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
   /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */
   waits_on?: WaitsOn[];
-  tickets?: { number: number; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null }[];
+  /** `waiting_for_ci`: its reviewers all passed, only its CI is left (no agent on it), since `ci_since` (RFC 3339). */
+  tickets?: { number: number; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; waiting_for_ci?: boolean; ci_since?: string | null }[];
   /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
   waiting_for_lead?: number[];
   /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
@@ -588,6 +593,8 @@ export type MirrorSync = {
 
 /** Loft's https address on the tailnet (null when `tailscale serve` doesn't serve it), and the command that turns it on. */
 export type Https = { url: string | null; host: string | null; command: string };
+/** Whether this Mac can transcribe the web's voice, and whether cleanup runs on Apple's on-device model or on Haiku. */
+export type VoiceStatus = { speech: { ready: boolean; text: string }; cleanup: { on_device: boolean; text: string } };
 
 /** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
 export type MacAccess = {
@@ -696,6 +703,8 @@ export const api = {
   voiceClean: (text: string) => req<{ text: string; cleaned: boolean }>("POST", "/voice/clean", { text }),
   /** Asks Tailscale whether it serves Loft over https. */
   https: () => req<Https>("GET", "/system/https"),
+  /** Checks the transcriber and the on-device model now. */
+  voiceStatus: () => req<VoiceStatus>("GET", "/voice/status"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),

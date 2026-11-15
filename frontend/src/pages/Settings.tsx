@@ -7,6 +7,7 @@ import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
 import { HttpsAccess } from "./HttpsAccess";
+import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
 import { cleanLineText, cx, fmtBytes, oneLine, timeAgo } from "../lib/format";
@@ -652,6 +653,7 @@ export default function SettingsPage() {
         <PushSettings />
 
         <HttpsAccess />
+        <VoiceOnThisMac />
 
         <ClaudeLoginSection />
 
