@@ -226,9 +226,25 @@ fn terminal_app(ps: &str, uid: u32) -> Option<(u32, String)> {
     })
 }
 
-/// Whether the executable `ps` reports for a process (`comm`) is the `herdr` Loft found, by real path.
-fn is_herdr_exe(comm: &str, herdr: &Path) -> bool {
-    match (std::fs::canonicalize(comm.trim()), std::fs::canonicalize(herdr)) {
+/// The real path of the program process `pid` runs, from the kernel (`ps -o comm=` gives only the name it was
+/// started with, or a path cut short).
+#[cfg(not(target_os = "macos"))]
+fn exe_of(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn exe_of(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: proc_pidpath writes at most `buf.len()` bytes into `buf` and returns how many.
+    let n = unsafe { libc::proc_pidpath(pid as libc::c_int, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..n as usize])))
+}
+
+/// Whether `exe` is the `herdr` Loft found, by real path.
+fn is_herdr_exe(exe: &Path, herdr: &Path) -> bool {
+    match (std::fs::canonicalize(exe), std::fs::canonicalize(herdr)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
@@ -242,7 +258,7 @@ async fn raise_terminal() {
     let uid = unsafe { libc::geteuid() };
     let Ok(ps) = run(Path::new("/bin/ps"), &["-axo", "pid=,ppid=,ruid=,args="], None).await else { return };
     let Some((client, app)) = terminal_app(&ps, uid) else { return };
-    let (Some(herdr), Ok(exe)) = (find("herdr"), run(Path::new("/bin/ps"), &["-p", &client.to_string(), "-o", "comm="], None).await) else { return };
+    let (Some(herdr), Some(exe)) = (find("herdr"), exe_of(client)) else { return };
     if is_herdr_exe(&exe, &herdr) {
         let _ = run(Path::new("/usr/bin/open"), &["-a", &app], None).await;
     }
@@ -415,10 +431,18 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let other = dir.join("other");
         std::fs::write(&other, "").unwrap();
-        assert!(is_herdr_exe(&real.to_string_lossy(), &link), "through a symlink");
-        assert!(is_herdr_exe(&format!("{}\n", real.display()), &real));
-        assert!(!is_herdr_exe(&other.to_string_lossy(), &real), "another program named at argv[0] doesn't count");
-        assert!(!is_herdr_exe("/nonexistent/herdr", &real));
+        assert!(is_herdr_exe(&real, &link), "through a symlink");
+        assert!(!is_herdr_exe(&other, &real), "another program doesn't count, whatever it's called");
+        // What `ps -o comm=` would give: a bare name or a path cut to 16 characters. Neither is a path to trust.
+        assert!(!is_herdr_exe(Path::new("herdr"), &real));
+        assert!(!is_herdr_exe(Path::new(&real.to_string_lossy()[..16]), &real));
+    }
+
+    #[test]
+    fn the_exe_comes_from_the_kernel_not_the_process_name() {
+        let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(std::fs::canonicalize(exe_of(std::process::id()).unwrap()).unwrap(), me);
+        assert_eq!(exe_of(u32::MAX - 1), None);
     }
 
     #[test]
