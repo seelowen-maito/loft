@@ -166,8 +166,9 @@ if [ "$MACOS" = 1 ]; then
   section "Background service"
   # The service is per user, not per copy: another checkout of loft may own it.
   other=""
-  [ -f "$PLIST" ] && ! grep -qF "<string>$BIN</string>" "$PLIST" && other=$(sed -n 's/.*<key>ProgramArguments<\/key><array><string>\(.*\)<\/string>.*/\1/p' "$PLIST")
+  [ -f "$PLIST" ] && ! grep -qE "<string>$BIN(-signed)?</string>" "$PLIST" && other=$(sed -n 's/.*<key>ProgramArguments<\/key><array><string>\(.*\)<\/string>.*/\1/p' "$PLIST")
   if [ -n "$other" ]; then
+    other=${other%-signed}
     warn "the background service runs another copy of loft ${D}(${other%/backend/target/release/loft})${N}"
     answer=$(ask "Switch the service to this copy? [y/N]" n)
   elif [ -f "$PLIST" ]; then
@@ -183,13 +184,20 @@ if [ "$MACOS" = 1 ]; then
       warn "$n agent(s) running; not restarting loft now. Run ${HERE}setup.sh again once they finish."
     else
       mkdir -p ~/Library/LaunchAgents ~/Library/Logs
+      # With a "loft" signing identity, the service runs the build's signed copy, so Login Items lists that and
+      # its permissions survive updates. The first signing may ask on this Mac's screen to let codesign use the key.
+      SERVICE_BIN=$BIN
+      if security find-identity -p codesigning 2>/dev/null | grep -q '"loft"'; then
+        if spin "Signing loft with the \"loft\" identity" "$BIN" sign; then SERVICE_BIN=$BIN-signed; ok "signed with the \"loft\" identity"
+        else warn "couldn't sign with the \"loft\" identity; the service runs the unsigned build"; fi
+      fi
       cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$BIN</string></array>
+  <key>ProgramArguments</key><array><string>$SERVICE_BIN</string></array>
   <key>WorkingDirectory</key><string>$ROOT/backend</string>
   <key>EnvironmentVariables</key>
   <dict>
