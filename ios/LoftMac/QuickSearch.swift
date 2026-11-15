@@ -95,6 +95,7 @@ final class QuickSearchController {
         #if DEBUG
         // Needs no window: a directly launched app may not open one.
         let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-render-chat-note"), i + 1 < args.count { Task { renderChatNote(to: args[i + 1]) } }
         if let i = args.firstIndex(of: "-render-quick-search"), i + 2 < args.count {
             Task { await renderQuickSearch(self, query: args[i + 1], to: args[i + 2]) }
         }
@@ -395,6 +396,8 @@ struct QuickSearchSettings: View {
 func renderQuickSearch(_ controller: QuickSearchController, query: String, to file: String) async {
     for _ in 0..<80 where controller.model.store.agents.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
     controller.show()
+    // `-render-herdr-ready`: as if Herdr UI were linked (the demo has no Herdr to ask); pair it with `-agentsOpenIn herdr|loft`.
+    if ProcessInfo.processInfo.arguments.contains("-render-herdr-ready") { controller.model.herdrReady = true }
     controller.model.query = query
     try? await Task.sleep(for: .seconds(1.5))
     if let view = NSApp.windows.first(where: { $0 is NSPanel && $0.isVisible })?.contentView,
