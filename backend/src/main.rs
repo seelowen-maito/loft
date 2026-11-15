@@ -75,6 +75,7 @@ fn api_routes() -> Router<AppState> {
         .route("/usage", get(api::usage))
         .route("/system", get(system::get))
         .route("/system/mac-access", post(mac_access::check))
+        .route("/system/https", get(tailnet::https))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/backups", get(backup::get).post(backup::now))
         .route("/restart", post(api::restart))
@@ -249,6 +250,8 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(agents::quiet_watcher(state.clone()));
     tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
     tokio::spawn(mac_access::watcher(state.clone()));
+    let port = state.cfg.port;
+    tokio::task::spawn_blocking(move || tailnet::check_https(port));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(delivery::ci_poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));

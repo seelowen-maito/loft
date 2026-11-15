@@ -583,6 +583,9 @@ export type MirrorSync = {
 };
 
 /** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
+/** Loft's https address on the tailnet (null when `tailscale serve` doesn't serve it), and the command that turns it on. */
+export type Https = { url: string | null; host: string | null; command: string };
+
 export type MacAccess = {
   items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
   binary: string | null;
@@ -663,6 +666,8 @@ export const api = {
   system: () => req<SystemReading>("GET", "/system"),
   /** Lists a fixed set of macOS-guarded folders; can show macOS's prompts on the Mac. */
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
+  /** Asks Tailscale whether it serves Loft over https. */
+  https: () => req<Https>("GET", "/system/https"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
