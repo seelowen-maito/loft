@@ -314,7 +314,7 @@ private struct DeliveryCard: View {
 
     private func color(_ tone: IssueDelivery.Tone) -> Color {
         switch tone {
-        case .running, .final: Theme.accent
+        case .running, .ci, .final: Theme.accent
         case .stalled: Theme.failureInk
         case .paused: .secondary
         case .needsYou: Theme.attentionInk
