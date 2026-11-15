@@ -75,16 +75,16 @@ extension UsageWidgetSnapshot {
 }
 
 /// The colours Loft uses for a level, as the web: usage amber at 75 %, red at 90 %; memory high / critical; CPU warm / hot.
-/// Amber is the darker ink in light mode, where the bright amber is too faint on the white tile.
+/// Amber and red are the darker inks in light mode, where the bright ones are too faint on the white tile.
 enum UsageTone {
     static func usage(_ percent: Double?) -> Color {
         guard let p = percent else { return .secondary }
-        return p >= 90 ? Theme.failure : p >= 75 ? Theme.attentionInk : Theme.accent
+        return p >= 90 ? Theme.failureInk : p >= 75 ? Theme.attentionInk : Theme.accent
     }
 
     static func level(_ level: String?) -> Color {
         switch level {
-        case "hot", "critical": Theme.failure
+        case "hot", "critical": Theme.failureInk
         case "warm", "high": Theme.attentionInk
         default: .primary
         }
