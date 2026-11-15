@@ -26,6 +26,10 @@ final class NeedsYouTests: XCTestCase {
         var prompt = asks
         prompt.source = "prompt"
         XCTAssertFalse(prompt.isQuestions, "the permission to ask is an ordinary Allow / Deny")
+        XCTAssertEqual(prompt.summary, "Which store?\nWhich region?", "but it lists the questions too")
+        XCTAssertEqual(AgentState.waitingApproval.label(pending: [asks]), "Has questions")
+        XCTAssertEqual(AgentState.waitingApproval.label(pending: [asks, prompt]), "Needs approval", "anything else waiting needs approval")
+        XCTAssertEqual(AgentState.waitingApproval.label(pending: []), "Needs approval")
     }
 
     func testTheBackendsFixtureDecodes() throws {

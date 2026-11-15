@@ -260,6 +260,9 @@ public struct PermissionRequest: Codable, Identifiable, Hashable {
     /// An agent's multiple-choice questions: answered in the web chat, where the options show; here only skipped.
     public var isQuestions: Bool { source == "questions" }
 
+    /// The permission to ask those questions, or the questions themselves: either way, the questions are what's asked.
+    public var asksQuestions: Bool { isQuestions || toolName == "AskUserQuestion" }
+
     /// Whether Always allow can save something. A Kill's rule is only ever one Loft made for a program it can
     /// name (the backend checks it), so an empty rule means none.
     public var canAlwaysAllow: Bool {
@@ -281,7 +284,7 @@ public struct PermissionRequest: Codable, Identifiable, Hashable {
 
     /// A one-line, human description of what is being asked, without dumping raw input.
     public var summary: String {
-        if isQuestions, case .array(let qs)? = input?["questions"] {
+        if asksQuestions, case .array(let qs)? = input?["questions"] {
             return qs.compactMap { $0["question"]?.stringValue }.joined(separator: "\n")
         }
         if let cmd = input?["command"]?.stringValue { return "\(toolName): \(cmd)" }
