@@ -251,8 +251,14 @@ async fn clean_on_device(text: &str) -> Option<String> {
     drop(stdin);
     let out = match tokio::time::timeout(FM_TIMEOUT, child.wait_with_output()).await {
         Ok(Ok(out)) if out.status.success() => out,
+        // Never the output itself: it is the user's dictation.
         r => {
-            tracing::info!("on-device cleanup failed ({}); using Haiku", if r.is_err() { "timed out".into() } else { format!("{r:?}") });
+            let why = match r {
+                Ok(Ok(out)) => format!("exit {:?}", out.status.code()),
+                Ok(Err(e)) => e.to_string(),
+                Err(_) => "timed out".into(),
+            };
+            tracing::info!("on-device cleanup failed ({why}); using Haiku");
             return None;
         }
     };
