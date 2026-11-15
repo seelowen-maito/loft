@@ -1,42 +1,20 @@
-import { useEffect, useState } from "react";
 import { Mic } from "lucide-react";
-import { api, type VoiceStatus } from "../lib/api";
+import { api } from "../lib/api";
+import { useCheck } from "../lib/useCheck";
+import { CheckButton, SettingsCard } from "../components/SettingsCard";
 
 /** Settings → Voice on this Mac: whether Talk in the browser can be transcribed here, and where its cleanup runs. */
 export function VoiceOnThisMac() {
-  const [status, setStatus] = useState<VoiceStatus | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const run = async () => {
-    setBusy(true);
-    setErr(null);
-    try {
-      setStatus(await api.voiceStatus());
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  useEffect(() => {
-    run();
-  }, []);
-
+  const { data: status, busy, err, run, loading } = useCheck(api.voiceStatus);
   return (
-    <section id="voice" className="panel scroll-mt-4 space-y-4 p-5">
-      <div className="flex items-start gap-3">
-        <div className="flex-1">
-          <h2 className="text-[15px] font-medium tracking-tight">Voice on this Mac</h2>
-          <p className="mt-1 text-[12.5px] text-fg-3">
-            Talk in the browser sends your voice to this Mac, which turns it into text with Apple's speech model, then tidies it up.
-          </p>
-        </div>
-        <button className="btn shrink-0" disabled={busy} onClick={run}>
-          <Mic className="size-3.5" /> {busy ? "Checking…" : "Check again"}
-        </button>
-      </div>
-      {err && <p className="text-[12.5px] text-bad">{err}</p>}
+    <SettingsCard
+      id="voice"
+      title="Voice on this Mac"
+      description="Talk in the browser sends your voice to this Mac, which turns it into text with Apple's speech model, then tidies it up."
+      action={<CheckButton busy={busy} onClick={run} icon={Mic} />}
+      error={err}
+      loading={loading}
+    >
       {status && (
         <dl className="space-y-3 text-[13px]">
           <div>
@@ -54,6 +32,6 @@ export function VoiceOnThisMac() {
           </div>
         </dl>
       )}
-    </section>
+    </SettingsCard>
   );
 }

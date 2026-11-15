@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { api, type MacAccess as Check } from "../lib/api";
+import { useCheck } from "../lib/useCheck";
+import { CheckButton, SettingsCard } from "../components/SettingsCard";
 import { cx } from "../lib/format";
 
 const STATE: Record<Check["items"][number]["state"], { text: string; cls: string }> = {
@@ -12,55 +13,18 @@ const STATE: Record<Check["items"][number]["state"], { text: string; cls: string
 
 /** Settings → Mac access: whether macOS lets Loft's agents into the folders it guards with a prompt. */
 export function MacAccess() {
-  const [check, setCheck] = useState<Check | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const card = useRef<HTMLElement>(null);
-  // Needs you links here when macOS is asking on the Mac. The sections above load after this one
-  // mounts and push it down, so it's scrolled to again while the page grows (for a few seconds).
-  useEffect(() => {
-    if (window.location.hash !== "#mac-access") return;
-    const go = () => card.current?.scrollIntoView({ block: "start" });
-    go();
-    const grows = new ResizeObserver(go);
-    grows.observe(card.current?.parentElement ?? document.body);
-    const stop = setTimeout(() => grows.disconnect(), 3000);
-    return () => {
-      clearTimeout(stop);
-      grows.disconnect();
-    };
-  }, []);
-
-  const run = async () => {
-    setBusy(true);
-    setErr(null);
-    try {
-      setCheck(await api.macAccess());
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
+  const { data: check, busy, err, run, loading } = useCheck(api.macAccess);
   const fullDisk = check?.items.find((i) => i.id === "full_disk")?.state === "allowed";
   const needsHelp = check && !fullDisk && check.items.some((i) => i.state === "blocked" || i.state === "waiting");
   return (
-    <section id="mac-access" ref={card} className="panel scroll-mt-4 space-y-4 p-5">
-      <div className="flex items-start gap-3">
-        <div className="flex-1">
-          <h2 className="text-[15px] font-medium tracking-tight">Mac access</h2>
-          <p className="mt-1 text-[12.5px] text-fg-3">
-            macOS asks before any app reads Desktop, Documents, Downloads or iCloud Drive. On a Mac with no screen nobody sees it, and an agent waits
-            for an answer. Checking can show those prompts on the Mac, so check while you're at it or on Screen Sharing. Loft also
-            watches macOS's privacy log for prompts in its own name (only those) and tells you in Needs you.
-          </p>
-        </div>
-        <button className="btn shrink-0" disabled={busy} onClick={run}>
-          <ShieldCheck className="size-3.5" /> {busy ? "Checking…" : check ? "Check again" : "Check"}
-        </button>
-      </div>
-      {err && <p className="text-[12.5px] text-bad">{err}</p>}
+    <SettingsCard
+      id="mac-access"
+      title="Mac access"
+      description="macOS asks before any app reads Desktop, Documents, Downloads or iCloud Drive. On a Mac with no screen nobody sees it, and an agent waits for an answer. Checking can show those prompts on the Mac, so check while you're at it or on Screen Sharing. Loft also watches macOS's privacy log for prompts in its own name (only those) and tells you in Needs you."
+      action={<CheckButton busy={busy} onClick={run} icon={ShieldCheck} />}
+      error={err}
+      loading={loading}
+    >
       {check && (
         <>
           <ul className="divide-y divide-line rounded-xl border border-line">
@@ -104,6 +68,6 @@ export function MacAccess() {
           )}
         </>
       )}
-    </section>
+    </SettingsCard>
   );
 }

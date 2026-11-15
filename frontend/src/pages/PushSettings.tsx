@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { BellRing, ExternalLink, KeyRound, Smartphone, Trash2 } from "lucide-react";
+import { SettingsCard } from "../components/SettingsCard";
 import { api, portalHome, type PushDevice, type PushStatus } from "../lib/api";
 import { cx, timeAgo } from "../lib/format";
 
@@ -23,7 +24,7 @@ export function PushSettings() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [portalLink, setPortalLink] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
-  const section = useRef<HTMLElement>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const load = () => {
     api.pushStatus().then((s) => {
@@ -31,15 +32,11 @@ export function PushSettings() {
       setKeyId(s.key_id);
       setTeamId(s.team_id);
       setRelayAddr(s.relay_address);
-    });
-    api.devices().then(setDevices);
+      setLoadErr(null);
+    }).catch((e) => setLoadErr((e as Error).message));
+    api.devices().then(setDevices).catch(() => {});
   };
   useEffect(load, []);
-  // `/settings#push` (Needs you's "Push is off") scrolls here once it shows.
-  const shown = !!status;
-  useEffect(() => {
-    if (shown && window.location.hash === "#push") section.current?.scrollIntoView({ block: "start" });
-  }, [shown]);
   // After Sign in the backend collects the key; look until it has it or the code is gone.
   const signingIn = status?.signing_in;
   useEffect(() => {
@@ -118,18 +115,19 @@ export function PushSettings() {
     load();
   };
 
-  if (!status) return null;
+  if (!status) return <SettingsCard id="push" title="Push notifications" error={loadErr} loading={!loadErr} />;
   const changed = keyId !== status.key_id || teamId !== status.team_id || !!file;
   const off = status.path === "none";
   const addrChanged = relayAddr.trim() !== status.relay_address;
   const portal = portalHome(status);
   return (
-    <section ref={section} id="push" className="panel scroll-mt-20 space-y-4 p-5">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-[15px] font-medium tracking-tight">Push notifications</h2>
-        <span className={cx("chip text-[10.5px]", off ? "text-fg-3" : "text-good")}>{CHIP[status.path]}</span>
-      </div>
-      <p className="text-[12.5px] text-fg-2">Alerts reach the iPhone app even when it's closed. {WHERE[status.path]}</p>
+    <SettingsCard
+      id="push"
+      title="Push notifications"
+      description={<>Alerts reach the iPhone app even when it's closed. {WHERE[status.path]}</>}
+      action={<span className={cx("chip text-[10.5px]", off ? "text-fg-3" : "text-good")}>{CHIP[status.path]}</span>}
+      error={loadErr}
+    >
       {off && status.devices > 0 && (
         <p role="alert" className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
           Push is off: Loft drops every alert for {status.devices === 1 ? "your paired phone" : `your ${status.devices} paired phones`}. Sign in below to get push through the
@@ -296,6 +294,6 @@ export function PushSettings() {
           ))
         )}
       </div>
-    </section>
+    </SettingsCard>
   );
 }

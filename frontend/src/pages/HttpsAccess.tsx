@@ -1,44 +1,20 @@
-import { useEffect, useState } from "react";
 import { Lock } from "lucide-react";
-import { api, type Https } from "../lib/api";
+import { api } from "../lib/api";
+import { useCheck } from "../lib/useCheck";
+import { CheckButton, SettingsCard } from "../components/SettingsCard";
 
 /** Settings → Https: Loft's https address on the tailnet, which browsers need before they allow the microphone. */
 export function HttpsAccess() {
-  const [https, setHttps] = useState<Https | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const run = async () => {
-    setBusy(true);
-    setErr(null);
-    try {
-      setHttps(await api.https());
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  useEffect(() => {
-    // Talk links here when the page isn't on https: the sections above load after this one, so scroll once it's checked.
-    run().then(() => window.location.hash === "#https" && setTimeout(() => document.getElementById("https")?.scrollIntoView({ block: "start" }), 500));
-  }, []);
-
+  const { data: https, busy, err, run, loading } = useCheck(api.https);
   return (
-    <section id="https" className="panel scroll-mt-4 space-y-4 p-5">
-      <div className="flex items-start gap-3">
-        <div className="flex-1">
-          <h2 className="text-[15px] font-medium tracking-tight">Https on the tailnet</h2>
-          <p className="mt-1 text-[12.5px] text-fg-3">
-            Browsers allow the microphone only over https. Tailscale serves Loft at its https address, with a certificate, to your devices
-            on the tailnet only.
-          </p>
-        </div>
-        <button className="btn shrink-0" disabled={busy} onClick={run}>
-          <Lock className="size-3.5" /> {busy ? "Checking…" : "Check again"}
-        </button>
-      </div>
-      {err && <p className="text-[12.5px] text-bad">{err}</p>}
+    <SettingsCard
+      id="https"
+      title="Https on the tailnet"
+      description="Browsers allow the microphone only over https. Tailscale serves Loft at its https address, with a certificate, to your devices on the tailnet only."
+      action={<CheckButton busy={busy} onClick={run} icon={Lock} />}
+      error={err}
+      loading={loading}
+    >
       {https?.url && (
         <p className="text-[13px]">
           On: <a className="break-all font-mono text-accent underline" href={https.url}>{https.url}</a>
@@ -62,6 +38,6 @@ export function HttpsAccess() {
           </ol>
         </div>
       )}
-    </section>
+    </SettingsCard>
   );
 }

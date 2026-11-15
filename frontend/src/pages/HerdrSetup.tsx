@@ -1,24 +1,23 @@
 import { useEffect, useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { api, type HerdrStatus } from "../lib/api";
+import { api } from "../lib/api";
+import { useCheck } from "../lib/useCheck";
+import { SettingsCard } from "../components/SettingsCard";
 import { herdrInstallCommand, isLocalOrigin } from "../lib/herdr";
 
 /** Settings → Herdr UI: every agent as an agent in Herdr UI, on this machine or another one. */
 export function HerdrSetup() {
-  const [status, setStatus] = useState<HerdrStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ done: string[]; message: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const load = () => api.herdrStatus().then((s) => {
-    setStatus(s);
-    if (s.linked) setOpen(true);
-  }).catch(() => {});
+  const check = useCheck(api.herdrStatus);
+  const status = check.data;
   useEffect(() => {
-    load();
-  }, []);
+    if (status?.linked) setOpen(true);
+  }, [status?.linked]);
 
   const setUpHere = async () => {
     setBusy(true);
@@ -27,7 +26,7 @@ export function HerdrSetup() {
     try {
       const r = await api.herdrSetup();
       setResult(r);
-      await load();
+      await check.run();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -51,12 +50,13 @@ export function HerdrSetup() {
       : " ";
 
   return (
-    <section className="panel space-y-4 p-5">
-      <h2 className="text-[15px] font-medium tracking-tight">Herdr UI</h2>
-      <p className="text-[13px] text-fg-2">
-        See every agent in Herdr UI, the terminal multiplexer for coding agents: one tab per agent with its chat, slash commands,
-        approvals and this inspector as a sidebar. Herdr shows each one as an agent, working, idle or waiting for you.
-      </p>
+    <SettingsCard
+      id="herdr"
+      title="Herdr UI"
+      description="See every agent in Herdr UI, the terminal multiplexer for coding agents: one tab per agent with its chat, slash commands, approvals and this inspector as a sidebar. Herdr shows each one as an agent, working, idle or waiting for you."
+      error={err ?? check.err}
+      loading={check.loading}
+    >
       {!open ? (
         <button type="button" className="btn-primary" onClick={() => setOpen(true)}>
           Set up Herdr UI
@@ -85,7 +85,6 @@ export function HerdrSetup() {
                 <li className="text-fg">{result.message}</li>
               </ul>
             )}
-            {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
           </div>
 
           <div className="space-y-3 rounded-xl border border-line p-4">
@@ -110,6 +109,6 @@ export function HerdrSetup() {
           </div>
         </div>
       )}
-    </section>
+    </SettingsCard>
   );
 }
