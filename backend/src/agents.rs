@@ -1221,7 +1221,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
         .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
         // Workspaces live inside the user's checkout: git in a workspace with no clone stops here instead of finding it.
-        .env("GIT_CEILING_DIRECTORIES", &state.cfg.storage_dir)
+        // Git ignores a relative ceiling.
+        .env("GIT_CEILING_DIRECTORIES", std::path::absolute(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone()))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
         .stdin(Stdio::piped())
@@ -1946,6 +1947,17 @@ pub(crate) mod tests {
         let out = git(&ws.join("repo"), &["rev-parse", "--show-toplevel"]);
         assert!(out.status.success(), "{out:?}");
         assert_eq!(std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), std::fs::canonicalize(ws.join("repo")).unwrap());
+    }
+
+    #[test]
+    fn a_relative_storage_folder_still_gives_git_an_absolute_ceiling() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() };
+        let st = AppState { cfg: std::sync::Arc::new(cfg), ..st };
+        let cmd = build_command(&st, &a, false).unwrap();
+        let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap();
+        assert_eq!(Path::new(ceiling), std::env::current_dir().unwrap().join("agent-local-storage"));
     }
 
     #[test]

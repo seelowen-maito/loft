@@ -193,7 +193,7 @@ public struct DeliveryWidgetView: View {
     private func verdict(_ name: String, _ v: DeliveryWidgetSnapshot.Verdict) -> some View {
         let (symbol, tint): (String, Color) = switch v {
         case .passed: ("checkmark.circle.fill", WidgetTheme.working)
-        case .failed: ("xmark.circle.fill", Theme.failure)
+        case .failed: ("xmark.circle.fill", WidgetTheme.failure)
         case .pending: ("circle.dotted", .secondary)
         }
         return Label { Text(name).foregroundStyle(.secondary) } icon: { Image(systemName: symbol).foregroundStyle(tint) }
@@ -215,7 +215,7 @@ public struct DeliveryWidgetView: View {
         switch snapshot.status {
         case .running, .finalReview: WidgetTheme.accent
         case .needsYou, .paused: WidgetTheme.attention
-        case .stalled: Theme.failure
+        case .stalled: WidgetTheme.failure
         case .done, .merged: WidgetTheme.working
         }
     }
