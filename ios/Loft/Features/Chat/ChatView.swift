@@ -253,7 +253,7 @@ struct ChatView: View {
                              attachTask: currentQuestion == nil ? { pickingTask = true } : nil,
                              videoAgentId: currentQuestion == nil ? agentId : nil, attachments: $attachments) { text, byVoice in
                     if attachments.isEmpty, let action = CommandQuery.action(for: text, commands: commands), currentQuestion == nil {
-                        runCommand(action)
+                        runCommand(action, text: text)
                     } else if !attachments.isEmpty {
                         // A message with photos or a video is always plain chat.
                         let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
@@ -662,8 +662,8 @@ extension ChatView {
     }
 
     /// A command typed or picked from the "/" menu, sent: the composer is emptied once it ran, kept if it failed.
-    fileprivate func runCommand(_ action: CommandQuery.Action) {
-        let text = draft
+    /// `text` is what was sent: the composer has already emptied itself by then.
+    fileprivate func runCommand(_ action: CommandQuery.Action, text: String) {
         draft = ""
         if action == .resume { return resuming = true }
         Task {

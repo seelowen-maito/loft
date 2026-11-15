@@ -247,7 +247,7 @@ struct ComposerView: View {
                 .accessibilityIdentifier("sendButton")
                 .sensoryFeedback(.impact(weight: .light), trigger: store.pending.count) { old, new in new > old }
             }
-            Text("@ agents and files · # specs, issues and PRs")
+            Text("/ commands · @ agents and files · # specs, issues and PRs")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("composerHint")
