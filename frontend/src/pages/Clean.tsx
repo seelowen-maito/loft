@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { ArrowDown, ArrowUp, ChevronRight, Loader2 } from "lucide-react";
 import { api, type CleanItem, type CleanLog, type GitCheck, type LeftProcess, type WorkspaceSizes } from "../lib/api";
+import { fmtElapsed } from "../lib/runTimer";
 import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, chosenRows, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, ticksAfter, timeAgo, type CleanFilter, type CleanSort } from "../lib/format";
 import { CleanLogView, CopyCommands, EQUIVALENT } from "./Settings";
 
@@ -254,7 +255,7 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
             {ps.map((p) => (
               <li key={p.pid} className="flex gap-3">
                 <span className="min-w-0 flex-1 truncate font-mono" title={p.command}>{p.command}</span>
-                <span className="shrink-0 tabular-nums">{timeAgo(Date.now() / 1000 - p.age_secs).replace(" ago", "")}</span>
+                <span className="shrink-0 tabular-nums">{fmtElapsed(p.age_secs * 1000)}</span>
               </li>
             ))}
           </ul>

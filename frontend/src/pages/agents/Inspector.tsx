@@ -333,6 +333,7 @@ function WorkspaceSize({ id }: { id: string }) {
 
 function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void }) {
   const [confirm, setConfirm] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [purge, setPurge] = useState(true);
   const [size, setSize] = useState<number | null>(null);
   useEffect(() => {
@@ -342,7 +343,14 @@ function DangerZone({ agent, onCleared }: { agent: Agent; onCleared: () => void 
     <div className="space-y-3 rounded-2xl border border-bad/20 p-4">
       <div className="eyebrow text-bad/80">Danger zone</div>
       <div className="flex flex-wrap gap-2">
-        <button className="btn" onClick={() => api.clearMessages(agent.id).then(onCleared)}>Clear chat history</button>
+        {clearing ? (
+          <span className="flex items-center gap-2">
+            <button className="btn border-bad/40 bg-bad/20 text-fg" onClick={() => api.clearMessages(agent.id).then(() => { setClearing(false); onCleared(); })}>Clear it</button>
+            <button className="btn-ghost" onClick={() => setClearing(false)}>Keep it</button>
+          </span>
+        ) : (
+          <button className="btn" onClick={() => setClearing(true)}>Clear chat history</button>
+        )}
         {agent.builtin ? (
           <span className="self-center text-[12.5px] text-fg-3">{agent.name} comes with Loft and can't be deleted.</span>
         ) : !confirm ? (

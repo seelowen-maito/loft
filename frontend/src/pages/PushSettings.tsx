@@ -20,6 +20,7 @@ export function PushSettings() {
   const [relayKey, setRelayKey] = useState("");
   const [relayAddr, setRelayAddr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [portalLink, setPortalLink] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -289,9 +290,16 @@ export function PushSettings() {
               <button type="button" className="btn shrink-0" disabled={off} onClick={() => test(d)} title={off ? "Add a relay key or your own key first" : undefined}>
                 <BellRing className="size-3.5" /> Send test push
               </button>
-              <button type="button" className="btn-ghost shrink-0 text-fg-3 hover:text-bad" onClick={() => remove(d)} aria-label="Remove this phone" title="Remove this phone">
-                <Trash2 className="size-3.5" />
-              </button>
+              {removing === d.token ? (
+                <>
+                  <button type="button" className="btn shrink-0 border-bad/40 bg-bad/20 text-fg" onClick={() => { setRemoving(null); remove(d); }}>Remove</button>
+                  <button type="button" className="btn-ghost shrink-0" onClick={() => setRemoving(null)}>Keep</button>
+                </>
+              ) : (
+                <button type="button" className="btn-ghost shrink-0 text-fg-3 hover:text-bad" onClick={() => setRemoving(d.token)} aria-label="Remove this phone" title="Remove this phone">
+                  <Trash2 className="size-3.5" />
+                </button>
+              )}
             </div>
           ))
         )}

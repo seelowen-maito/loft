@@ -16,6 +16,7 @@ import { ClosedOnGithubCard, CommentBox, DeliveryCard, HandOffCard, NewTaskDialo
 import { isSpec } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
 import { BoardPage, boardSpecs } from "./SpecBoard";
+import { closesOnEscape } from "../lib/dialogKeys";
 import { boardIssues, NEEDS_YOU, parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
 import { agentInGroup, groupAgents, groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
@@ -82,7 +83,7 @@ export default function TasksPage() {
   }, []);
   useEffect(() => {
     api.tasks().then(setTasks);
-    api.agents().then(setAgents);
+    api.agents().then(setAgents).catch(() => {});
     // Which projects have a GitHub repo: only their Loft issues can be published there.
     api.repos().then((rs) => setRepos(Object.fromEntries(rs.filter((r) => r.github).map((r) => [r.name, r.github!])))).catch(() => {});
     sync();
@@ -104,6 +105,8 @@ export default function TasksPage() {
         clearTimeout(reload.current);
         reload.current = setTimeout(loadDeliveries, 1500);
       }
+      if (e.type === "agent_updated") setAgents((as) => (as.some((a) => a.id === e.agent.id) ? as.map((a) => (a.id === e.agent.id ? { ...a, ...e.agent } : a)) : [...as, e.agent]));
+      if (e.type === "agent_deleted") setAgents((as) => as.filter((a) => a.id !== e.agent_id));
       if (e.type === "task_deleted") setTasks((ts) => ts?.filter((t) => t.id !== e.task_id) ?? ts);
     }, [loadDeliveries]),
   );
@@ -234,7 +237,7 @@ function Modal({ onClose, children }: { onClose: () => void; children: React.Rea
     const el = e.target as HTMLElement;
     if (e.key === "Escape") {
       // Not while a field or another dialog (new issue, confirm…) has it.
-      if (e.defaultPrevented || el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || document.querySelectorAll('[role="dialog"]').length > 1) return;
+      if (!closesOnEscape(e) || document.querySelectorAll('[role="dialog"]').length > 1) return;
       e.stopPropagation();
       close.current();
     } else if (e.key === "Tab" && box.current) {

@@ -435,6 +435,7 @@ export function Chat({
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!running) return;
+    setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
   }, [running]);
@@ -492,7 +493,7 @@ export function Chat({
               title={agent.interval_minutes && agent.quiet_hours?.length ? `Paused ${fmtQuiet(agent.quiet_hours)}` : undefined}
             >
               <Clock className="size-3" /> {fmtSchedule(agent)}
-              {agent.next_run_at && agent.interval_minutes > 0 && <> · next {timeAgo(agent.next_run_at)}</>}
+              {agent.next_run_at && agent.interval_minutes > 0 && <> · {new Date(agent.next_run_at).getTime() > Date.now() ? `next ${timeAgo(agent.next_run_at)}` : "next: any moment"}</>}
             </span>
             <ContextSize session={agent.session_id != null} tokens={agent.context_tokens ?? null} running={running} onCompact={() => compactContext("")} onClear={() => clearContext()} onResume={() => setResuming(true)} />
           </div>
