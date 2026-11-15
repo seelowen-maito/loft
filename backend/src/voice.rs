@@ -353,16 +353,32 @@ pub async fn transcribe(State(state): State<AppState>, Query(q): Query<Transcrib
 /// `GET /api/voice/status` → `{ speech: { ready, text }, cleanup: { on_device, text } }`, for Settings › Voice on this
 /// Mac: whether this Mac can transcribe the web's voice (the helper's `--check`), and whether cleanup runs on Apple's
 /// on-device model (`fm available`) or on Haiku. `text` is the status, or the reason and the fix. Refused to other
-/// sites, and one check at a time, so nothing can pile up processes on the Mac.
+/// sites, one check at a time, and an answer is reused for `STATUS_REUSE`, so nothing can pile up processes on the Mac.
 pub async fn status(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Result<Json<Value>, ApiError> {
     crate::guard::same_site_read(&headers)?;
-    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _one = ONE_AT_A_TIME.lock().await;
-    let (speech, cleanup) = tokio::join!(speech_status(&state), cleanup_status());
-    Ok(Json(json!({
+    Ok(Json(status_within(&state, STATUS_REUSE).await))
+}
+
+const STATUS_REUSE: Duration = Duration::from_secs(3);
+
+/// The status, or the last one when it is younger than `reuse`. Kept per helper path: one in Loft, one per test.
+async fn status_within(state: &AppState, reuse: Duration) -> Value {
+    type Last = std::collections::HashMap<std::path::PathBuf, (std::time::Instant, Value)>;
+    static LAST: std::sync::LazyLock<tokio::sync::Mutex<Last>> = std::sync::LazyLock::new(Default::default);
+    let mut last = LAST.lock().await;
+    let helper = helper(state);
+    if let Some((at, v)) = last.get(&helper)
+        && at.elapsed() < reuse
+    {
+        return v.clone();
+    }
+    let (speech, cleanup) = tokio::join!(speech_status(state), cleanup_status());
+    let v = json!({
         "speech": { "ready": speech.is_ok(), "text": speech.unwrap_or_else(|e| e) },
         "cleanup": { "on_device": cleanup.is_ok(), "text": cleanup.unwrap_or_else(|e| e) },
-    })))
+    });
+    last.insert(helper, (std::time::Instant::now(), v.clone()));
+    v
 }
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -607,7 +623,21 @@ esac
     }
 
     async fn status_call(st: &AppState) -> Value {
-        status(State(st.clone()), axum::http::HeaderMap::new()).await.ok().unwrap().0
+        status_within(st, Duration::ZERO).await
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn status_reuses_an_answer_for_a_few_seconds() {
+        let st = crate::tasks::tests::state();
+        fake_helper(&st, "echo Ready");
+        let first = status(State(st.clone()), axum::http::HeaderMap::new()).await.ok().unwrap().0;
+        assert_eq!(first["speech"]["text"], "Ready");
+        // Asked again at once: the same answer, without running the checks again.
+        fake_helper(&st, "echo 'should not run' >&2; exit 2");
+        assert_eq!(status(State(st.clone()), axum::http::HeaderMap::new()).await.ok().unwrap().0, first);
+        // Once it is older than the window, the checks run again.
+        assert_eq!(status_within(&st, Duration::ZERO).await["speech"]["text"], "should not run");
     }
 
     #[cfg(target_os = "macos")]
