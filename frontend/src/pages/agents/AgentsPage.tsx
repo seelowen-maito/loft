@@ -78,7 +78,7 @@ export default function AgentsPage() {
   }, [overlay]);
 
   useEffect(() => {
-    api.agents().then(setAgents);
+    api.agents().then(setAgents).catch(() => {});
     api.permissions().then(setPerms);
     api.pullRequests().then(setPrs);
   }, []);

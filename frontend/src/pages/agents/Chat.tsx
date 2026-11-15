@@ -7,7 +7,7 @@ import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtInterval, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
+import { cx, fmtInterval, fmtQuiet, fmtSchedule, nextRunText } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
@@ -435,6 +435,7 @@ export function Chat({
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!running) return;
+    setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
   }, [running]);
@@ -492,7 +493,7 @@ export function Chat({
               title={agent.interval_minutes && agent.quiet_hours?.length ? `Paused ${fmtQuiet(agent.quiet_hours)}` : undefined}
             >
               <Clock className="size-3" /> {fmtSchedule(agent)}
-              {agent.next_run_at && agent.interval_minutes > 0 && <> · next {timeAgo(agent.next_run_at)}</>}
+              {agent.next_run_at && agent.interval_minutes > 0 && <> · {nextRunText(agent.next_run_at)}</>}
             </span>
             <ContextSize session={agent.session_id != null} tokens={agent.context_tokens ?? null} running={running} onCompact={() => compactContext("")} onClear={() => clearContext()} onResume={() => setResuming(true)} />
           </div>
@@ -1108,7 +1109,7 @@ function LoopBar({ agent, onError }: { agent: Agent; onError: (e: string) => voi
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] text-fg">{l.prompt}</div>
         <div className="truncate font-mono text-[11px] text-fg-3">
-          Looping {fmtInterval(l.interval_minutes)} · {new Date(l.next_at).getTime() > Date.now() ? `next ${timeAgo(l.next_at)}` : agent.running ? "next: when this run ends" : "next: any moment"}
+          Looping {fmtInterval(l.interval_minutes)} · {agent.running && new Date(l.next_at).getTime() <= Date.now() ? "next: when this run ends" : nextRunText(l.next_at)}
         </div>
       </div>
       <button className="btn shrink-0" onClick={stop} disabled={busy}>

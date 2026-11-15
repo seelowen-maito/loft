@@ -81,7 +81,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
             <span className="break-all font-mono text-[11.5px] text-fg">{askGit}</span> has no git yet. Set it up? Loft runs <span className="font-mono">git init</span>, adds a <span className="font-mono">.gitignore</span> for junk and secret files like <span className="font-mono">.env</span> and keys, and commits the folder as it is. Then the Delivery starts.
           </div>
           <div className="flex flex-wrap gap-2">
-            <button className="btn btn-primary text-[12px]" disabled={busy !== null} onClick={() => start(true)}>
+            <button className="btn-primary text-[12px]" disabled={busy !== null} onClick={() => start(true)}>
               {busy === "start" ? <Loader2 className="size-3.5 animate-spin" /> : <GitBranch className="size-3.5" />} Set up git and start
             </button>
             <button className="btn text-[12px]" disabled={busy !== null} onClick={() => { setAskGit(null); setDeclined(true); }}>
@@ -110,7 +110,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, outcome, showRepo, not
         )}
         {delivery?.local && stage?.state === "ready" && !merged && (
           <button
-            className="btn btn-primary text-[12.5px]"
+            className="btn-primary text-[12.5px]"
             disabled={busy !== null}
             title={`Merges ${stage.branch} into ${stage.base} in the Dev's clone. Your copy of the project isn't touched.`}
             onClick={() => run("merge", async () => setMerged((await api.mergeDelivery(delivery.repo, delivery.spec)).message))}
