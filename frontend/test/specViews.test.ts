@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, specRef, stageOf, ticketState, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, specRef, stageOf, ticketState, deliveryWaits, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
@@ -173,4 +173,10 @@ test("one state for every ticket, whichever page asks", () => {
   assert.deepEqual(at("closed"), { text: "done", tone: "good" });
   assert.deepEqual(at("started", { waiting: "the lead" }), { text: "waiting", tone: "muted" }, "a Dev's own wait");
   assert.equal(at("closed", { waiting: "stale" }).text, "done");
+});
+
+test("the waiting lines read Needs you for the user and Waiting for the Lead", () => {
+  assert.deepEqual(deliveryWaits({ waiting_on_you: [4, 7], waiting_for_lead: [9] }), ["Needs you: #4, #7", "Waiting for the Lead: #9"]);
+  assert.deepEqual(deliveryWaits({ waiting_on_you: [] }), []);
+  assert.deepEqual(deliveryWaits(null), []);
 });

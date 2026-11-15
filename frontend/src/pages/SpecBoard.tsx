@@ -46,7 +46,7 @@ function TicketCard({ t, dense, agentById, open }: { t: BoardTicket; dense: bool
       </div>
       {(!dense || t.current || !!t.waiting_on?.length || t.waiting_for_ci || !!t.waiting) && (
         <div className="mt-1 flex flex-wrap items-center gap-1">
-          <span className={cx("min-w-0 font-mono text-[10px] [overflow-wrap:anywhere]", TONE_TEXT[l.tone])}>{l.text}</span>
+          <span className={cx("min-w-0 font-mono text-[10px] [overflow-wrap:anywhere]", TONE_TEXT[l.tone])} title={t.waiting ?? undefined}>{l.text}</span>
           <Verdicts v={t.verdicts} />
           {a && <span className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-fg-2"><Sticker avatar={a.avatar} lead={a.role === "lead"} size={14} />{a.name}</span>}
         </div>
