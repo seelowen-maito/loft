@@ -5,9 +5,9 @@ import { api, type Agent } from "../lib/api";
 import { DRAFT_SET, loadDraft, saveDraft } from "../lib/draft";
 import { cx } from "../lib/format";
 import { loadLastAgent } from "../lib/lastAgent";
-import { appendDraft, chipLabel, chips, micBlocked, next, OPEN_TALK, pcm16k, sections, START, starter } from "../lib/talk";
+import { appendDraft, chipLabel, chips, listeningLabel, micBlocked, next, OPEN_TALK, pcm16k, sections, START, starter, talkSession, type TalkSession } from "../lib/talk";
 
-/** How often the audio so far goes to the Mac to be transcribed. */
+/** How often the session ticks: the audio so far goes to the Mac to be transcribed. */
 const CHUNK_MS = 1000;
 
 /** Talk in the browser, like the Mac's voice panel: one dialog for the whole page, opened by `openTalk` (the top
@@ -72,8 +72,8 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
   const [level, setLevel] = useState(0);
   const [seconds, setSeconds] = useState(0);
   const [needsHttps, setNeedsHttps] = useState(false);
-  // The recording in progress: its session on the Mac, the microphone, and the chunks sent one after another.
-  const rec = useRef<{ session: string; mic: Recorder | null; timer: number; queue: Promise<string>; ended: boolean } | null>(null);
+  // The recording in progress: its session on the Mac and the microphone.
+  const rec = useRef<{ session: TalkSession; mic: Recorder | null; timer: number } | null>(null);
 
   useEffect(() => {
     api.agents().then((as) => {
@@ -81,22 +81,6 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
       setTo((t) => t ?? starter(as, wanted, loadLastAgent()));
     }).catch(() => {});
   }, [wanted]);
-
-  /** Sends the audio recorded since the last chunk; the final one ends the session on the Mac. */
-  const flush = (final: boolean) => {
-    const r = rec.current;
-    if (!r || r.ended) return r?.queue ?? Promise.resolve("");
-    r.ended = final;
-    // Taken now, so the chunks keep their order even while an earlier one is still being transcribed.
-    const audio = r.mic?.take() ?? new Uint8Array();
-    r.queue = r.queue.then(async () => {
-      if (!final && audio.length === 0) return "";
-      const { text } = await api.transcribe(r.session, audio, final);
-      if (rec.current === r) dispatch({ type: "heard", text });
-      return text;
-    });
-    return r.queue;
-  };
 
   /** Stops the microphone; `discard` also deletes the session's audio on the Mac. */
   const stopRecording = (discard: boolean) => {
@@ -106,7 +90,7 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
     r.mic?.stop();
     r.mic = null;
     if (discard) {
-      if (!r.ended) api.transcribe(r.session, new Uint8Array(), true).catch(() => {});
+      r.session.discard();
       rec.current = null;
     }
   };
@@ -121,7 +105,14 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
       dispatch({ type: "failed", message: blocked });
       return;
     }
-    const r = { session: crypto.randomUUID(), mic: null as Recorder | null, timer: 0, queue: Promise.resolve(""), ended: false };
+    const r: { session: TalkSession; mic: Recorder | null; timer: number } = { session: null!, mic: null, timer: 0 };
+    r.session = talkSession(
+      crypto.randomUUID(),
+      api.transcribe,
+      () => r.mic?.take() ?? new Uint8Array(),
+      (text) => dispatch({ type: "heard", text }),
+      (e) => fail(e.message),
+    );
     rec.current = r;
     let cancelled = false;
     record(setLevel).then(
@@ -130,8 +121,10 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
         r.mic = mic;
         const started = Date.now();
         r.timer = window.setInterval(() => {
-          setSeconds(Math.floor((Date.now() - started) / 1000));
-          flush(false).catch((e) => fail((e as Error).message));
+          const s = Math.floor((Date.now() - started) / 1000);
+          setSeconds(s);
+          // At the limit, Talk finishes by itself and keeps the text so far.
+          if (r.session.tick(s) === "stop") done();
         }, CHUNK_MS);
         dispatch({ type: "listening" });
       },
@@ -157,7 +150,8 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
   const done = () => {
     dispatch({ type: "stop" });
     const r = rec.current;
-    const last = flush(true);
+    if (!r) return;
+    const last = r.session.finish();
     stopRecording(false);
     last.then(
       (text) => {
@@ -305,7 +299,7 @@ function TalkDialog({ wanted, close }: { wanted: string | null; close: () => voi
                 {step.kind === "listening" && step.heard ? step.heard : step.kind === "preparing" ? "Getting ready…" : "Start talking…"}
               </p>
               <Bars level={step.kind === "listening" ? level : 0} />
-              <p className="text-center font-mono text-[11px] text-fg-3">{step.kind === "listening" ? `Listening · ${seconds}s` : " "}</p>
+              <p className="text-center font-mono text-[11px] text-fg-3">{step.kind === "listening" ? listeningLabel(seconds) : " "}</p>
             </div>
           )}
         </div>

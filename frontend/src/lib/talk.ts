@@ -132,6 +132,63 @@ export function pcm16k(input: Float32Array, rate: number): Uint8Array {
   return new Uint8Array(out.buffer);
 }
 
+/** Talk stops by itself after this many seconds, just before the Mac's ten-minute limit, so the text so far is kept. */
+export const MAX_SECONDS = 590;
+
+/** The line under the bars while listening; in the last minute, when Talk will stop. */
+export function listeningLabel(seconds: number): string {
+  const left = MAX_SECONDS - seconds;
+  return left > 60 ? `Listening · ${seconds}s` : `Listening · stops in ${Math.max(0, left)}s`;
+}
+
+/** Sends a chunk of a session's audio and answers the text of all of it so far (`api.transcribe`). */
+export type Transcribe = (session: string, audio: Uint8Array, final: boolean) => Promise<{ text: string }>;
+
+/** A recording's session on the Mac. `tick` runs once a second while listening; `finish` sends the last audio and
+ * answers the final text; `discard` deletes the session's audio on the Mac. */
+export type TalkSession = { tick: (seconds: number) => "stop" | null; finish: () => Promise<string>; discard: () => void };
+
+/** A session that sends the microphone's audio (`take`: the audio since the last call) in order, one chunk at a time:
+ * while a chunk is being transcribed, the next ticks skip, and their audio goes with the next chunk. Each chunk
+ * transcribes the whole session, so as it grows, chunks go less often instead of piling up. `heard` gets each
+ * answer, until `discard`; `failed` gets a chunk's error. */
+export function talkSession(id: string, transcribe: Transcribe, take: () => Uint8Array, heard: (text: string) => void, failed: (e: Error) => void): TalkSession {
+  let queue: Promise<string> = Promise.resolve("");
+  let busy = false;
+  let ended = false;
+  let dropped = false;
+  const send = (audio: Uint8Array, final: boolean) => {
+    ended = final;
+    queue = queue.then(async () => {
+      const { text } = await transcribe(id, audio, final);
+      if (!dropped) heard(text);
+      return text;
+    });
+    return queue;
+  };
+  return {
+    tick: (seconds) => {
+      if (seconds >= MAX_SECONDS) return "stop";
+      if (ended || busy) return null;
+      const audio = take();
+      if (audio.length === 0) return null;
+      busy = true;
+      send(audio, false).then(
+        () => (busy = false),
+        (e: Error) => !dropped && !ended && failed(e),
+      );
+      return null;
+    },
+    finish: () => (ended ? queue : send(take(), true)),
+    discard: () => {
+      dropped = true;
+      if (ended) return;
+      ended = true;
+      transcribe(id, new Uint8Array(), true).catch(() => {});
+    },
+  };
+}
+
 /** The text to put in a message box that already holds `existing`. */
 export function appendDraft(existing: string, text: string): string {
   return existing.trim() ? `${existing.trimEnd()}\n${text}` : text;

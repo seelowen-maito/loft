@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendDraft, chipLabel, chips, micBlocked, next, pcm16k, sections, START, starter, type Step, type TalkAgent, type TalkEvent } from "../src/lib/talk.ts";
+import { appendDraft, chipLabel, chips, listeningLabel, MAX_SECONDS, micBlocked, next, pcm16k, sections, START, starter, talkSession, type Step, type TalkAgent, type TalkEvent } from "../src/lib/talk.ts";
 
 const agent = (id: string, more: Partial<TalkAgent> = {}): TalkAgent => ({ id, name: id, last_run_at: null, ...more });
 const run = (events: TalkEvent[], from: Step = START) => events.reduce(next, from);
@@ -111,4 +111,87 @@ test("audio becomes 16 kHz 16-bit little-endian PCM", () => {
 test("Edit in chat adds the text under what the message box already holds", () => {
   assert.equal(appendDraft("", "Hi."), "Hi.");
   assert.equal(appendDraft("First line  ", "Hi."), "First line\nHi.");
+});
+
+/** A fake Mac: each call waits until the test answers it, with the text "<bytes so far> bytes". */
+function fakeMac() {
+  const calls: { audio: number[]; final: boolean; answer: () => void; fail: (m: string) => void }[] = [];
+  let total = 0;
+  const transcribe = (_id: string, audio: Uint8Array, final: boolean) =>
+    new Promise<{ text: string }>((resolve, reject) => {
+      total += audio.length;
+      const text = `${total} bytes`;
+      calls.push({ audio: [...audio], final, answer: () => resolve({ text }), fail: (m) => reject(new Error(m)) });
+    });
+  return { calls, transcribe };
+}
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+test("chunks go in order, one at a time; ticks while one is out wait for the next chunk", async () => {
+  const mac = fakeMac();
+  let mic = [1, 2];
+  const heard: string[] = [];
+  const s = talkSession("s1", mac.transcribe, () => Uint8Array.from(mic.splice(0)), (t) => heard.push(t), () => assert.fail("no failure"));
+  s.tick(1);
+  await settle();
+  mic.push(3, 4);
+  s.tick(2); // the first chunk is still out: this audio waits
+  assert.equal(mac.calls.length, 1);
+  mac.calls[0].answer();
+  await settle();
+  mic.push(5, 6);
+  s.tick(3); // both waiting blocks go together
+  await settle();
+  assert.deepEqual(mac.calls[1].audio, [3, 4, 5, 6]);
+  // Done while a chunk is out: the final chunk goes after it, and its text is the answer.
+  mic.push(7, 8);
+  const last = s.finish();
+  await settle();
+  assert.equal(mac.calls.length, 2, "the final chunk waits for the one before");
+  mac.calls[1].answer();
+  await settle();
+  assert.deepEqual(mac.calls[2], { ...mac.calls[2], audio: [7, 8], final: true });
+  mac.calls[2].answer();
+  assert.equal(await last, "8 bytes");
+  assert.deepEqual(heard, ["2 bytes", "6 bytes", "8 bytes"]);
+  s.tick(4);
+  s.discard();
+  assert.equal(mac.calls.length, 3, "nothing goes after the session ended");
+});
+
+test("cancel deletes the session's audio on the Mac, and a late answer is ignored", async () => {
+  const mac = fakeMac();
+  const heard: string[] = [];
+  const failed: string[] = [];
+  const s = talkSession("s1", mac.transcribe, () => Uint8Array.of(1, 2), (t) => heard.push(t), (e) => failed.push(e.message));
+  s.tick(1);
+  await settle();
+  s.discard();
+  assert.deepEqual(mac.calls[1], { ...mac.calls[1], audio: [], final: true });
+  mac.calls[0].answer();
+  await settle();
+  assert.deepEqual(heard, []);
+  assert.deepEqual(failed, []);
+});
+
+test("a failed chunk is reported once", async () => {
+  const mac = fakeMac();
+  const failed: string[] = [];
+  const s = talkSession("s1", mac.transcribe, () => Uint8Array.of(1, 2), () => {}, (e) => failed.push(e.message));
+  s.tick(1);
+  await settle();
+  mac.calls[0].fail("Transcribing timed out.");
+  await settle();
+  assert.deepEqual(failed, ["Transcribing timed out."]);
+});
+
+test("Talk stops itself before the Mac's ten-minute limit, and says so in the last minute", () => {
+  const mac = fakeMac();
+  const s = talkSession("s1", mac.transcribe, () => Uint8Array.of(1, 2), () => {}, () => {});
+  assert.equal(s.tick(MAX_SECONDS - 1), null);
+  assert.equal(s.tick(MAX_SECONDS), "stop");
+  // The Mac refuses more than ten minutes of 16 kHz 16-bit audio (voice.rs MAX_AUDIO_BYTES).
+  assert.ok(MAX_SECONDS * 16000 * 2 < 10 * 60 * 16000 * 2);
+  assert.equal(listeningLabel(12), "Listening · 12s");
+  assert.equal(listeningLabel(MAX_SECONDS - 45), "Listening · stops in 45s");
 });
