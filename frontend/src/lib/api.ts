@@ -22,6 +22,10 @@ export type Agent = {
   effort: string;
   interval_minutes: number;
   quiet_hours: QuietWindow[];
+  /** `/loop`: the prompt Loft sends again every interval until it's stopped. */
+  loop?: { prompt: string; interval_minutes: number; next_at: string } | null;
+  /** `/schedule`: prompts Loft sends once, or at each due time of a repeat. */
+  schedules?: { id: string; prompt: string; every: string | null; time: string | null; next_at: string }[];
   allowed_tools: string[];
   disallowed_tools: string[];
   mcp_servers: Record<string, unknown>;
@@ -602,6 +606,9 @@ export type SettingsView = {
   running_agents: number;
 };
 
+/** Whether the claude CLI is logged in (`GET /claude/login`). */
+export type ClaudeLogin = { logged_in: boolean; account: string | null; plan: string | null; note: string | null; steps: string };
+
 /** Claude plan limits, as in Claude Code's /usage. percent is 0–100. */
 export type UsageWindow = { key: string; label: string; percent: number; resets_at: string | null };
 export type Usage = { windows: UsageWindow[]; error: string | null };
@@ -652,6 +659,8 @@ export type SimulatorInput =
   | { action: "key"; code: number }
   | { action: "button"; name: "home" | "lock" };
 
+export type AgentCommand = { name: string; description: string; tag: "passthrough" | "loft" | "terminal"; reason: string | null };
+
 export const api = {
   simulators: () => req<{ interactive: boolean; devices: Simulator[]; error?: string }>("GET", "/simulator"),
   /** Agents' Simulator devices, biggest first; none without Xcode. */
@@ -662,6 +671,8 @@ export const api = {
   usage: () => req<Usage>("GET", "/usage"),
   system: () => req<SystemReading>("GET", "/system"),
   /** Lists a fixed set of macOS-guarded folders; can show macOS's prompts on the Mac. */
+  claudeLogin: () => req<ClaudeLogin>("GET", "/claude/login"),
+  claudeLoginTerminal: () => req<{ ok: boolean }>("POST", "/claude/login/terminal"),
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
@@ -735,6 +746,8 @@ export const api = {
   clearMessages: (id: string) => req("DELETE", `/agents/${id}/messages`),
   run: (id: string) => req("POST", `/agents/${id}/run`),
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
+  /** What the agent's CLI offers (Loft's own commands, then the CLI's by name), each tagged with how it runs. */
+  commands: (id: string) => req<AgentCommand[]>("GET", `/agents/${id}/commands`),
   /** The user has seen this chat: clears its Unread reply in every browser. */
   markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
@@ -800,6 +813,11 @@ export const api = {
     req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),
   restartRun: (id: string) => req("POST", `/agents/${id}/restart`),
   resetSession: (id: string) => req<Agent>("POST", `/agents/${id}/reset-session`),
+  loopStart: (id: string, interval: string, prompt: string) => req<{ ok: boolean }>("POST", `/agents/${id}/loop`, { interval, prompt }),
+  scheduleAdd: (id: string, text: string) => req<{ ok: boolean }>("POST", `/agents/${id}/schedules`, { text }),
+  scheduleCancel: (id: string, sid: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/schedules/${sid}`),
+  agentCommand: (id: string, name: string, arg: string) => req<{ text: string }>("POST", `/agents/${id}/command`, { name, arg }),
+  loopStop: (id: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/loop`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
   sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),
   resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),

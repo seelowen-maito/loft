@@ -609,7 +609,7 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
         }
     });
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
-    let for_user = matches!(trigger, "schedule" | "manual") || (text.is_some() && meta["from_agent"].is_null());
+    let for_user = matches!(trigger, "schedule" | "manual" | "scheduled") || (text.is_some() && meta["from_agent"].is_null());
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
     start(state, agent_id, prompt, trigger, for_user);
     msg
@@ -1102,7 +1102,7 @@ fn agent_file(state: &AppState, agent_id: &str, kind: &str) -> PathBuf {
 }
 
 pub(crate) const AGENT_FILES: &str = ".agent-files";
-const AGENT_FILE_KINDS: [&str; 4] = ["md", "mcp.json", "settings.json", "env.sh"];
+const AGENT_FILE_KINDS: [&str; 5] = ["md", "mcp.json", "settings.json", "env.sh", "commands.json"];
 /// Where the agents' files were kept before they held more than the prompt.
 const OLD_AGENT_FILES: &str = ".system-prompts";
 
@@ -1183,6 +1183,10 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         "hooks": crate::kill_guard::hooks(&exe),
     });
 
+    crate::commands::unlink_user_commands(&workspace(state, &a.id), &crate::sessions::claude_dir());
+    // Read from the workspace by a relative path, like the agent's files, so no user folder is on argv.
+    let user_plugin = crate::commands::sync_user_plugin(&state.cfg.storage_dir.join(AGENT_FILES), &crate::sessions::claude_dir())
+        .map(|p| PathBuf::from("..").join(AGENT_FILES).join(p.file_name().unwrap()));
     let ports = crate::ports::range(state, &a.id)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     cmd.current_dir(workspace(state, &a.id))
@@ -1194,12 +1198,15 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .arg("--mcp-config")
         .arg(write_agent_file(state, &a.id, "mcp.json", &mcp_config)?)
         .arg("--strict-mcp-config")
-        // Isolate agents from the user's own Claude Code settings, hooks and plugins.
+        // Agents read no settings file: not the user's, and not the workspace's, which the agent can write
+        // (an allow rule or a hook there would skip the approval prompt). The user's own commands and skills
+        // come as a plugin Loft owns (see `commands`).
         .args(["--setting-sources", ""])
         .arg("--settings")
         .arg(write_agent_file(state, &a.id, "settings.json", &settings.to_string())?)
         .args(["--permission-prompt-tool", "mcp__loft__approval_prompt"])
         .args(["--permission-mode", &a.permission_mode])
+        .args(user_plugin.iter().flat_map(|p| [std::ffi::OsStr::new("--plugin-dir"), p.as_os_str()]))
         .args(["--name", &a.name])
         .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
         // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
@@ -1474,6 +1481,7 @@ async fn run_process(
         match ev["type"].as_str() {
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
+                    let _ = crate::commands::save(&state.cfg.storage_dir, agent_id, &crate::commands::parse_init(&ev));
                     if let Some(sid) = ev["session_id"].as_str().filter(|_| !throwaway) {
                         set_session(state, agent_id, sid)?;
                     }
@@ -1686,8 +1694,9 @@ async fn run_process(
                 }
                 if ev["is_error"].as_bool().unwrap_or(false) {
                     let msg = ev["result"].as_str().or(ev["subtype"].as_str()).unwrap_or("run failed");
-                    run_msg(quiet, state, agent_id, rid, "system", "error", msg, json!({}));
-                    run_error = Some(msg.to_string());
+                    let msg = crate::login::with_fix(msg);
+                    run_msg(quiet, state, agent_id, rid, "system", "error", &msg, json!({}));
+                    run_error = Some(msg);
                 }
                 let end = json!({
                     "cost_usd": cost,
@@ -2117,7 +2126,7 @@ cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 case "$prompt" in *"redraw your sticker"*) cost=0.25 sid=s-redraw;; esac
 : "${cost:=0}" "${sid:=s1}"
-echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
+echo '{"type":"system","subtype":"init","session_id":"'"$sid"'","slash_commands":["clear","review","doctor"],"skills":["review"],"terminal_slash_commands":["doctor"]}'
 case "$prompt" in *"redraw your sticker"*) while [ ! -f go ]; do sleep 0.05; done;; esac
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
@@ -3062,6 +3071,23 @@ esac
 
     async fn idle(st: &AppState, id: &str) {
         until("the runs to end", 10, || !is_running(st, id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_stores_the_commands_its_cli_reports_and_the_api_lists_them_tagged() {
+        let (st, a) = fake_claude_state();
+        let none = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(none.as_array().unwrap().len(), 12, "before a run: Loft's own commands only");
+        let _ = send(&st, &a.id, "hello").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        let list = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        let tag = |n: &str| list.as_array().unwrap().iter().find(|c| c["name"] == n).map(|c| c["tag"].clone());
+        assert_eq!((tag("/clear"), tag("/review"), tag("/doctor")), (Some(json!("loft")), Some(json!("passthrough")), Some(json!("terminal"))));
+        let doctor = list.as_array().unwrap().iter().find(|c| c["name"] == "/doctor").unwrap();
+        assert!(doctor["reason"].as_str().unwrap().contains("terminal"));
+        assert!(crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path("nope".into())).await.is_err());
+        let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
+        assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|w| w == ["--setting-sources", ""]), "no settings file is read");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -21,8 +21,18 @@ pub struct PastSession {
 }
 
 /// Claude Code's folder, as `claude` finds it.
-fn claude_dir() -> PathBuf {
-    std::env::var("CLAUDE_CONFIG_DIR").map(Into::into).unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"))
+pub fn claude_dir() -> PathBuf {
+    config_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude"))
+}
+
+/// `CLAUDE_CONFIG_DIR` when it is set to something: the CLI treats an empty or blank one as unset (an empty path
+/// would read from Loft's own working directory).
+pub fn config_dir() -> Option<PathBuf> {
+    config_dir_of(std::env::var("CLAUDE_CONFIG_DIR").ok())
+}
+
+fn config_dir_of(v: Option<String>) -> Option<PathBuf> {
+    v.filter(|d| !d.trim().is_empty()).map(Into::into)
 }
 
 /// Where Claude Code keeps the transcripts of sessions run in `cwd`: the real path with every UTF-16 unit that
@@ -142,6 +152,14 @@ pub fn context_of(sid: &str) -> Option<u64> {
 
 #[cfg(test)]
 pub mod tests {
+    #[test]
+    fn an_empty_or_blank_config_dir_is_unset() {
+        assert_eq!(super::config_dir_of(Some(String::new())), None);
+        assert_eq!(super::config_dir_of(Some("  ".into())), None);
+        assert_eq!(super::config_dir_of(None), None);
+        assert_eq!(super::config_dir_of(Some("/x/y".into())), Some("/x/y".into()));
+    }
+
     use super::*;
 
     pub fn tmp() -> PathBuf {

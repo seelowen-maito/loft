@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Trash2, X,
+  Brain, ChevronRight, Code2, Copy, File, Folder, FolderGit2, Loader2, Paintbrush, Plus, Save, Server, Shield, SlidersHorizontal, Terminal, Trash2, X,
 } from "lucide-react";
 import { api, ROLES, type Agent, type FileEntry, type Memory, type PermissionRequest } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
@@ -12,8 +12,9 @@ import { GroupInput, ProjectsField } from "./ProjectsField";
 import { projectsOf, withTyped } from "../../lib/team";
 import { FRESH_CONTEXT } from "../../lib/newAgent";
 import { QuietHours } from "./QuietHours";
+import { CommandsPanel } from "./CommandsPanel";
 
-type Tab = "config" | "permissions" | "memory" | "workspace";
+type Tab = "config" | "permissions" | "memory" | "commands" | "workspace";
 
 export const MODELS = [
   { value: "sonnet", label: "Sonnet · balanced" },
@@ -55,6 +56,7 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
     { id: "config", label: "Config", icon: <SlidersHorizontal className="size-3.5" /> },
     { id: "permissions", label: "Access", icon: <Shield className="size-3.5" />, badge: pending },
     { id: "memory", label: "Memory", icon: <Brain className="size-3.5" /> },
+    { id: "commands", label: "Commands", icon: <Terminal className="size-3.5" /> },
     { id: "workspace", label: "Files", icon: <Folder className="size-3.5" /> },
   ];
   return (
@@ -64,12 +66,16 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
+            title={t.label}
+            aria-label={t.label}
             className={cx(
               "relative flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] transition",
               tab === t.id ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg",
             )}
           >
-            {t.icon} {t.label}
+            {t.icon}
+            {/* Only the open tab keeps its name: five names don't fit the panel. */}
+            {tab === t.id && t.label}
             {!!t.badge && <span className="ml-0.5 rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{t.badge}</span>}
           </button>
         ))}
@@ -78,6 +84,7 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
         {tab === "config" && <ConfigTab key={agent.id} agent={agent} groups={groups} projects={projects} onCleared={onCleared} />}
         {tab === "permissions" && <AccessTab agent={agent} perms={perms} />}
         {tab === "memory" && <MemoryTab agent={agent} />}
+        {tab === "commands" && <CommandsPanel agent={agent} />}
         {tab === "workspace" && <FilesTab agent={agent} />}
       </div>
     </div>
@@ -121,6 +128,13 @@ function ConfigTab({ agent, groups, projects, onCleared }: { agent: Agent; group
   const [typed, setTyped] = useState("");
   const [shown, setDraft] = useState<Draft>(initial);
   const draft = withTyped(shown, typed);
+  // /model and /effort in the chat change the agent under an open panel: follow them unless the user edited that field.
+  const seen = useRef({ model: agent.model, effort: agent.effort });
+  useEffect(() => {
+    const prev = seen.current;
+    seen.current = { model: agent.model, effort: agent.effort };
+    setDraft((d) => ({ ...d, model: d.model === prev.model ? agent.model : d.model, effort: d.effort === prev.effort ? agent.effort : d.effort }));
+  }, [agent.model, agent.effort]);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // Redraw: busy from the click until the agent's `redrawing` flag says it's done (it survives a reload and shows in other tabs).
