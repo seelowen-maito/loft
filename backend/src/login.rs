@@ -15,7 +15,8 @@ pub fn status_from(creds: Result<Value, String>, email: Option<String>) -> Value
     };
     let Some(_) = oauth["accessToken"].as_str() else {
         let why = match creds {
-            Err(e) => format!("{}.", e.trim_end_matches('.')),
+            // The usage error adds "; run `claude` and log in", which the steps already say.
+            Err(e) => format!("{}.", e.split(';').next().unwrap_or_default().trim_end_matches('.')),
             Ok(_) => "Claude Code isn't logged in with a Claude plan.".into(),
         };
         return json!({ "logged_in": false, "account": null, "plan": null, "note": why, "steps": STEPS });
@@ -58,7 +59,7 @@ pub async fn text() -> String {
     if s["logged_in"] == true {
         let who = s["account"].as_str().map_or(String::new(), |a| format!(" as {a}"));
         let plan = s["plan"].as_str().map_or(String::new(), |p| format!(" ({p} plan)"));
-        format!("Claude is logged in{who}{plan}. To switch accounts: {STEPS}")
+        format!("Claude is logged in{who}{plan}. To switch accounts, log in again from a terminal on the Mac: run `claude auth login`, or press Open Terminal in Settings › Claude login.")
     } else {
         format!("Claude is not logged in. {STEPS}")
     }
@@ -88,7 +89,7 @@ mod tests {
     fn status_reads_a_fake_credential_store() {
         let ok = status_from(Ok(json!({ "claudeAiOauth": { "accessToken": "t", "subscriptionType": "max", "expiresAt": 1 } })), Some("a@b.c".into()));
         assert_eq!((ok["logged_in"].clone(), ok["account"].clone(), ok["plan"].clone()), (json!(true), json!("a@b.c"), json!("max")), "an expired token still refreshes by itself");
-        let none = status_from(Err("no Claude Code login found".into()), None);
+        let none = status_from(Err("no Claude Code login found; run `claude` and log in".into()), None);
         assert_eq!((none["logged_in"].clone(), none["note"].clone()), (json!(false), json!("no Claude Code login found.")));
         assert!(none["steps"].as_str().unwrap().contains("claude auth login"));
         let api_key = status_from(Ok(json!({})), None);

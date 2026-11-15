@@ -1165,4 +1165,4 @@ function fmtNext(iso: string): string {
 }
 
 /** Loft commands that answer with a notice: they show or change a setting, or show usage. */
-const INFO_COMMANDS = ["/model", "/effort", "/cost", "/status"];
+const INFO_COMMANDS = ["/model", "/effort", "/cost", "/status", "/login"];

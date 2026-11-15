@@ -8,7 +8,12 @@ export function ClaudeLoginSection() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const load = () => api.claudeLogin().then(setS).catch((e) => setErr((e as Error).message));
-  useEffect(() => void load(), []);
+  // Read again while the page is open, so the status turns once the login in Terminal is done.
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
   const open = async () => {
     setBusy(true);
     setErr(null);
