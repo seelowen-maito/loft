@@ -193,7 +193,7 @@ export function Chat({
   const mentionable = agents.filter((a) => a.id !== agent.id).sort((a, b) => Number(teamOf(a) !== teamOf(agent)) - Number(teamOf(b) !== teamOf(agent)));
   const mention = useMention(agent.id, text, setText, mentionable);
   // "#18": specs, issues and pull requests to tag; the backend adds what each is to the agent's prompt.
-  const tagMenu = useTagMenu(agent.project, text, setText);
+  const tagMenu = useTagMenu(agent.project, agents, text, setText);
   const highlight = highlightParts(text, commandNames, mentionable.map((a) => a.name), picked);
   const highlighted = highlight.some((p) => p.accent);
   // PR cards render right below the tool call that opened them.

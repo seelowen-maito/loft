@@ -223,7 +223,11 @@ export function searchRows<T extends FoundRow>(rows: T[], query: string, limit =
 /** The `#` token typed at the end of the text: `#18` or `#`. What's typed after the `#`, else undefined. */
 export const hashToken = (text: string) => /(?:^|[\s([{"'])#([^\s#]*)$/.exec(text)?.[1];
 
-export type TagRow = { kind: "spec" | "issue" | "pr"; title: string; tag: string; open: boolean; project: string; number: number | null };
+/** `status` is the issue's (in_progress, …) or the PR's (open, draft, merged, closed); `at` is when it last changed. */
+export type TagRow = {
+  kind: "spec" | "issue" | "pr"; title: string; tag: string; open: boolean; project: string; number: number | null;
+  status: string; github: boolean; agent: string | null; at: string;
+};
 
 /** The tag to insert for a pick, as the backend reads it: `#N` in the agent's own project, `owner/repo#N` in another,
  * the issue's id for a Loft-only issue. */
@@ -232,13 +236,18 @@ export function tagRows(tasks: Task[], prs: PullRequest[], project: string): Tag
   const fmt = (repo: string, number: number, name: string) => (mine && name === mine ? `#${number}` : `${repo}#${number}`);
   const issues = tasks.map((t): TagRow => ({
     kind: t.labels.some((l) => l.toLowerCase() === "spec") ? "spec" : "issue", title: t.title, project: t.project, number: t.github?.number ?? null, open: t.state === "open",
+    status: t.status, github: !!t.github, agent: t.agent_id, at: t.updated_at,
     tag: t.github ? fmt(t.github.repo, t.github.number, t.project) : `#${t.id}`,
   }));
   // The same PR can be registered by more than one agent.
   const unique = [...new Map(prs.map((p) => [p.url, p])).values()];
   const pulls = unique.map((p): TagRow => {
     const name = p.slug.split("/").pop() ?? p.slug;
-    return { kind: "pr", title: p.title, project: name, number: p.number, open: p.state === "open" || p.state === "", tag: fmt(p.slug, p.number, name) };
+    const open = p.state === "open" || p.state === "";
+    return {
+      kind: "pr", title: p.title, project: name, number: p.number, open, tag: fmt(p.slug, p.number, name),
+      status: open && p.draft ? "draft" : p.state || "open", github: true, agent: p.agent_id, at: p.merged_at ?? p.closed_at ?? p.created_at,
+    };
   });
   return [...issues, ...pulls];
 }
