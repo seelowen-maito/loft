@@ -4,6 +4,7 @@ import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { specProgress } from "../lib/issueOrder";
 import { badgeText, deliveryOf, stageOf, ticketState, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
+import { NEEDS_YOU_LABEL } from "../lib/taskStatus";
 import { DeliveryLine } from "../components/DeliveryLine";
 
 /* Pieces shared by the Issues page's Specs board (./SpecBoard) and a spec's own page, which opens with its Delivery timeline (`SpecPanel`). */
@@ -35,12 +36,12 @@ export function Bar({ done, total, stage }: { done: number; total: number; stage
   );
 }
 
-/** The "waiting on you" and "waiting for the Lead" lines of a Delivery, the same on the spec panel and the Delivery card. */
+/** The "Needs you" and "waiting for the Lead" lines of a Delivery, the same on the spec panel and the Delivery card. */
 export function DeliveryWaits({ d, className }: { d: { waiting_on_you?: number[]; waiting_for_lead?: number[] } | null; className?: string }) {
   const list = (ns: number[]) => ns.map((n) => `#${n}`).join(", ");
   return (
     <>
-      {!!d?.waiting_on_you?.length && <div className={cx("text-warn", className)}>Waiting on you: {list(d.waiting_on_you)}</div>}
+      {!!d?.waiting_on_you?.length && <div className={cx("text-warn", className)}>{NEEDS_YOU_LABEL}: {list(d.waiting_on_you)}</div>}
       {!!d?.waiting_for_lead?.length && <div className={cx("text-warn", className)}>Waiting for the Lead: {list(d.waiting_for_lead)}</div>}
     </>
   );

@@ -3,6 +3,8 @@ import { ChevronRight, CircleCheck, CircleDot, GitPullRequest } from "lucide-rea
 import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { relTime } from "../lib/time";
+import { NEEDS_YOU_LABEL, taskStatus, toneText } from "../lib/taskStatus";
+import { TaskStatus } from "../components/TaskStatus";
 import { Origin } from "../components/Origin";
 import { parseFilters, withFilters } from "../lib/issueFilters";
 import { Sticker } from "../components/Sticker";
@@ -61,7 +63,7 @@ function IssueCard({ t, dense, agentById, open }: { t: Task; dense: boolean; age
   return (
     <button onClick={() => open(t.id)} className={cx("panel block w-full text-left transition-colors hover:bg-white/[0.04]", dense ? "p-2" : "p-3")}>
       <div className="flex items-start gap-1.5">
-        {closed ? <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-merged" aria-label="Closed" /> : <CircleDot className="mt-0.5 size-3.5 shrink-0 text-good" aria-label="Open" />}
+        {closed ? <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-merged" aria-label="Closed" /> : <CircleDot className={cx("mt-0.5 size-3.5 shrink-0", toneText(taskStatus(t.status).tone))} aria-label={taskStatus(t.status).label} />}
         <span className={cx("min-w-0 flex-1 leading-snug", dense ? "truncate text-[12.5px]" : "text-[13px] [overflow-wrap:anywhere]", closed && "text-fg-3")}>{t.title}</span>
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10.5px] text-fg-3">
@@ -69,6 +71,7 @@ function IssueCard({ t, dense, agentById, open }: { t: Task; dense: boolean; age
         <span>{t.github ? `#${t.github.number}` : "Loft"}</span>
         {t.project && <span>{t.project}</span>}
         <span>{relTime(t.updated_at)}</span>
+        {!closed && <TaskStatus status={t.status} />}
         {(t.owner || (!dense && a)) && (
           <span className="ml-auto inline-flex min-w-0 items-center gap-2 text-[10.5px] text-fg-2">
             {t.owner && <GithubUser login={t.owner} bare />}
@@ -179,7 +182,7 @@ function Options({ params, setParams }: { params: URLSearchParams; setParams: (n
           })}
         </div>
         <span className="mx-1 h-4 w-px bg-line" />
-        <button className={chip(o.needsMe)} aria-pressed={o.needsMe} onClick={() => set({ needsMe: !o.needsMe })} title="Ready to merge, or something needs a human">Needs me</button>
+        <button className={chip(o.needsMe)} aria-pressed={o.needsMe} onClick={() => set({ needsMe: !o.needsMe })} title="Ready to merge, or something needs a human">{NEEDS_YOU_LABEL}</button>
         <button className={chip(closed)} aria-pressed={closed} onClick={() => setParams(withFilters(params, { closed: !closed }))} title="Closed issues in the Issues column">Show closed</button>
         <button className={chip(o.showDropped)} aria-pressed={o.showDropped} onClick={() => set({ showDropped: !o.showDropped })} title="Specs closed as not planned">Show dropped</button>
         <button className={chip(o.hideShipped)} aria-pressed={o.hideShipped} onClick={() => set({ hideShipped: !o.hideShipped })}>Hide shipped</button>
