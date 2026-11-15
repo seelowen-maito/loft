@@ -20,7 +20,8 @@ export function HttpsAccess() {
     }
   };
   useEffect(() => {
-    run();
+    // Talk links here when the page isn't on https: the sections above load after this one, so scroll once it's checked.
+    run().then(() => window.location.hash === "#https" && setTimeout(() => document.getElementById("https")?.scrollIntoView({ block: "start" }), 500));
   }, []);
 
   return (

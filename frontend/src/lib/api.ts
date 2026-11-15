@@ -666,6 +666,20 @@ export const api = {
   system: () => req<SystemReading>("GET", "/system"),
   /** Lists a fixed set of macOS-guarded folders; can show macOS's prompts on the Mac. */
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
+  /** Adds a chunk of a Talk session's audio (16 kHz mono 16-bit PCM) and returns the text of all of it so far; the
+   * final chunk ends the session. */
+  transcribe: async (session: string, audio: Uint8Array, final: boolean): Promise<{ text: string; final: boolean }> => {
+    const res = await fetch(`/api/voice/transcribe?session=${encodeURIComponent(session)}${final ? "&final=true" : ""}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: audio as BodyInit,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as any).error ?? `${res.status} ${res.statusText}`);
+    return data as { text: string; final: boolean };
+  },
+  /** Tidies a dictation; the original comes back (`cleaned: false`) when it can't. */
+  voiceClean: (text: string) => req<{ text: string; cleaned: boolean }>("POST", "/voice/clean", { text }),
   /** Asks Tailscale whether it serves Loft over https. */
   https: () => req<Https>("GET", "/system/https"),
   settings: () => req<SettingsView>("GET", "/settings"),

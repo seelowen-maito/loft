@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Link, useLocation } from "react-router";
 import { permCard } from "../../lib/pending";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
@@ -28,6 +28,7 @@ import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
 import { formatCombo, loadCombo, openShortcut } from "../../lib/shortcuts";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
+import { openTalk } from "../../lib/talk";
 import { useDraft } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { isVideo } from "../../lib/video";
@@ -692,6 +693,9 @@ export function Chat({
                   className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
                 />
               </div>
+              <button className="btn-ghost size-8 justify-center p-0" onClick={() => openTalk(agent.id)} aria-label="Talk" title={`Talk to ${agent.name}`}>
+                <Mic className="size-4" />
+              </button>
               <button
                 className="btn-primary size-8 justify-center p-0"
                 disabled={(!text.trim() && images.length === 0) || uploading || failed || sending}
