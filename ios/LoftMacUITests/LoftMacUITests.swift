@@ -130,6 +130,31 @@ final class LoftMacUITests: XCTestCase {
         shot("Sent with @ and #")
     }
 
+    /// #487: Shift-Return adds a line without sending; Return sends the message with its line breaks.
+    func testShiftReturnAddsLineAndReturnSends() {
+        launch(["-ui-testing"])
+        let list = app.scrollViews["agentsList"]
+        XCTAssertTrue(list.waitForExistence(timeout: 10))
+        list.buttons["agentRow-Orchestrator"].click()
+        let field = app.textFields["composerField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.click()
+        field.typeText("first line")
+        field.typeKey(.return, modifierFlags: .shift)
+        field.typeText("second line")
+        XCTAssertEqual(field.value as? String, "first line\nsecond line", "Shift-Return adds a line and doesn't send")
+        let sent = app.descendants(matching: .any).matching(identifier: "userMessage")
+            .matching(NSPredicate(format: "label CONTAINS %@", "first line")).firstMatch
+        XCTAssertFalse(sent.exists)
+        shot("Multi-line before sending")
+
+        field.typeText("\r")
+        XCTAssertTrue(sent.waitForExistence(timeout: 10))
+        XCTAssertTrue((sent.label).contains("first line\nsecond line"), sent.label)
+        XCTAssertEqual(field.value as? String, "")
+        shot("Multi-line sent")
+    }
+
     /// Settings › Apple Intelligence on the fixture model status: unavailable says why and disables the switches;
     /// available enables them.
     func testAppleIntelligenceSettingsFollowTheModelStatus() {

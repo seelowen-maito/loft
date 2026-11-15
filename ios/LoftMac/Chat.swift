@@ -420,12 +420,18 @@ private struct Composer: View {
                     .lineLimit(1...8)
                     .focused($focused)
                     .onSubmit(submit)
+                    // Shift-Return adds a line at the caret instead of sending, as on the web.
+                    .onKeyPress(.return, phases: .down) { press in
+                        guard press.modifiers.contains(.shift) else { return .ignored }
+                        NSApp.sendAction(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)), to: nil, from: nil)
+                        return .handled
+                    }
                     .accessibilityIdentifier("composerField")
                 micButton
                 Button(action: send) { Image(systemName: "arrow.up.circle.fill").font(.title2).foregroundStyle(canSend ? Theme.accent : WebTheme.fg3) }
                     .buttonStyle(.borderless)
                     .disabled(!canSend)
-                    .help("Send (Return)")
+                    .help("Send (Return) · New line (Shift-Return)")
                     .accessibilityLabel("Send")
                     .accessibilityIdentifier("sendButton")
             }
