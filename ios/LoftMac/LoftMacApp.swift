@@ -126,38 +126,16 @@ struct LoftMacApp: App {
     }
 }
 
-/// The window's sections, in sidebar order; ⌘1 to ⌘5 open them.
-enum MacSection: Int, CaseIterable, Identifiable {
-    case overview = 1, agents, issues, needsYou, settings
-
-    var id: Int { rawValue }
-
-    var title: String {
-        switch self {
-        case .overview: "Overview"
-        case .agents: "Agents"
-        case .issues: "Issues"
-        case .needsYou: "Needs you"
-        case .settings: "Settings"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .overview: "square.grid.2x2"
-        case .agents: "person.3"
-        case .issues: "checklist"
-        case .needsYou: "bell.badge"
-        case .settings: "gearshape"
-        }
-    }
-}
-
 /// Where the window is: the section, the agent whose chat is open, the issue pages open, and the New message picker.
 @MainActor
 @Observable
 final class MacNav {
-    var section: MacSection = .agents
+    /// The section the window shows and the sidebar highlights, and the chat-opened count for the composer.
+    var selection = MacSelection()
+    var section: MacSection {
+        get { selection.section }
+        set { selection.go(newValue) }
+    }
     var agentId: String?
     var picksRecipient = false
     /// Text from the voice panel's Edit in chat, for that agent's message box.
@@ -174,7 +152,7 @@ final class MacNav {
 
     func openChat(_ agentId: String) {
         chatNote = nil  // it was for the open that fell back, not for this one
-        section = .agents
+        selection.openChat()
         self.agentId = agentId
     }
 
@@ -187,17 +165,16 @@ final class MacNav {
     func open(_ link: DeepLink) {
         switch link {
         case .needsYou:
-            section = .needsYou
+            section = MacSection(link)
             needsYouFocus = nil
         case .needsYouItem(let id):
-            section = .needsYou
+            section = MacSection(link)
             needsYouFocus = id
-        case .agents, .talk: section = .agents
-        case .overview: section = .overview
         case .agent(let id): openChat(id)
         case .issue(let id):
-            section = .issues
+            section = MacSection(link)
             issuePath = [id]
+        case .agents, .talk, .overview: section = MacSection(link)
         }
     }
 }

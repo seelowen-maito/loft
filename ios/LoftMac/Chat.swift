@@ -365,6 +365,7 @@ private struct Composer: View {
     /// This press only stopped a dictation: its release isn't a click for Talk.
     @State private var ignoreRelease = false
     @FocusState private var focused: Bool
+    @Environment(MacNav.self) private var nav
 
     private var mentions: [(title: String, agents: [Agent])]? {
         MentionQuery.query(in: text).map { MentionQuery.sections($0, in: store.agents, excluding: agent.name) }
@@ -448,8 +449,16 @@ private struct Composer: View {
                 .strokeBorder(focused ? Theme.accent.opacity(0.4) : WebTheme.lineStrong))
         }
         .padding(12)
-        // Takes the keyboard when the chat opens, but not from the sidebar: ↑/↓ there keep moving between sections.
-        .onAppear { focused = !(NSApp.keyWindow?.firstResponder is NSTableView) }
+        // Takes the keyboard when the chat opens from code; a sidebar click leaves it there, so ↑/↓ keep moving
+        // between sections.
+        .onAppear {
+            focused = MacSelection.composerTakesKeyboard(
+                requested: nav.selection.takeComposerRequest(),
+                sidebarHasKeyboard: NSApp.keyWindow?.firstResponder is NSTableView)
+        }
+        // The same chat opened again from code: it doesn't appear anew.
+        // (A chat for another agent is a new view, which asks in onAppear.)
+        .onChange(of: nav.selection.composerRequests) { focused = true }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             // Switching away (or a system prompt) can swallow the mouse-up: the mic never stays on behind another app.
             pressing = false
