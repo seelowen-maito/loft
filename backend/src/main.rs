@@ -67,6 +67,8 @@ fn main() -> anyhow::Result<()> {
         Some(kill_guard::ARG) => kill_guard::hook(),
         // And as their `kill`, `pkill` and `killall`.
         Some(processes::ARG) => processes::cli(),
+        // And as setup.sh's way to sign the build before the background service points at its signed copy.
+        Some(signing::ARG) => signing::cli(),
         _ => {}
     }
     serve()
