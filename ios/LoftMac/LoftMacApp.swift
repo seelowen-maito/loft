@@ -173,6 +173,7 @@ final class MacNav {
     var chatNote: (agentId: String, text: String)?
 
     func openChat(_ agentId: String) {
+        chatNote = nil  // it was for the open that fell back, not for this one
         section = .agents
         self.agentId = agentId
     }
