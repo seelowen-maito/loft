@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
-import { ArrowDown, ArrowUp, ChevronRight, Loader2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronRight, Loader2, TriangleAlert } from "lucide-react";
 import { api, type CleanItem, type CleanLog, type GitCheck, type LeftProcess, type WorkspaceSizes } from "../lib/api";
 import { fmtDuration } from "../lib/time";
 import { canCheck, cleanState, cleanType, cx, filterClean, fmtBytes, chosenRows, gitCheckText, inBatches, initialTicks, reasonLines, selectable, sortClean, ticksAfter, type CleanFilter, type CleanSort } from "../lib/format";
+import { Callout } from "../components/Callout";
 import { relTime } from "../lib/time";
 import { CleanLogView, CopyCommands, EQUIVALENT } from "./Settings";
 import { usePoll } from "../hooks/usePoll";
@@ -79,7 +80,7 @@ export default function CleanPage() {
           <h1 className="text-[20px] font-medium tracking-tight">Clean</h1>
           {checking && <Loader2 className="size-4 animate-spin text-fg-3" aria-label="Measuring workspaces" />}
         </div>
-        {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
+        {err && <Callout tone="bad" icon={<TriangleAlert />}>{err}</Callout>}
         {table && <CleanTable table={table} name={name} left={left} stopping={stopping} busy={busy} onTick={tick} onStop={stopThem} onConfirm={confirm} />}
       </div>
       {shown && <CleanLogView log={shown} name={name} onClose={() => setShown(null)} />}
@@ -265,7 +266,7 @@ function CleanTable({ table, name, left, stopping, busy, onTick, onStop, onConfi
   const types = [...new Set(items.map(cleanType))];
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
+      {err && <Callout tone="bad" icon={<TriangleAlert />}>{err}</Callout>}
       {items.length === 0 ? (
         <p className="text-[13px] text-fg-3">Nothing in any workspace.</p>
       ) : (

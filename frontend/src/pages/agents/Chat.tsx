@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
+import { Callout } from "../../components/Callout";
 import { fmtClock, fmtDate, fmtDuration, fmtDayTime, nextRunText } from "../../lib/time";
 import { useNow } from "../../lib/useNow";
 import { Sticker } from "../../components/Sticker";
@@ -916,10 +917,9 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   }
   if (m.kind === "error") {
     return (
-      <div className="flex items-start gap-2 rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[13px] text-fg-2">
-        <AlertCircle className="mt-0.5 size-4 shrink-0 text-bad" />
+      <Callout tone="bad" icon={<AlertCircle />}>
         <pre className="whitespace-pre-wrap [overflow-wrap:anywhere] font-sans">{m.content}</pre>
-      </div>
+      </Callout>
     );
   }
   if (m.kind === "notice" && m.meta?.plan_task_id) return <PlanCard taskId={m.meta.plan_task_id} agents={agents} />;
