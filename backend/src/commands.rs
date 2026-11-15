@@ -173,18 +173,23 @@ pub const USER_PLUGIN: &str = "user";
 const SKIP: [&str; 2] = ["node_modules", ".git"];
 
 /// Every file under `src` as (path relative to `src`, size, modified time). Links are followed, so a linked skill
-/// folder counts as what it points at; the depth cap stops a link loop.
-fn files(src: &Path, rel: &Path, depth: u32, out: &mut Vec<(std::path::PathBuf, u64, u128)>) -> std::io::Result<()> {
+/// folder counts as what it points at; a broken link is skipped, and so is a folder already being walked (a loop).
+/// `above` holds the real paths of the folders being walked.
+fn files(src: &Path, rel: &Path, depth: u32, above: &mut Vec<std::path::PathBuf>, out: &mut Vec<(std::path::PathBuf, u64, u128)>) -> std::io::Result<()> {
     if depth > 8 {
         return Ok(());
     }
     for e in std::fs::read_dir(src.join(rel))? {
         let e = e?;
         let rel = rel.join(e.file_name());
-        let m = std::fs::metadata(e.path())?;
+        let Ok(m) = std::fs::metadata(e.path()) else { continue };
         if m.is_dir() {
-            if !SKIP.iter().any(|s| e.file_name() == *s) {
-                files(src, &rel, depth + 1, out)?;
+            let real = std::fs::canonicalize(e.path())?;
+            if !SKIP.iter().any(|s| e.file_name() == *s) && !above.contains(&real) {
+                above.push(real);
+                let r = files(src, &rel, depth + 1, above, out);
+                above.pop();
+                r?;
             }
         } else {
             let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
@@ -194,6 +199,28 @@ fn files(src: &Path, rel: &Path, depth: u32, out: &mut Vec<(std::path::PathBuf, 
     Ok(())
 }
 
+/// What is in a built plugin folder, links not followed: anything added to it changes this.
+fn listing(dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+        let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+        out.push(format!("{} {} {} {t}", e.path().display(), m.is_dir(), m.len()));
+        if m.is_dir() {
+            listing(&e.path(), out);
+        }
+    }
+}
+
+fn built_listing(dir: &Path) -> String {
+    let mut v = Vec::new();
+    listing(dir, &mut v);
+    v.sort();
+    v.join("\n")
+}
+
+/// For each plugin folder this process built: the user's files it was built from and what the folder held then.
+static BUILT: std::sync::Mutex<Vec<(std::path::PathBuf, String, String)>> = std::sync::Mutex::new(Vec::new());
 static SYNC: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SYNCS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -205,22 +232,24 @@ static SYNCS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0
 /// its commands, and runs starting together don't race.
 pub fn sync_user_plugin(storage: &Path, claude_dir: &Path) -> Option<std::path::PathBuf> {
     let _lock = SYNC.lock().unwrap_or_else(|e| e.into_inner());
-    let (dir, stamp) = (storage.join("user-plugin"), storage.join("user-plugin.fingerprint"));
+    let dir = storage.join("user-plugin");
     let tmp = storage.join(format!("user-plugin.{}.{}", std::process::id(), SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let mut all: Vec<(&str, Vec<_>)> = Vec::new();
     for kind in ["commands", "skills"] {
         let mut list = Vec::new();
-        if claude_dir.join(kind).is_dir() && files(&claude_dir.join(kind), Path::new(""), 0, &mut list).is_ok() {
+        if claude_dir.join(kind).is_dir() && files(&claude_dir.join(kind), Path::new(""), 0, &mut vec![std::fs::canonicalize(claude_dir.join(kind)).unwrap_or_default()], &mut list).is_ok() {
             all.push((kind, list));
         }
     }
     if all.is_empty() {
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_file(&stamp);
         return None;
     }
     let print = format!("{all:?}");
-    if dir.is_dir() && std::fs::read_to_string(&stamp).is_ok_and(|p| p == print) {
+    // Unchanged source and nothing added to or changed in the built folder (an agent can write there): keep it.
+    let held = (print.clone(), if dir.is_dir() { built_listing(&dir) } else { String::new() });
+    let known = BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(d, p, l)| d == &dir && *p == held.0 && *l == held.1);
+    if known && dir.is_dir() {
         return Some(dir);
     }
     let built = (|| -> std::io::Result<()> {
@@ -242,7 +271,9 @@ pub fn sync_user_plugin(storage: &Path, claude_dir: &Path) -> Option<std::path::
     if built.is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         if std::fs::rename(&tmp, &dir).is_ok() {
-            let _ = std::fs::write(&stamp, &print);
+            let mut b = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+            b.retain(|(d, _, _)| d != &dir);
+            b.push((dir.clone(), print, built_listing(&dir)));
             return Some(dir);
         }
     }
@@ -358,13 +389,13 @@ mod tests {
         let p = sync_user_plugin(&st, &home).unwrap();
         assert!(p.join("skills/big/SKILL.md").exists() && !p.join("skills/big/node_modules").exists());
         // Unchanged: left alone, so a running agent keeps what it loaded.
-        std::fs::write(p.join("marker"), "m").unwrap();
+        let built_at = std::fs::metadata(p.join("skills/big/SKILL.md")).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
         sync_user_plugin(&st, &home).unwrap();
-        assert!(p.join("marker").exists());
+        assert_eq!(std::fs::metadata(p.join("skills/big/SKILL.md")).unwrap().modified().unwrap(), built_at);
         // Changed: rebuilt.
         std::fs::write(home.join("skills/big/SKILL.md"), "bigger").unwrap();
         sync_user_plugin(&st, &home).unwrap();
-        assert!(!p.join("marker").exists());
         assert_eq!(std::fs::read_to_string(p.join("skills/big/SKILL.md")).unwrap(), "bigger");
     }
 
@@ -391,5 +422,41 @@ mod tests {
         assert!(threads.into_iter().all(|t| t.join().unwrap()));
         assert_eq!(std::fs::read_to_string(st.join("user-plugin/commands/ship.md")).unwrap(), "ship");
         assert!(st.join("user-plugin/.claude-plugin/plugin.json").exists());
+    }
+
+    #[test]
+    fn a_file_added_to_the_built_plugin_is_removed_at_the_next_sync() {
+        let (home, st) = (dir("tamper-home"), dir("tamper-st"));
+        std::fs::create_dir_all(home.join("commands")).unwrap();
+        std::fs::write(home.join("commands/ship.md"), "ship").unwrap();
+        let p = sync_user_plugin(&st, &home).unwrap();
+        std::fs::create_dir_all(p.join("hooks")).unwrap();
+        std::fs::write(p.join("hooks/hooks.json"), "{}").unwrap();
+        std::fs::write(p.join("commands/ship.md"), "changed").unwrap();
+        sync_user_plugin(&st, &home).unwrap();
+        assert!(!p.join("hooks").exists());
+        assert_eq!(std::fs::read_to_string(p.join("commands/ship.md")).unwrap(), "ship");
+    }
+
+    #[test]
+    fn a_broken_link_is_skipped_and_the_other_skills_still_load() {
+        let (home, st) = (dir("broken-home"), dir("broken-st"));
+        std::fs::create_dir_all(home.join("skills/ok")).unwrap();
+        std::fs::write(home.join("skills/ok/SKILL.md"), "ok").unwrap();
+        std::os::unix::fs::symlink(home.join("gone"), home.join("skills/dead")).unwrap();
+        let p = sync_user_plugin(&st, &home).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("skills/ok/SKILL.md")).unwrap(), "ok");
+        assert!(!p.join("skills/dead").exists());
+    }
+
+    #[test]
+    fn a_link_loop_is_copied_once() {
+        let (home, st) = (dir("cycle-home"), dir("cycle-st"));
+        std::fs::create_dir_all(home.join("skills/a")).unwrap();
+        std::fs::write(home.join("skills/a/SKILL.md"), "a").unwrap();
+        std::os::unix::fs::symlink(home.join("skills"), home.join("skills/a/back")).unwrap();
+        let p = sync_user_plugin(&st, &home).unwrap();
+        assert!(p.join("skills/a/SKILL.md").exists());
+        assert!(!p.join("skills/a/back").exists(), "the link back to a folder being copied is skipped");
     }
 }
