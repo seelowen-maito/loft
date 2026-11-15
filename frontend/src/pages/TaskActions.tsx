@@ -355,7 +355,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
         </ul>
       )}
       {(d?.waiting_on_you ?? []).length > 0 && (
-        <div className="mt-2 text-[12.5px] text-warn">Waiting on you: {(d?.waiting_on_you ?? []).map((n) => `#${n}`).join(", ")}</div>
+        <div className="mt-2 text-[12.5px] text-warn">Needs you: {(d?.waiting_on_you ?? []).map((n) => `#${n}`).join(", ")}</div>
       )}
       {waiting.length > 0 && (
         <div className="mt-2 text-[12.5px] text-fg-3">Waiting for the Lead to assign {waiting.map((n) => `#${n}`).join(", ")}</div>

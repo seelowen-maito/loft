@@ -6,7 +6,7 @@ import { Origin } from "../../components/Origin";
 import { IssueRow } from "../../components/IssueRow";
 import { cx } from "../../lib/format";
 import { relTime } from "../../lib/time";
-import { STATUS_TONE } from "../../components/TaskChip";
+import { taskStatus, toneText } from "../../lib/taskStatus";
 import { useTasks } from "../../hooks/lists";
 
 /** Open tasks first, the ones waiting on you on top; then the most recently updated. */
@@ -64,10 +64,10 @@ export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPic
         {list.map((t, i) => (
           <IssueRow
             key={t.id}
-            tone={STATUS_TONE[t.status]}
+            tone={toneText(taskStatus(t.status).tone)}
             github={!!t.github}
             title={t.title}
-            meta={[t.github && `#${t.github.number}`, t.status.replace("_", " "), name(t.agent_id), t.project, relTime(t.updated_at)]}
+            meta={[t.github && `#${t.github.number}`, taskStatus(t.status).label, name(t.agent_id), t.project, relTime(t.updated_at)]}
             selected={i === index}
             onHover={() => setIndex(i)}
             onPick={() => onPick(t.id)}

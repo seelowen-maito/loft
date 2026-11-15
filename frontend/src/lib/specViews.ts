@@ -1,5 +1,6 @@
 /** The Issues page's spec views: which Delivery a spec has and where it stands. Pure, so the board, its URL options and a spec's own page agree. */
 import type { IssueDelivery, Task, TaskStatus } from "./api";
+import { NEEDS_YOU_LABEL } from "./taskStatus.ts";
 
 /** `GET /api/deliveries/summary`: a spec's Delivery, with the spec it belongs to. */
 export type DeliverySummary = Omit<IssueDelivery, "tickets" | "spec"> & {
@@ -46,7 +47,7 @@ export function badgeText(stage: Stage, d: Pick<DeliverySummary, "state" | "stat
   const label = [...STAGES, DROPPED].find((s) => s.key === stage)!.label;
   if (stage !== "delivery") return label;
   if (d?.state_line?.tone === "ci") return "Waiting for CI";
-  const sub = d?.state === "final_review" ? " · final review" : d?.state === "final_fixes" ? " · fixing" : d?.state === "needs_human" ? " · needs you" : "";
+  const sub = d?.state === "final_review" ? " · final review" : d?.state === "final_fixes" ? " · fixing" : d?.state === "needs_human" ? ` · ${NEEDS_YOU_LABEL}` : "";
   return label + sub;
 }
 
@@ -60,7 +61,7 @@ export function ticketLabel(state: string, waitingOn: string[] = [], waitingForC
     case "review": return { text: "in review", tone: "accent" };
     case "changes": return { text: "fixing", tone: "accent" };
     case "closing": return { text: "closing", tone: "accent" };
-    case "needs_human": return { text: "Waiting on you", tone: "warn" };
+    case "needs_human": return { text: NEEDS_YOU_LABEL, tone: "warn" };
     case "elsewhere": return { text: "elsewhere", tone: "muted" };
     default: return { text: "open", tone: "muted" };
   }

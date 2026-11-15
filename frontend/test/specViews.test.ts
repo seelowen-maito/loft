@@ -32,7 +32,7 @@ test("the stage follows the Delivery and the issue", () => {
 test("ticket states read in words", () => {
   assert.deepEqual(ticketLabel("closed"), { text: "done", tone: "good" });
   assert.equal(ticketLabel("needs_human").tone, "warn");
-  assert.equal(ticketLabel("needs_human").text, "Waiting on you");
+  assert.equal(ticketLabel("needs_human").text, "Needs you");
   assert.equal(ticketLabel("whatever").text, "open");
   assert.deepEqual(ticketLabel("changes"), { text: "fixing", tone: "accent" });
   assert.equal(ticketLabel("review", [], true).text, "waiting for CI");
@@ -150,7 +150,7 @@ test("the spec card badge reads Waiting for CI when only CI is left", () => {
   assert.equal(badgeText("delivery", del({ state_line: ci })), "Waiting for CI");
   assert.equal(badgeText("delivery", del({ state_line: { tone: "running", text: "Running." } })), "In Delivery", "an agent is at work on another ticket");
   assert.equal(badgeText("delivery", del({ state: "final_review", state_line: { tone: "final", text: "Final review" } })), "In Delivery · final review");
-  assert.equal(badgeText("delivery", del({ state: "needs_human" })), "In Delivery · needs you");
+  assert.equal(badgeText("delivery", del({ state: "needs_human" })), "In Delivery · Needs you");
   assert.equal(badgeText("ready", del({ state: "ready", state_line: ci })), "Ready to merge", "only while In Delivery");
   assert.equal(badgeText("planned", null), "Planned");
 });

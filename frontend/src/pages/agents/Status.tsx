@@ -1,9 +1,10 @@
 import type { Agent } from "../../lib/api";
+import { NEEDS_YOU_LABEL } from "../../lib/taskStatus";
 import { cx } from "../../lib/format";
 import { RunTimer } from "../../components/RunTimer";
 
 export function statusOf(a: Agent): { label: string; dot: string; text: string } {
-  if (a.status === "waiting") return { label: "Needs you", dot: "bg-warn", text: "text-warn" };
+  if (a.status === "waiting") return { label: NEEDS_YOU_LABEL, dot: "bg-warn", text: "text-warn" };
   if (a.running && a.waiting_on?.length) return { label: "Waiting", dot: "bg-info animate-pulse-soft", text: "text-info" };
   if (a.running || a.status === "running") return { label: "Working", dot: "bg-accent animate-pulse-soft", text: "text-accent" };
   if (a.status === "error") return { label: "Error", dot: "bg-bad", text: "text-bad" };

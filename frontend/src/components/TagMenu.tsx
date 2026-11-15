@@ -6,7 +6,7 @@ import { relTime } from "../lib/time";
 import { hashToken, insertTag, tagMatches, tagRows, type TagRow } from "../lib/shortcuts";
 import { usePullRequests, useTasks } from "../hooks/lists";
 import { IssueRow } from "./IssueRow";
-import { STATUS_TONE } from "./TaskChip";
+import { taskStatus, toneText } from "../lib/taskStatus";
 
 const ICON = { spec: FileText, issue: CircleDot, pr: GitPullRequest };
 const TITLE = { spec: "Specs", issue: "Issues", pr: "Pull requests" };
@@ -58,10 +58,10 @@ export function useTagMenu(project: string, agents: Agent[], text: string, setTe
           )}
           <IssueRow
             icon={ICON[r.kind]}
-            tone={(r.kind === "pr" ? PR_TONE : STATUS_TONE)[r.status] ?? "text-fg-3"}
+            tone={r.kind === "pr" ? PR_TONE[r.status] ?? "text-fg-3" : toneText(taskStatus(r.status).tone)}
             github={r.github}
             title={r.title}
-            meta={[r.number !== null && `#${r.number}`, r.status.replace("_", " "), agents.find((a) => a.id === r.agent)?.name, r.project, relTime(r.at)]}
+            meta={[r.number !== null && `#${r.number}`, r.kind === "pr" ? r.status : taskStatus(r.status).label, agents.find((a) => a.id === r.agent)?.name, r.project, relTime(r.at)]}
             selected={i === index}
             onHover={() => setIndex(i)}
             onPick={() => pick(r)}

@@ -19,25 +19,14 @@ import { isSpec } from "../lib/issueOrder";
 import { SpecPanel } from "./SpecViews";
 import { BoardPage, boardSpecs } from "./SpecBoard";
 import { Dialog } from "../components/Dialog";
+import { TaskStatus } from "../components/TaskStatus";
+import { taskStatus, toneText } from "../lib/taskStatus";
 import { boardIssues, NEEDS_YOU, parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
 import { agentInGroup, groupAgents, groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
-const STATUS_TONE: Record<string, string> = {
-  waiting_approval: "text-warn",
-  blocked: "text-warn",
-  failed: "text-bad",
-  in_progress: "text-accent",
-  ready: "text-info",
-  inbox: "text-fg-3",
-  done: "text-good",
-  cancelled: "text-fg-3",
-};
-
-const statusLabel = (s: string) => (s === "waiting_approval" ? "waiting for you" : s.replace("_", " "));
-
 /** Open or closed, as on GitHub: the green dot, or the purple check (grey when cancelled, like "not planned"). */
 function StateIcon({ task: t, className }: { task: Task; className?: string }) {
-  if (t.state === "open") return <CircleDot className={cx(className, STATUS_TONE[t.status])} aria-label="Open" />;
+  if (t.state === "open") return <CircleDot className={cx(className, toneText(taskStatus(t.status).tone))} aria-label="Open" />;
   return <CircleCheck className={cx(className, t.status === "cancelled" ? "text-fg-3" : "text-merged")} aria-label="Closed" />;
 }
 
@@ -274,7 +263,7 @@ function TaskDetail({ task: t, tasks, agents, agentById, repos, deliveries, to, 
             {t.state === "open" ? <CircleDot className="size-3" /> : <CircleCheck className="size-3" />}
             {t.state === "open" ? "Open" : t.status === "cancelled" ? "Closed · not planned" : "Closed"}
           </span>
-          <span className={cx("chip", STATUS_TONE[t.status])}>{statusLabel(t.status)}</span>
+          <TaskStatus status={t.status} variant="chip" />
           {t.priority !== "normal" && <span className={cx("chip", (t.priority === "high" || t.priority === "urgent") && "text-warn")}>{t.priority}</span>}
           {t.project && <span className="chip">{t.project}</span>}
           {t.github && (
@@ -383,7 +372,7 @@ function OwnedBy({ task: t, agent, deps }: { task: Task; agent?: Agent; deps: Ta
       </section>
       <section className="panel p-4">
         <div className="eyebrow mb-2">In Loft</div>
-        <Fact label="Status"><span className={STATUS_TONE[t.status]}>{statusLabel(t.status)}</span></Fact>
+        <Fact label="Status"><TaskStatus status={t.status} /></Fact>
         <Fact label="Agent">{agent ? <><Sticker avatar={agent.avatar} lead={agent.role === "lead"} size={18} /> {agent.name}</> : <span className="text-fg-3">nobody yet</span>}</Fact>
         <Fact label="Priority">{t.priority}</Fact>
         <Fact label="When done">closes #{g.number} on GitHub</Fact>
@@ -428,7 +417,7 @@ function ThreadEntry({ c, agent }: { c: TaskComment; agent?: Agent }) {
     const extra = c.meta.summary || c.meta.error;
     return (
       <li className="flex gap-3 pl-1">
-        <span className={cx("mt-1.5 size-1.5 shrink-0 rounded-full bg-current", STATUS_TONE[c.meta.status ?? ""] ?? "text-fg-3")} />
+        <TaskStatus status={c.meta.status} variant="dot" className="mt-1.5" />
         <div className="min-w-0 flex-1">
           <div className="font-mono text-[11.5px] text-fg-2">
             {c.text} <span className="text-fg-3">· {when}</span>

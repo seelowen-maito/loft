@@ -456,7 +456,7 @@ function AccessTab({ agent, perms }: { agent: Agent; perms: PermissionRequest[] 
     <div className="space-y-7 p-5">
       {pending.length > 0 && (
         <div className="space-y-2">
-          <div className="eyebrow text-warn">Waiting on you</div>
+          <div className="eyebrow text-warn">Needs you</div>
           {pending.map((p) => <PermissionCard key={p.id} req={p} />)}
         </div>
       )}
