@@ -20,8 +20,8 @@ pub struct Body {
     arg: String,
 }
 
-/// Shows or sets one agent setting. `allow_default` adds "default", which clears the setting.
-fn setting(state: &AppState, id: &str, what: &str, arg: &str, choices: &[&str], allow_default: bool, current: String, set: fn(&mut crate::db::Agent, String)) -> Result<String, crate::api::ApiError> {
+/// Shows or sets one agent setting: its name, its choices, and whether "default" is one (it clears the setting).
+fn setting(state: &AppState, id: &str, (what, choices, allow_default): (&str, &[&str], bool), arg: &str, current: String, set: fn(&mut crate::db::Agent, String)) -> Result<String, crate::api::ApiError> {
     let arg = arg.trim().to_lowercase();
     let list = if allow_default { format!("{}, default", choices.join(", ")) } else { choices.join(", ") };
     if arg.is_empty() {
@@ -72,8 +72,8 @@ async fn usage_text(state: &AppState, id: &str, with_plan: bool) -> Result<Strin
 pub async fn run(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<Body>) -> ApiResult<Value> {
     let a = state.db.get_agent(&id)?.ok_or_else(not_found)?;
     let text = match b.name.as_str() {
-        "model" => setting(&state, &id, "Model", &b.arg, &MODELS, false, a.model, |a, v| a.model = v)?,
-        "effort" => setting(&state, &id, "Effort", &b.arg, &EFFORTS, true, a.effort, |a, v| a.effort = v)?,
+        "model" => setting(&state, &id, ("Model", &MODELS, false), &b.arg, a.model, |a, v| a.model = v)?,
+        "effort" => setting(&state, &id, ("Effort", &EFFORTS, true), &b.arg, a.effort, |a, v| a.effort = v)?,
         "login" => crate::login::text().await,
         "cost" => usage_text(&state, &id, false).await?,
         "status" => usage_text(&state, &id, true).await?,
