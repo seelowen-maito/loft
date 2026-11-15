@@ -1152,6 +1152,31 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(any("ticketRow-QA", app).appears(timeout: 5), "back to the spec")
     }
 
+    /// #424: a spec whose only open work is CI says so in its row, its Delivery card (with how long, linked to the
+    /// checks) and its ticket row, and names no Dev.
+    func testASpecWaitingForCI() {
+        let app = launch(["-fixture-specs", "-fixture-ci"])
+        app.tabBars.buttons["Issues"].tap()
+        let specs = app.segmentedControls["issuesViewSwitch"].buttons["Specs"]
+        XCTAssertTrue(specs.appears(timeout: 5))
+        specs.tap()
+        XCTAssertTrue(any("specRow-Implement settings functionality", app).appears(timeout: 5))
+        XCTAssertTrue(text(containing: "Waiting for CI", app).exists, "the row's badge")
+        XCTAssertFalse(text(containing: "on #45 Docs", app).exists, "no Dev on it")
+
+        any("specRow-Implement settings functionality", app).tap()
+        XCTAssertTrue(any("deliveryState", app).appears(timeout: 5))
+        XCTAssertTrue(any("deliveryState", app).label.hasPrefix("Waiting for CI on #45 · 6 min"), any("deliveryState", app).label)
+        XCTAssertNotEqual(any("deliveryState", app).elementType, .staticText, "a link to the checks: \(any("deliveryState", app).elementType.rawValue)")
+        XCTAssertFalse(any("deliveryRunning", app).exists, "nobody is on a ticket")
+        for _ in 0..<3 where !any("ticketRow-Docs", app).exists { app.swipeUp() }
+        let docs = any("ticketRow-Docs", app).label
+        XCTAssertTrue(docs.contains("waiting for CI · 6 min"), docs)
+        XCTAssertFalse(docs.contains("in review"), docs)
+        XCTAssertFalse(docs.contains("ci waiting"), docs)
+        XCTAssertTrue(docs.contains("security passed"), docs)
+    }
+
     /// #149: an open spec on GitHub starts from the Delivery card and never merges here; Merge only for a plan kept
     /// in Loft that's ready.
     func testStartDeliveryAndMergeAppearOnlyWhenTheyApply() {
