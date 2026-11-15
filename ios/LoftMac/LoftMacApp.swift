@@ -313,6 +313,8 @@ struct MainWindow: View {
                         .tag(s)
                 }
             }
+            // A click on a row leaves a text field the keyboard, so ↑/↓ wouldn't move: the sidebar takes it.
+            .simultaneousGesture(TapGesture().onEnded { SidebarKeyboard.take() })
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
             .scrollContentBackground(.hidden)
             .background(WebTheme.canvas)
@@ -344,6 +346,31 @@ struct MainWindow: View {
         // The web's page, cards and text colours behind every section.
         .webPage()
         .sheet(isPresented: $nav.picksRecipient) { RecipientPicker() }
+        .onChange(of: nav.section) { keepSidebarKeyboard() }
+    }
+
+    /// A section's own field (Agents' search, a chat's composer) can take the keyboard as it shows, which would make ↑/↓
+    /// stop moving between sections after a sidebar click. Takes it back unless a chat was opened from code.
+    private func keepSidebarKeyboard() {
+        guard nav.selection.sidebarKeepsKeyboard, let window = NSApp.keyWindow, !(window.firstResponder is NSText) else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            if nav.selection.sidebarKeepsKeyboard, window.firstResponder is NSText { SidebarKeyboard.take() }
+        }
+    }
+}
+
+/// The sidebar's table: SwiftUI's List leaves the window itself as first responder after a click, and ↑/↓ only move the
+/// selection while the table is.
+enum SidebarKeyboard {
+    @MainActor static func take() {
+        guard let window = NSApp.keyWindow, let root = window.contentView?.superview ?? window.contentView else { return }
+        func sidebar(in view: NSView) -> NSTableView? {
+            if let t = view as? NSTableView, t.accessibilityLabel() == "Sidebar" { return t }
+            for v in view.subviews { if let t = sidebar(in: v) { return t } }
+            return nil
+        }
+        if let table = sidebar(in: root) { window.makeFirstResponder(table) }
     }
 }
 

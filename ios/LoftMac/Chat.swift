@@ -454,7 +454,7 @@ private struct Composer: View {
         .onAppear {
             focused = MacSelection.composerTakesKeyboard(
                 requested: nav.selection.takeComposerRequest(),
-                sidebarHasKeyboard: NSApp.keyWindow?.firstResponder is NSTableView)
+                sidebarHasKeyboard: !(NSApp.keyWindow?.firstResponder is NSText))
         }
         // The same chat opened again from code: it doesn't appear anew.
         // (A chat for another agent is a new view, which asks in onAppear.)

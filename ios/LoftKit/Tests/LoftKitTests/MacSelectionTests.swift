@@ -69,6 +69,15 @@ final class MacSelectionTests: XCTestCase {
         XCTAssertNil(s.chatNote)
     }
 
+    func testOnlyAnOpenedChatTakesTheKeyboardFromTheSidebar() {
+        var s = MacSelection()
+        XCTAssertTrue(s.sidebarKeepsKeyboard)
+        s.openChat()
+        XCTAssertFalse(s.sidebarKeepsKeyboard)
+        s.go(.agents) // a sidebar click
+        XCTAssertTrue(s.sidebarKeepsKeyboard)
+    }
+
     func testComposerKeyboardRule() {
         // Opened from code: the cursor goes to the composer even if the sidebar had the keyboard.
         XCTAssertTrue(MacSelection.composerTakesKeyboard(requested: true, sidebarHasKeyboard: true))
