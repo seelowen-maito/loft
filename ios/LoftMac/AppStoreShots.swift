@@ -23,7 +23,14 @@ enum AppStoreShots {
         }
         guard let window = main else { return NSApp.terminate(nil) }
         window.setFrame(NSRect(origin: window.frame.origin, size: size), display: true)
-        func settle() async { try? await Task.sleep(for: .seconds(2)) }
+        // The window is key in every shot (coloured traffic lights), except under a panel, which takes the keys.
+        func settle(key: Bool = true) async {
+            if key {
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
         func png(_ name: String, over panels: [NSWindow] = []) {
             let out = rep(size)
             NSGraphicsContext.saveGraphicsState()
@@ -65,7 +72,7 @@ enum AppStoreShots {
         quickSearch.model.query = "agent"
         if let panel = NSApp.windows.first(where: { $0 is NSPanel && $0.isVisible }) {
             panel.setFrameTopLeftPoint(NSPoint(x: window.frame.midX - panel.frame.width / 2, y: window.frame.maxY - size.height / 5))
-            await settle()
+            await settle(key: false)
             png("4-quick-search", over: [panel])
         }
         quickSearch.close()
@@ -73,7 +80,7 @@ enum AppStoreShots {
         await showVoicePanel(voicePanel, store: store, fixture: "review")
         if let panel = NSApp.windows.first(where: { $0 is NSPanel && $0.isVisible }) {
             panel.setFrameTopLeftPoint(NSPoint(x: window.frame.midX - panel.frame.width / 2, y: window.frame.maxY - 180))
-            await settle()
+            await settle(key: false)
             png("5-voice-panel", over: [panel])
         }
         voicePanel.close()

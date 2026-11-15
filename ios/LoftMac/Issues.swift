@@ -50,24 +50,29 @@ struct IssuesSection: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             Divider()
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 12) {
-                    if type != .specs {
-                        let issues = SpecViews.boardIssues(store.tasks, deliveries, showClosed: showClosed)
-                        BoardColumn(title: "Issues", count: issues.count, id: "issues") {
-                            ForEach(issues) { IssueCard(task: $0) }
+            // As on the web, the columns share the width, at least 240 pt each; narrower, the board scrolls sideways.
+            let columns = (type != .specs ? 1 : 0) + (type != .issues ? stages.count : 0)
+            GeometryReader { geo in
+                let width = max(240, (geo.size.width - 32 - 12 * CGFloat(columns - 1)) / CGFloat(max(columns, 1)))
+                ScrollView(.horizontal) {
+                    HStack(alignment: .top, spacing: 12) {
+                        if type != .specs {
+                            let issues = SpecViews.boardIssues(store.tasks, deliveries, showClosed: showClosed)
+                            BoardColumn(title: "Issues", count: issues.count, id: "issues", width: width) {
+                                ForEach(issues) { IssueCard(task: $0) }
+                            }
                         }
-                    }
-                    if type != .issues {
-                        ForEach(stages) { stage in
-                            let specs = SpecViews.specs(store.tasks, in: stage, store.deliverySummaries)
-                            BoardColumn(title: stage.label, count: specs.count, id: stage.rawValue, tone: stage.tone) {
-                                ForEach(specs) { SpecCard(spec: $0) }
+                        if type != .issues {
+                            ForEach(stages) { stage in
+                                let specs = SpecViews.specs(store.tasks, in: stage, store.deliverySummaries)
+                                BoardColumn(title: stage.label, count: specs.count, id: stage.rawValue, width: width, tone: stage.tone) {
+                                    ForEach(specs) { SpecCard(spec: $0) }
+                                }
                             }
                         }
                     }
+                    .padding(16)
                 }
-                .padding(16)
             }
             .frame(maxHeight: .infinity)
         }
@@ -82,6 +87,7 @@ private struct BoardColumn<Content: View>: View {
     let title: String
     let count: Int
     let id: String
+    let width: CGFloat
     var tone: Color = WebTheme.fg3
     @ViewBuilder let content: Content
 
@@ -106,7 +112,7 @@ private struct BoardColumn<Content: View>: View {
                 .padding([.horizontal, .bottom], 8)
             }
         }
-        .frame(width: 290)
+        .frame(width: width)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(WebTheme.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: WebTheme.panelRadius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: WebTheme.panelRadius, style: .continuous).strokeBorder(WebTheme.line))

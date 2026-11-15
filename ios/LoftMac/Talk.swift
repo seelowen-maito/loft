@@ -180,25 +180,29 @@ struct VoiceCard: View {
         let shown = TalkRecipients.chips(store.agents, current: current)
         return HStack(spacing: 8) {
             Text("To").foregroundStyle(WebTheme.fg3)
-            ScrollView(.horizontal) {
-                HStack {
-                    if let s = flow.suggested, step == .ready {
-                        Button { flow.pick(s.id) } label: { Label("Send to \(s.name)?", systemImage: "arrow.turn.up.right") }
-                            .buttonStyle(.plain).foregroundStyle(Theme.accent)
-                            .accessibilityIdentifier("talkSuggestion")
-                    }
-                    ForEach(shown) { a in
-                        Button { flow.pick(a.id) } label: {
-                            Text(TalkRecipients.label(a, among: shown)).fontWeight(a.id == current ? .semibold : .regular)
-                                .padding(.horizontal, 10).padding(.vertical, 4)
-                                .background(a.id == current ? Theme.accent.opacity(0.25) : WebTheme.raised, in: Capsule())
+            // As many whole chips as fit, most recent first; the rest are under More.
+            ViewThatFits(in: .horizontal) {
+                ForEach(Array(stride(from: shown.count, through: 0, by: -1)), id: \.self) { k in
+                    HStack {
+                        if let s = flow.suggested, step == .ready {
+                            Button { flow.pick(s.id) } label: { Label("Send to \(s.name)?", systemImage: "arrow.turn.up.right") }
+                                .buttonStyle(.plain).foregroundStyle(Theme.accent)
+                                .accessibilityIdentifier("talkSuggestion")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("talkTo-\(a.name)")
+                        ForEach(shown.prefix(k)) { a in
+                            Button { flow.pick(a.id) } label: {
+                                Text(TalkRecipients.label(a, among: shown)).fontWeight(a.id == current ? .semibold : .regular)
+                                    .padding(.horizontal, 10).padding(.vertical, 4)
+                                    .background(a.id == current ? Theme.accent.opacity(0.25) : WebTheme.raised, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("talkTo-\(a.name)")
+                        }
                     }
+                    .fixedSize()
                 }
             }
-            .scrollIndicators(.hidden)
+            .frame(maxWidth: .infinity, alignment: .leading)
             Button("More") { picking = true }.fixedSize().accessibilityIdentifier("talkMore")
                 .popover(isPresented: $picking) { TalkMore(voice: voice, isPresented: $picking) { flow.pick($0) } }
         }

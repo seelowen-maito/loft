@@ -25,7 +25,7 @@ fi
 
 echo "Drawing the screenshots…"
 # The arguments are read for this launch only, so nothing changes the app's saved settings.
-"$DERIVED/Build/Products/Debug/Loft.app/Contents/MacOS/Loft" -demo -render-app-store "$PWD/$OUT" \
+"$DERIVED/Build/Products/Debug/Loft.app/Contents/MacOS/Loft" -demo -render-app-store "$PWD/$OUT" -fixture-specs \
   -appearance dark -boardType all -boardShowClosed NO -boardShowDropped NO -ApplePersistenceIgnoreState YES > /dev/null 2>&1 &
 pid=$!
 for _ in $(seq 1 90); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done

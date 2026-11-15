@@ -836,6 +836,18 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         if ProcessInfo.processInfo.arguments.contains("-fixture-disk-low") {
             list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.diskLow.utf8)), at: 0)
         }
+        // The demo (and the App Store shots) read like real work, not the redaction and line-limit tests' text.
+        if scripted {
+            for n in list.items.indices {
+                switch list.items[n].id {
+                case "permission:p1": list.items[n].text = "Push the fix\n$ git push origin fix/login-timeout"
+                case "task:dbc521e2-042c-4485-a15d-956c162919ed:failed":
+                    list.items[n].reason = "Failed: the iOS build needs Xcode 27"
+                    list.items[n].text = "The build Mac has Xcode 26. Install Xcode 27 and run it again."
+                default: break
+                }
+            }
+        }
         list.items.removeAll { done.contains($0.id) }
         let seen = locked { needsYouSeen }
         for n in list.items.indices { list.items[n].seen = seen.contains(list.items[n].id) }
