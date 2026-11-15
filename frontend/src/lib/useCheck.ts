@@ -7,8 +7,14 @@ export function afterCheck<T>(prev: Check<T>, r: { ok: T } | { error: unknown })
   return "ok" in r ? { data: r.ok, err: null } : { data: prev.data, err: r.error instanceof Error ? r.error.message : String(r.error) };
 }
 
-/** A check a Settings card runs when it opens and again on its action ("Check again"). `loading` is only the first one. */
-export function useCheck<T>(fn: () => Promise<T>) {
+/** Whether a card shows its skeleton: only while its first, automatic check is out. A manual card has none. */
+export function isLoading(s: Check<unknown>, manual: boolean): boolean {
+  return !manual && s.data === null && s.err === null;
+}
+
+/** A check a Settings card runs when it opens and again on its action ("Check again"). `loading` is only the first one.
+ *  With `manual`, it runs only on the action: for a check that can raise prompts on the Mac. */
+export function useCheck<T>(fn: () => Promise<T>, { manual = false } = {}) {
   const [state, setState] = useState<Check<T>>({ data: null, err: null });
   const [busy, setBusy] = useState(false);
   const latest = useRef(fn);
@@ -25,7 +31,7 @@ export function useCheck<T>(fn: () => Promise<T>) {
     }
   }, []);
   useEffect(() => {
-    run();
-  }, [run]);
-  return { data: state.data, err: state.err, busy, run, loading: state.data === null && state.err === null };
+    if (!manual) run();
+  }, [run, manual]);
+  return { data: state.data, err: state.err, busy, run, loading: isLoading(state, manual) };
 }

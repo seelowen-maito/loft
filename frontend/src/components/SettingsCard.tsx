@@ -40,11 +40,11 @@ export function SettingsCard({ id, title, description, action, error, loading, c
   );
 }
 
-/** A card's "Check again" button. */
-export function CheckButton({ busy, onClick, icon: Icon }: { busy: boolean; onClick: () => void; icon: LucideIcon }) {
+/** A card's "Check again" button; `label` is "Check" for a card that has not checked yet. */
+export function CheckButton({ busy, onClick, icon: Icon, label = "Check again" }: { busy: boolean; onClick: () => void; icon: LucideIcon; label?: string }) {
   return (
     <button type="button" className="btn shrink-0" disabled={busy} onClick={onClick}>
-      <Icon className="size-3.5" /> {busy ? "Checking…" : "Check again"}
+      <Icon className="size-3.5" /> {busy ? "Checking…" : label}
     </button>
   );
 }

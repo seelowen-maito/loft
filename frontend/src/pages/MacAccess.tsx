@@ -13,7 +13,7 @@ const STATE: Record<Check["items"][number]["state"], { text: string; cls: string
 
 /** Settings → Mac access: whether macOS lets Loft's agents into the folders it guards with a prompt. */
 export function MacAccess() {
-  const { data: check, busy, err, run, loading } = useCheck(api.macAccess);
+  const { data: check, busy, err, run, loading } = useCheck(api.macAccess, { manual: true }); // only on the button: checking can raise macOS prompts on the Mac
   const fullDisk = check?.items.find((i) => i.id === "full_disk")?.state === "allowed";
   const needsHelp = check && !fullDisk && check.items.some((i) => i.state === "blocked" || i.state === "waiting");
   return (
@@ -21,7 +21,7 @@ export function MacAccess() {
       id="mac-access"
       title="Mac access"
       description="macOS asks before any app reads Desktop, Documents, Downloads or iCloud Drive. On a Mac with no screen nobody sees it, and an agent waits for an answer. Checking can show those prompts on the Mac, so check while you're at it or on Screen Sharing. Loft also watches macOS's privacy log for prompts in its own name (only those) and tells you in Needs you."
-      action={<CheckButton busy={busy} onClick={run} icon={ShieldCheck} />}
+      action={<CheckButton busy={busy} onClick={run} icon={ShieldCheck} label={check ? "Check again" : "Check"} />}
       error={err}
       loading={loading}
     >
