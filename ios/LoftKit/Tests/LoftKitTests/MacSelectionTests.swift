@@ -78,11 +78,20 @@ final class MacSelectionTests: XCTestCase {
         XCTAssertTrue(s.sidebarKeepsKeyboard)
     }
 
+    func testPickingAnAgentInTheListIsAnOpenedChat() {
+        var s = MacSelection()
+        s.go(.agents) // the sidebar click that showed the list: the sidebar keeps the keyboard
+        XCTAssertTrue(s.sidebarKeepsKeyboard)
+        s.openChat() // a click on an agent, while Agents already shows
+        XCTAssertFalse(s.sidebarKeepsKeyboard)
+        XCTAssertTrue(s.takeComposerRequest())
+    }
+
     func testComposerKeyboardRule() {
         // Opened from code: the cursor goes to the composer even if the sidebar had the keyboard.
-        XCTAssertTrue(MacSelection.composerTakesKeyboard(requested: true, sidebarHasKeyboard: true))
+        XCTAssertTrue(MacSelection.composerTakesKeyboard(requested: true, noTextFieldFocused: true))
         // A sidebar click alone: the sidebar keeps it.
-        XCTAssertFalse(MacSelection.composerTakesKeyboard(requested: false, sidebarHasKeyboard: true))
-        XCTAssertTrue(MacSelection.composerTakesKeyboard(requested: false, sidebarHasKeyboard: false))
+        XCTAssertFalse(MacSelection.composerTakesKeyboard(requested: false, noTextFieldFocused: true))
+        XCTAssertTrue(MacSelection.composerTakesKeyboard(requested: false, noTextFieldFocused: false))
     }
 }

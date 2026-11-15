@@ -370,7 +370,14 @@ enum SidebarKeyboard {
             for v in view.subviews { if let t = sidebar(in: v) { return t } }
             return nil
         }
-        if let table = sidebar(in: root) { window.makeFirstResponder(table) }
+        guard let table = sidebar(in: root) else {
+            #if DEBUG
+            NSLog("SidebarKeyboard: no NSTableView labelled \"Sidebar\" in the window; ↑/↓ will not move between sections")
+            assertionFailure("sidebar table not found")
+            #endif
+            return
+        }
+        window.makeFirstResponder(table)
     }
 }
 

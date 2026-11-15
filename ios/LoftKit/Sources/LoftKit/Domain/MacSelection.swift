@@ -76,7 +76,8 @@ public struct MacSelection: Sendable {
     /// A chat's composer takes the keyboard when the chat shows, unless the sidebar has it (↑/↓ there keep moving
     /// between sections), and always when the chat was opened from code.
     /// - requested: `takeComposerRequest()`.
-    public static func composerTakesKeyboard(requested: Bool, sidebarHasKeyboard: Bool) -> Bool {
-        requested || !sidebarHasKeyboard
+    /// - noTextFieldFocused: no text field has the keyboard: the sidebar (or the window) does, and keeps it.
+    public static func composerTakesKeyboard(requested: Bool, noTextFieldFocused: Bool) -> Bool {
+        requested || !noTextFieldFocused
     }
 }
