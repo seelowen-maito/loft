@@ -38,6 +38,13 @@ struct LoftMacApp: App {
             quickSearch.showWindow?()
             NSApp.activate(ignoringOtherApps: true)
         })
+        #if DEBUG
+        // Opens the window itself: a directly launched app may not open one.
+        if let i = ProcessInfo.processInfo.arguments.firstIndex(of: "-render-app-store"), i + 1 < ProcessInfo.processInfo.arguments.count {
+            let folder = ProcessInfo.processInfo.arguments[i + 1], voicePanel = _voicePanel.wrappedValue
+            Task { await AppStoreShots.render(store: store, nav: nav, quickSearch: quickSearch, voicePanel: voicePanel, to: folder) }
+        }
+        #endif
         MacAppDelegate.openSpotlightItem = { quickSearch.open(spotlightItem: $0) }
         _spotlight = State(initialValue: Self.indexesSpotlight ? MacSpotlight(store: store) : nil)
     }
@@ -305,9 +312,19 @@ struct MainWindow: View {
     @Environment(LoftStore.self) private var store
     @Environment(MacNav.self) private var nav
 
+    /// The App Store screenshots leave the demo's banner and the sections' sidebar out.
+    private static var isAppStoreShot: Bool {
+        #if DEBUG
+        AppStoreShots.isRendering
+        #else
+        false
+        #endif
+    }
+    @State private var columns: NavigationSplitViewVisibility = isAppStoreShot ? .detailOnly : .automatic
+
     var body: some View {
         @Bindable var nav = nav
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             List(selection: $nav.section) {
                 ForEach(MacSection.allCases) { s in
                     Label(s.title, systemImage: s.symbol).accessibilityIdentifier("section-\(s.title)")
@@ -341,7 +358,7 @@ struct MainWindow: View {
                 }
             }
             // Over every section in the demo, under the toolbar.
-            .safeAreaInset(edge: .top, spacing: 0) { if store.isDemo { DemoBanner() } }
+            .safeAreaInset(edge: .top, spacing: 0) { if store.isDemo && !Self.isAppStoreShot { DemoBanner() } }
         }
         // The web's page, cards and text colours behind every section.
         .webPage()

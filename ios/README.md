@@ -221,6 +221,7 @@ It's always signed with your team, even for Debug, because its entitlements need
   ```
 
   `-allowProvisioningUpdates` creates the Mac App Store and installer certificates the first time. Testers install it with Apple's TestFlight app for Mac.
+- *App Store screenshots:* from `ios/`, run `scripts/appstore-mac.sh`. It builds the Mac app (Debug, unsigned, so no team is needed) and has it draw six shots from the demo's sample data, with no network, in the dark theme and without the demo banner: an agent's chat with the agents list, the Issues board, Needs you, quick search over the chat, the voice panel, and Overview. They land in `ios/build/appstore-mac/` as `1-chat.png` … `6-overview.png`, each exactly 2880 × 1800 px (a 1440 × 900 pt window at 2×); the script checks the sizes. To upload, open the Mac app's version in App Store Connect, go to Previews and Screenshots › macOS, and drag the six files in, in order (the first shows first). The window's sidebar of sections is left out because its glass draws blank offscreen. The shots come from `LoftMac/AppStoreShots.swift` (`-demo -render-app-store <folder>`, Debug only).
 - *Icon:* the ten PNGs in `LoftMac/Assets.xcassets/AppIcon.appiconset`, plus `LoftMac/Loft.icns` built from them, which the app ships as its icon file (`CFBundleIconFile`). Xcode 27 writes an `.icns` from the asset catalog without the 256pt and 512pt images, and App Store Connect rejects the upload without them, so the Mac target doesn't ask it to. When you change the PNGs, rebuild `Loft.icns` from `ios/`:
 
   ```sh
