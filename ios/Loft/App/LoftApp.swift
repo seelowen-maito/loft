@@ -213,7 +213,7 @@ struct RootView: View {
                         OverviewView().withRoutes()
                     }
                     .tabItem { Label("Overview", systemImage: "square.grid.2x2") }
-                    .badge(attentionCount)
+                    .badge(store.attentionBadge)
                     .tag(Router.Tab.overview)
 
                     NavigationStack(path: $router.agentsPath) {
@@ -248,12 +248,6 @@ struct RootView: View {
                 }
             }
         }
-    }
-
-    private var attentionCount: Int {
-        store.pendingApprovals().count
-            + store.tasks.filter { $0.state == .failed || $0.state == .blocked }.count
-            + store.agents.filter { store.state(of: $0) == .failed }.count
     }
 }
 
