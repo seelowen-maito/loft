@@ -81,6 +81,11 @@ export function ticketState(t: { state: string; waiting?: string | null; waiting
 
 /* ---------- the board's tickets ---------- */
 
+/** A running ticket's row on the Delivery card: the Dev's own wait in full ("waiting on #12: needs the API endpoint."), else the shared label. */
+export function runningText(t: { state: string; waiting?: string | null; waiting_on?: string[]; waiting_for_ci?: boolean }): string {
+  return t.waiting || ticketState({ state: t.state, waiting_on: t.waiting_on, waiting_for_ci: t.waiting_for_ci }).text;
+}
+
 export type BoardTicket = { key: string; number: number | null; title: string; state: string; taskId: string | null; verdicts: Record<string, string>; current: boolean; agentId: string | null; waiting?: string | null; waiting_on?: string[]; waiting_for_ci?: boolean; waiting_for_lead?: boolean };
 
 /** A spec's tickets: its Delivery's when it has them, else its sub-issues in Loft. Each knows its own issue, to open it. */

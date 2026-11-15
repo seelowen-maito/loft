@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router";
 import { ArrowUp, Check, CloudUpload, Link2, Pause, Pencil, Play, RotateCcw, Trash2, TriangleAlert, UserRoundPlus, X } from "lucide-react";
 import { api, roleLabel, type Agent, type IssueDelivery, type Task } from "../lib/api";
 import { cx } from "../lib/format";
-import { ticketState } from "../lib/specViews";
+import { runningText, ticketState } from "../lib/specViews";
 import { DeliveryWaits, TONE_TEXT } from "./SpecViews";
 import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { isSpec } from "../lib/issueOrder";
@@ -333,7 +333,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
             <li key={x.number} className="flex flex-wrap items-baseline gap-x-2">
               <span className="font-mono text-fg-3">#{x.number}</span>
               <span>{x.title}</span>
-              <span className={TONE_TEXT[ticketState(x).tone]} title={x.waiting ?? undefined}>· {ticketState(x).text} ·</span>
+              <span className={TONE_TEXT[ticketState(x).tone]} >· {runningText(x)} ·</span>
               <Link to={`/agents/${x.agent_id}`} className="text-accent hover:underline">{x.agent_name}</Link>
             </li>
           ))}

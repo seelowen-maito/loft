@@ -41,7 +41,7 @@ export default function TasksPage() {
   const { id: routeId } = useParams();
   const navigate = useNavigate();
   const tasks = useTasks().items;
-  const agentList = useAgents().items;
+  const { items: agentList, failed: agentsFailed } = useAgents();
   const agents = useMemo(() => agentList ?? [], [agentList]);
   // Which projects have a GitHub repo: only their Loft issues can be published there.
   const repoList = useRepos().items;
@@ -185,6 +185,7 @@ export default function TasksPage() {
         </button>
         {tasks && <span className="font-mono text-[11px] text-fg-3">{count}</span>}
       </div>
+      {agentsFailed && <p className="mt-2 text-[12.5px] text-bad">Couldn't load agents.</p>}
     </div>
   );
 
