@@ -54,7 +54,9 @@ export default function ReposPage() {
   };
   const refresh = () =>
     refreshing.run(async () => {
-      await reposList.reload(() => api.repos(true));
+      // Read here, not through the list's reload, which keeps the old list on a failure: run() shows the error.
+      const rs = await api.repos(true);
+      await reposList.reload(async () => rs);
       loadGithub(true);
     });
 
