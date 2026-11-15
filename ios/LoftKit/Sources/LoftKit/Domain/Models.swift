@@ -26,6 +26,15 @@ public struct AgentSchedule: Codable, Hashable, Identifiable {
         return "Every \(every) \(Self.clock(time ?? "", locale: locale))"
     }
 
+    /// The schedule's row: "Every weekday · next Mon Nov 16 8:00 AM". The repeat's time is left out when it is the
+    /// next run's time, which is the usual case, so the row fits on one line.
+    public func rowLabel(locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        let next = Self.nextLabel(nextAt, locale: locale, timeZone: timeZone)
+        guard let every else { return "Once · next \(next)" }
+        let same = Self.clock(time ?? "", locale: locale) == Self.format(nextAt, "jmm", locale: locale, timeZone: timeZone)
+        return "Every \(every)\(same ? "" : " " + Self.clock(time ?? "", locale: locale)) · next \(next)"
+    }
+
     /// "HH:MM" from the server as a time of day in the user's locale ("8:00 AM", "08:00"); as is when unreadable.
     static func clock(_ t: String, locale: Locale) -> String {
         let p = t.split(separator: ":")
@@ -44,10 +53,11 @@ public struct AgentSchedule: Codable, Hashable, Identifiable {
         return f.string(from: d)
     }
 
-    /// A next-run time as "Mon 16 Nov 8:00 AM": the same short shape for a loop and a schedule, built from the
-    /// user's locale pieces (12 or 24 hour, language) without the commas and "at" a full format adds.
+    /// A next-run time as "Mon Nov 16 8:00 AM" (en_US) or "Mon 16 Nov 08:00" (en_GB): the same short shape for a
+    /// loop and a schedule, from the user's locale pieces (day and month order, 12 or 24 hour, language) without
+    /// the commas and "at" a full format adds.
     public static func nextLabel(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
-        ["EEE", "d", "MMM", "jmm"].map { format(date, $0, locale: locale, timeZone: timeZone) }.joined(separator: " ")
+        ["EEE", "MMMd", "jmm"].map { format(date, $0, locale: locale, timeZone: timeZone) }.joined(separator: " ")
     }
 }
 
