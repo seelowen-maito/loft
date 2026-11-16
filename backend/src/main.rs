@@ -216,7 +216,9 @@ async fn serve() -> anyhow::Result<()> {
     let db = db::Db::open(&data_dir.join("loft.db"))?;
     // Agents' workspaces live outside any repo (ADR 0005); an older install's move out of the checkout, before any run.
     let chosen = storage::chosen(&root, &data_dir, storage::data_home)?;
-    let storage_dir = storage::migrate(&root.join(storage::NAME), &chosen, &root, &data_dir, &db, &sessions::claude_dir().join("projects"))?;
+    let settings = settings::Store::load(&data_dir)?;
+    let projects_dir = settings.boot().projects_dir.clone();
+    let (storage_dir, not_moved) = storage::migrate(&root.join(storage::NAME), &chosen, &root, &projects_dir, &data_dir, &db, &sessions::claude_dir().join("projects"))?;
     // The checkout guard trusts only this folder as the agents' workspaces.
     storage::configure(&storage_dir);
     let cfg = Config {
@@ -241,7 +243,7 @@ async fn serve() -> anyhow::Result<()> {
         gh_pace: Arc::new(github::Pace::default()),
         gh_budget: Arc::new(Default::default()),
         update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
-        settings: Arc::new(settings::Store::load(&data_dir)?),
+        settings: Arc::new(settings),
         usage: Arc::new(usage::Cache::default()),
         system: Arc::new(system::Cache::default()),
         grill_locks: Arc::new(grill::Locks::default()),
@@ -252,6 +254,8 @@ async fn serve() -> anyhow::Result<()> {
         xcode: Arc::new(Default::default()),
         needs_you: Arc::new(Default::default()),
     };
+    // Needs you says why, until the move happens.
+    state.rt.lock().unwrap().workspaces_not_moved = not_moved;
     setup::ensure_loft(&state);
     {
         let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();
