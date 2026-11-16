@@ -262,8 +262,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         // GNU coreutils under their Homebrew names (`gmv`, `gln`, `gcp`).
         let tool = name.strip_prefix('g').filter(|n| matches!(*n, "ln" | "mv" | "cp" | "rm" | "install")).unwrap_or(name);
         if matches!(tool, "ln" | "mv" | "cp" | "rm" | "rmdir" | "unlink" | "install" | "rsync" | "ditto") {
-            // Braces or a glob: it may name any folder.
-            if args.iter().zip(live).any(|(a, &l)| hides(a, l)) {
+            // Braces or a glob: it may name any folder. (A removal can't make a link or a `.git`.)
+            if !matches!(tool, "rm" | "rmdir" | "unlink") && args.iter().zip(live).any(|(a, &l)| hides(a, l)) {
                 dirs.dotgit = true;
             }
             // What the command writes into, when it only puts files in a folder (`cp x .`), isn't swapped: skipped when
@@ -384,11 +384,18 @@ fn names_dotgit(words: &[String], targets: &[String]) -> bool {
     words.iter().filter(|w| !w.starts_with("GIT_DIR=") && !w.starts_with("GIT_WORK_TREE=")).chain(targets).any(|w| ends(w) || w.split_once('=').is_some_and(|(_, v)| ends(v)))
 }
 
-/// Whether any of a command's words, redirect targets or input text names GIT_DIR or GIT_WORK_TREE, even through a
-/// name hidden by a glob or an expansion (`GIT_D*`, `${!GIT_*}`).
+/// Whether a command sets, exports, unsets or reads GIT_DIR or GIT_WORK_TREE: a word that starts with the name or
+/// has `NAME=` in it, or whose name (before any `=`) is a glob or an expansion of `GIT_*` (`GIT_D*`, `${!GIT_*}`), even
+/// through quotes. Text a shell runs (`eval`, `sh -c`, a heredoc) counts if it names either at all. A mention in a
+/// message (`'fix GIT_DIR handling'`) or a use of the value (`echo $GIT_DIR`) doesn't.
 fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
-    let hit = |t: &str| t.contains("GIT_DIR") || t.contains("GIT_WORK_TREE") || (t.contains("GIT_") && t.contains(['$', '*', '?', '[', '{']));
-    words.iter().chain(targets).any(|w| hit(w)) || hit(stdin)
+    let named = |t: &str| t.contains("GIT_DIR") || t.contains("GIT_WORK_TREE");
+    let hit = |w: &str| {
+        let name = w.split('=').next().unwrap_or(w);
+        w.starts_with("GIT_DIR") || w.starts_with("GIT_WORK_TREE") || w.contains("GIT_DIR=") || w.contains("GIT_WORK_TREE=") || (name.starts_with("GIT_") && name.contains(['$', '*', '?', '[', '{'])) || name.contains("${!GIT")
+    };
+    let shell = words.iter().any(|w| matches!(base(w), "eval" | "sh" | "bash" | "zsh" | "dash" | "ksh"));
+    words.iter().chain(targets).any(|w| hit(w) || (shell && named(w))) || (shell && named(stdin))
 }
 
 /// The folders one command (not a `cd`, a shell or an `eval`) changes, run in `dirs`.
@@ -2236,6 +2243,12 @@ mod tests {
             format!("env GIT_DIR={o}/.git git reset --hard"),
             format!("export GIT_DIR={o}/.git; unset GIT_DIR; git reset --hard"),
             format!("read GIT_DIR <<< {o}/.git; git reset --hard"),
+            "sh -c 'unset GIT_DIR'; git reset --hard".to_string(),
+            "bash -c 'f=GIT_WORK_TREE; echo $f'; git reset --hard".to_string(),
+            format!("bash <<EOF\nexport GIT_DIR={o}/.git\nEOF\ngit reset --hard"),
+            format!("echo 'export GIT_DIR={o}/.git' | sh; git reset --hard"),
+            "export GIT_DIR; git reset --hard".to_string(),
+            "typeset -x GIT_WORK_TREE; git reset --hard".to_string(),
         ] {
             has(&cmd, &apart, &unknown);
             has(&cmd, &clone, &unknown);
@@ -2251,7 +2264,7 @@ mod tests {
             has(cmd, &clone, &unknown);
         }
         // ln, mv, cp and their GNU names with braces or a glob may name any folder.
-        for cmd in ["ln -s {a,b} t; git reset --hard", "mv lo* old; git -C loft reset --hard", "gmv loft old && gln -s x loft; git -C loft reset --hard", "gln -s {a,b} t; git reset --hard", "gcp -s x . && git add .", "cp x? y; git reset --hard", "rm -rf lo[f]t; git reset --hard"] {
+        for cmd in ["ln -s {a,b} t; git reset --hard", "mv lo* old; git -C loft reset --hard", "gmv loft old && gln -s x loft; git -C loft reset --hard", "gln -s {a,b} t; git reset --hard", "gcp -s x . && git add .", "cp x? y; git reset --hard"] {
             has(cmd, &clone, &unknown);
         }
         assert_eq!(asks_all(&format!("export GIT_DIR={o}/.git; git status"), &at(&apart)), Vec::<PathBuf>::new());
@@ -2302,6 +2315,11 @@ mod tests {
         }
         // What an agent does in its own clone still asks nothing.
         for cmd in [
+            "git commit -m 'fix GIT_DIR handling'",
+            "echo $GIT_DIR && git add .",
+            "GIT_SSH_COMMAND=\"ssh -i $KEY\" git push",
+            "rm -rf lo* && git add .",
+            "rm -f build/*.o; git commit -m x",
             "cp ../x.txt . && git add .",
             "cp -r ../x . && git add .",
             "mv ../x.txt . && git add .",
