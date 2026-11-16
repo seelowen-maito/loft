@@ -38,9 +38,9 @@ pub fn data_home() -> anyhow::Result<PathBuf> {
     xdg.or_else(home).ok_or_else(|| anyhow::anyhow!("no home folder to keep the agents' workspaces in: set HOME"))
 }
 
-/// The storage folder Loft uses: the one recorded in its data folder `data_dir`, else [`dir_for`] `data_home`,
-/// recorded now, so a later start with another `$XDG_DATA_HOME` (launchd's, a shell's) keeps the same one.
-pub fn chosen(root: &Path, data_dir: &Path, data_home: &Path) -> anyhow::Result<PathBuf> {
+/// The storage folder Loft uses: the one recorded in its data folder `data_dir`, else [`dir_for`] `data_home()`,
+/// recorded now, so a later start with another `$XDG_DATA_HOME` (launchd's, a shell's), or none, keeps the same one.
+pub fn chosen(root: &Path, data_dir: &Path, data_home: impl FnOnce() -> anyhow::Result<PathBuf>) -> anyhow::Result<PathBuf> {
     let file = data_dir.join(CHOSEN);
     if let Ok(text) = std::fs::read_to_string(&file) {
         let dir = PathBuf::from(text.trim());
@@ -49,7 +49,7 @@ pub fn chosen(root: &Path, data_dir: &Path, data_home: &Path) -> anyhow::Result<
         }
         tracing::warn!("agents' workspaces: {} doesn't hold a full path; choosing again", file.display());
     }
-    let dir = dir_for(root, data_home);
+    let dir = dir_for(root, &data_home()?);
     std::fs::write(&file, dir.as_os_str().as_bytes())?;
     tracing::info!("agents' workspaces: chose {}", dir.display());
     Ok(dir)
@@ -95,7 +95,9 @@ pub fn migrate(old: &Path, new: &Path, data_dir: &Path, db: &Db, projects: &Path
                 return new.to_path_buf();
             }
             let copy = data_dir.join(DB_COPY);
-            let started = (if copy.exists() { Ok(()) } else { db.copy_to(&copy) }).and_then(|_| Ok(std::fs::write(&marker, old.as_os_str().as_bytes())?));
+            // A copy left by an earlier attempt whose rename failed is older than the database now.
+            let _ = std::fs::remove_file(&copy);
+            let started = db.copy_to(&copy).and_then(|_| Ok(std::fs::write(&marker, old.as_os_str().as_bytes())?));
             if let Err(e) = started {
                 tracing::error!("agents' workspaces: couldn't start moving {} ({e}); Loft keeps using it", old.display());
                 let _ = std::fs::remove_file(&marker);
@@ -387,7 +389,7 @@ mod tests {
     #[test]
     fn a_fresh_install_keeps_workspaces_outside_the_checkout_where_a_missing_clone_finds_no_repository() {
         let (_home, home, root) = home();
-        let storage = chosen(&root, &root.join(".loft"), &home.join(".local/share")).unwrap();
+        let storage = chosen(&root, &root.join(".loft"), || Ok(home.join(".local/share"))).unwrap();
         assert_eq!(storage, dir_for(&root, &home.join(".local/share")));
         assert_eq!(storage.file_name().unwrap(), NAME, "the guard knows a workspace by this name");
         assert!(!storage.starts_with(&root) && !storage.starts_with(home.join("dev")), "{}", storage.display());
@@ -402,8 +404,12 @@ mod tests {
     #[test]
     fn the_chosen_folder_stays_when_the_data_home_changes() {
         let (_home, home, root) = home();
-        let first = chosen(&root, &root.join(".loft"), &home.join(".local/share")).unwrap();
-        assert_eq!(chosen(&root, &root.join(".loft"), &home.join("elsewhere")).unwrap(), first);
+        let no_home = || Err(anyhow::anyhow!("no home"));
+        assert!(chosen(&root, &root.join(".loft"), no_home).is_err(), "nothing to choose from");
+        let first = chosen(&root, &root.join(".loft"), || Ok(home.join(".local/share"))).unwrap();
+        assert_eq!(chosen(&root, &root.join(".loft"), || Ok(home.join("elsewhere"))).unwrap(), first);
+        // A start with no home folder still finds the recorded one.
+        assert_eq!(chosen(&root, &root.join(".loft"), no_home).unwrap(), first);
     }
 
     #[test]
@@ -491,5 +497,14 @@ mod tests {
         assert!(o.old_dir().join("agent-1/notes").is_dir() && !new.exists());
         assert_eq!(o.rows(), rows);
         assert!(!o.data().join(MARKER).exists(), "the next start tries again from the start");
+
+        // It does, once the way is clear, with a copy of the database as it is then.
+        o.db.conn().execute("UPDATE memories SET content = content || ' (later)'", []).unwrap();
+        std::fs::remove_file(o.home.join("blocked")).unwrap();
+        std::fs::create_dir_all(o.home.join("blocked")).unwrap();
+        assert_eq!(migrate(&o.old_dir(), &new, &o.data(), &o.db, &o.projects()), new);
+        let before = Db::open(&o.data().join(DB_COPY)).unwrap();
+        let kept: String = before.conn().query_row("SELECT content FROM memories", [], |r| r.get(0)).unwrap();
+        assert!(kept.ends_with(" (later)") && kept.contains(&o.old_dir().display().to_string()), "{kept}");
     }
 }
