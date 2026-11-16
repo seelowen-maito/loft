@@ -156,8 +156,8 @@ pub fn migrate(old: &Path, new: &Path, root: &Path, projects_dir: &Path, data_di
 
 /// Why `new` (`<data home>/loft/<checkout>/agent-local-storage`) isn't a safe place for the workspaces, if it isn't:
 /// it, its parent or `<data home>/loft` is a symlink (an agent could have planted one), or its real path is in Loft's
-/// checkout `root`, in the projects folder `projects_dir` (unless that is the home folder or above it, which holds
-/// the data folder by design) or in a git work tree. Makes `<data home>/loft` and the folder for this checkout,
+/// checkout `root` or in the projects folder `projects_dir` (unless that is the home folder or above it, which holds
+/// the data folder by design). A git work tree around it only gets a warning. Makes `<data home>/loft` and the folder for this checkout,
 /// owner-only.
 fn safe_destination(new: &Path, root: &Path, projects_dir: &Path) -> Result<(), String> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -184,36 +184,17 @@ fn safe_destination(new: &Path, root: &Path, projects_dir: &Path) -> Result<(), 
     if real.starts_with(&projects_dir) && !home.is_some_and(|h| h.starts_with(&projects_dir)) {
         return Err(format!("{} is inside the projects folder", real.display()));
     }
+    // A home folder kept in git (dotfiles) is fine: GIT_CEILING_DIRECTORIES stops agents' git below it.
     if let Some(repo) = real.ancestors().find(|a| a.join(".git").exists()) {
-        return Err(format!("{} is inside the git work tree at {}", real.display(), repo.display()));
+        tracing::warn!("agents' workspaces: {} is inside the git work tree at {}; agents' git stops at the workspaces (GIT_CEILING_DIRECTORIES)", real.display(), repo.display());
     }
     Ok(())
 }
 
-/// The storage folder Loft uses, as a real path: set on start ([`configure`]); in the checkout guard's hook, read
-/// from the `GIT_CEILING_DIRECTORIES` Loft gives every run.
-static CONFIGURED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-/// Records the storage folder Loft uses, for [`holds`].
-pub fn configure(dir: &Path) {
-    let _ = CONFIGURED.set(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()));
-}
-
-/// Whether the real path `folder` is in the agents' workspaces: inside the storage folder Loft uses, and nowhere else,
-/// whatever its folders are named (the old `<checkout>/agent-local-storage` included). Tests, which set no storage
-/// folder, go by the name.
-pub fn holds(folder: &Path) -> bool {
-    if cfg!(test) {
-        return folder.components().any(|c| c.as_os_str() == NAME);
-    }
-    let from_hook = || {
-        let ceiling = std::env::var_os("GIT_CEILING_DIRECTORIES").and_then(|v| std::env::split_paths(&v).next()).filter(|p| p.is_absolute());
-        ceiling.map(|p| p.canonicalize().unwrap_or(p)).unwrap_or_default()
-    };
-    holds_in(folder, CONFIGURED.get_or_init(from_hook))
-}
-
-fn holds_in(folder: &Path, storage: &Path) -> bool {
+/// Whether the real path `folder` is in the agents' workspaces: inside `storage`, the real path of the storage folder
+/// Loft uses, and nowhere else, whatever its folders are named (the old `<checkout>/agent-local-storage` included).
+/// Nothing is when `storage` isn't a full path.
+pub fn holds_in(folder: &Path, storage: &Path) -> bool {
     storage.is_absolute() && folder.starts_with(storage)
 }
 
@@ -511,7 +492,8 @@ mod tests {
         for command in ["cargo build", "pnpm install", "git checkout main"] {
             let changes = crate::kill_guard::checkout_changes(command, &missing, &[]);
             assert!(!changes.is_empty(), "{command}: the guard still sees the change");
-            assert!(changes.iter().all(|c| crate::kill_guard::in_agent_storage(&c.folder) && !c.folder.starts_with(&root)), "{command}: {changes:?}");
+            let storage = missing.parent().unwrap().parent().unwrap();
+            assert!(changes.iter().all(|c| crate::kill_guard::in_agent_storage(&c.folder, storage) && !c.folder.starts_with(&root)), "{command}: {changes:?}");
         }
         // Where the workspaces used to be, git there (with no ceiling, as through `sh -c`) changed the user's checkout.
         let old = root.join(NAME).join("agent-1/loft");
@@ -608,10 +590,11 @@ mod tests {
         std::fs::create_dir_all(share.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&o.root, &share).unwrap();
         assert_eq!(o.migrate(), o.old_dir());
+        // A home folder kept in git (dotfiles) is no reason to stay: the ceiling covers agents' git.
         let o = Old::make();
         ok(git(&o.home, &["init", "-q"]));
-        assert_eq!(o.migrate(), o.old_dir());
-        assert!(o.old_dir().join("agent-1").is_dir());
+        assert_eq!(o.migrate_why(), (o.new_dir(), None));
+        assert!(o.new_dir().join("agent-1").is_dir());
 
         // A data folder in the projects folder, where agents make repos.
         let o = Old::make();

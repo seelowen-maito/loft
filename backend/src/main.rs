@@ -219,8 +219,6 @@ async fn serve() -> anyhow::Result<()> {
     let settings = settings::Store::load(&data_dir)?;
     let projects_dir = settings.boot().projects_dir.clone();
     let (storage_dir, not_moved) = storage::migrate(&root.join(storage::NAME), &chosen, &root, &projects_dir, &data_dir, &db, &sessions::claude_dir().join("projects"))?;
-    // The checkout guard trusts only this folder as the agents' workspaces.
-    storage::configure(&storage_dir);
     let cfg = Config {
         port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
         root: root.clone(),
