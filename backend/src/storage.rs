@@ -66,8 +66,10 @@ pub fn chosen(root: &Path, data_dir: &Path, data_home: impl FnOnce() -> anyhow::
 /// the folders in them, so sessions resume; each workspace also gets a copy of the checkout's Claude Code memory,
 /// which it shared while inside it. The marker goes once all of them worked.
 ///
-/// A rename that fails keeps `old`. Both folders full with no move under way is left alone, loudly: `new` is used.
-pub fn migrate(old: &Path, new: &Path, data_dir: &Path, db: &Db, projects: &Path) -> PathBuf {
+/// `new` must be a safe place first ([`safe_destination`]). When it isn't, or already holds files with no move under
+/// way, or the rename fails, nothing moves and `old` stays in use, with an error; a fresh install (no `old`) doesn't
+/// start. A symlinked `old` isn't moved either.
+pub fn migrate(old: &Path, new: &Path, root: &Path, data_dir: &Path, db: &Db, projects: &Path) -> anyhow::Result<PathBuf> {
     let marker = data_dir.join(MARKER);
     let old = match std::fs::read(&marker) {
         Ok(path) => {
@@ -77,22 +79,29 @@ pub fn migrate(old: &Path, new: &Path, data_dir: &Path, db: &Db, projects: &Path
         }
         Err(_) => {
             if !old.is_dir() {
-                return new.to_path_buf();
+                // A fresh install, or the move is done.
+                safe_destination(new, root).map_err(|why| anyhow::anyhow!("agents' workspaces can't be in {}: {why}", new.display()))?;
+                return Ok(new.to_path_buf());
             }
             if old.is_symlink() {
                 tracing::error!("agents' workspaces: {} is a symlink, so it isn't moved; Loft keeps using it", old.display());
-                return old.to_path_buf();
+                return Ok(old.to_path_buf());
+            }
+            if let Err(why) = safe_destination(new, root) {
+                tracing::error!("agents' workspaces: not moving {} to {}: {why}. Loft keeps using {}", old.display(), new.display(), old.display());
+                return Ok(old.to_path_buf());
             }
             // An empty `new` (an earlier start made it) is no reason not to move.
             if new.exists() && std::fs::remove_dir(new).is_err() {
                 tracing::error!(
-                    "agents' workspaces: both {} and {} hold files, and no move is under way. Loft uses {} and moves nothing; \
-                     the old folder is left as it is: move what you need from it by hand, then delete it",
+                    "agents' workspaces: not moving {} to {}: it already holds files, and no move is under way. Loft keeps \
+                     using {}; look at what is in {} and delete it, and the next start moves the workspaces",
                     old.display(),
                     new.display(),
+                    old.display(),
                     new.display()
                 );
-                return new.to_path_buf();
+                return Ok(old.to_path_buf());
             }
             let copy = data_dir.join(DB_COPY);
             // A copy left by an earlier attempt whose rename failed is older than the database now.
@@ -101,21 +110,22 @@ pub fn migrate(old: &Path, new: &Path, data_dir: &Path, db: &Db, projects: &Path
             if let Err(e) = started {
                 tracing::error!("agents' workspaces: couldn't start moving {} ({e}); Loft keeps using it", old.display());
                 let _ = std::fs::remove_file(&marker);
-                return old.to_path_buf();
+                return Ok(old.to_path_buf());
             }
             old.to_path_buf()
         }
     };
     if old.is_dir() {
-        let moved = if new.exists() {
-            Err(std::io::Error::other(format!("{} is there too", new.display())))
-        } else {
-            std::fs::create_dir_all(new.parent().unwrap_or(new)).and_then(|_| std::fs::rename(&old, new))
+        // Checked again: this may be a later start, finishing a move a crash stopped before the rename.
+        let moved = match safe_destination(new, root) {
+            Err(why) => Err(why),
+            Ok(()) if new.exists() => Err(format!("{} is there too", new.display())),
+            Ok(()) => std::fs::rename(&old, new).map_err(|e| e.to_string()),
         };
         if let Err(e) = moved {
             tracing::error!("agents' workspaces: couldn't move {} to {}: {e}. Loft keeps using {}", old.display(), new.display(), old.display());
             let _ = std::fs::remove_file(&marker);
-            return old;
+            return Ok(old);
         }
         tracing::info!("agents' workspaces: moved {} to {}", old.display(), new.display());
     }
@@ -149,11 +159,70 @@ pub fn migrate(old: &Path, new: &Path, data_dir: &Path, db: &Db, projects: &Path
     } else if !ok {
         tracing::error!("agents' workspaces: the move to {} isn't finished; Loft tries the rest again on its next start", new.display());
     }
-    new.to_path_buf()
+    Ok(new.to_path_buf())
+}
+
+/// Why `new` (`<data home>/loft/<checkout>/agent-local-storage`) isn't a safe place for the workspaces, if it isn't:
+/// it, its parent or `<data home>/loft` is a symlink (an agent could have planted one), or its real path is in Loft's
+/// checkout `root` or in a git work tree. Makes `<data home>/loft` and the folder for this checkout, owner-only.
+fn safe_destination(new: &Path, root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let key = new.parent().ok_or("it has no parent folder")?;
+    let loft = key.parent().ok_or("it has no parent folder")?;
+    for p in [loft, key, new] {
+        if p.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("{} is a symlink", p.display()));
+        }
+    }
+    let made = std::fs::create_dir_all(loft.parent().unwrap_or(loft)).and_then(|_| std::fs::DirBuilder::new().recursive(true).mode(0o700).create(key));
+    made.map_err(|e| format!("couldn't make {}: {e}", key.display()))?;
+    for p in [loft, key] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("couldn't make {} owner-only: {e}", p.display()))?;
+    }
+    // Links anywhere above count: the real path decides.
+    let real = key.canonicalize().map_err(|e| format!("couldn't resolve {}: {e}", key.display()))?;
+    if real.starts_with(root.canonicalize().unwrap_or_else(|_| root.to_path_buf())) {
+        return Err(format!("{} is inside Loft's checkout", real.display()));
+    }
+    if let Some(repo) = real.ancestors().find(|a| a.join(".git").exists()) {
+        return Err(format!("{} is inside the git work tree at {}", real.display(), repo.display()));
+    }
+    Ok(())
+}
+
+/// The storage folder Loft uses, as a real path: set on start ([`configure`]); in the checkout guard's hook, read
+/// from the `GIT_CEILING_DIRECTORIES` Loft gives every run.
+static CONFIGURED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Records the storage folder Loft uses, for [`holds`].
+pub fn configure(dir: &Path) {
+    let _ = CONFIGURED.set(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()));
+}
+
+/// Whether the real path `folder` is in the agents' workspaces: inside the storage folder Loft uses, and nowhere else,
+/// whatever its folders are named (the old `<checkout>/agent-local-storage` included). Tests, which set no storage
+/// folder, go by the name.
+pub fn holds(folder: &Path) -> bool {
+    if cfg!(test) {
+        return folder.components().any(|c| c.as_os_str() == NAME);
+    }
+    let from_hook = || {
+        let ceiling = std::env::var_os("GIT_CEILING_DIRECTORIES").and_then(|v| std::env::split_paths(&v).next()).filter(|p| p.is_absolute());
+        ceiling.map(|p| p.canonicalize().unwrap_or(p)).unwrap_or_default()
+    };
+    holds_in(folder, CONFIGURED.get_or_init(from_hook))
+}
+
+fn holds_in(folder: &Path, storage: &Path) -> bool {
+    storage.is_absolute() && folder.starts_with(storage)
 }
 
 /// Replaces `from` with `to` in `file` when it holds it. False when it couldn't.
 fn rewrite(file: &Path, from: &str, to: &str) -> bool {
+    // Never through a symlink: it may lead anywhere.
+    if !file.symlink_metadata().is_ok_and(|m| m.file_type().is_file()) {
+        return true;
+    }
     let Ok(text) = std::fs::read_to_string(file) else { return true };
     if !text.contains(from) {
         return true;
@@ -220,14 +289,24 @@ fn rewrite_files(dir: &Path, from: &str, to: &str, depth: usize) -> bool {
     ok
 }
 
-/// Renames Claude Code's transcript folders of `old` and every folder in it to the same under `new`.
+/// Renames Claude Code's transcript folders of the workspaces in `new` and every folder in them, made while they
+/// were in `old`, to the same under `new`. A sibling of `old` (`agent-local-storage-old`) isn't one.
 fn move_transcripts(projects: &Path, old: &Path, new: &Path) -> bool {
     let name = |p: &Path| crate::sessions::transcripts_dir_in(projects, p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let (from, to) = (name(old), name(new));
+    let encode = |s: &str| -> String { s.chars().flat_map(|c| if c.is_ascii_alphanumeric() { vec![c] } else { vec!['-'; c.len_utf16()] }).collect() };
+    let workspaces: Vec<String> = std::fs::read_dir(new)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().as_bytes().starts_with(b"."))
+        .map(|e| format!("-{}", encode(&e.file_name().to_string_lossy())))
+        .collect();
     let mut ok = true;
     for entry in std::fs::read_dir(projects).into_iter().flatten().flatten() {
         let was = entry.file_name().to_string_lossy().into_owned();
-        let Some(rest) = was.strip_prefix(&from).filter(|r| r.is_empty() || r.starts_with('-')) else { continue };
+        let in_workspace = |r: &&str| workspaces.iter().any(|w| r.strip_prefix(w.as_str()).is_some_and(|after| after.is_empty() || after.starts_with('-')));
+        let Some(rest) = was.strip_prefix(&from).filter(in_workspace) else { continue };
         let now = format!("{to}{rest}");
         // Claude Code cuts longer names and adds a hash, which can't be made from the name alone.
         if now.len() > 200 {
@@ -326,6 +405,8 @@ mod tests {
                 std::fs::create_dir_all(&t).unwrap();
                 std::fs::write(t.join("s1.jsonl"), "{}").unwrap();
             }
+            // A sibling of the storage folder, not a workspace.
+            std::fs::create_dir_all(crate::sessions::transcripts_dir_in(&projects, &root.join(format!("{NAME}-old")))).unwrap();
             let memory = crate::sessions::transcripts_dir_in(&projects, &root).join("memory");
             std::fs::create_dir_all(&memory).unwrap();
             std::fs::write(memory.join("MEMORY.md"), format!("- clone at {}/loft", ws.display())).unwrap();
@@ -353,7 +434,7 @@ mod tests {
         }
 
         fn migrate(&self) -> PathBuf {
-            migrate(&self.old_dir(), &self.new_dir(), &self.data(), &self.db, &self.projects())
+            migrate(&self.old_dir(), &self.new_dir(), &self.root, &self.data(), &self.db, &self.projects()).unwrap()
         }
 
         fn rows(&self) -> (String, String) {
@@ -380,6 +461,11 @@ mod tests {
             let memory = crate::sessions::transcripts_dir_in(&self.projects(), &ws).join("memory/MEMORY.md");
             assert_eq!(std::fs::read_to_string(memory).unwrap(), format!("- clone at {clone}"));
             assert!(!self.data().join(MARKER).exists(), "the move is done");
+            assert!(crate::sessions::transcripts_dir_in(&self.projects(), &self.root.join(format!("{NAME}-old"))).is_dir(), "not a workspace's");
+            use std::os::unix::fs::PermissionsExt;
+            for dir in [self.new_dir().parent().unwrap(), self.new_dir().parent().unwrap().parent().unwrap()] {
+                assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700, "{}", dir.display());
+            }
             let before = Db::open(&self.data().join(DB_COPY)).unwrap();
             let kept: String = before.conn().query_row("SELECT content FROM memories", [], |r| r.get(0)).unwrap();
             assert!(kept.contains(&self.old_dir().display().to_string()), "the copy is from before: {kept}");
@@ -451,7 +537,7 @@ mod tests {
         let o = Old::make();
         o.db.copy_to(&o.data().join(DB_COPY)).unwrap();
         std::fs::write(o.data().join(MARKER), o.old_dir().as_os_str().as_bytes()).unwrap();
-        std::fs::create_dir_all(o.new_dir().parent().unwrap()).unwrap();
+        safe_destination(&o.new_dir(), &o.root).unwrap();
         std::fs::rename(o.old_dir(), o.new_dir()).unwrap();
         assert_eq!(o.migrate(), o.new_dir());
         o.assert_moved();
@@ -475,7 +561,7 @@ mod tests {
         let o = Old::make();
         std::fs::create_dir_all(o.new_dir().join("agent-2")).unwrap();
         let rows = o.rows();
-        assert_eq!(o.migrate(), o.new_dir());
+        assert_eq!(o.migrate(), o.old_dir(), "the folders the database names stay in use");
         assert!(o.old_dir().join("agent-1/notes/plan.md").exists() && !o.new_dir().join("agent-1").exists());
         assert_eq!(o.rows(), rows, "the database still names what is still there");
         assert!(!o.data().join(MARKER).exists() && !o.data().join(DB_COPY).exists());
@@ -487,13 +573,69 @@ mod tests {
     }
 
     #[test]
+    fn a_planted_destination_moves_nothing() {
+        // The destination is a link to a folder an agent made.
+        let o = Old::make();
+        let elsewhere = o.home.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(o.new_dir().parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, o.new_dir()).unwrap();
+        let rows = o.rows();
+        assert_eq!(o.migrate(), o.old_dir());
+        assert!(o.old_dir().join("agent-1/notes/plan.md").exists() && std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+        assert_eq!(o.rows(), rows);
+        assert!(!o.data().join(MARKER).exists());
+
+        // `<data home>/loft` leads back into the checkout.
+        let o = Old::make();
+        let loft = o.new_dir().parent().unwrap().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(loft.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(o.root.join("inside")).unwrap();
+        std::os::unix::fs::symlink(o.root.join("inside"), &loft).unwrap();
+        assert_eq!(o.migrate(), o.old_dir());
+        assert!(o.old_dir().join("agent-1").is_dir() && std::fs::read_dir(o.root.join("inside")).unwrap().next().is_none());
+
+        // A link above it, or a git repository around it, counts by the real path.
+        let o = Old::make();
+        let share = o.new_dir().parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(share.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&o.root, &share).unwrap();
+        assert_eq!(o.migrate(), o.old_dir());
+        let o = Old::make();
+        ok(git(&o.home, &["init", "-q"]));
+        assert_eq!(o.migrate(), o.old_dir());
+        assert!(o.old_dir().join("agent-1").is_dir());
+
+        // A fresh install doesn't start on a planted destination.
+        let (_home, home, root) = home();
+        let new = dir_for(&root, &home.join(".local/share"));
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&root, &new).unwrap();
+        let db = Db::open(&root.join(".loft/loft.db")).unwrap();
+        let refused = migrate(&root.join(NAME), &new, &root, &root.join(".loft"), &db, &home.join(".claude/projects"));
+        assert!(refused.is_err_and(|e| e.to_string().contains("symlink")));
+    }
+
+    #[test]
+    fn only_the_configured_storage_folder_holds_workspaces() {
+        let storage = Path::new("/data/loft/loft-1a2b3c4d/agent-local-storage");
+        assert!(holds_in(&storage.join("agent-1/loft"), storage));
+        assert!(holds_in(storage, storage));
+        // The old folder, or any other of that name, isn't trusted.
+        assert!(!holds_in(Path::new("/Users/me/dev/loft/agent-local-storage/agent-1"), storage));
+        assert!(!holds_in(Path::new("/tmp/agent-local-storage/x"), storage));
+        // Nothing is trusted when Loft named no folder.
+        assert!(!holds_in(&storage.join("agent-1"), Path::new("")));
+    }
+
+    #[test]
     fn a_failed_move_keeps_loft_working_from_the_old_folder() {
         let o = Old::make();
         // The data folder can't be made: a file is in its way.
         std::fs::write(o.home.join("blocked"), "").unwrap();
         let new = dir_for(&o.root, &o.home.join("blocked"));
         let rows = o.rows();
-        assert_eq!(migrate(&o.old_dir(), &new, &o.data(), &o.db, &o.projects()), o.old_dir());
+        assert_eq!(migrate(&o.old_dir(), &new, &o.root, &o.data(), &o.db, &o.projects()).unwrap(), o.old_dir());
         assert!(o.old_dir().join("agent-1/notes").is_dir() && !new.exists());
         assert_eq!(o.rows(), rows);
         assert!(!o.data().join(MARKER).exists(), "the next start tries again from the start");
@@ -502,7 +644,7 @@ mod tests {
         o.db.conn().execute("UPDATE memories SET content = content || ' (later)'", []).unwrap();
         std::fs::remove_file(o.home.join("blocked")).unwrap();
         std::fs::create_dir_all(o.home.join("blocked")).unwrap();
-        assert_eq!(migrate(&o.old_dir(), &new, &o.data(), &o.db, &o.projects()), new);
+        assert_eq!(migrate(&o.old_dir(), &new, &o.root, &o.data(), &o.db, &o.projects()).unwrap(), new);
         let before = Db::open(&o.data().join(DB_COPY)).unwrap();
         let kept: String = before.conn().query_row("SELECT content FROM memories", [], |r| r.get(0)).unwrap();
         assert!(kept.ends_with(" (later)") && kept.contains(&o.old_dir().display().to_string()), "{kept}");

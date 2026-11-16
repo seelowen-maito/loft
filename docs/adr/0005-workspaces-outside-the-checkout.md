@@ -16,8 +16,8 @@ Workspaces live outside any repository and outside the projects folder: `$XDG_DA
   1. the database is copied to `.loft/loft.db.before-0005` (replacing one an earlier failed attempt left), and a marker, `.loft/moving-workspaces`, records the old path;
   2. the old folder is renamed to the new one. If that fails (another volume, no permission), the marker goes, an error is logged and Loft keeps using the old folder. There is no copy fallback;
   3. while the marker is there, every start runs these steps, each safe to repeat: every text value in the database that names the old path names the new one (one transaction: chats, memories, tasks, ...); git links are repointed (a worktree's or submodule's `.git` file, `.git/config`, worktrees' `gitdir`, submodules' configs with `core.worktree`); small text files in the workspaces outside clones (`notes/` and the like) are rewritten; Claude Code's transcript folders of the workspaces and every folder in them move, so sessions resume; each workspace gets a copy of the checkout's Claude Code memory (which it shared while inside the checkout), with its paths rewritten. The marker goes once all of them worked, so a crash or a failed step is finished on the next start.
-- **Both folders full with no move under way** (an older build run again after the move): Loft logs an error, uses the new folder and moves nothing; the old one is left for the user to sort out.
-- **The guard stays as strict as before**: nothing in kill_guard.rs changes. `GIT_CEILING_DIRECTORIES` stays, for a home folder kept in git.
+- **Only a safe destination**: agents can write in the data folder unasked, so before a move (and on every start without one) `<data home>/loft`, the checkout's folder in it and the destination must not be symlinks, and the destination's real path must not be in Loft's checkout or any git work tree. `<data home>/loft` and the checkout's folder are made owner-only (0700). An unsafe destination, or one that already holds files with no move under way, moves nothing: Loft logs an error and keeps the old folder. A fresh install with an unsafe destination doesn't start, and neither does a home folder kept in git.
+- **The guard trusts only the storage folder Loft uses**: `in_agent_storage` (kill_guard.rs) checks the real path against it (set on start; in the hook, read from the run's `GIT_CEILING_DIRECTORIES`), so a folder that is merely named `agent-local-storage`, such as the old one, isn't trusted. Otherwise the guard's rules are unchanged. `GIT_CEILING_DIRECTORIES` stays, for git itself.
 
 ## Not migrated
 Agents see the old path in these; most rebuild or go on their own:
@@ -26,6 +26,7 @@ Agents see the old path in these; most rebuild or go on their own:
 - Text inside Claude Code transcripts (each message's `cwd`), and transcript folders whose new name would pass 200 characters (Claude Code cuts and hashes those).
 - Processes still running from before the restart (an idle agent's dev server): they keep working, since a rename on one volume keeps their open files, but their environment and printed paths are old, and a `cd <old path>` fails.
 - The checkout's own Claude Code memory is copied, not moved: the user's sessions in the checkout keep theirs.
+- `.loft/loft.db.before-0005` is kept; delete it once the move looks right.
 
 ## Consequences
 - A missing clone in a workspace finds no repository above it, so the guard has nothing to ask about.

@@ -486,9 +486,10 @@ fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Whether `folder` is in an agent's workspace: under a folder named `agent-local-storage`.
+/// Whether `folder` is in an agent's workspace: under the storage folder Loft uses (storage.rs), not any folder named
+/// `agent-local-storage`.
 pub fn in_agent_storage(folder: &Path) -> bool {
-    folder.components().any(|c| c.as_os_str() == "agent-local-storage")
+    crate::storage::holds(folder)
 }
 
 /// What a piece of shell text, or one simple command in it, does that the guard cares about.
