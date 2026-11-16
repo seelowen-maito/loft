@@ -59,6 +59,11 @@ fi
 derived="${DERIVED_DATA:-build}"
 if [[ "${suites[*]}" == LoftMacUITests/* ]]; then
   dest="platform=macOS" scheme=LoftMac
+  # Without Automation Mode every Mac UI test hangs on its first query until the time limit (it turns off on restarts).
+  if automationmodetool 2>/dev/null | grep -q "is disabled"; then
+    echo "Automation Mode is off; turn it on with: sudo automationmodetool enable-automationmode-without-authentication" >&2
+    exit 1
+  fi
 else
   sim="${SIMULATOR:-$(xcrun simctl list devices booted | grep -m1 -E 'iPhone' | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/' || true)}"
   if [[ -z "$sim" ]]; then echo "No booted iPhone Simulator; boot one or set SIMULATOR." >&2; exit 1; fi
@@ -137,10 +142,12 @@ for suite in "${suites[@]}"; do
     # Stopped (or exited badly) after the tests ran: their own result line decides.
     grep -qE "^Test Suite '(All|Selected) tests' passed" "$log" && suite_status=0 || suite_status=1
   fi
+  # A test that times out restarts the runner, and the restarted run can print "passed" having run nothing.
+  if grep -qE "exceeded execution time allowance|^Failing tests:|\*\* TEST EXECUTE FAILED \*\*" "$log"; then suite_status=1; fi
   took=$(( $(date +%s) - s ))
   timings "$log"
   if [[ $suite_status -ne 0 ]]; then
-    grep -E "error: |Test Case .* failed|timed out|\*\* TEST" "$log" | head -40 || true
+    grep -E "error: |Test Case .* failed|timed out|exceeded execution time allowance|\*\* TEST" "$log" | head -40 || true
     echo "▸ $suite FAILED in ${took}s"
     status=$suite_status
     break  # UI tests only run once the unit tests pass.
