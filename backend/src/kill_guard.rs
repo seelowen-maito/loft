@@ -138,6 +138,10 @@ struct Dirs {
     /// What earlier `ln`, `mv`, `cp`, `rm` and the like of this command name, as written and with links followed: a folder
     /// among them (or below one) may be swapped for a link before git runs.
     touched: Vec<PathBuf>,
+    /// An earlier `ln`, `mv`, `cp` or `rm` names a path the guard can't tell (`"$LOCK"`).
+    unreadable: bool,
+    /// The shell has `cd`'d (or `pushd`/`popd`'d) since the command began.
+    moved: bool,
     /// GIT_DIR and GIT_WORK_TREE as the shell has them (`export GIT_DIR=x`, `GIT_DIR=x;`), resolved where they were set.
     env_git_dir: Option<Option<PathBuf>>,
     env_tree: Option<Option<PathBuf>>,
@@ -177,6 +181,7 @@ impl Dirs {
     fn keep_made(&mut self, inner: &Dirs) {
         self.made |= inner.made;
         self.dotgit |= inner.dotgit;
+        self.unreadable |= inner.unreadable;
         self.touched.extend(inner.touched.iter().cloned());
     }
 
@@ -275,10 +280,22 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             _ => {}
         }
         if matches!(name, "ln" | "mv" | "cp" | "rm" | "rmdir" | "unlink" | "install" | "rsync" | "ditto") {
-            for a in args.iter().filter(|a| !a.starts_with('-')) {
+            // What the command writes into, when it only puts files in a folder (`cp x .`), isn't swapped: skipped when
+            // it can't make a link or a `.git` there. Anything else it names may be.
+            let copies = matches!(name, "mv" | "cp" | "install" | "rsync" | "ditto");
+            let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+            let dest = args.iter().position(|a| a == "-t" || a == "--target-directory").and_then(|i| args.get(i + 1)).or_else(|| args.iter().find_map(|a| a.strip_prefix("--target-directory=").map(|_| a))).or(paths.last().copied().filter(|_| copies));
+            let links = args.iter().any(|a| {
+                let long = a.starts_with("--");
+                (long && a.contains("link")) || (!long && a.starts_with('-') && a.chars().any(|c| if name == "rsync" { matches!(c, 'l' | 'a') } else { matches!(c, 's' | 'l') }))
+            });
+            let git = paths.iter().any(|p| Path::new(p).file_name().is_some_and(|n| n == ".git"));
+            let here = |p: &Path| dirs.cwd.as_ref().is_some_and(|c| c.starts_with(p));
+            for a in paths {
                 match dirs.at_text(a) {
+                    Some(p) if copies && !links && !git && dest.is_some_and(|d| d == a) && here(&p) => {}
                     Some(p) => dirs.touched.extend([real(p.clone()), p]),
-                    None => dirs.dotgit = true, // a path the guard can't tell
+                    None => dirs.unreadable = true,
                 }
             }
         }
@@ -287,6 +304,9 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             if name != "git" {
                 dirs.dotgit |= words.iter().filter(|w| assignment(w).is_none()).chain(&cmds[i].targets).any(|w| Path::new(w).file_name().is_some_and(|n| n == ".git"));
             }
+        }
+        if matches!(name, "cd" | "pushd" | "popd") {
+            dirs.moved = true;
         }
         let folders = match name {
             "cd" => {
@@ -505,6 +525,7 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
     let Some(args) = expand_args(args, live) else { return unknown_in(&dirs, None) };
     let hid = |k: usize| args.get(k).is_some_and(|(w, live)| hides(w, *live));
     let mut i = 0;
+    let mut dir_options = false;
     let sub = loop {
         let Some((a, _)) = args.get(i) else { return vec![] };
         i += 1;
@@ -521,6 +542,7 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         };
         match a {
             "-C" => {
+                dir_options = true;
                 let to = next();
                 dirs.cwd = to;
             }
@@ -581,7 +603,9 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         let start = outer.start.clone().map(real);
         let near = start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd) || start.is_some_and(|s| cwd.starts_with(s)));
         let touched = dirs.touched.iter().any(|t| cwd.starts_with(t) || dirs.cwd.as_ref().is_some_and(|c| c.starts_with(t)));
-        if dirs.dotgit || touched || (dirs.made && near && !cwd.exists()) {
+        // A path the guard couldn't read matters only when git doesn't simply run where the command started.
+        let unreadable = dirs.unreadable && (dirs.moved || dir_options || tree.is_some() || git_dir.is_some());
+        if dirs.dotgit || touched || unreadable || (dirs.made && near && !cwd.exists()) {
             return unknown_in(&dirs, None);
         }
     }
@@ -2218,11 +2242,25 @@ mod tests {
             format!("cd loft && mv ../loft ../old && ln -s {o} ../loft && git reset --hard"),
             format!("cp -r {o} loft && git -C loft checkout main"),
             "mv \"$a\" \"$b\"; git -C loft reset --hard".to_string(),
+            "rm -f \"$LOCK\" && git -C . add .".to_string(),
+            "rm -f \"$LOCK\"; cd loft && git add .".to_string(),
+            "rm -f \"$LOCK\"; git --work-tree=. add .".to_string(),
         ] {
             has(&cmd, &ws, &unknown);
         }
+        // Copying into the folder git runs in asks only when it could bring a link or a `.git`.
+        for cmd in [format!("cp -rs {o}/.git . && git reset --hard"), format!("cp -r {o}/.git . && git reset --hard"), format!("cp -r {o}/.git ../loft && git reset --hard"), "ln -s x . && git add .".to_string(), "rsync -a src/ . && git add .".to_string(), "cp --symbolic-link x . && git add .".to_string(), "cp -l x . && git add .".to_string()] {
+            has(&cmd, &clone, &unknown);
+        }
         // What an agent does in its own clone still asks nothing.
         for cmd in [
+            "cp ../x.txt . && git add .",
+            "cp -r ../x . && git add .",
+            "mv ../x.txt . && git add .",
+            "install -m 644 ../x.txt . && git add .",
+            "cp -t . ../x.txt && git add .",
+            "rm -f \"$LOCK\" && git add .",
+            "rm -f \"$LOCK\"; git commit -m x",
             "rm -f .git/index.lock && git add .",
             "mv notes.txt old.txt && git add .",
             "cp ../x.txt notes.txt && git -C . commit -m x",
