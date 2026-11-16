@@ -464,12 +464,7 @@ fn dir_word(args: &[String]) -> (bool, Option<usize>) {
         if a.len() < 2 || !a.starts_with('-') || stack_entry(a) {
             return (physical, Some(i));
         }
-        for c in a.chars().skip(1) {
-            match c {
-                'P' => physical = true,
-                _ => {}
-            }
-        }
+        physical |= a.contains('P');
     }
     (physical, None)
 }
