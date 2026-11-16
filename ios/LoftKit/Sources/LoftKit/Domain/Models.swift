@@ -435,6 +435,8 @@ public enum ServerFeature: String {
     case agentDevices = "agent_devices"
     /// Settings › Disk lists what an idle agent left running, with Stop them; an agent is busy only in a run.
     case leftProcesses = "left_processes"
+    /// A message can reply to an earlier one in the chat (spec #572).
+    case reply
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.

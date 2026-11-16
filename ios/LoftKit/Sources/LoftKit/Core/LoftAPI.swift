@@ -8,7 +8,7 @@ public protocol LoftAPI: Sendable {
     func agents() async throws -> [Agent]
     func messages(agentId: String, limit: Int, before: Int64?) async throws -> [ChatMessage]
     func sendMessage(agentId: String, text: String, clientId: String) async throws -> SendMessageResponse
-    /// `meta` carries only what the server accepts from clients (today `grill`).
+    /// `meta` carries only what the server accepts from clients (`grill`, `task_id`, and `reply_to`, sent as its own field).
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?) async throws -> SendMessageResponse
     /// A message with uploads (`images`: names from `upload`).
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse
@@ -263,6 +263,8 @@ public struct LiveLoftAPI: LoftAPI {
     public func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
         var body: [String: JSONValue] = ["text": .string(text), "client_id": .string(clientId)]
         if let meta { body["meta"] = meta }
+        // A reply (spec #572): the quoted message's id goes up as `reply_to`, not inside meta.
+        if let r = meta?["reply_to"] { body["reply_to"] = r }
         if !images.isEmpty { body["images"] = .array(images.map(JSONValue.string)) }
         return try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages", body: .object(body)))
     }

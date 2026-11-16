@@ -471,7 +471,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     public func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply"] + (grill ? ["grill"] : []))
     }
 
     public func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -536,6 +536,15 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 guard taskList.contains(where: { $0.id == t }) else { throw APIError.server(status: 400, message: "The attached issue doesn't exist.") }
                 tags["task_id"] = .string(t)
                 tags["task_refs"] = .array([.string(t)])
+            }
+            // A reply, as the backend stores it (spec #572): only a chat message of this chat can be quoted.
+            if let r = meta?["reply_to"]?.numberValue {
+                let agentName = agentList.first { $0.id == agentId }?.name ?? ""
+                guard let q = msgs[agentId]?.first(where: { $0.id == Int64(r) }), q.isQuotable else {
+                    throw APIError.server(status: 400, message: "The quoted message isn't in this chat.")
+                }
+                let quote = MessageQuote(of: q, agentName: agentName)
+                tags["reply_to"] = ["id": .number(Double(quote.id)), "role": .string(q.role), "author": .optional(quote.author), "excerpt": .string(quote.excerpt)]
             }
             let m = ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "user", kind: "text", content: text,
                                 meta: .object(tags), createdAt: Date())

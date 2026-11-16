@@ -58,6 +58,15 @@
   50% { transform: rotate(90deg) scale(0.8); opacity: 0.55; }
   100% { transform: rotate(180deg) scale(1); opacity: 1; }
 }
+/* A message a reply's quote jumped to. */
+@keyframes quote-flash {
+  from { background-color: color-mix(in srgb, var(--color-accent) 18%, transparent); }
+  to { background-color: transparent; }
+}
+.quote-flash {
+  border-radius: 12px;
+  animation: quote-flash 1.8s ease-out;
+}
 @keyframes shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
