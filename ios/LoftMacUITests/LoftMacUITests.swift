@@ -14,12 +14,16 @@ class MacUITestCase: XCTestCase {
     }
 
     func launch(_ args: [String]) {
-        // No Needs you notifications: their permission prompt takes the focus mid-test.
-        app.launchArguments = args + ["-no-alerts"]
+        // No Needs you notifications (their permission prompt takes the focus mid-test), and no restored windows.
+        app.launchArguments = args + ["-no-alerts", "-ApplePersistenceIgnoreState", "YES"]
         app.launch()
         app.activate()
         // macOS can restore Loft with its window closed, leaving only the menu bar item: Go › Agents (⌘2) opens it.
         if !app.windows.firstMatch.waitForExistence(timeout: 5) { app.typeKey("2", modifierFlags: .command) }
+        // The split view saves a collapsed sidebar in the app's defaults, which the tests share with the Loft
+        // installed on this Mac (same bundle id), so show it here rather than clear those defaults.
+        let show = app.toolbars.buttons["Show Sidebar"]
+        if show.exists { show.click() }
     }
 
     func shot(_ name: String) {

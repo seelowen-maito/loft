@@ -259,6 +259,8 @@ The script runs LoftKit's tests with `swift test` (no Simulator), builds once (`
 - iPhone (`LoftUITests`): launch and connect (the demo), the tabs, open an agent's chat and send, approve or deny a permission.
 - Mac (`LoftMacUITests`): launch and connect (the demo), sidebar navigation (clicks, ⌘1–⌘5, ↓), open an agent's chat and send, quick search.
 
+Run the Mac UI tests with `test.sh --mac-ui`. It builds into `ios/build`, on the Mac's own disk: a DerivedData folder on an external drive makes macOS ask whether "LoftMacUITests-Runner" may access files on a removable volume, and that prompt stops the run. Leave `DERIVED_DATA` unset, or point it at the internal disk. Each Mac UI test launches Loft with `-ApplePersistenceIgnoreState YES` and opens the sidebar if an earlier run left it collapsed.
+
 A new UI test outside those flows needs a reason a unit test can't cover it. The legacy UI tests (`LoftLegacyUITests`, `LoftMacLegacyUITests`) check rules that still live inside SwiftUI views; they run only with `--ui-legacy` or `--mac-ui-legacy`, and each one goes once its logic moves out of the view and gets unit tests. Each UI test is a single launch walking one flow, with `-no-animations -no-speech -no-ai` (no animations, microphone, speech recognizer or on-device model), and waits of 5 s or less.
 
 UI tests run against an in-app fixture server (`-ui-testing`, Debug builds only), so no agents run. The backend tests use a temporary database.
