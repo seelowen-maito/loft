@@ -655,6 +655,10 @@ pub fn enqueue(state: &AppState, agent_id: &str, text: Option<String>, trigger: 
 pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str) -> Option<Message> {
     let prompt = text.as_ref().map(|t| {
         let p = crate::uploads::prompt(t, &meta);
+        let p = match crate::reply::prompt_block(state, agent_id, &meta) {
+            Some(q) => format!("{q}\n\n{p}"),
+            None => p,
+        };
         let refs: Vec<String> = meta["task_refs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         let p = if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) };
         // A task that is both attached and tagged is described once, by its reference header.
