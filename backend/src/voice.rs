@@ -289,8 +289,8 @@ fn transcribe_timeout(bytes: u64) -> Duration {
 const ABANDONED: Duration = Duration::from_secs(3600);
 
 /// LoftKit's transcribe helper, built beside the backend (`swift build -c release --product loft-transcribe`).
-fn helper(state: &AppState) -> std::path::PathBuf {
-    let root = state.cfg.storage_dir.parent().unwrap_or(std::path::Path::new("."));
+pub(crate) fn helper(state: &AppState) -> std::path::PathBuf {
+    let root = &state.cfg.root;
     root.join("ios/LoftKit/.build/release/loft-transcribe")
 }
 
@@ -528,7 +528,7 @@ esac
 
     fn fake_state() -> AppState {
         let mut st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let bin = dir.join("fake-claude-brief");
         std::fs::write(&bin, FAKE).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -592,7 +592,7 @@ esac
 
     /// A stand-in `fm` with `body` as its script; it logs its arguments.
     fn fake_fm(st: &AppState, body: &str) {
-        let bin = st.cfg.storage_dir.parent().unwrap().join("fake-fm");
+        let bin = st.cfg.root.as_path().join("fake-fm");
         std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.args\"\n{body}\n")).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         FAKE_FM.with(|f| *f.borrow_mut() = Some(bin));
@@ -613,7 +613,7 @@ esac
         // fm works: its cleanup, with the dictation on stdin, not on argv.
         fake_fm(&st, "sed -e 's/^so uh fix/Fix/' -e 's/the the/the/' -e 's/$/./'");
         assert_eq!(clean_call(&st, said).await, json!({ "text": "Fix the cart total after a split payment.", "cleaned": true }));
-        let args = std::fs::read_to_string(st.cfg.storage_dir.parent().unwrap().join("fake-fm.args")).unwrap();
+        let args = std::fs::read_to_string(st.cfg.root.as_path().join("fake-fm.args")).unwrap();
         assert!(args.starts_with("respond --no-stream --greedy --instructions ") && !args.contains("cart total"), "{args}");
         // fm fails, hangs, or does more than clean: Haiku cleans, and the user sees no error.
         for (body, why) in [("exit 1", "fails"), ("exec sleep 60", "hangs"), ("echo 'Corrija o total do carrinho.'", "translates"), ("echo 'Sure! Fix it in cart.rs.'", "answers")] {

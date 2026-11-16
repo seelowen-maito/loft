@@ -367,7 +367,7 @@ mod tests {
     async fn a_video_reaches_the_agent_as_frames_with_timestamps_and_its_path() {
         let Some(ffmpeg) = find_tool("ffmpeg") else { return eprintln!("skipped: no ffmpeg to make the test video") };
         let (st, a) = crate::agents::tests::fake_claude_state();
-        let src = st.cfg.storage_dir.parent().unwrap().join("clip.mp4");
+        let src = st.cfg.root.as_path().join("clip.mp4");
         let made = std::process::Command::new(ffmpeg)
             .args(["-v", "error", "-f", "lavfi", "-i", "testsrc=duration=3:size=64x48:rate=10", "-pix_fmt", "yuv420p"])
             .arg(&src)

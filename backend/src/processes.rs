@@ -1606,7 +1606,7 @@ mod tests {
     /// A link to sleep with a name no process outside this test has, for killall.
     fn unique_sleep(st: &AppState) -> (PathBuf, String) {
         let name = format!("ks{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
-        let path = st.cfg.storage_dir.parent().unwrap().join(&name);
+        let path = st.cfg.root.as_path().join(&name);
         std::os::unix::fs::symlink("/bin/sleep", &path).unwrap();
         (path, name)
     }
@@ -1746,7 +1746,7 @@ mod tests {
     async fn serve_kills(st: &mut AppState) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        st.cfg = Arc::new(crate::state::Config { port, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() });
+        st.cfg = Arc::new(crate::state::Config { port, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone(), root: st.cfg.root.clone() });
         let app = axum::Router::new().route("/kill/{agent_id}", axum::routing::post(handle)).with_state(st.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     }

@@ -83,7 +83,9 @@ fn outside_changes(input: &str, ceiling: &[PathBuf]) -> Vec<Change> {
     let Ok(v) = serde_json::from_str::<Value>(input) else { return vec![] };
     let Some(command) = v["tool_input"]["command"].as_str() else { return vec![] };
     let Some(cwd) = v["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::current_dir().ok()) else { return vec![] };
-    checkout_changes(command, &cwd, ceiling).into_iter().filter(|c| !in_agent_storage(&c.folder)).collect()
+    // Loft's ceiling is the storage folder.
+    let storage = ceiling.first().map(|c| real(c.clone())).unwrap_or_default();
+    checkout_changes(command, &cwd, ceiling).into_iter().filter(|c| !in_agent_storage(&c.folder, &storage)).collect()
 }
 
 fn check(input: &str) -> Result<(), &'static str> {
@@ -126,6 +128,8 @@ struct Dirs {
     stack: Vec<Option<PathBuf>>,
     /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
     ceiling: Vec<PathBuf>,
+    /// The storage folder Loft uses (the run's ceiling, whatever the command does to git's).
+    storage: PathBuf,
     /// Other folders the shell may be in: `cd lnk/..` goes to the folder holding `lnk` for the shell and to the one
     /// holding what `lnk` points at for git and the kernel.
     alts: Vec<PathBuf>,
@@ -210,8 +214,9 @@ pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<C
     let mut found = vec![];
     let start = Some(cwd.to_path_buf());
     let ceiling: Vec<PathBuf> = ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect();
+    let storage = ceiling.first().cloned().unwrap_or_default();
     let ceiling = if plain_git(command, cwd, &ceiling) { ceiling } else { vec![] };
-    changes(command, &mut Dirs { start: start.clone(), cwd: start, ceiling, ..Default::default() }, 0, &mut found);
+    changes(command, &mut Dirs { start: start.clone(), cwd: start, ceiling, storage, ..Default::default() }, 0, &mut found);
     let mut out: Vec<Change> = vec![];
     for c in found {
         // A symlink into a user's checkout counts as that checkout.
@@ -634,7 +639,7 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         // a clone, `git checkout`, `tar`), a `.git` file. Nothing about it is known, not even a clone's own folder
         // (it may bring a link, or an agent's `--work-tree` may name a checkout).
         let start = outer.start.clone().map(real);
-        let near = start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd) || start.is_some_and(|s| cwd.starts_with(s)));
+        let near = start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd, &dirs.storage) || start.is_some_and(|s| cwd.starts_with(s)));
         let touched = dirs.touched.iter().any(|t| cwd.starts_with(t) || dirs.cwd.as_ref().is_some_and(|c| c.starts_with(t)));
         // A path the guard couldn't read matters only when git doesn't simply run where the command started.
         let unreadable = dirs.unreadable && (dirs.moved || dir_options || tree.is_some() || git_dir.is_some());
@@ -868,9 +873,10 @@ fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Whether `folder` is in an agent's workspace: under a folder named `agent-local-storage`.
-pub fn in_agent_storage(folder: &Path) -> bool {
-    folder.components().any(|c| c.as_os_str() == "agent-local-storage")
+/// Whether the real path `folder` is in an agent's workspace: under `storage`, the real path of the storage folder
+/// Loft uses (storage.rs), not any folder named `agent-local-storage`.
+pub fn in_agent_storage(folder: &Path, storage: &Path) -> bool {
+    crate::storage::holds_in(folder, storage)
 }
 
 /// What a piece of shell text, or one simple command in it, does that the guard cares about.
@@ -1609,6 +1615,7 @@ pub async fn handle(
 ) -> axum::Json<Value> {
     let projects = state.settings.get().projects_dir;
     let projects = std::fs::canonicalize(&projects).unwrap_or(projects);
+    let storage = std::fs::canonicalize(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone());
     let deadline = tokio::time::Instant::now() + ASK_TIMEOUT;
     for change in req.changes {
         // Read again each time: an "Always allow" for one folder may cover the next.
@@ -1616,7 +1623,7 @@ pub async fn handle(
         // A folder the hook couldn't name: the user is asked about the projects folder as a whole.
         let unknown = change.folder == Path::new(UNKNOWN);
         let at = if unknown { projects.clone() } else { change.folder.clone() };
-        if !unknown && (!at.starts_with(&projects) || in_agent_storage(&at)) {
+        if !unknown && (!at.starts_with(&projects) || in_agent_storage(&at, &storage)) {
             continue;
         }
         let folder = at.display().to_string();
@@ -1869,12 +1876,27 @@ mod tests {
 
     // A user's checkout and an agent's clone of it, as the Loft workspace sits inside the user's repo.
     const USER: &str = "/nowhere/dev/loft";
+    const STORAGE: &str = "/nowhere/dev/loft/agent-local-storage";
     const CLONE: &str = "/nowhere/dev/loft/agent-local-storage/abc/loft";
 
-    /// The folders the hook would ask Loft about, for `cmd` run in `cwd`.
+    /// The folders the hook would ask Loft about, for `cmd` run in `cwd`, with Loft's ceiling at `STORAGE`.
     fn asks_all(cmd: &str, cwd: &str) -> Vec<PathBuf> {
         let input = json!({ "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": cmd } }).to_string();
-        outside_changes(&input, &[]).into_iter().map(|c| c.folder).collect()
+        outside_changes(&input, &[PathBuf::from(STORAGE)]).into_iter().map(|c| c.folder).collect()
+    }
+
+    #[test]
+    fn only_the_storage_folder_loft_uses_is_trusted_not_any_of_that_name() {
+        // A folder an agent made, or the old one in the checkout, named like the storage folder.
+        for stray in ["/nowhere/dev/loft/agent-local-storage-old/x", "/nowhere/elsewhere/agent-local-storage/x", "/nowhere/agent-local-storage/x"] {
+            let input = json!({ "tool_name": "Bash", "cwd": stray, "tool_input": { "command": "cargo build" } }).to_string();
+            assert_eq!(outside_changes(&input, &[PathBuf::from("/data/loft/loft-1a2b3c4d/agent-local-storage")]), vec![Change { folder: stray.into(), command: "cargo build".into() }]);
+            assert!(!in_agent_storage(Path::new(stray), Path::new("/data/loft/loft-1a2b3c4d/agent-local-storage")));
+        }
+        // With no ceiling (not run by Loft), nothing is trusted.
+        let input = json!({ "tool_name": "Bash", "cwd": CLONE, "tool_input": { "command": "cargo build" } }).to_string();
+        assert_eq!(outside_changes(&input, &[]).len(), 1);
+        assert_eq!(asks("cargo build", CLONE), None, "the agent's own clone");
     }
 
     /// The one folder the hook would ask Loft about.
@@ -2075,11 +2097,15 @@ mod tests {
                 assert_eq!(asks(cmd, &at(cwd)), Some(project.clone()), "should ask: {cmd} (in {})", cwd.display());
             }
             assert_eq!(asks("git status", &at(cwd)), None);
-            assert_eq!(asks("git -C loft pull", &at(&ws)), None);
+            // The agent's own clone, in the storage folder Loft uses.
+            let input = json!({ "tool_name": "Bash", "cwd": at(&ws), "tool_input": { "command": "git -C loft pull" } }).to_string();
+            assert_eq!(outside_changes(&input, &[project.join("agent-local-storage")]), vec![]);
         }
         // A new repository is where it's made, not in the checkout around it; global config is no checkout's.
+        let storage = [project.join("agent-local-storage")];
         for cmd in ["git clone /nowhere/dev/loft", "git clone https://github.com/x/loft.git", "git clone -b main /src loft2", "git init scratch-repo", "git init", "git config --global user.name x", "git config --system core.x y"] {
-            assert_eq!(asks(cmd, &at(&ws)), None, "should run: {cmd}");
+            let input = json!({ "tool_name": "Bash", "cwd": at(&ws), "tool_input": { "command": cmd } }).to_string();
+            assert_eq!(outside_changes(&input, &storage), vec![], "should run: {cmd}");
         }
         assert_eq!(asks(&format!("git clone /src {}", at(&project.join("sub"))), &at(&ws)), Some(project.join("sub")));
         assert_eq!(asks("git init", &at(&project)), Some(project.clone()));
@@ -2103,23 +2129,28 @@ mod tests {
         assert_eq!(asks("git clone /src relative", &at(&ws)), Some(other.join("gone")));
         // A loop of links doesn't hang: it stays where it is.
         std::os::unix::fs::symlink(ws.join("loop"), ws.join("loop")).unwrap();
-        assert_eq!(asks("git clone /src loop", &at(&ws)), None);
+        let in_storage_at = |cmd: &str, cwd: &Path| {
+            let input = json!({ "tool_name": "Bash", "cwd": at(cwd), "tool_input": { "command": cmd } }).to_string();
+            outside_changes(&input, &storage).into_iter().map(|c| c.folder).collect::<Vec<_>>()
+        };
+        let in_storage = |cmd: &str| in_storage_at(cmd, &ws);
+        assert_eq!(in_storage("git clone /src loop"), Vec::<PathBuf>::new());
         // A repository kept apart from its folder is judged by where it goes too.
         let apart = project.join("repo.git");
         for cmd in [format!("git clone --separate-git-dir {} /src mine", at(&apart)), format!("git init --separate-git-dir={} mine", at(&apart))] {
-            assert_eq!(asks(&cmd, &at(&ws)), Some(apart.clone()), "should ask: {cmd}");
+            assert_eq!(in_storage(&cmd), vec![apart.clone()], "should ask: {cmd}");
         }
-        assert_eq!(asks("git clone --separate-git-dir ../x/mine.git /src mine", &at(&ws)), None);
+        assert_eq!(in_storage("git clone --separate-git-dir ../x/mine.git /src mine"), Vec::<PathBuf>::new());
         // Before this command, the shell may have been anywhere: the workspace stands for it.
         for cmd in ["cd -; git checkout main", "cd loft; cd /tmp; popd; git stash", "cd loft && popd && git reset --hard"] {
             assert_eq!(asks(cmd, &at(&ws)), Some(project.clone()), "should ask: {cmd}");
         }
-        assert_eq!(asks("cd -; git checkout main", &at(&clone)), None);
+        assert_eq!(in_storage_at("cd -; git checkout main", &clone), Vec::<PathBuf>::new());
         // In the agent's clone, or a folder of it: its own repository.
-        assert_eq!(asks("git checkout main", &at(&clone)), None);
-        assert_eq!(asks("git reset --hard", &at(&clone.join("backend"))), None);
+        assert_eq!(in_storage_at("git checkout main", &clone), Vec::<PathBuf>::new());
+        assert_eq!(in_storage_at("git reset --hard", &clone.join("backend")), Vec::<PathBuf>::new());
         // A work tree given from the workspace: git still finds the user's repository from the folder.
-        assert_eq!(asks(&format!("git --work-tree={} checkout .", at(&clone)), &at(&ws)), Some(project.clone()));
+        assert_eq!(in_storage(&format!("git --work-tree={} checkout .", at(&clone))), vec![project.clone()]);
         std::fs::remove_dir_all(project.parent().unwrap()).unwrap();
     }
 
@@ -2137,6 +2168,12 @@ mod tests {
         let root = std::fs::canonicalize(&root).unwrap();
         let (project, ws, clone, other) = (root.join("loft"), root.join("loft/agent-local-storage/x"), root.join("loft/agent-local-storage/x/loft"), root.join("other"));
         let at = |p: &Path| p.display().to_string();
+        // As Loft runs the hook: its ceiling is the storage folder.
+        let storage = [root.join("loft/agent-local-storage")];
+        let asks_all = |cmd: &str, cwd: &str| {
+            let input = json!({ "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": cmd } }).to_string();
+            outside_changes(&input, &storage).into_iter().map(|c| c.folder).collect::<Vec<_>>()
+        };
         std::os::unix::fs::symlink(other.join("src"), ws.join("lnk")).unwrap();
         // `k`: a link to a folder of the clone; `sl`: a `.git` that is a link; `gc`: a `.git` file with a `commondir`.
         std::fs::create_dir_all(clone.join("a/b")).unwrap();
@@ -2486,7 +2523,9 @@ mod tests {
 
         // Outside the projects folder, or in an agent's workspace there: no question.
         assert_eq!(guard(PathBuf::from("/tmp/elsewhere")).await.unwrap()["allow"], true);
-        assert_eq!(guard(user.join("agent-local-storage/x/loft")).await.unwrap()["allow"], true);
+        let clone = st.cfg.storage_dir.join("x/loft");
+        std::fs::create_dir_all(&clone).unwrap();
+        assert_eq!(guard(std::fs::canonicalize(&clone).unwrap()).await.unwrap()["allow"], true);
         assert!(pending().is_empty());
 
         // Denied: the agent is told to use its own clone.

@@ -1155,7 +1155,7 @@ pub(crate) mod tests {
     /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
     pub(crate) fn state() -> AppState {
         let st = state_with_token();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let projects = dir.join("projects");
         std::fs::create_dir_all(&projects).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects, "github_token": "test-token" }).to_string()).unwrap();
