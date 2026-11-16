@@ -126,20 +126,71 @@ struct Dirs {
     stack: Vec<Option<PathBuf>>,
     /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
     ceiling: Vec<PathBuf>,
-    /// The folders an earlier `git clone` or `git init` of this command makes: what is in them isn't known yet (a clone
-    /// can bring a link to anywhere).
+    /// The folders an earlier `git clone` or `git init` of this command makes. What is in them isn't known yet (a clone
+    /// can bring a link to anywhere), but they are repositories of their own.
     fresh: Vec<PathBuf>,
+    /// Other folders the shell may be in: `cd lnk/..` goes to the folder holding `lnk` for the shell and to the one
+    /// holding what `lnk` points at for git and the kernel.
+    alts: Vec<PathBuf>,
+    /// A command ran before this one: it may have made a folder, a link or a `.git` that isn't there yet.
+    made: bool,
+    /// An earlier command wrote a `.git` (`echo 'gitdir: x' > t/.git`): git may follow it anywhere.
+    dotgit: bool,
+    /// An earlier `cd` named a folder the guard can't list (a glob, braces).
+    unknown: bool,
 }
 
 impl Dirs {
-    /// `path` from the current folder; an absolute one (`/x`, `~/x`, `$HOME/x`) even when that is unknown.
+    /// `path` from the current folder; an absolute one (`/x`, `~/x`, `$HOME/x`) even when that is unknown. With `..`
+    /// after a link going up from where the link points, as git and the kernel do.
     fn at(&self, path: &str) -> Option<PathBuf> {
+        self.resolve(path, true)
+    }
+
+    /// The same with `..` folded as text, as the shell does for `cd` and Node does for a path it is given.
+    fn at_text(&self, path: &str) -> Option<PathBuf> {
+        self.resolve(path, false)
+    }
+
+    fn resolve(&self, path: &str, physical: bool) -> Option<PathBuf> {
         let absolute = path.starts_with(['/', '~']) || path.starts_with("$HOME") || path.starts_with("${HOME}");
-        resolve(if absolute { Path::new("/") } else { self.cwd.as_deref()? }, path)
+        resolve(if absolute { Path::new("/") } else { self.cwd.as_deref()? }, path, physical)
     }
 
     fn cd(&mut self, to: Option<PathBuf>) {
         self.old = std::mem::replace(&mut self.cwd, to);
+    }
+
+    /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
+    fn keep_made(&mut self, inner: &Dirs) {
+        self.fresh = inner.fresh.clone();
+        self.made |= inner.made;
+        self.dotgit |= inner.dotgit;
+    }
+
+    /// `cd` to a glob or braces: the folder the literal part names, with the topmost checkout around as another place.
+    fn hide(&mut self, dir: &str) {
+        let hidden = self.cwd.as_deref().or(self.start.as_deref()).map(outermost_checkout);
+        let literal = literal_folder(self, dir);
+        self.alts = hidden.into_iter().collect();
+        self.unknown = true;
+        self.cd(literal);
+    }
+
+    /// `cd dir` (`-P`: `physical`): the shell goes where the text fold says, and the folder the physical one says is kept
+    /// as another place it may be.
+    fn move_to(&mut self, dir: &str, physical: bool) {
+        let to = if physical { self.at(dir) } else { self.at_text(dir) };
+        let mut alts: Vec<PathBuf> = vec![];
+        let from_here = self.at(dir);
+        let from_alts: Vec<Option<PathBuf>> = self.alts.iter().map(|a| resolve(a, dir, true)).collect();
+        for p in std::iter::once(from_here).chain(from_alts).flatten() {
+            if Some(&p) != to.as_ref() && !alts.contains(&p) && alts.len() < 8 {
+                alts.push(p);
+            }
+        }
+        self.alts = alts;
+        self.cd(to);
     }
 }
 
@@ -168,12 +219,13 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         return;
     }
     let cmds = parse(text);
-    // The folders as each open subshell found them, to go back to when it ends.
+    // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
     for i in 0..cmds.len() {
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
-            *dirs = saved.pop().unwrap().1;
+            let inner = std::mem::replace(dirs, saved.pop().unwrap().1);
+            dirs.keep_made(&inner);
         }
         for &s in &scope[saved.len()..] {
             saved.push((s, dirs.clone()));
@@ -183,34 +235,68 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             Run::Words(words) => words,
             Run::Text(text) => {
                 changes(&text, dirs, depth + 1, out);
+                dirs.made = true;
                 continue;
             }
         };
+        let live = &cmds[i].live[all.len() - words.len()..];
         // `GIT_DIR=x git ...`, `env GIT_WORK_TREE=x git ...`
         let vars: Vec<&String> = all[..all.len() - words.len()].iter().filter(|w| assignment(w).is_some()).collect();
         let Some((name, args)) = words.split_first() else { continue };
-        let folders = match base(name) {
+        let (args, live) = (args, &live[1..]);
+        let name = base(name);
+        if !matches!(name, "cd" | "pushd" | "popd") {
+            // Any command can make a folder, a link or a `.git`: tar, ln, cp, echo > t/.git.
+            if name != "git" {
+                dirs.dotgit |= words.iter().chain(&cmds[i].targets).any(|w| Path::new(w).file_name().is_some_and(|n| n == ".git"));
+            }
+        }
+        let folders = match name {
             "cd" => {
-                let to = match args.iter().find(|a| !matches!(a.as_str(), "-L" | "-P" | "-e" | "-@")).map(String::as_str) {
-                    None => dirs::home_dir(),
-                    Some("-") => dirs.old.clone().or(dirs.start.clone()),
-                    // A glob or braces: any folder the shell may list, so the outermost checkout stands for it.
-                    Some(dir) if hides(dir) => dirs.cwd.as_deref().map(outermost_checkout),
-                    Some(dir) => dirs.at(dir),
-                };
-                dirs.cd(to);
+                let physical = args.iter().any(|a| a == "-P");
+                let i = args.iter().position(|a| !matches!(a.as_str(), "-L" | "-P" | "-e" | "-@"));
+                match i.map(|i| (args[i].as_str(), live[i])) {
+                    None => {
+                        dirs.alts.clear();
+                        dirs.cd(dirs::home_dir());
+                    }
+                    Some(("-", _)) => {
+                        dirs.alts.clear();
+                        dirs.cd(dirs.old.clone().or(dirs.start.clone()));
+                    }
+                    // A glob or braces: the shell may go to any folder it lists. The literal part of the path names
+                    // where they start, and the checkout around stands for the rest.
+                    Some((dir, true)) if hides(dir, true) => dirs.hide(dir),
+                    Some((dir, _)) => dirs.move_to(dir, physical),
+                }
                 continue;
             }
             "pushd" => {
-                let to = match args.iter().find(|a| *a != "-n").map(String::as_str) {
-                    // `pushd` swaps the top two folders; `pushd +1` rotates the stack.
-                    None => dirs.stack.pop().unwrap_or_default(),
-                    Some(d) if d.starts_with(['+', '-']) => None,
-                    Some(dir) => dirs.at(dir),
-                };
+                let physical = args.iter().any(|a| a == "-P");
                 let from = dirs.cwd.clone();
-                dirs.stack.push(from);
-                dirs.cd(to);
+                let i = args.iter().position(|a| a != "-n" && a != "-P" && a != "-L");
+                match i.map(|i| (args[i].as_str(), live[i])) {
+                    // `pushd` swaps the top two folders; `pushd +1` rotates the stack.
+                    None => {
+                        dirs.alts.clear();
+                        let to = dirs.stack.pop().unwrap_or_default();
+                        dirs.stack.push(from);
+                        dirs.cd(to);
+                    }
+                    Some((d, _)) if d.starts_with(['+', '-']) => {
+                        dirs.alts.clear();
+                        dirs.stack.push(from);
+                        dirs.cd(None);
+                    }
+                    Some((dir, true)) if hides(dir, true) => {
+                        dirs.stack.push(from);
+                        dirs.hide(dir);
+                    }
+                    Some((dir, _)) => {
+                        dirs.stack.push(from);
+                        dirs.move_to(dir, physical);
+                    }
+                }
                 continue;
             }
             "popd" => {
@@ -218,46 +304,75 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     Some(d) if args.is_empty() => d,
                     _ => dirs.start.clone(),
                 };
+                dirs.alts.clear();
                 dirs.cd(to);
                 continue;
             }
             "sh" | "bash" | "zsh" | "dash" | "ksh" => {
                 if let Some(t) = shell_script(&cmds, i, args) {
-                    changes(&t, &mut dirs.clone(), depth + 1, out);
+                    let mut inner = dirs.clone();
+                    changes(&t, &mut inner, depth + 1, out);
+                    dirs.keep_made(&inner);
                 }
+                dirs.made = true;
                 continue;
             }
             "eval" => {
                 changes(&args.join(" "), dirs, depth + 1, out);
+                dirs.made = true;
                 continue;
             }
-            "git" => git_changes(dirs, &vars, args),
-            "cargo" => match flags(args, &["--manifest-path"]) {
-                (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
-                    Some(m) => dirs.at(m).and_then(|m| m.parent().map(Path::to_path_buf)).into_iter().collect(),
-                    None => dirs.cwd.clone().into_iter().collect(),
-                },
-                _ => vec![],
-            },
-            pm @ ("npm" | "pnpm" | "yarn" | "bun") => {
-                let dir_flags: &[&str] = match pm {
-                    "npm" => &["--prefix"],
-                    "pnpm" => &["--dir", "-C"],
-                    _ => &["--cwd"],
-                };
-                match flags(args, dir_flags) {
-                    (dir, Some(s)) if PM_CHANGES.contains(&s) => dir.map_or(dirs.cwd.clone(), |d| dirs.at(d)).into_iter().collect(),
-                    (dir, None) if pm == "yarn" => dir.map_or(dirs.cwd.clone(), |d| dirs.at(d)).into_iter().collect(), // a bare `yarn` installs
-                    _ => vec![],
+            _ => {
+                let mut folders = command_folders(name, args, live, &vars, dirs);
+                // Each other folder the shell may be in.
+                for alt in dirs.alts.clone() {
+                    let mut at = Dirs { cwd: Some(alt), alts: vec![], ..dirs.clone() };
+                    folders.extend(command_folders(name, args, live, &vars, &mut at));
                 }
+                if dirs.unknown && !folders.is_empty() {
+                    folders.push(PathBuf::from(UNKNOWN));
+                }
+                folders
             }
-            "xcodebuild" => {
-                let reads = ["-list", "-showBuildSettings", "-version", "-showsdks", "-showdestinations", "-help"];
-                if args.iter().any(|a| reads.contains(&a.as_str())) { vec![] } else { dirs.cwd.clone().into_iter().collect() }
-            }
-            _ => vec![],
         };
+        dirs.made = true;
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+    }
+}
+
+/// The folders one command (not a `cd`, a shell or an `eval`) changes, run in `dirs`.
+fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String], dirs: &mut Dirs) -> Vec<PathBuf> {
+    match name {
+        "git" => git_changes(dirs, vars, args, live),
+        "cargo" => match flags(args, &["--manifest-path"]) {
+            (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
+                Some(m) => dirs.at(m).and_then(|m| m.parent().map(Path::to_path_buf)).into_iter().collect(),
+                None => dirs.cwd.clone().into_iter().collect(),
+            },
+            _ => vec![],
+        },
+        pm @ ("npm" | "pnpm" | "yarn" | "bun") => {
+            let dir_flags: &[&str] = match pm {
+                "npm" => &["--prefix"],
+                "pnpm" => &["--dir", "-C"],
+                _ => &["--cwd"],
+            };
+            // Node folds `..` as text, the kernel after the links: both are asked about.
+            let folders = |dir: Option<&str>| match dir {
+                None => dirs.cwd.clone().into_iter().collect::<Vec<_>>(),
+                Some(d) => [dirs.at_text(d), dirs.at(d)].into_iter().flatten().collect(),
+            };
+            match flags(args, dir_flags) {
+                (dir, Some(s)) if PM_CHANGES.contains(&s) => folders(dir),
+                (dir, None) if pm == "yarn" => folders(dir), // a bare `yarn` installs
+                _ => vec![],
+            }
+        }
+        "xcodebuild" => {
+            let reads = ["-list", "-showBuildSettings", "-version", "-showsdks", "-showdestinations", "-help"];
+            if args.iter().any(|a| reads.contains(&a.as_str())) { vec![] } else { dirs.cwd.clone().into_iter().collect() }
+        }
+        _ => vec![],
     }
 }
 
@@ -326,17 +441,21 @@ fn plain_git_args(args: &[String], cwd: &Path, ceiling: &[PathBuf]) -> bool {
 
 /// Whether `dir`, from `cwd` with symlinks followed, is in one of the `ceiling` folders.
 fn inside_ceiling(dir: &str, cwd: &Path, ceiling: &[PathBuf]) -> bool {
-    resolve(cwd, dir).map(real).is_some_and(|d| ceiling.iter().any(|c| d.starts_with(c)))
+    resolve(cwd, dir, true).map(real).is_some_and(|d| ceiling.iter().any(|c| d.starts_with(c)))
 }
+
+/// What the guard reports for a folder it can't name: Loft asks the user about the projects folder as a whole.
+pub const UNKNOWN: &str = "/loft-unknown-folder";
 
 /// The folders a git command changes, past its global options: its work tree (`--work-tree`, `GIT_WORK_TREE`) and
 /// the checkout its repository is in (`--git-dir`, `GIT_DIR`), each by default the repository git finds from the
 /// folder (`-C`): the nearest one up, which for an agent's workspace that isn't a clone is the user's checkout around
 /// it. Every subcommand changes them but the ones that only read (`git_reads`).
-fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
+///
+/// What the shell expands (braces, globs) or an earlier command of this run may still make (a folder, a link, a
+/// `.git` file) hides the folder or repository: then the answer is `unknown_in`.
+fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool]) -> Vec<PathBuf> {
     let mut dirs = outer.clone();
-    // Braces the shell expands before git sees them (`git -C {../..,reset} --hard`).
-    let args: Vec<String> = args.iter().flat_map(|a| expand_braces(a)).collect();
     let (mut tree, mut git_dir) = (None, None);
     for v in vars {
         if let Some(d) = v.strip_prefix("GIT_WORK_TREE=") {
@@ -345,53 +464,61 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String]) -> Vec<PathB
             git_dir = Some(dirs.at(d));
         }
     }
-    // Where a command whose folder, work tree or repository the guard can't list (a glob, `{1..3}`) may act.
-    let hidden = dirs.cwd.as_deref().or(dirs.start.as_deref()).map(outermost_checkout);
-    let mut it = args.iter();
+    // Braces the shell expands before git sees them (`git -C {../..,reset} --hard`).
+    let Some(args) = expand_args(args, live) else { return unknown_in(&dirs, None) };
+    let hid = |k: usize| args.get(k).is_some_and(|(w, live)| hides(w, *live));
+    let mut i = 0;
     let sub = loop {
-        let Some(a) = it.next() else { return vec![] };
+        let Some((a, _)) = args.get(i) else { return vec![] };
+        i += 1;
+        let a = a.as_str();
         let value = |o: &str| a.strip_prefix(o).and_then(|r| r.strip_prefix('='));
-        let takes_value = matches!(a.as_str(), "-C" | "--work-tree" | "--git-dir" | "-c" | "--namespace" | "--config-env" | "--super-prefix");
-        if hides(a) || (takes_value && it.as_slice().first().is_some_and(|v| hides(v))) {
-            return hidden.into_iter().collect();
+        let takes_value = matches!(a, "-C" | "--work-tree" | "--git-dir" | "-c" | "--namespace" | "--config-env" | "--super-prefix");
+        if hid(i - 1) || (takes_value && hid(i)) {
+            let path = if takes_value && hid(i) { args.get(i).map(|w| w.0.as_str()) } else { value("--git-dir").or(value("--work-tree")) };
+            return unknown_in(&dirs, path);
         }
-        match a.as_str() {
+        let mut next = || {
+            i += 1;
+            args.get(i - 1).and_then(|(d, _)| dirs.at(d))
+        };
+        match a {
             "-C" => {
-                let to = it.next().and_then(|d| dirs.at(d));
+                let to = next();
                 dirs.cwd = to;
             }
-            "--work-tree" => tree = Some(it.next().and_then(|d| dirs.at(d))),
-            "--git-dir" => git_dir = Some(it.next().and_then(|d| dirs.at(d))),
+            "--work-tree" => tree = Some(next()),
+            "--git-dir" => git_dir = Some(next()),
             _ if value("--work-tree").is_some() => tree = Some(value("--work-tree").and_then(|d| dirs.at(d))),
             _ if value("--git-dir").is_some() => git_dir = Some(value("--git-dir").and_then(|d| dirs.at(d))),
-            "-c" | "--namespace" | "--config-env" | "--super-prefix" => {
-                it.next();
-            }
+            "-c" | "--namespace" | "--config-env" | "--super-prefix" => i += 1,
             o if o.starts_with('-') => {}
             sub => break sub,
         }
     };
-    let rest: Vec<&str> = it.map(String::as_str).collect();
+    let rest: Vec<&str> = args[i..].iter().map(|(w, _)| w.as_str()).collect();
     if git_reads(sub, &rest) || (sub == "config" && rest.iter().any(|a| matches!(*a, "--global" | "--system"))) {
         return vec![];
     }
     // `clone` and `init` make a new repository: in the folder they name, or the folder they run in, not the one around it.
     if let Some(valued) = match sub {
-        "clone" => Some(&["-b", "--branch", "-o", "--origin", "-c", "--config", "--depth", "--reference", "--reference-if-able", "--template", "--separate-git-dir", "-u", "--upload-pack", "-j", "--jobs", "--filter", "--shallow-since", "--shallow-exclude", "--server-option", "--bundle-uri"][..]),
-        "init" => Some(&["-b", "--initial-branch", "--template", "--separate-git-dir", "--object-format", "--ref-format"][..]),
+        "clone" => Some(&["--branch", "--origin", "--config", "--depth", "--reference", "--reference-if-able", "--template", "--separate-git-dir", "--upload-pack", "--jobs", "--filter", "--shallow-since", "--shallow-exclude", "--server-option", "--bundle-uri", "-b", "-o", "-c", "-u", "-j"][..]),
+        "init" => Some(&["--initial-branch", "--template", "--separate-git-dir", "--object-format", "--ref-format", "-b"][..]),
         _ => None,
     } {
         let (mut words, mut git_dir) = (vec![], None);
         let mut it = rest.iter();
         while let Some(a) = it.next() {
-            if *a == "--separate-git-dir" {
-                git_dir = it.next().copied();
-            } else if let Some(d) = a.strip_prefix("--separate-git-dir=") {
-                git_dir = Some(d);
-            } else if valued.contains(a) {
-                it.next();
-            } else if !a.starts_with('-') {
-                words.push(*a);
+            // Git takes a long option by any unique prefix (`--orig`, `--dep`, `--separate-g`).
+            let (name, inline) = a.split_once('=').map_or((*a, None), |(n, v)| (n, Some(v)));
+            let long = if name.starts_with("--") { valued.iter().copied().find(|v| *v == name).or_else(|| valued.iter().copied().find(|v| v.starts_with(name))) } else { valued.iter().copied().find(|v| *v == name) };
+            match (long, inline) {
+                (Some("--separate-git-dir"), Some(d)) => git_dir = Some(d),
+                (Some("--separate-git-dir"), None) => git_dir = it.next().copied(),
+                (Some(_), None) => drop(it.next()),
+                (Some(_), Some(_)) => {}
+                (None, _) if !a.starts_with('-') => words.push(*a),
+                (None, _) => {}
             }
         }
         // `clone <repository> [<folder>]`, `init [<folder>]`, and the repository's own folder when it's apart.
@@ -400,24 +527,52 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String]) -> Vec<PathB
         outer.fresh.extend(target.clone().map(real));
         return [target, git_dir.and_then(|d| dirs.at(d))].into_iter().flatten().collect();
     }
-    // Below a folder this command's clone makes, a link may lead anywhere: unknown, like a glob.
-    if let Some(cwd) = dirs.cwd.clone().map(real)
-        && dirs.fresh.iter().any(|f| cwd != *f && cwd.starts_with(f))
-    {
-        return hidden.into_iter().collect();
-    }
-    // The folder this command's clone makes is a repository of its own, not part of the one around it.
-    if let Some(cwd) = dirs.cwd.clone().map(real)
-        && dirs.fresh.contains(&cwd)
-    {
-        return vec![cwd];
+    if let Some(cwd) = dirs.cwd.clone().map(real) {
+        // The folder this command's clone makes is a repository of its own, not part of the one around it.
+        if dirs.fresh.contains(&cwd) {
+            return vec![cwd];
+        }
+        // A part that isn't there when the hook looks can be made before git runs: a link to any checkout (`ln -s`,
+        // a clone, `git checkout`, `tar`), a `.git` file. Only the folder a clone or init made is known.
+        let start = outer.start.clone().map(real);
+        let near = start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd) || start.is_some_and(|s| cwd.starts_with(s)));
+        if dirs.dotgit || (dirs.made && near && !cwd.exists()) {
+            return unknown_in(&dirs, None);
+        }
     }
     let found = dirs.cwd.map(|d| repo_root(d, &dirs.ceiling));
-    // A `.git` file points at the repository, which may be another checkout's.
-    let linked = found.as_deref().and_then(linked_repo);
+    // A `.git` file or link points at the repository, which may be another checkout's.
+    let linked = found.as_deref().map(linked_repos).unwrap_or_default();
     // The checkout a `.git` folder belongs to.
-    let repo = git_dir.unwrap_or(linked.or_else(|| found.clone())).map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
-    [tree.unwrap_or(found), repo].into_iter().flatten().collect()
+    let repos: Vec<PathBuf> = match git_dir {
+        Some(d) => d.into_iter().collect(),
+        None if linked.is_empty() => found.clone().into_iter().collect(),
+        None => linked,
+    };
+    let repos = repos.into_iter().map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
+    tree.unwrap_or(found).into_iter().chain(repos).collect()
+}
+
+/// What a command whose folder, work tree or repository the guard can't name may change: the folder the literal part of
+/// `path` names (`<projects>/lof?` is `<projects>`), the topmost checkout around where it runs, and, for Loft, the
+/// projects folder (`UNKNOWN`).
+fn unknown_in(dirs: &Dirs, path: Option<&str>) -> Vec<PathBuf> {
+    let literal = path.and_then(|p| literal_folder(dirs, p));
+    let hidden = dirs.cwd.as_deref().or(dirs.start.as_deref()).map(outermost_checkout);
+    literal.into_iter().chain(hidden).chain([PathBuf::from(UNKNOWN)]).collect()
+}
+
+/// The folder a path with a glob or braces starts from: the parts before the first one that has one.
+fn literal_folder(dirs: &Dirs, path: &str) -> Option<PathBuf> {
+    let mut keep = vec![];
+    for part in path.split('/') {
+        if part.contains(['*', '?', '[', '{']) {
+            break;
+        }
+        keep.push(part);
+    }
+    let prefix = keep.join("/");
+    dirs.at(if prefix.is_empty() && path.starts_with('/') { "/" } else if prefix.is_empty() { "." } else { &prefix })
 }
 
 /// `path` with symlinks followed, even when it doesn't exist yet (a folder `clone` will make): its nearest folder that
@@ -430,7 +585,7 @@ fn real_at(path: PathBuf, links: usize) -> PathBuf {
     for base in path.ancestors() {
         let rest = path.strip_prefix(base).unwrap_or(Path::new(""));
         if let Ok(r) = std::fs::canonicalize(base) {
-            return r.join(rest);
+            return if rest.as_os_str().is_empty() { r } else { r.join(rest) };
         }
         // As many links as the system follows (a loop never resolves).
         if links < 40
@@ -452,19 +607,34 @@ fn repo_root(folder: PathBuf, ceiling: &[PathBuf]) -> PathBuf {
     folder.ancestors().take_while(|d| !stop || below(d)).find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
 }
 
-/// Where a `.git` file in `root` (a linked work tree, a submodule, `--separate-git-dir`) sends git: the checkout that
-/// holds the repository it names (`gitdir: <checkout>/.git/worktrees/x`), or the repository's folder itself.
-fn linked_repo(root: &Path) -> Option<PathBuf> {
+/// Where a `.git` in `root` that isn't a plain folder (a file `gitdir: x`, or a link to another `.git`) sends git: the
+/// checkout that holds that repository, and the one that holds the common repository its `commondir` file names.
+fn linked_repos(root: &Path) -> Vec<PathBuf> {
     use std::io::Read;
-    let file = root.join(".git");
-    if !file.is_file() {
-        return None;
-    }
-    let mut text = String::new();
-    std::fs::File::open(&file).ok()?.take(4096).read_to_string(&mut text).ok()?;
-    let dir = real(root.join(text.lines().next()?.strip_prefix("gitdir:")?.trim()));
-    let checkout = dir.ancestors().find(|a| a.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent).map(Path::to_path_buf);
-    Some(checkout.unwrap_or(dir))
+    // The first line of a small file, with `prefix` taken off.
+    let line = |file: &Path, prefix: &str| -> Option<String> {
+        let mut text = String::new();
+        std::fs::File::open(file).ok()?.take(4096).read_to_string(&mut text).ok()?;
+        text.lines().next()?.strip_prefix(prefix).map(|l| l.trim().to_string())
+    };
+    let dot = root.join(".git");
+    let Ok(meta) = std::fs::symlink_metadata(&dot) else { return vec![] };
+    let target = real(dot.clone());
+    let gitdir = if meta.is_file() || (meta.is_symlink() && target.is_file()) {
+        let from = if meta.is_file() { root } else { target.parent().unwrap_or(root) };
+        match line(&target, "gitdir:") {
+            Some(d) => real(from.join(d)),
+            None => return vec![],
+        }
+    } else if meta.is_symlink() {
+        target
+    } else {
+        return vec![];
+    };
+    // The checkout holding a `.git` folder: the one it is in, else the repository's folder itself.
+    let checkout = |d: &Path| d.ancestors().find(|a| a.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent).map_or(d.to_path_buf(), Path::to_path_buf);
+    let common = line(&gitdir.join("commondir"), "").map(|c| real(gitdir.join(c)));
+    [Some(checkout(&gitdir)), common.map(|c| checkout(&c))].into_iter().flatten().collect()
 }
 
 /// The topmost checkout around `folder`: where a command whose target the guard can't list may act.
@@ -473,21 +643,35 @@ fn outermost_checkout(folder: &Path) -> PathBuf {
     folder.ancestors().filter(|d| d.join(".git").exists()).last().map(Path::to_path_buf).unwrap_or(folder)
 }
 
-/// Whether the shell turns `word` into names the guard can't list: a glob, or braces (`{a,b}`, `{1..3}`; the ones a git
-/// word has are expanded first, `expand_braces`).
-fn hides(word: &str) -> bool {
-    let braces = word.find('{').is_some_and(|i| (i == 0 || !word[..i].ends_with('$')) && word[i..].contains('}') && (word[i..].contains(',') || word[i..].contains("..")));
-    word.contains(['*', '?', '[']) || (braces && !word.contains(char::is_whitespace))
+/// Whether the shell turns `word` into names the guard can't list: it has a glob or braces (`{a,b}`, `{1..3}`) outside
+/// quotes (`live`, from the lexer). The ones a git word has are expanded first (`expand_args`).
+fn hides(word: &str, live: bool) -> bool {
+    let braces = word.find('{').is_some_and(|i| !word[..i].ends_with('$') && word[i..].contains('}') && (word[i..].contains(',') || word[i..].contains("..")));
+    live && (word.contains(['*', '?', '[']) || braces)
 }
 
-/// The words the shell makes of `word` by brace expansion: `{a,b}` is two. A word with a space was quoted, `${x}` and
-/// `{x}` are literal, and a sequence (`{1..3}`) stays as it is (`hides`).
-fn expand_braces(word: &str) -> Vec<String> {
-    let b = word.as_bytes();
-    let Some(open) = (0..b.len()).find(|&i| b[i] == b'{' && (i == 0 || b[i - 1] != b'$')) else { return vec![word.to_string()] };
-    if word.contains(char::is_whitespace) {
-        return vec![word.to_string()];
+/// `args` with the braces of each unquoted word expanded as the shell does, each with whether it still may hold a glob.
+/// None when it can't tell: braces in a word that is partly quoted, or an expansion too long to list.
+fn expand_args(args: &[String], live: &[bool]) -> Option<Vec<(String, bool)>> {
+    let mut out = vec![];
+    for (a, &live) in args.iter().zip(live) {
+        if !live || !a.contains('{') {
+            out.push((a.clone(), live));
+        } else if a.contains(char::is_whitespace) {
+            return None;
+        } else {
+            let mut budget = 4096;
+            out.extend(expand_braces(a, &mut budget)?.into_iter().filter(|w| !w.is_empty()).map(|w| (w, true)));
+        }
     }
+    Some(out)
+}
+
+/// The words the shell makes of `word` by brace expansion: `{a,b}` is two. `${x}`, `{x}` and `{}` are literal, and a
+/// sequence (`{1..3}`) stays as it is (`hides`). None past `budget` words.
+fn expand_braces(word: &str, budget: &mut usize) -> Option<Vec<String>> {
+    let b = word.as_bytes();
+    let Some(open) = (0..b.len()).find(|&i| b[i] == b'{' && (i == 0 || b[i - 1] != b'$')) else { return Some(vec![word.to_string()]) };
     let (mut depth, mut commas, mut close) = (0, vec![], None);
     for (i, c) in b.iter().enumerate().skip(open) {
         match c {
@@ -503,18 +687,16 @@ fn expand_braces(word: &str) -> Vec<String> {
             _ => {}
         }
     }
-    let Some(close) = close.filter(|_| !commas.is_empty()) else { return vec![word.to_string()] };
+    let Some(close) = close.filter(|_| !commas.is_empty()) else { return Some(vec![word.to_string()]) };
     let (pre, post) = (&word[..open], &word[close + 1..]);
     let mut out = vec![];
     let mut start = open + 1;
     for end in commas.iter().chain([&close]) {
-        out.extend(expand_braces(&format!("{pre}{}{post}", &word[start..*end])));
+        out.extend(expand_braces(&format!("{pre}{}{post}", &word[start..*end]), budget)?);
         start = end + 1;
-        if out.len() > 64 {
-            break;
-        }
     }
-    out
+    *budget = budget.checked_sub(out.len())?;
+    Some(out)
 }
 
 /// Whether a git subcommand, with its arguments, only reads.
@@ -554,8 +736,8 @@ fn git_reads(sub: &str, rest: &[&str]) -> bool {
     }
 }
 
-/// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded after the links on the way are followed. None when it holds another variable or a substitution.
-fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
+/// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded (after the links on the way are followed when `physical`). None when it holds another variable or a substitution.
+fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
     let home = || dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
     let path = match path {
         p if p == "~" || p.starts_with("~/") => format!("{}{}", home()?, &p[1..]),
@@ -569,9 +751,12 @@ fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for c in cwd.join(path).components() {
         match c {
-            // Git follows a link before it goes up: `lnk/..` is the folder holding what `lnk` points at.
+            // Git and the kernel follow a link before they go up: `lnk/..` is the folder holding what `lnk` points at.
+            // The shell's `cd` folds the text (`physical` is false).
             Component::ParentDir => {
-                out = real(out);
+                if physical {
+                    out = real(out);
+                }
                 out.pop();
             }
             Component::CurDir => {}
@@ -872,6 +1057,11 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
 struct Cmd {
     /// Its words with quotes removed. Redirections aren't words.
     words: Vec<String>,
+    /// Whether each word has a `*`, `?`, `[` or `{` the shell expands: one outside any quotes. A quoted one is a plain
+    /// character, and a partly quoted word with an unquoted one counts.
+    live: Vec<bool>,
+    /// The files its redirections write or read.
+    targets: Vec<String>,
     /// Each pipeline it sits in, from the outermost (one a compound command it's in sits in) in: the pipeline and
     /// its place there.
     pipes: Vec<(usize, usize)>,
@@ -929,6 +1119,8 @@ struct Level {
     cur: Option<usize>,
     word: String,
     in_word: bool,
+    /// The word has an unquoted `*`, `?`, `[` or `{`.
+    live: bool,
     /// What the next word is a redirection's target of.
     redirect: Option<Redirect>,
     frames: Vec<Frame>,
@@ -938,7 +1130,7 @@ struct Level {
 
 impl Level {
     fn new() -> Self {
-        Level { cur: None, word: String::new(), in_word: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![] }
+        Level { cur: None, word: String::new(), in_word: false, live: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![] }
     }
 
     fn frame(&mut self) -> &mut Frame {
@@ -956,23 +1148,25 @@ impl Level {
     fn end_word(&mut self, p: &mut Parse) {
         if !std::mem::take(&mut self.in_word) {
             self.word.clear();
+            self.live = false;
             return;
         }
         let word = std::mem::take(&mut self.word);
+        let live = std::mem::take(&mut self.live);
         let id = self.cmd(p);
         let cmd = &mut p.cmds[id];
         match self.redirect.take() {
-            Some(Redirect::File) => {}
+            Some(Redirect::File) => cmd.targets.push(word),
             Some(Redirect::Here) => {
                 cmd.stdin += &word;
                 cmd.stdin.push('\n');
             }
-            None => self.command_word(p, id, word),
+            None => self.command_word(p, id, word, live),
         }
     }
 
     /// Adds a word to the command, opening or closing a compound command when it's a keyword in command position.
-    fn command_word(&mut self, p: &mut Parse, id: usize, word: String) {
+    fn command_word(&mut self, p: &mut Parse, id: usize, word: String, live: bool) {
         if self.frame().pattern == Some(true) && word != "esac" {
             return; // a `case` pattern
         }
@@ -987,6 +1181,7 @@ impl Level {
             }
         }
         words.push(word);
+        p.cmds[id].live.push(live);
         if opens_case {
             self.end(p);
             self.frames.push(Frame { pattern: Some(true), ..Default::default() });
@@ -1220,6 +1415,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             _ => {
                 l.word.push(ch);
                 l.in_word = true;
+                l.live |= matches!(ch, '*' | '?' | '[' | '{');
             }
         }
     }
@@ -1315,11 +1511,18 @@ pub async fn handle(
     for change in req.changes {
         // Read again each time: an "Always allow" for one folder may cover the next.
         let Ok(Some(a)) = state.db.get_agent(&agent_id) else { break };
-        if !change.folder.starts_with(&projects) || in_agent_storage(&change.folder) {
+        // A folder the hook couldn't name: the user is asked about the projects folder as a whole.
+        let unknown = change.folder == Path::new(UNKNOWN);
+        let at = if unknown { projects.clone() } else { change.folder.clone() };
+        if !unknown && (!at.starts_with(&projects) || in_agent_storage(&at)) {
             continue;
         }
-        let folder = change.folder.display().to_string();
-        let reason = format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command);
+        let folder = at.display().to_string();
+        let reason = if unknown {
+            format!("{} runs a command that may change one of your checkouts under {folder} (it can't tell which), not its own clone: {}", a.name, change.command)
+        } else {
+            format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command)
+        };
         let input = json!({ "command": change.command, "folder": folder });
         let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
         let d = crate::agents::ask_permission_for(&state, &a.id, "prompt", "Checkout", input, &reason, String::new(), wait).await;
@@ -1833,6 +2036,15 @@ mod tests {
         let (project, ws, clone, other) = (root.join("loft"), root.join("loft/agent-local-storage/x"), root.join("loft/agent-local-storage/x/loft"), root.join("other"));
         let at = |p: &Path| p.display().to_string();
         std::os::unix::fs::symlink(other.join("src"), ws.join("lnk")).unwrap();
+        // `k`: a link to a folder of the clone; `sl`: a `.git` that is a link; `gc`: a `.git` file with a `commondir`.
+        std::fs::create_dir_all(clone.join("a/b")).unwrap();
+        std::os::unix::fs::symlink(clone.join("a/b"), ws.join("k")).unwrap();
+        std::fs::create_dir_all(ws.join("sl")).unwrap();
+        std::os::unix::fs::symlink(other.join(".git"), ws.join("sl/.git")).unwrap();
+        std::fs::create_dir_all(ws.join("gc")).unwrap();
+        std::fs::write(ws.join("gc/.git"), "gitdir: ../fake\n").unwrap();
+        std::fs::create_dir_all(ws.join("fake")).unwrap();
+        std::fs::write(ws.join("fake/commondir"), format!("{}\n", at(&other.join(".git")))).unwrap();
         // A `.git` file, absolute and relative, and one to a repository kept apart.
         for (name, text) in [("gf", format!("gitdir: {}\n", at(&other.join(".git/worktrees/w")))), ("gr", "gitdir: ../../../../other/.git\n".to_string())] {
             std::fs::create_dir_all(ws.join(name)).unwrap();
@@ -1862,8 +2074,58 @@ mod tests {
         // A `.git` file's `gitdir:`.
         has("git -C gf reset --hard", &ws, &other);
         has("cd gr && git checkout main", &ws, &other);
+        let unknown = PathBuf::from(UNKNOWN);
+        // Quoted braces are plain characters: they don't hide the `-C` that comes after.
+        for cmd in ["git -c 'x.y={b,c}' -C ../../.. reset --hard", "git -c x.y=\\{b,c\\} -C ../../.. reset --hard", "git -c \"alias.x={a,status}\" -C ../../.. reset --hard"] {
+            has(cmd, &clone, &project);
+        }
+        // `..` after a link is folded as text by `cd` and `pushd`, and after the link by git: both are asked about.
+        for cmd in ["cd k/../.. && git reset --hard", "cd k && cd ../.. && git reset --hard", "pushd k/../.. && git reset --hard", "cd k/.. && GIT_CEILING_DIRECTORIES= git reset --hard", "pnpm --dir k/../../.. install"] {
+            has(cmd, &ws, &project);
+        }
+        has("cd lnk/.. && git reset --hard", &ws, &project);
+        // A glob names the folder its literal part does, wherever the command runs.
+        let elsewhere = std::env::temp_dir();
+        for cmd in [format!("git -C {}/lof? reset --hard", at(&root)), format!("cd {}/lof? && git reset --hard", at(&root)), format!("git --git-dir={}/lof?/.git checkout other", at(&root))] {
+            has(&cmd, &elsewhere, &root);
+            has(&cmd, &elsewhere, &unknown);
+        }
+        // Holes in the expansion: many words, a quoted part, an empty word, too many to list.
+        let many = "--no-pager,".repeat(70);
+        for cmd in [format!("git {{{many}-C,../../..,reset,--hard}}"), "git {,-C} ../../.. reset --hard".to_string()] {
+            has(&cmd, &clone, &project);
+        }
+        for cmd in ["git {-C,../../..,-c,\"x.y=b c\"} reset --hard".to_string(), format!("git {} reset --hard", "{a,b}".repeat(13))] {
+            has(&cmd, &clone, &unknown);
+        }
+        // What the same command made before git runs: a link, a clone's link, a checkout's, an archive's, a `.git` file.
+        for (cmd, cwd) in [
+            ("(git clone -q src t); git -C t/l reset --hard", &clone),
+            ("sh -c 'git clone -q src t'; git -C t/l reset --hard", &clone),
+            ("git clone -q --orig o src t && git -C t/l reset --hard", &clone),
+            ("git clone -q --dep 1 src t && git -C t/l reset --hard", &clone),
+            ("git checkout -q withlink && git -C l reset --hard", &clone),
+            ("git pull -q && git -C l reset --hard", &clone),
+            ("git worktree add -q wt b && git -C wt/l reset --hard", &clone),
+            ("tar xf x.tar && git -C t/l reset --hard", &clone),
+            ("ln -s ../../../../other t && git -C t reset --hard", &ws),
+            ("ln -s ../../../../other t; cd t && git reset --hard", &ws),
+            ("echo 'gitdir: x' > a/.git; git -C a checkout other", &clone),
+            ("mkdir t && echo 'gitdir: x' > t/.git && git -C t checkout other", &clone),
+            ("mkdir t && cp g t/.git && git -C t checkout other", &clone),
+        ] {
+            has(cmd, cwd, &unknown);
+        }
+        // A `.git` that is a link to another `.git`, and one whose `commondir` names another repository.
+        has("git -C sl checkout other", &ws, &other);
+        has("git -C gc branch -D main", &ws, &other);
         // What an agent does in its own clone still asks nothing.
         for cmd in [
+            "git clone -q --depth 1 src t && git -C t reset --hard",
+            "mkdir -p t && git -C t init -q",
+            "echo hi > notes.txt && git add notes.txt",
+            "cd -P . && git commit -m x",
+            "cd k/.. && git status",
             "git clone -q src t && git -C t reset --hard",
             "git clone -q src t && cd t && git checkout -b x",
             "git commit -m 'fix {a,b} and *'",
@@ -2031,6 +2293,15 @@ mod tests {
         crate::agents::tests::until("the next change asking again", 5, || pending().len() == 1).await;
         crate::agents::decide(&st, &pending()[0].id, "deny", None, None, None).unwrap();
         assert_eq!(again.await.unwrap()["allow"], false);
+
+        // A folder the hook couldn't name: the user is asked about the projects folder as a whole.
+        let asking = guard(PathBuf::from(UNKNOWN));
+        crate::agents::tests::until("a request for the unknown folder", 5, || pending().len() == 1).await;
+        let req = pending().remove(0);
+        assert_eq!(req.input["folder"], projects.display().to_string());
+        assert!(req.reason.contains("can't tell which"), "{}", req.reason);
+        crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
+        assert_eq!(asking.await.unwrap()["allow"], false);
     }
 
     #[tokio::test(flavor = "multi_thread")]
