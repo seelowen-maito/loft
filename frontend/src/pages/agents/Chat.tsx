@@ -50,7 +50,7 @@ import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
 import { QuoteBlock, QuoteChip, ReplyButton, useLongPress } from "./Quote";
-import { messageAnchor, quotable, quoteOf, replyOf } from "../../lib/reply";
+import { QUOTE_GONE_NOTE, jumpStep, messageAnchor, quotable, quoteGone, quoteOf, replyOf } from "../../lib/reply";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -410,10 +410,7 @@ export function Chat({
     if (uploading || failed) return;
     if (images.length > 0) {
       stick.current = true;
-      await act(sending, async () => {
-        await api.send(agent.id, v, images, taskId ?? undefined, reply?.id);
-        putDraft(agent.id, EMPTY_DRAFT);
-      });
+      await act(sending, () => sendText(v, images));
       return;
     }
     // The message's one command, leading or picked wherever it sits: /compact and /grill take the rest as their
@@ -429,10 +426,17 @@ export function Chat({
     const known = cmd && commands.find((c) => c.name === cmd.command);
     if (cmd && known?.tag !== "passthrough") return runCommand(cmd.command, cmd.rest);
     stick.current = true;
-    await act(sending, async () => {
-      await api.send(agent.id, v, [], taskId ?? undefined, reply?.id);
-      putDraft(agent.id, EMPTY_DRAFT);
-    });
+    await act(sending, () => sendText(v, []));
+  };
+  // A quote whose message is gone is dropped, so the next send goes through; the error says why.
+  const sendText = async (v: string, imgs: string[]) => {
+    try {
+      await api.send(agent.id, v, imgs, taskId ?? undefined, reply?.id);
+    } catch (e) {
+      if (quoteGone(errorText(e))) setReply(null);
+      throw e;
+    }
+    putDraft(agent.id, EMPTY_DRAFT);
   };
 
   // Reply on a message: its quote goes above the message box. Stable, so memoized rows don't re-render.
@@ -453,16 +457,21 @@ export function Chat({
     el.classList.add("quote-flash");
     return true;
   };
-  const onJump = useCallback((id: number) => {
-    if (flash(id)) return;
-    jumpTo.current = id;
-    setShowEarlier(true);
-  }, []);
+  const onJump = useCallback(
+    (id: number) => {
+      const step = jumpStep(flash(id), hiddenCount);
+      if (step === "show-earlier") {
+        jumpTo.current = id;
+        setShowEarlier(true);
+      } else if (step === "gone") setCmdNote(QUOTE_GONE_NOTE);
+    },
+    [hiddenCount],
+  );
   useLayoutEffect(() => {
     const id = jumpTo.current;
     if (id == null || !showEarlier) return;
     jumpTo.current = null;
-    if (!flash(id)) setCmdNote("That message is no longer in the chat.");
+    if (!flash(id)) setCmdNote(QUOTE_GONE_NOTE);
   }, [showEarlier]);
 
   const running = !!agent.running;

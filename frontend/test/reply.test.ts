@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { authorLabel, quotable, quoteOf, replyOf } from "../src/lib/reply.ts";
+import { authorLabel, jumpStep, quotable, quoteGone, quoteOf, replyOf } from "../src/lib/reply.ts";
 
 const msg = (role: string, content: string, meta: object | null = null) => ({ id: 3, role, content, meta });
 
@@ -28,4 +28,17 @@ test("only chat messages offer Reply: not run markers, tools or thinking", () =>
   for (const [role, kind] of [["system", "run_start"], ["system", "clear"], ["assistant", "thinking"], ["assistant", "tool_use"], ["tool", "tool_result"], ["assistant", "error"]]) {
     assert.ok(!quotable({ role, kind }), `${role} ${kind}`);
   }
+});
+
+test("a clicked quote scrolls to a shown message, shows the items before /clear, or says it's gone", () => {
+  assert.equal(jumpStep(true, 12), "flash");
+  assert.equal(jumpStep(false, 12), "show-earlier");
+  // Older than what the chat loaded: nothing hidden to show, so the note shows right away.
+  assert.equal(jumpStep(false, 0), "gone");
+});
+
+test("only the gone-quote refusal drops the composer's quote", () => {
+  assert.equal(quoteGone("The quoted message isn't in this chat."), true);
+  assert.equal(quoteGone("Only chat messages can be quoted."), false);
+  assert.equal(quoteGone("empty message"), false);
 });

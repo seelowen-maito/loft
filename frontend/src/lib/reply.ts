@@ -31,3 +31,13 @@ export const authorLabel = (q: Quote) => q.author ?? "You";
 
 /** The DOM id of a message's row, which a quote jumps to. */
 export const messageAnchor = (id: number) => `msg-${id}`;
+
+/** What clicking a quote does: scroll to the original when it's shown, show the items before /clear when it may be
+ * among them, else say it's gone (older than what the chat loaded). */
+export const jumpStep = (shown: boolean, hiddenEarlier: number): "flash" | "show-earlier" | "gone" =>
+  shown ? "flash" : hiddenEarlier > 0 ? "show-earlier" : "gone";
+
+export const QUOTE_GONE_NOTE = "That message is no longer in the chat.";
+
+/** The server's refusal of a reply whose quoted message is gone (a draft kept across a reload): the quote is dropped. */
+export const quoteGone = (error: string) => error === "The quoted message isn't in this chat.";
