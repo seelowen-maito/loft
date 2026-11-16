@@ -126,9 +126,6 @@ struct Dirs {
     stack: Vec<Option<PathBuf>>,
     /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
     ceiling: Vec<PathBuf>,
-    /// The folders an earlier `git clone` or `git init` of this command makes. What is in them isn't known yet (a clone
-    /// can bring a link to anywhere), but they are repositories of their own.
-    fresh: Vec<PathBuf>,
     /// Other folders the shell may be in: `cd lnk/..` goes to the folder holding `lnk` for the shell and to the one
     /// holding what `lnk` points at for git and the kernel.
     alts: Vec<PathBuf>,
@@ -163,7 +160,6 @@ impl Dirs {
 
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
     fn keep_made(&mut self, inner: &Dirs) {
-        self.fresh = inner.fresh.clone();
         self.made |= inner.made;
         self.dotgit |= inner.dotgit;
     }
@@ -524,16 +520,12 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         // `clone <repository> [<folder>]`, `init [<folder>]`, and the repository's own folder when it's apart.
         let target = words.get(if sub == "clone" { 1 } else { 0 });
         let target = target.map_or(dirs.cwd.clone(), |t| dirs.at(t));
-        outer.fresh.extend(target.clone().map(real));
         return [target, git_dir.and_then(|d| dirs.at(d))].into_iter().flatten().collect();
     }
     if let Some(cwd) = dirs.cwd.clone().map(real) {
-        // The folder this command's clone makes is a repository of its own, not part of the one around it.
-        if dirs.fresh.contains(&cwd) {
-            return vec![cwd];
-        }
         // A part that isn't there when the hook looks can be made before git runs: a link to any checkout (`ln -s`,
-        // a clone, `git checkout`, `tar`), a `.git` file. Only the folder a clone or init made is known.
+        // a clone, `git checkout`, `tar`), a `.git` file. Nothing about it is known, not even a clone's own folder
+        // (it may bring a link, or an agent's `--work-tree` may name a checkout).
         let start = outer.start.clone().map(real);
         let near = start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd) || start.is_some_and(|s| cwd.starts_with(s)));
         if dirs.dotgit || (dirs.made && near && !cwd.exists()) {
@@ -2116,18 +2108,22 @@ mod tests {
         ] {
             has(cmd, cwd, &unknown);
         }
+        // A workspace outside every checkout (the storage moved out of the project): nothing around it to name, yet a link
+        // made in the same command still asks.
+        let apart = root.join("apart/agent-local-storage/x");
+        std::fs::create_dir_all(&apart).unwrap();
+        for cmd in [format!("ln -s {} t && git -C t reset --hard", at(&other)), format!("ln -s {} t; cd t && git reset --hard", at(&other))] {
+            has(&cmd, &apart, &unknown);
+        }
         // A `.git` that is a link to another `.git`, and one whose `commondir` names another repository.
         has("git -C sl checkout other", &ws, &other);
         has("git -C gc branch -D main", &ws, &other);
         // What an agent does in its own clone still asks nothing.
         for cmd in [
-            "git clone -q --depth 1 src t && git -C t reset --hard",
             "mkdir -p t && git -C t init -q",
             "echo hi > notes.txt && git add notes.txt",
             "cd -P . && git commit -m x",
             "cd k/.. && git status",
-            "git clone -q src t && git -C t reset --hard",
-            "git clone -q src t && cd t && git checkout -b x",
             "git commit -m 'fix {a,b} and *'",
             "git commit -m \"use {x} here\"",
             "git log --format='%h {%s}' -- '*.rs'",
@@ -2138,10 +2134,23 @@ mod tests {
         ] {
             assert_eq!(asks_all(cmd, &at(&clone)), Vec::<PathBuf>::new(), "should run: {cmd}");
         }
-        // A clone's folder is from its own -C, and what the next command does there is the clone's.
-        for cmd in ["git -C loft clone x ../y && git -C y add *.md", "git -C loft clone x ../y && git -C y reset --hard"] {
-            assert_eq!(asks_all(cmd, &at(&ws)), Vec::<PathBuf>::new(), "should run: {cmd}");
+        // A clone is run in a command of its own: git on the new folder in the same command asks, whatever it names.
+        let user = at(&project);
+        for cmd in [
+            "git clone -q src t && git -C t reset --hard".to_string(),
+            "git clone -q src t && cd t && git checkout -b x".to_string(),
+            "git clone -q --depth 1 src t && git -C t reset --hard".to_string(),
+            "git -C loft clone x ../y && git -C y add *.md".to_string(),
+            format!("git clone x ny && git -C ny --work-tree={user} reset --hard"),
+            format!("git clone x ny && git -C ny --git-dir={user}/.git checkout other"),
+            format!("git clone x ny && GIT_DIR={user}/.git git -C ny checkout other"),
+            format!("git clone x ny && GIT_WORK_TREE={user} git -C ny checkout ."),
+        ] {
+            has(&cmd, &ws, &unknown);
+            has(&cmd, &clone, &unknown);
         }
+        // Next to it, in its own command, the clone is known.
+        assert_eq!(asks_all("git -C loft pull", &at(&ws)), Vec::<PathBuf>::new());
         std::fs::remove_dir_all(root).unwrap();
     }
 
