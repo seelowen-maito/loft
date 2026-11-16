@@ -179,6 +179,15 @@ impl Dirs {
         self.touched.iter().any(|t| cwd.starts_with(t) || self.cwd.as_ref().is_some_and(|c| c.starts_with(t))) || (self.unreadable && (self.moved || named))
     }
 
+    /// Whether `path` goes through a folder an earlier `ln`, `mv` or `cp` names and then up (`t/..`): the link isn't
+    /// there yet, so the guard folds the `..` back to where `t` sits, while the shell lands beside what it points at.
+    fn passes(&self, path: &str) -> bool {
+        let parts: Vec<&str> = path.split('/').collect();
+        let Some(up) = parts.iter().position(|p| *p == "..").filter(|&u| u > 0) else { return false };
+        let before = parts[..up].join("/");
+        self.at_text(&before).is_some_and(|p| self.touched.iter().any(|t| p.starts_with(t) || real(p.clone()).starts_with(t)))
+    }
+
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
     fn keep_made(&mut self, inner: &Dirs) {
         self.made |= inner.made;
@@ -200,6 +209,11 @@ impl Dirs {
     /// `cd dir` (`-P`: `physical`): the shell goes where the text fold says, and the folder the physical one says is kept
     /// as another place it may be.
     fn move_to(&mut self, dir: &str, physical: bool) {
+        // `cd -P` with `..` out of a link that isn't there yet lands somewhere the guard can't tell.
+        let inside = self.cwd.as_ref().is_some_and(|c| self.touched.iter().any(|t| c.starts_with(t)));
+        if physical && dir.split('/').any(|p| p == "..") && (inside || self.passes(dir)) {
+            return self.hide(dir);
+        }
         let to = if physical { self.at(dir) } else { self.at_text(dir) };
         let mut alts: Vec<PathBuf> = vec![];
         let from_here = self.at(dir);
@@ -289,6 +303,16 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             });
             let git = paths.iter().any(|p| Path::new(p).file_name().is_some_and(|n| n == ".git"));
             let here = |p: &Path| dirs.cwd.as_ref().is_some_and(|c| c.starts_with(p));
+            // `ln <target>` and `ln <target>... <folder>` make `<name of target>` in the folder: `.` when there is one path.
+            if tool == "ln" {
+                let into = dest.map(String::as_str).or(if paths.len() == 1 { Some(".") } else { paths.last().map(|p| p.as_str()).filter(|p| dirs.at_text(p).is_some_and(|d| d.is_dir())) });
+                let sources = paths.iter().filter(|p| Some(p.as_str()) != into || paths.len() == 1);
+                if let Some(folder) = into.and_then(|i| dirs.at_text(i)) {
+                    for name in sources.filter_map(|p| Path::new(p.as_str()).file_name()) {
+                        dirs.touched.extend([real(folder.join(name)), folder.join(name)]);
+                    }
+                }
+            }
             for a in paths {
                 match dirs.at_text(a) {
                     Some(p) if copies && !links && !git && dest.is_some_and(|d| d == a) && here(&p) => {}
@@ -372,6 +396,11 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 continue;
             }
             _ => {
+                // `env -C <folder> cmd` runs cmd there.
+                let before = dirs.cwd.clone();
+                if let Some(d) = env_chdir(&all[..all.len() - words.len()]) {
+                    dirs.cwd = dirs.at(d);
+                }
                 let mut folders = command_folders(name, args, live, &vars, dirs);
                 // Each other folder the shell may be in.
                 for alt in dirs.alts.clone() {
@@ -379,10 +408,13 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     folders.extend(command_folders(name, args, live, &vars, &mut at));
                 }
                 // The folder it runs in may be a link an earlier `ln`, `mv` or `cp` of this command makes (git checks its own).
-                let swapped = name != "git" && !folders.is_empty() && dirs.cwd.clone().map(real).is_some_and(|c| dirs.swapped(&c, false));
+                // Each folder it names, not only the one it runs in (`pnpm -C t install`).
+                let here = dirs.cwd.clone().map(real);
+                let swapped = name != "git" && folders.iter().any(|f| f.as_os_str() != UNKNOWN && dirs.swapped(&real(f.clone()), Some(real(f.clone())) != here));
                 if swapped {
                     folders.extend(unknown_in(dirs, None));
                 }
+                dirs.cwd = before;
                 if dirs.unknown && !folders.is_empty() {
                     folders.push(PathBuf::from(UNKNOWN));
                 }
@@ -394,6 +426,16 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
+}
+
+/// The folder `env -C <folder>`, `env -C<folder>` or `env --chdir=<folder>` among the wrappers before a command moves it to.
+fn env_chdir(prefix: &[String]) -> Option<&str> {
+    let env = prefix.iter().position(|w| base(w) == "env")?;
+    let opts = &prefix[env + 1..];
+    opts.iter().enumerate().find_map(|(i, o)| match o.as_str() {
+        "-C" | "--chdir" => opts.get(i + 1).map(String::as_str),
+        o => o.strip_prefix("--chdir=").or(o.strip_prefix("-C")).filter(|d| !d.is_empty()),
+    })
 }
 
 /// Whether a command writes or names a path that ends in `.git` (also as `of=x/.git` or `--output=x/.git`), other than
@@ -423,7 +465,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
         "git" => git_changes(dirs, vars, args, live),
         "cargo" => match flags(args, &["--manifest-path"]) {
             (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
-                Some(m) => dirs.at(m).and_then(|m| m.parent().map(Path::to_path_buf)).into_iter().collect(),
+                Some(m) => dirs.at(m).and_then(|f| f.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(m).then(|| PathBuf::from(UNKNOWN))).collect(),
                 None => dirs.cwd.clone().into_iter().collect(),
             },
             _ => vec![],
@@ -437,7 +479,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
             // Node folds `..` as text, the kernel after the links: both are asked about.
             let folders = |dir: Option<&str>| match dir {
                 None => dirs.cwd.clone().into_iter().collect::<Vec<_>>(),
-                Some(d) => [dirs.at_text(d), dirs.at(d)].into_iter().flatten().collect(),
+                Some(d) => [dirs.at_text(d), dirs.at(d)].into_iter().flatten().chain(dirs.passes(d).then(|| PathBuf::from(UNKNOWN))).collect(),
             };
             match flags(args, dir_flags) {
                 (dir, Some(s)) if PM_CHANGES.contains(&s) => folders(dir),
@@ -447,7 +489,13 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
         }
         "xcodebuild" => {
             let reads = ["-list", "-showBuildSettings", "-version", "-showsdks", "-showdestinations", "-help"];
-            if args.iter().any(|a| reads.contains(&a.as_str())) { vec![] } else { dirs.cwd.clone().into_iter().collect() }
+            if args.iter().any(|a| reads.contains(&a.as_str())) {
+                return vec![];
+            }
+            // The folder of the project or workspace it names builds there too.
+            let named = args.windows(2).filter(|w| matches!(w[0].as_str(), "-project" | "-workspace")).map(|w| w[1].as_str());
+            let named: Vec<PathBuf> = named.flat_map(|n| dirs.at(n).and_then(|p| p.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(n).then(|| PathBuf::from(UNKNOWN)))).collect();
+            dirs.cwd.clone().into_iter().chain(named).collect()
         }
         _ => vec![],
     }
@@ -2262,11 +2310,35 @@ mod tests {
             ("ln -s ../../../../other t && cd t && pnpm install", &ws),
             ("mv a t && cd t && cargo build", &ws),
             ("cp -s ../../../../other t; cd t; xcodebuild build", &ws),
+            // `ln <target>` makes `./<name of target>`.
+            ("ln -s ../../../../other && cd other && pnpm install", &ws),
+            ("ln -s ../../../../other/src && cd src && cargo build", &ws),
+            // A folder option into the link, not only the shell's folder.
+            ("ln -s ../../../../other t && pnpm -C t install", &ws),
+            ("ln -s ../../../../other t && pnpm --dir=t install", &ws),
+            ("ln -s ../../../../other t && npm install --prefix t", &ws),
+            ("ln -s ../../../../other t && yarn --cwd t install", &ws),
+            ("ln -s ../../../../other t && bun install --cwd t", &ws),
+            ("ln -s ../../../../other t && cargo build --manifest-path t/Cargo.toml", &ws),
+            ("ln -s ../../../../other/src t && cargo build --manifest-path t/../Cargo.toml", &ws),
+            ("ln -s ../../../../other t && xcodebuild -project t/X.xcodeproj build", &ws),
+            // A physical `cd` out of the link lands beside what it points at.
+            ("ln -s ../../../../other/src t && cd -P t/.. && pnpm install", &ws),
+            ("ln -s ../../../../other/src t && cd t && cd -P .. && git reset --hard", &ws),
             ("echo 'gitdir: x' > a/.git; git -C a checkout other", &clone),
             ("mkdir t && echo 'gitdir: x' > t/.git && git -C t checkout other", &clone),
             ("mkdir t && cp g t/.git && git -C t checkout other", &clone),
         ] {
             has(cmd, cwd, &unknown);
+        }
+        // The folder a tool names itself, with no link: `env -C`, `xcodebuild -project`.
+        let o = at(&other);
+        for cmd in [format!("env -C {o} pnpm install"), format!("xcodebuild -project {o}/X.xcodeproj build"), format!("xcodebuild -workspace {o}/X.xcworkspace -scheme X build")] {
+            assert_eq!(asks_all(&cmd, &at(&ws)), vec![other.clone()], "should ask: {cmd}");
+        }
+        // The agent's own clone, reached by `cd`, is no link: it runs.
+        for cmd in ["cd loft && pnpm install", "cd loft && cargo build", "pnpm -C loft install"] {
+            assert_eq!(asks_all(cmd, &at(&ws)), Vec::<PathBuf>::new(), "should run: {cmd}");
         }
         // A workspace outside every checkout (the storage moved out of the project): nothing around it to name, yet a link
         // made in the same command still asks.
