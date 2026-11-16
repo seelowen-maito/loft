@@ -183,9 +183,11 @@ impl Dirs {
     /// there yet, so the guard folds the `..` back to where `t` sits, while the shell lands beside what it points at.
     fn passes(&self, path: &str) -> bool {
         let parts: Vec<&str> = path.split('/').collect();
-        let Some(up) = parts.iter().position(|p| *p == "..").filter(|&u| u > 0) else { return false };
-        let before = parts[..up].join("/");
-        self.at_text(&before).is_some_and(|p| self.touched.iter().any(|t| p.starts_with(t) || real(p.clone()).starts_with(t)))
+        // Each `..`, with what is before it folded as text (`real/../t/..` goes up from `t`).
+        (1..parts.len()).filter(|&u| parts[u] == "..").any(|u| {
+            let before = parts[..u].join("/");
+            self.at_text(&before).is_some_and(|p| self.touched.iter().any(|t| p.starts_with(t) || real(p.clone()).starts_with(t)))
+        })
     }
 
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
@@ -209,9 +211,9 @@ impl Dirs {
     /// `cd dir` (`-P`: `physical`): the shell goes where the text fold says, and the folder the physical one says is kept
     /// as another place it may be.
     fn move_to(&mut self, dir: &str, physical: bool) {
-        // `cd -P` with `..` out of a link that isn't there yet lands somewhere the guard can't tell.
-        let inside = self.cwd.as_ref().is_some_and(|c| self.touched.iter().any(|t| c.starts_with(t)));
-        if physical && dir.split('/').any(|p| p == "..") && (inside || self.passes(dir)) {
+        // `cd -P` into or out of a link that isn't there yet puts the shell where it points, which the guard can't tell.
+        let under = |p: Option<&PathBuf>| p.is_some_and(|c| self.touched.iter().any(|t| c.starts_with(t)));
+        if physical && (under(self.cwd.as_ref()) || under(self.at_text(dir).as_ref()) || self.passes(dir)) {
             return self.hide(dir);
         }
         let to = if physical { self.at(dir) } else { self.at_text(dir) };
@@ -428,14 +430,27 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     dirs.dotgit |= pending_dotgit;
 }
 
-/// The folder `env -C <folder>`, `env -C<folder>` or `env --chdir=<folder>` among the wrappers before a command moves it to.
+/// The folder the last `-C <folder>`, `-C<folder>`, `--chdir=<folder>` or `--chdir <folder>` of the `env`s before a command
+/// moves it to, as one option or bundled (`-iC <folder>`).
 fn env_chdir(prefix: &[String]) -> Option<&str> {
-    let env = prefix.iter().position(|w| base(w) == "env")?;
-    let opts = &prefix[env + 1..];
-    opts.iter().enumerate().find_map(|(i, o)| match o.as_str() {
-        "-C" | "--chdir" => opts.get(i + 1).map(String::as_str),
-        o => o.strip_prefix("--chdir=").or(o.strip_prefix("-C")).filter(|d| !d.is_empty()),
-    })
+    let mut found = None;
+    let mut it = prefix.iter().skip_while(|w| base(w) != "env").skip(1);
+    while let Some(o) = it.next() {
+        if let Some(d) = o.strip_prefix("--chdir=") {
+            found = Some(d);
+        } else if o == "--chdir" {
+            found = it.next().map(String::as_str).or(found);
+        } else if o.starts_with('-') && !o.starts_with("--") {
+            // A bundle: options up to the first that takes a value, which is the rest of the word or the next word.
+            let Some(at) = o.find(['C', 'u', 'P', 'S']) else { continue };
+            let rest = &o[at + 1..];
+            let value = if rest.is_empty() { it.next().map(String::as_str) } else { Some(rest) };
+            if o.as_bytes()[at] == b'C' {
+                found = value.or(found);
+            }
+        }
+    }
+    found
 }
 
 /// Whether a command writes or names a path that ends in `.git` (also as `of=x/.git` or `--output=x/.git`), other than
@@ -1165,12 +1180,14 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             i += 2; // and the function's name: `function f { pkill x; }`
             continue;
         }
+        // `env -iC <folder>`: a bundle whose last option takes the next word.
+        let ends_valued = |o: &str| !o.starts_with("--") && o.find(['C', 'u', 'P', 'S']).is_some_and(|at| at + 1 == o.len());
         // Each wrapper with its options that take a value.
         let name = base(w);
         let valued: &[&str] = match name {
             "sudo" => &["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"],
             "doas" => &["-u", "-C"],
-            "env" => &["-u", "-C", "-P"],
+            "env" => &["-u", "-C", "-P", "--chdir"],
             "xargs" => &["-n", "-I", "-L", "-P", "-s", "-E", "-J", "-R", "-S", "-d", "-a"],
             "parallel" => &["-j", "-n", "-N", "-S", "-I", "-a", "-d", "-E", "--jobs", "--delay", "--timeout"],
             "nice" => &["-n"],
@@ -1200,11 +1217,11 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
                 // A command run with an emptied environment, another PATH or a variable unset (`env -u PATH`).
                 ("env", o) if o == "-" || o.starts_with("--ignore") || o.starts_with("--unset") || (!o.starts_with("--") && o.contains(['i', 'P', 'u'])) => {
                     *bypass = true;
-                    if valued.contains(&o) {
+                    if valued.contains(&o) || ends_valued(o) {
                         i += 1;
                     }
                 }
-                (_, o) if valued.contains(&o) => i += 1,
+                (_, o) if valued.contains(&o) || (name == "env" && ends_valued(o)) => i += 1,
                 _ => {}
             }
         }
@@ -2334,6 +2351,18 @@ mod tests {
         // The folder a tool names itself, with no link: `env -C`, `xcodebuild -project`.
         let o = at(&other);
         for cmd in [format!("env -C {o} pnpm install"), format!("xcodebuild -project {o}/X.xcodeproj build"), format!("xcodebuild -workspace {o}/X.xcworkspace -scheme X build")] {
+            assert_eq!(asks_all(&cmd, &at(&ws)), vec![other.clone()], "should ask: {cmd}");
+        }
+        // After `cd -P` through a link, or `..` before one, later folders stay unknown; so do env's bundled, repeated and nested -C.
+        for cmd in [
+            "ln -s ../../../../other/src t && cd -P t && cd .. && pnpm install".to_string(),
+            "ln -s ../../../../other/src t && cd -P t && cd .. && git reset --hard".to_string(),
+            "ln -s ../../../../other/src t && cd -P real/../t/.. && pnpm install".to_string(),
+            "ln -s ../../../../other/src t && cargo build --manifest-path real/../t/../Cargo.toml".to_string(),
+        ] {
+            assert!(asks_all(&cmd, &at(&ws)).iter().any(|f| f.as_os_str() == UNKNOWN), "should ask: {cmd}");
+        }
+        for cmd in [format!("env -iC {o} pnpm install"), format!("env -C /tmp -C {o} pnpm install"), format!("env -C /tmp env -C {o} pnpm install"), format!("env -i -uX -C{o} pnpm install"), format!("env --chdir {o} pnpm install")] {
             assert_eq!(asks_all(&cmd, &at(&ws)), vec![other.clone()], "should ask: {cmd}");
         }
         // The agent's own clone, reached by `cd`, is no link: it runs.
