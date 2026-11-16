@@ -120,6 +120,9 @@ pub fn migrate(old: &Path, new: &Path, root: &Path, projects_dir: &Path, data_di
             return kept(&old, why);
         }
         tracing::info!("agents' workspaces: moved {} to {}", old.display(), new.display());
+    } else if let Err(why) = safe_destination(new, root, projects_dir) {
+        // A later start finishing a move: the workspaces are already in `new`, which changed since. The marker stays.
+        anyhow::bail!("agents' workspaces: can't finish the move to {}: {why}. Loft doesn't start until it is a safe folder again", new.display());
     }
 
     let (from, to) = (old.to_string_lossy().into_owned(), new.to_string_lossy().into_owned());
@@ -526,6 +529,30 @@ mod tests {
         std::fs::write(o.data().join(MARKER), o.old_dir().as_os_str().as_bytes()).unwrap();
         safe_destination(&o.new_dir(), &o.root, &o.home.join("dev")).unwrap();
         std::fs::rename(o.old_dir(), o.new_dir()).unwrap();
+        assert_eq!(o.migrate(), o.new_dir());
+        o.assert_moved();
+    }
+
+    #[test]
+    fn a_move_to_finish_checks_the_destination_again() {
+        // Killed right after the rename; the destination is then swapped for a link into the checkout.
+        let o = Old::make();
+        o.db.copy_to(&o.data().join(DB_COPY)).unwrap();
+        std::fs::write(o.data().join(MARKER), o.old_dir().as_os_str().as_bytes()).unwrap();
+        safe_destination(&o.new_dir(), &o.root, &o.home.join("dev")).unwrap();
+        std::fs::rename(o.old_dir(), o.new_dir()).unwrap();
+        let moved = o.home.join("moved");
+        std::fs::rename(o.new_dir(), &moved).unwrap();
+        std::fs::create_dir_all(o.root.join("inside")).unwrap();
+        std::os::unix::fs::symlink(o.root.join("inside"), o.new_dir()).unwrap();
+        let rows = o.rows();
+        let refused = migrate(&o.old_dir(), &o.new_dir(), &o.root, &o.home.join("dev"), &o.data(), &o.db, &o.projects());
+        assert!(refused.is_err_and(|e| e.to_string().contains("symlink")));
+        assert_eq!(o.rows(), rows, "nothing points at it");
+        assert!(o.data().join(MARKER).exists(), "the next start tries again");
+        // Once the folder is back, the move finishes.
+        std::fs::remove_file(o.new_dir()).unwrap();
+        std::fs::rename(&moved, o.new_dir()).unwrap();
         assert_eq!(o.migrate(), o.new_dir());
         o.assert_moved();
     }
