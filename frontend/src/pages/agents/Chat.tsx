@@ -50,7 +50,7 @@ import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
 import { QuoteBlock, QuoteChip, ReplyButton, useLongPress } from "./Quote";
-import { messageAnchor, quoteOf, replyOf } from "../../lib/reply";
+import { messageAnchor, quotable, quoteOf, replyOf } from "../../lib/reply";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -921,8 +921,10 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   onReply: (m: Message) => void;
   onJump: (id: number) => void;
 }) {
-  const press = useLongPress(() => onReply(m));
-  const replyButton = <ReplyButton onReply={() => onReply(m)} />;
+  const canReply = quotable(m);
+  const longPress = useLongPress(() => onReply(m));
+  const press = canReply ? longPress : {};
+  const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} />;
   if (m.kind === "clear") {
     return (
       <div className="flex items-center gap-3 py-2">
@@ -1070,7 +1072,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   const replier = m.meta?.mention_reply ? findAgent(agents, m.meta.from_agent?.id) : undefined;
   return (
     <div id={messageAnchor(m.id)} className="group relative flex gap-3 pt-1" {...press}>
-      {m.kind === "text" && <div className="absolute -top-1 right-0"><ReplyButton onReply={() => onReply(m)} className="border border-line bg-ink-850 shadow" /></div>}
+      {canReply && <div className="absolute -top-1 right-0"><ReplyButton onReply={() => onReply(m)} className="border border-line bg-ink-850 shadow" /></div>}
       <Sticker avatar={(replier ?? agent).avatar} lead={(replier ?? agent).role === "lead"} size={26} className="mt-0.5" />
       <div className={cx("prose-chat min-w-0 flex-1", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
         {m.meta?.mention_reply && (

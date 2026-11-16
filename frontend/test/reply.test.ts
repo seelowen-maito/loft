@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { authorLabel, quoteOf, replyOf } from "../src/lib/reply.ts";
+import { authorLabel, quotable, quoteOf, replyOf } from "../src/lib/reply.ts";
 
 const msg = (role: string, content: string, meta: object | null = null) => ({ id: 3, role, content, meta });
 
@@ -21,4 +21,11 @@ test("a quote's excerpt is one line, cut with an ellipsis when long", () => {
 test("a sent message's reply_to reads as its quote; anything else is no quote", () => {
   assert.deepEqual(replyOf({ reply_to: { id: 9, author: null, excerpt: "Ship it", role: "user" } }), { id: 9, author: null, excerpt: "Ship it" });
   for (const meta of [null, {}, { reply_to: null }, { reply_to: { id: "9" } }]) assert.equal(replyOf(meta), null, JSON.stringify(meta));
+});
+
+test("only chat messages offer Reply: not run markers, tools or thinking", () => {
+  for (const [role, kind] of [["user", "text"], ["assistant", "text"]]) assert.ok(quotable({ role, kind }), kind);
+  for (const [role, kind] of [["system", "run_start"], ["system", "clear"], ["assistant", "thinking"], ["assistant", "tool_use"], ["tool", "tool_result"], ["assistant", "error"]]) {
+    assert.ok(!quotable({ role, kind }), `${role} ${kind}`);
+  }
 });

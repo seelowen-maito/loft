@@ -7,6 +7,9 @@ const EXCERPT_CHARS = 200;
 
 type Quotable = { id: number; role: string; content: string; meta: Record<string, any> | null };
 
+/** Only chat messages can be quoted (as the server rules): text from the user, another agent or the agent. */
+export const quotable = (m: { role: string; kind: string }) => m.kind === "text" && (m.role === "user" || m.role === "assistant");
+
 /** The quote of `m` in `agentName`'s chat, as the composer shows it before sending. */
 export function quoteOf(m: Quotable, agentName: string): Quote {
   const author = m.meta?.from_agent?.name ?? (m.role === "user" ? null : agentName);

@@ -25,9 +25,17 @@ fn cut(s: &str, max: usize) -> (String, bool) {
     }
 }
 
-/// `meta.reply_to` for a reply to message `id`: refused unless it's in `agent`'s own chat.
+/// Only chat messages can be quoted: the user's, another agent's and the agent's text, not run markers, tools or thinking.
+fn quotable(m: &Message) -> bool {
+    m.kind == "text" && (m.role == "user" || m.role == "assistant")
+}
+
+/// `meta.reply_to` for a reply to message `id`: refused unless it's a chat message in `agent`'s own chat.
 pub fn reply_meta(state: &AppState, agent: &Agent, id: i64) -> Result<Value, String> {
     let m = state.db.get_message(&agent.id, id).ok().flatten().ok_or("The quoted message isn't in this chat.")?;
+    if !quotable(&m) {
+        return Err("Only chat messages can be quoted.".into());
+    }
     let one_line = m.content.split_whitespace().collect::<Vec<_>>().join(" ");
     let (excerpt, long) = cut(&one_line, EXCERPT_CHARS);
     Ok(json!({
@@ -114,6 +122,16 @@ mod tests {
             assert_eq!(send(&st, &a.id, "ok?", id).await.unwrap_err(), "The quoted message isn't in this chat.");
         }
         assert!(st.db.list_messages(&a.id, 10, None).unwrap().is_empty(), "nothing is stored");
+    }
+
+    #[tokio::test]
+    async fn only_chat_messages_can_be_quoted() {
+        let st = state();
+        let a = agent(&st, "Dev");
+        for (role, kind) in [("system", "run_start"), ("system", "clear"), ("assistant", "thinking"), ("assistant", "tool_use"), ("tool", "tool_result")] {
+            let m = crate::agents::add_msg(&st, &a.id, None, role, kind, "user", json!({})).unwrap();
+            assert_eq!(send(&st, &a.id, "hello?", json!(m.id)).await.unwrap_err(), "Only chat messages can be quoted.", "{kind}");
+        }
     }
 
     #[tokio::test]
