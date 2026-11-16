@@ -74,7 +74,14 @@ struct ChatView: View {
                         MessageRow(message: m, agent: agent, showsSticker: i == 0 || Self.speaker(shown[i - 1]) != Self.speaker(m),
                                    reply: store.info?.supports(.reply) == true && m.isQuotable
                                        ? { replyingTo = MessageQuote(of: m, agentName: agent.name) } : nil,
-                                   jump: { id in withAnimation { proxy.scrollTo(id, anchor: .top) } })
+                                   jump: { id in
+                                       // One older than the loaded pages can't be scrolled to: say so, as the web does.
+                                       if shown.contains(where: { $0.id == id }) {
+                                           withAnimation { proxy.scrollTo(id, anchor: .top) }
+                                       } else {
+                                           nav.chatNote = (agent.id, "That message is no longer in the chat.")
+                                       }
+                                   })
                             .id(m.id)
                     }
                     ForEach(store.pending(for: agent.id)) { PendingRow(message: $0) }
