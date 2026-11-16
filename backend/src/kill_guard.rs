@@ -126,6 +126,9 @@ struct Dirs {
     stack: Vec<Option<PathBuf>>,
     /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
     ceiling: Vec<PathBuf>,
+    /// The folders an earlier `git clone` or `git init` of this command makes: what is in them isn't known yet (a clone
+    /// can bring a link to anywhere).
+    fresh: Vec<PathBuf>,
 }
 
 impl Dirs {
@@ -191,6 +194,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 let to = match args.iter().find(|a| !matches!(a.as_str(), "-L" | "-P" | "-e" | "-@")).map(String::as_str) {
                     None => dirs::home_dir(),
                     Some("-") => dirs.old.clone().or(dirs.start.clone()),
+                    // A glob or braces: any folder the shell may list, so the outermost checkout stands for it.
+                    Some(dir) if hides(dir) => dirs.cwd.as_deref().map(outermost_checkout),
                     Some(dir) => dirs.at(dir),
                 };
                 dirs.cd(to);
@@ -328,8 +333,10 @@ fn inside_ceiling(dir: &str, cwd: &Path, ceiling: &[PathBuf]) -> bool {
 /// the checkout its repository is in (`--git-dir`, `GIT_DIR`), each by default the repository git finds from the
 /// folder (`-C`): the nearest one up, which for an agent's workspace that isn't a clone is the user's checkout around
 /// it. Every subcommand changes them but the ones that only read (`git_reads`).
-fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
-    let mut dirs = dirs.clone();
+fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
+    let mut dirs = outer.clone();
+    // Braces the shell expands before git sees them (`git -C {../..,reset} --hard`).
+    let args: Vec<String> = args.iter().flat_map(|a| expand_braces(a)).collect();
     let (mut tree, mut git_dir) = (None, None);
     for v in vars {
         if let Some(d) = v.strip_prefix("GIT_WORK_TREE=") {
@@ -338,10 +345,16 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
             git_dir = Some(dirs.at(d));
         }
     }
+    // Where a command whose folder, work tree or repository the guard can't list (a glob, `{1..3}`) may act.
+    let hidden = dirs.cwd.as_deref().or(dirs.start.as_deref()).map(outermost_checkout);
     let mut it = args.iter();
     let sub = loop {
         let Some(a) = it.next() else { return vec![] };
         let value = |o: &str| a.strip_prefix(o).and_then(|r| r.strip_prefix('='));
+        let takes_value = matches!(a.as_str(), "-C" | "--work-tree" | "--git-dir" | "-c" | "--namespace" | "--config-env" | "--super-prefix");
+        if hides(a) || (takes_value && it.as_slice().first().is_some_and(|v| hides(v))) {
+            return hidden.into_iter().collect();
+        }
         match a.as_str() {
             "-C" => {
                 let to = it.next().and_then(|d| dirs.at(d));
@@ -384,11 +397,20 @@ fn git_changes(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
         // `clone <repository> [<folder>]`, `init [<folder>]`, and the repository's own folder when it's apart.
         let target = words.get(if sub == "clone" { 1 } else { 0 });
         let target = target.map_or(dirs.cwd.clone(), |t| dirs.at(t));
+        outer.fresh.extend(target.clone().map(real));
         return [target, git_dir.and_then(|d| dirs.at(d))].into_iter().flatten().collect();
     }
+    // Below a folder this command's clone makes, a link may lead anywhere: unknown, like a glob.
+    if let Some(cwd) = dirs.cwd.clone().map(real)
+        && dirs.fresh.iter().any(|f| cwd != *f && cwd.starts_with(f))
+    {
+        return hidden.into_iter().collect();
+    }
     let found = dirs.cwd.map(|d| repo_root(d, &dirs.ceiling));
+    // A `.git` file points at the repository, which may be another checkout's.
+    let linked = found.as_deref().and_then(linked_repo);
     // The checkout a `.git` folder belongs to.
-    let repo = git_dir.unwrap_or(found.clone()).map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
+    let repo = git_dir.unwrap_or(linked.or_else(|| found.clone())).map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
     [tree.unwrap_or(found), repo].into_iter().flatten().collect()
 }
 
@@ -422,6 +444,71 @@ fn repo_root(folder: PathBuf, ceiling: &[PathBuf]) -> PathBuf {
     let below = |d: &Path| ceiling.iter().any(|c| d != c && d.starts_with(c));
     let stop = ceiling.iter().any(|c| folder != *c && folder.starts_with(c));
     folder.ancestors().take_while(|d| !stop || below(d)).find(|d| d.join(".git").exists()).map(Path::to_path_buf).unwrap_or(folder)
+}
+
+/// Where a `.git` file in `root` (a linked work tree, a submodule, `--separate-git-dir`) sends git: the checkout that
+/// holds the repository it names (`gitdir: <checkout>/.git/worktrees/x`), or the repository's folder itself.
+fn linked_repo(root: &Path) -> Option<PathBuf> {
+    use std::io::Read;
+    let file = root.join(".git");
+    if !file.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(&file).ok()?.take(4096).read_to_string(&mut text).ok()?;
+    let dir = real(root.join(text.lines().next()?.strip_prefix("gitdir:")?.trim()));
+    let checkout = dir.ancestors().find(|a| a.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent).map(Path::to_path_buf);
+    Some(checkout.unwrap_or(dir))
+}
+
+/// The topmost checkout around `folder`: where a command whose target the guard can't list may act.
+fn outermost_checkout(folder: &Path) -> PathBuf {
+    let folder = real(folder.to_path_buf());
+    folder.ancestors().filter(|d| d.join(".git").exists()).last().map(Path::to_path_buf).unwrap_or(folder)
+}
+
+/// Whether the shell turns `word` into names the guard can't list: a glob, or braces (`{a,b}`, `{1..3}`; the ones a git
+/// word has are expanded first, `expand_braces`).
+fn hides(word: &str) -> bool {
+    let braces = word.find('{').is_some_and(|i| (i == 0 || !word[..i].ends_with('$')) && word[i..].contains('}') && (word[i..].contains(',') || word[i..].contains("..")));
+    word.contains(['*', '?', '[']) || (braces && !word.contains(char::is_whitespace))
+}
+
+/// The words the shell makes of `word` by brace expansion: `{a,b}` is two. A word with a space was quoted, `${x}` and
+/// `{x}` are literal, and a sequence (`{1..3}`) stays as it is (`hides`).
+fn expand_braces(word: &str) -> Vec<String> {
+    let b = word.as_bytes();
+    let Some(open) = (0..b.len()).find(|&i| b[i] == b'{' && (i == 0 || b[i - 1] != b'$')) else { return vec![word.to_string()] };
+    if word.contains(char::is_whitespace) {
+        return vec![word.to_string()];
+    }
+    let (mut depth, mut commas, mut close) = (0, vec![], None);
+    for (i, c) in b.iter().enumerate().skip(open) {
+        match c {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            b',' if depth == 1 => commas.push(i),
+            _ => {}
+        }
+    }
+    let Some(close) = close.filter(|_| !commas.is_empty()) else { return vec![word.to_string()] };
+    let (pre, post) = (&word[..open], &word[close + 1..]);
+    let mut out = vec![];
+    let mut start = open + 1;
+    for end in commas.iter().chain([&close]) {
+        out.extend(expand_braces(&format!("{pre}{}{post}", &word[start..*end])));
+        start = end + 1;
+        if out.len() > 64 {
+            break;
+        }
+    }
+    out
 }
 
 /// Whether a git subcommand, with its arguments, only reads.
@@ -461,7 +548,7 @@ fn git_reads(sub: &str, rest: &[&str]) -> bool {
     }
 }
 
-/// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded. None when it holds another variable or a substitution.
+/// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded after the links on the way are followed. None when it holds another variable or a substitution.
 fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
     let home = || dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
     let path = match path {
@@ -476,7 +563,9 @@ fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for c in cwd.join(path).components() {
         match c {
+            // Git follows a link before it goes up: `lnk/..` is the folder holding what `lnk` points at.
             Component::ParentDir => {
+                out = real(out);
                 out.pop();
             }
             Component::CurDir => {}
@@ -1721,6 +1810,67 @@ mod tests {
         // A work tree given from the workspace: git still finds the user's repository from the folder.
         assert_eq!(asks(&format!("git --work-tree={} checkout .", at(&clone)), &at(&ws)), Some(project.clone()));
         std::fs::remove_dir_all(project.parent().unwrap()).unwrap();
+    }
+
+    /// #578: the folder or repository git really touches is hidden by a link, a brace, a glob or a `.git` file.
+    #[test]
+    fn links_braces_globs_and_git_files_that_hide_the_target_ask() {
+        let root = std::env::temp_dir().join(format!("loft-guard-{}", uuid::Uuid::new_v4()));
+        let project = root.join("loft");
+        let ws = project.join("agent-local-storage/x");
+        let clone = ws.join("loft");
+        let other = root.join("other");
+        for d in [project.join(".git"), clone.join(".git"), other.join(".git/worktrees/w"), other.join("src")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let root = std::fs::canonicalize(&root).unwrap();
+        let (project, ws, clone, other) = (root.join("loft"), root.join("loft/agent-local-storage/x"), root.join("loft/agent-local-storage/x/loft"), root.join("other"));
+        let at = |p: &Path| p.display().to_string();
+        std::os::unix::fs::symlink(other.join("src"), ws.join("lnk")).unwrap();
+        // A `.git` file, absolute and relative, and one to a repository kept apart.
+        for (name, text) in [("gf", format!("gitdir: {}\n", at(&other.join(".git/worktrees/w")))), ("gr", "gitdir: ../../../../other/.git\n".to_string())] {
+            std::fs::create_dir_all(ws.join(name)).unwrap();
+            std::fs::write(ws.join(name).join(".git"), text).unwrap();
+        }
+        let has = |cmd: &str, cwd: &Path, folder: &Path| {
+            let all = asks_all(cmd, &at(cwd));
+            assert!(all.contains(&folder.to_path_buf()), "should ask about {}: {cmd} (in {}) -> {all:?}", folder.display(), cwd.display());
+        };
+        // `..` after a link goes up from what the link points at.
+        has("git -C lnk/.. reset --hard", &ws, &other);
+        has("cd lnk/.. && git reset --hard", &ws, &other);
+        // A link that arrives with the clone.
+        has("git clone -q src t && git -C t/l reset --hard", &clone, &project);
+        has("git clone -q src t && cd t/l && git reset --hard", &clone, &project);
+        // Braces the shell expands, and ones it lists as a sequence.
+        has("git -C {../..,reset} --hard", &clone, &project);
+        has(&format!("git -C loft {{--git-dir={}/.git,checkout,other}}", at(&project)), &ws, &project);
+        has("git {-C,../..} reset --hard", &clone, &project);
+        has("git -C {1..2} reset --hard", &clone, &project);
+        has("cd {../..,x} && git reset --hard", &clone, &project);
+        // Globs in a git or cd word.
+        has("git -C lo* reset --hard", &clone, &project);
+        has("git -C ../../* checkout main", &clone, &project);
+        has("cd ../../?? && git checkout main", &clone, &project);
+        has("git --git-dir=../../../*/.git checkout main", &clone, &project);
+        // A `.git` file's `gitdir:`.
+        has("git -C gf reset --hard", &ws, &other);
+        has("cd gr && git checkout main", &ws, &other);
+        // What an agent does in its own clone still asks nothing.
+        for cmd in [
+            "git clone -q src t && git -C t reset --hard",
+            "git clone -q src t && cd t && git checkout -b x",
+            "git commit -m 'fix {a,b} and *'",
+            "git commit -m \"use {x} here\"",
+            "git log --format='%h {%s}' -- '*.rs'",
+            "git checkout -b feat/{x}",
+            "git -C . reset --hard",
+            "git -C ${HOME}/x status",
+            "cd \"$DIR\" && git pull",
+        ] {
+            assert_eq!(asks_all(cmd, &at(&clone)), Vec::<PathBuf>::new(), "should run: {cmd}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
