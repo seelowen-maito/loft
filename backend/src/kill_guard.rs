@@ -135,6 +135,9 @@ struct Dirs {
     dotgit: bool,
     /// An earlier `cd` named a folder the guard can't list (a glob, braces).
     unknown: bool,
+    /// What earlier `ln`, `mv`, `cp`, `rm` and the like of this command name, as written and with links followed: a folder
+    /// among them (or below one) may be swapped for a link before git runs.
+    touched: Vec<PathBuf>,
     /// GIT_DIR and GIT_WORK_TREE as the shell has them (`export GIT_DIR=x`, `GIT_DIR=x;`), resolved where they were set.
     env_git_dir: Option<Option<PathBuf>>,
     env_tree: Option<Option<PathBuf>>,
@@ -174,6 +177,7 @@ impl Dirs {
     fn keep_made(&mut self, inner: &Dirs) {
         self.made |= inner.made;
         self.dotgit |= inner.dotgit;
+        self.touched.extend(inner.touched.iter().cloned());
     }
 
     /// `cd` to a glob or braces: the folder the literal part names, with the topmost checkout around as another place.
@@ -269,6 +273,14 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 }
             }
             _ => {}
+        }
+        if matches!(name, "ln" | "mv" | "cp" | "rm" | "rmdir" | "unlink" | "install" | "rsync" | "ditto") {
+            for a in args.iter().filter(|a| !a.starts_with('-')) {
+                match dirs.at_text(a) {
+                    Some(p) => dirs.touched.extend([real(p.clone()), p]),
+                    None => dirs.dotgit = true, // a path the guard can't tell
+                }
+            }
         }
         if !matches!(name, "cd" | "pushd" | "popd") {
             // Any command can make a folder, a link or a `.git`: tar, ln, cp, echo > t/.git.
@@ -568,7 +580,8 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         // (it may bring a link, or an agent's `--work-tree` may name a checkout).
         let start = outer.start.clone().map(real);
         let near = start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd) || start.is_some_and(|s| cwd.starts_with(s)));
-        if dirs.dotgit || (dirs.made && near && !cwd.exists()) {
+        let touched = dirs.touched.iter().any(|t| cwd.starts_with(t) || dirs.cwd.as_ref().is_some_and(|c| c.starts_with(t)));
+        if dirs.dotgit || touched || (dirs.made && near && !cwd.exists()) {
             return unknown_in(&dirs, None);
         }
     }
@@ -2197,8 +2210,22 @@ mod tests {
         // A `.git` that is a link to another `.git`, and one whose `commondir` names another repository.
         has("git -C sl checkout other", &ws, &other);
         has("git -C gc branch -D main", &ws, &other);
+        // An existing folder swapped for a link, or removed, moved or copied over, before git runs.
+        for cmd in [
+            format!("mv loft loft.old && ln -s {o} loft && git -C loft reset --hard"),
+            format!("rm -rf loft && ln -s {o} loft; git -C loft reset --hard"),
+            format!("mv loft x && ln -s {o} loft && git -C loft/backend reset --hard"),
+            format!("cd loft && mv ../loft ../old && ln -s {o} ../loft && git reset --hard"),
+            format!("cp -r {o} loft && git -C loft checkout main"),
+            "mv \"$a\" \"$b\"; git -C loft reset --hard".to_string(),
+        ] {
+            has(&cmd, &ws, &unknown);
+        }
         // What an agent does in its own clone still asks nothing.
         for cmd in [
+            "rm -f .git/index.lock && git add .",
+            "mv notes.txt old.txt && git add .",
+            "cp ../x.txt notes.txt && git -C . commit -m x",
             "mkdir -p t && git -C t init -q",
             "echo hi > notes.txt && git add notes.txt",
             "cd -P . && git commit -m x",
