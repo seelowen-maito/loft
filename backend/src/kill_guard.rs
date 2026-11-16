@@ -400,7 +400,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             _ => {
                 // `env -C <folder> cmd` runs cmd there.
                 let before = dirs.cwd.clone();
-                if let Some(d) = env_chdir(&all[..all.len() - words.len()]) {
+                for d in env_chdir(&all[..all.len() - words.len()]) {
                     dirs.cwd = dirs.at(d);
                 }
                 let mut folders = command_folders(name, args, live, &vars, dirs);
@@ -430,23 +430,23 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     dirs.dotgit |= pending_dotgit;
 }
 
-/// The folder the last `-C <folder>`, `-C<folder>`, `--chdir=<folder>` or `--chdir <folder>` of the `env`s before a command
-/// moves it to, as one option or bundled (`-iC <folder>`).
-fn env_chdir(prefix: &[String]) -> Option<&str> {
-    let mut found = None;
+/// Each `-C <folder>`, `-C<folder>`, `--chdir=<folder>` or `--chdir <folder>` of the `env`s before a command, in order
+/// (a relative one goes from the one before), as one option or bundled (`-iC <folder>`).
+fn env_chdir(prefix: &[String]) -> Vec<&str> {
+    let mut found = vec![];
     let mut it = prefix.iter().skip_while(|w| base(w) != "env").skip(1);
     while let Some(o) = it.next() {
         if let Some(d) = o.strip_prefix("--chdir=") {
-            found = Some(d);
+            found.push(d);
         } else if o == "--chdir" {
-            found = it.next().map(String::as_str).or(found);
+            found.extend(it.next().map(String::as_str));
         } else if o.starts_with('-') && !o.starts_with("--") {
             // A bundle: options up to the first that takes a value, which is the rest of the word or the next word.
             let Some(at) = o.find(['C', 'u', 'P', 'S']) else { continue };
             let rest = &o[at + 1..];
             let value = if rest.is_empty() { it.next().map(String::as_str) } else { Some(rest) };
             if o.as_bytes()[at] == b'C' {
-                found = value.or(found);
+                found.extend(value);
             }
         }
     }
@@ -2362,9 +2362,11 @@ mod tests {
         ] {
             assert!(asks_all(&cmd, &at(&ws)).iter().any(|f| f.as_os_str() == UNKNOWN), "should ask: {cmd}");
         }
-        for cmd in [format!("env -iC {o} pnpm install"), format!("env -C /tmp -C {o} pnpm install"), format!("env -C /tmp env -C {o} pnpm install"), format!("env -i -uX -C{o} pnpm install"), format!("env --chdir {o} pnpm install")] {
+        for cmd in [format!("env -iC {o} pnpm install"), format!("env -C {o}/src env -C .. pnpm install"), format!("env -C /tmp -C {o} pnpm install"), format!("env -C /tmp env -C {o} pnpm install"), format!("env -i -uX -C{o} pnpm install"), format!("env --chdir {o} pnpm install")] {
             assert_eq!(asks_all(&cmd, &at(&ws)), vec![other.clone()], "should ask: {cmd}");
         }
+        // A relative `-C` of a nested env goes from the outer one.
+        assert_eq!(asks_all(&format!("env -C {o} env -C src pnpm install"), &at(&ws)), vec![other.join("src")]);
         // The agent's own clone, reached by `cd`, is no link: it runs.
         for cmd in ["cd loft && pnpm install", "cd loft && cargo build", "pnpm -C loft install"] {
             assert_eq!(asks_all(cmd, &at(&ws)), Vec::<PathBuf>::new(), "should run: {cmd}");
