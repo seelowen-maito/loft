@@ -1276,8 +1276,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
         // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
         .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
-        // Workspaces live inside the user's checkout: git in a workspace with no clone stops here instead of finding it.
-        // Git ignores a relative ceiling.
+        // Workspaces live outside any repo (ADR 0005), but a home folder can be one: git in a workspace with no clone
+        // stops here instead of finding it. Git ignores a relative ceiling.
         .env("GIT_CEILING_DIRECTORIES", std::path::absolute(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone()))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
@@ -2015,7 +2015,7 @@ pub(crate) mod tests {
         let cmd = build_command(&st, &a, false).unwrap();
         let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap().to_owned();
         assert_eq!(ceiling, st.cfg.storage_dir.as_os_str());
-        // The storage folder sits in a checkout, as agent-local-storage does in the user's loft checkout.
+        // The storage folder sits in a repo, as it would in a home folder kept in git.
         let git = |dir: &Path, args: &[&str]| std::process::Command::new("git").args(args).current_dir(dir).env("GIT_CEILING_DIRECTORIES", &ceiling).output().unwrap();
         let checkout = st.cfg.storage_dir.parent().unwrap();
         assert!(git(checkout, &["init", "-q"]).status.success());

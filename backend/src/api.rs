@@ -119,7 +119,7 @@ pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>
     // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
     // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
     if s.backup_dir != state.settings.get().backup_dir
-        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent())
+        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), Some(&state.cfg.storage_dir))
     {
         return Err(bad(why));
     }

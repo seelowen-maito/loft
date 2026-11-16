@@ -39,6 +39,7 @@ mod setup;
 mod signing;
 mod simulator;
 mod state;
+mod storage;
 mod sweep;
 mod system;
 mod tailnet;
@@ -211,19 +212,22 @@ async fn serve() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf());
     let data_dir = root.join(".loft");
+    std::fs::create_dir_all(&data_dir)?;
+    let db = db::Db::open(&data_dir.join("loft.db"))?;
+    // Agents' workspaces live outside any repo (ADR 0005); an older install's move out of the checkout, before any run.
+    let storage_dir = storage::migrate(&root.join(storage::NAME), &storage::dir_for(&root, &storage::data_home()), &db, &sessions::claude_dir().join("projects"));
     let cfg = Config {
         port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
-        storage_dir: root.join("agent-local-storage"),
+        storage_dir,
         xcrun: "xcrun".into(),
         xcode: state::XcodeLookup::system(),
     };
     std::fs::create_dir_all(&cfg.storage_dir)?;
-    std::fs::create_dir_all(&data_dir)?;
     agents::remove_old_agent_files(&cfg.storage_dir);
 
     let (events, _) = broadcast::channel(1024);
     let state = AppState {
-        db: db::Db::open(&data_dir.join("loft.db"))?,
+        db,
         cfg: Arc::new(cfg),
         events,
         rt: Arc::new(Mutex::new(Runtime::default())),

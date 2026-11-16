@@ -145,11 +145,11 @@ fn found(root: &Path, at: NaiveDateTime) -> Last {
     Last { at: local(at), bytes: size("loft.db") + size("settings.json"), path }
 }
 
-/// Why `dir` can't hold backups, if it can't: in Loft's folder agents can read every chat, and in a git
-/// work tree the GitHub token in `settings.json` could be committed and pushed.
+/// Why `dir` can't hold backups, if it can't: in the agents' workspaces (`loft`) agents can read every chat, and
+/// in a git work tree, Loft's own checkout too, the GitHub token in `settings.json` could be committed and pushed.
 pub fn refuse(dir: &Path, loft: Option<&Path>) -> Option<&'static str> {
     if loft.is_some_and(|l| inside(dir, l)) {
-        return Some("Backups folder can't be inside Loft's folder, where agents can read it");
+        return Some("Backups folder can't be inside the agents' workspaces, where agents can read it");
     }
     if resolved(dir).ancestors().any(|a| a.join(".git").exists()) {
         return Some("Backups folder can't be inside a git repository, where it could be committed and pushed");
@@ -220,7 +220,7 @@ pub async fn run(state: &AppState) -> Status {
     let root = dir(&state.settings.get());
     let db = state.db.path().unwrap_or_default();
     let settings = db.with_file_name("settings.json");
-    let loft = state.cfg.storage_dir.parent().map(Path::to_path_buf);
+    let loft = Some(state.cfg.storage_dir.clone());
     let r = {
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
