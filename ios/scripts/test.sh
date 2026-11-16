@@ -59,9 +59,9 @@ fi
 derived="${DERIVED_DATA:-build}"
 if [[ "${suites[*]}" == LoftMacUITests/* ]]; then
   dest="platform=macOS" scheme=LoftMac
-  # Without Automation Mode every Mac UI test hangs on its first query until the time limit (it turns off on restarts).
-  if automationmodetool 2>/dev/null | grep -q "is disabled"; then
-    echo "Automation Mode is off; turn it on with: sudo automationmodetool enable-automationmode-without-authentication" >&2
+  # XCTest turns Automation Mode on by itself only when that needs no password (a setting that survives restarts).
+  if automationmodetool 2>/dev/null | grep -q "DOES REQUIRE user authentication"; then
+    echo "Automation Mode needs a password here; allow it once with: sudo automationmodetool enable-automationmode-without-authentication" >&2
     exit 1
   fi
 else
