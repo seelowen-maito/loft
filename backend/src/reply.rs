@@ -1,6 +1,7 @@
 //! Replying to a message: the user's message carries `meta.reply_to`, a short quote of an earlier message in the
 //! same agent's chat, and the agent gets that message (who, when, its text) before the user's.
 
+use crate::api::{bad, ApiError};
 use crate::db::{Agent, Message};
 use crate::state::AppState;
 use serde_json::{json, Value};
@@ -31,10 +32,10 @@ fn quotable(m: &Message) -> bool {
 }
 
 /// `meta.reply_to` for a reply to message `id`: refused unless it's a chat message in `agent`'s own chat.
-pub fn reply_meta(state: &AppState, agent: &Agent, id: i64) -> Result<Value, String> {
-    let m = state.db.get_message(&agent.id, id).ok().flatten().ok_or("The quoted message isn't in this chat.")?;
+pub fn reply_meta(state: &AppState, agent: &Agent, id: i64) -> Result<Value, ApiError> {
+    let m = state.db.get_message(&agent.id, id)?.ok_or_else(|| bad("The quoted message isn't in this chat."))?;
     if !quotable(&m) {
-        return Err("Only chat messages can be quoted.".into());
+        return Err(bad("Only chat messages can be quoted."));
     }
     let one_line = m.content.split_whitespace().collect::<Vec<_>>().join(" ");
     let (excerpt, long) = cut(&one_line, EXCERPT_CHARS);
@@ -145,6 +146,19 @@ mod tests {
         assert_eq!(r["message"]["meta"]["reply_to"]["excerpt"].as_str().unwrap().chars().count(), 201, "200 and an ellipsis");
         let q = queued(&st, &a.id);
         assert!(q.contains(&format!("> {}\n(Quote cut: the first 2000 of 5000 characters.)\n\ntoo long", "é".repeat(2000))), "{q}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_starts_a_grill_reaches_the_agent_quote_first() {
+        let st = state();
+        let a = agent(&st, "Dev");
+        busy(&st, &a);
+        let asked = crate::agents::add_msg(&st, &a.id, None, "assistant", "text", "Shall we plan pricing?", json!({})).unwrap();
+        let body = json!({ "text": "grill me on pricing", "reply_to": asked.id, "meta": { "grill": { "role": "start_request" } } });
+        let Json(r) = crate::api::send_message(State(st.clone()), Path(a.id.clone()), Json(serde_json::from_value(body).unwrap())).await.map_err(|e| e.1).unwrap();
+        assert_eq!(r["message"]["meta"]["reply_to"]["id"], json!(asked.id));
+        let q = st.rt.lock().unwrap().grill_queued.get(&a.id).map(|q| q.join("\n---\n")).unwrap_or_default();
+        assert!(q.starts_with("[The user is replying to Dev's message from ") && q.contains("> Shall we plan pricing?\n\ngrill me on pricing"), "{q}");
     }
 
     #[tokio::test]

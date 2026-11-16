@@ -512,13 +512,12 @@ pub struct SendMessage {
 }
 
 pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>, Json(m): Json<SendMessage>) -> ApiResult<Value> {
-    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let agent = state.db.get_agent(&id)?.ok_or_else(not_found)?;
     if m.text.trim().is_empty() && m.images.is_empty() {
         return Err(bad("empty message"));
     }
     crate::uploads::validate(&state, &id, &m.images)?;
-    let agent = state.db.get_agent(&id)?.ok_or_else(not_found)?;
-    let reply = m.reply_to.map(|r| crate::reply::reply_meta(&state, &agent, r)).transpose().map_err(bad)?;
+    let reply = m.reply_to.map(|r| crate::reply::reply_meta(&state, &agent, r)).transpose()?;
     let client_id = m.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
     if let Some(c) = &client_id
         && let Some(prev) = state.db.find_client_message(&id, c)? {
@@ -538,6 +537,12 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
         crate::grill::Routed::Normal(meta) => meta,
         crate::grill::Routed::Handled { message, wake } => {
             if let Some(p) = wake {
+                // A reply that starts a grill or is a grill command: the agent gets the quote first, as in chat.
+                let quote = message.as_ref().and_then(|m| crate::reply::prompt_block(&state, &id, &m.meta));
+                let p = match quote {
+                    Some(q) => format!("{q}\n\n{p}"),
+                    None => p,
+                };
                 agents::wake(&state, &id, p, "grill");
             }
             return Ok(Json(json!({ "ok": true, "queued": queued, "message": message })));
