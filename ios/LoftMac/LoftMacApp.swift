@@ -126,38 +126,16 @@ struct LoftMacApp: App {
     }
 }
 
-/// The window's sections, in sidebar order; ⌘1 to ⌘5 open them.
-enum MacSection: Int, CaseIterable, Identifiable {
-    case overview = 1, agents, issues, needsYou, settings
-
-    var id: Int { rawValue }
-
-    var title: String {
-        switch self {
-        case .overview: "Overview"
-        case .agents: "Agents"
-        case .issues: "Issues"
-        case .needsYou: "Needs you"
-        case .settings: "Settings"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .overview: "square.grid.2x2"
-        case .agents: "person.3"
-        case .issues: "checklist"
-        case .needsYou: "bell.badge"
-        case .settings: "gearshape"
-        }
-    }
-}
-
 /// Where the window is: the section, the agent whose chat is open, the issue pages open, and the New message picker.
 @MainActor
 @Observable
 final class MacNav {
-    var section: MacSection = .agents
+    /// The section the window shows and the sidebar highlights, and the chat-opened count for the composer.
+    var selection = MacSelection()
+    var section: MacSection {
+        get { selection.section }
+        set { selection.go(newValue) }
+    }
     var agentId: String?
     var picksRecipient = false
     /// Text from the voice panel's Edit in chat, for that agent's message box.
@@ -169,12 +147,13 @@ final class MacNav {
     var needsYouFocus: String?
     /// The chat to open Talk in, once it shows (the Talk widget or control).
     var talkIn: String?
-    /// A line for the top of that agent's chat: why it opened here and not in Herdr.
-    var chatNote: (agentId: String, text: String)?
+    var chatNote: (agentId: String, text: String)? {
+        get { selection.chatNote }
+        set { selection.chatNote = newValue }
+    }
 
     func openChat(_ agentId: String) {
-        chatNote = nil  // it was for the open that fell back, not for this one
-        section = .agents
+        selection.openChat()
         self.agentId = agentId
     }
 
@@ -187,17 +166,16 @@ final class MacNav {
     func open(_ link: DeepLink) {
         switch link {
         case .needsYou:
-            section = .needsYou
+            section = MacSection(link)
             needsYouFocus = nil
         case .needsYouItem(let id):
-            section = .needsYou
+            section = MacSection(link)
             needsYouFocus = id
-        case .agents, .talk: section = .agents
-        case .overview: section = .overview
         case .agent(let id): openChat(id)
         case .issue(let id):
-            section = .issues
+            section = MacSection(link)
             issuePath = [id]
+        case .agents, .talk, .overview: section = MacSection(link)
         }
     }
 }
@@ -335,6 +313,8 @@ struct MainWindow: View {
                         .tag(s)
                 }
             }
+            // A click on a row leaves a text field the keyboard, so ↑/↓ wouldn't move: the sidebar takes it.
+            .simultaneousGesture(TapGesture().onEnded { SidebarKeyboard.take(in: NSApp.keyWindow) })
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
             .scrollContentBackground(.hidden)
             .background(WebTheme.canvas)
@@ -366,6 +346,39 @@ struct MainWindow: View {
         // The web's page, cards and text colours behind every section.
         .webPage()
         .sheet(isPresented: $nav.picksRecipient) { RecipientPicker() }
+        .onChange(of: nav.section) { keepSidebarKeyboard() }
+    }
+
+    /// A section's own field (Agents' search, a chat's composer) can take the keyboard as it shows, which would make ↑/↓
+    /// stop moving between sections after a sidebar click. Takes it back unless a chat was opened from code.
+    private func keepSidebarKeyboard() {
+        guard nav.selection.sidebarKeepsKeyboard, let window = NSApp.keyWindow, !(window.firstResponder is NSText) else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            if nav.selection.sidebarKeepsKeyboard, window.firstResponder is NSText { SidebarKeyboard.take(in: window) }
+        }
+    }
+}
+
+/// The sidebar's table: SwiftUI's List leaves the window itself as first responder after a click, and ↑/↓ only move the
+/// selection while the table is.
+enum SidebarKeyboard {
+    /// - window: the window the click or section change was in; nothing happens if another one (a sheet, the quick
+    ///   search panel) is key by now.
+    @MainActor static func take(in window: NSWindow?) {
+        guard let window, NSApp.keyWindow === window, let root = window.contentView?.superview ?? window.contentView else { return }
+        func sidebar(in view: NSView) -> NSTableView? {
+            if let t = view as? NSTableView, t.accessibilityLabel() == "Sidebar" { return t }
+            for v in view.subviews { if let t = sidebar(in: v) { return t } }
+            return nil
+        }
+        guard let table = sidebar(in: root) else {
+            #if DEBUG
+            NSLog("SidebarKeyboard: no NSTableView labelled \"Sidebar\" in the window (collapsed, or renamed); ↑/↓ will not move between sections")
+            #endif
+            return
+        }
+        window.makeFirstResponder(table)
     }
 }
 
