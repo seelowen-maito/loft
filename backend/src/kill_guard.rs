@@ -24,7 +24,7 @@
 //! user about each such folder under the projects folder. The folder is the command's working directory, as `cd`,
 //! `cd -`, `pushd` and `popd` leave it (a subshell's stays in it), or the one a folder option names (`git -C`,
 //! `--work-tree`, `--git-dir`, `GIT_DIR`, `GIT_WORK_TREE`, `--manifest-path`, `pnpm --dir`, `npm --prefix`).
-//! Left out on purpose: `make`, `pnpm run <script>` and other scripts, which may do anything, and `export GIT_DIR`.
+//! Left out on purpose: `make`, `pnpm run <script>` and other scripts, which may do anything.
 //!
 //! Its limits, which the prompt rule covers: it reads shell text, so it doesn't see a script file the agent writes
 //! and runs, a command name built at run time (`k=/bin/kill; $k 123`), or other languages sending a signal
@@ -135,6 +135,9 @@ struct Dirs {
     dotgit: bool,
     /// An earlier `cd` named a folder the guard can't list (a glob, braces).
     unknown: bool,
+    /// GIT_DIR and GIT_WORK_TREE as the shell has them (`export GIT_DIR=x`, `GIT_DIR=x;`), resolved where they were set.
+    env_git_dir: Option<Option<PathBuf>>,
+    env_tree: Option<Option<PathBuf>>,
 }
 
 impl Dirs {
@@ -156,6 +159,15 @@ impl Dirs {
 
     fn cd(&mut self, to: Option<PathBuf>) {
         self.old = std::mem::replace(&mut self.cwd, to);
+    }
+
+    /// `export GIT_DIR=x`, `GIT_WORK_TREE=x;`: the shell's own value from here on. `unset` takes it back.
+    fn set_env(&mut self, word: &str) {
+        if let Some(d) = word.strip_prefix("GIT_DIR=") {
+            self.env_git_dir = Some(self.at(d));
+        } else if let Some(d) = word.strip_prefix("GIT_WORK_TREE=") {
+            self.env_tree = Some(self.at(d));
+        }
     }
 
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
@@ -238,13 +250,30 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         let live = &cmds[i].live[all.len() - words.len()..];
         // `GIT_DIR=x git ...`, `env GIT_WORK_TREE=x git ...`
         let vars: Vec<&String> = all[..all.len() - words.len()].iter().filter(|w| assignment(w).is_some()).collect();
-        let Some((name, args)) = words.split_first() else { continue };
+        let Some((name, args)) = words.split_first() else {
+            // `GIT_DIR=x` on its own sets it for the shell.
+            all.iter().for_each(|w| dirs.set_env(w));
+            continue;
+        };
         let (args, live) = (args, &live[1..]);
         let name = base(name);
+        match name {
+            "export" | "declare" | "typeset" | "readonly" | "local" => args.iter().for_each(|a| dirs.set_env(a)),
+            "unset" => {
+                for a in args {
+                    match a.as_str() {
+                        "GIT_DIR" => dirs.env_git_dir = None,
+                        "GIT_WORK_TREE" => dirs.env_tree = None,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
         if !matches!(name, "cd" | "pushd" | "popd") {
             // Any command can make a folder, a link or a `.git`: tar, ln, cp, echo > t/.git.
             if name != "git" {
-                dirs.dotgit |= words.iter().chain(&cmds[i].targets).any(|w| Path::new(w).file_name().is_some_and(|n| n == ".git"));
+                dirs.dotgit |= words.iter().filter(|w| assignment(w).is_none()).chain(&cmds[i].targets).any(|w| Path::new(w).file_name().is_some_and(|n| n == ".git"));
             }
         }
         let folders = match name {
@@ -452,7 +481,7 @@ pub const UNKNOWN: &str = "/loft-unknown-folder";
 /// `.git` file) hides the folder or repository: then the answer is `unknown_in`.
 fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool]) -> Vec<PathBuf> {
     let mut dirs = outer.clone();
-    let (mut tree, mut git_dir) = (None, None);
+    let (mut tree, mut git_dir) = (dirs.env_tree.clone(), dirs.env_git_dir.clone());
     for v in vars {
         if let Some(d) = v.strip_prefix("GIT_WORK_TREE=") {
             tree = Some(dirs.at(d));
@@ -487,7 +516,18 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
             "--git-dir" => git_dir = Some(next()),
             _ if value("--work-tree").is_some() => tree = Some(value("--work-tree").and_then(|d| dirs.at(d))),
             _ if value("--git-dir").is_some() => git_dir = Some(value("--git-dir").and_then(|d| dirs.at(d))),
-            "-c" | "--namespace" | "--config-env" | "--super-prefix" => i += 1,
+            // `-c core.worktree=x` names the work tree as `--work-tree` does.
+            "-c" => {
+                if let Some((_, v)) = args.get(i).and_then(|(w, _)| w.split_once('=')).filter(|(k, _)| k.eq_ignore_ascii_case("core.worktree")) {
+                    tree = Some(dirs.at(v));
+                }
+                i += 1;
+            }
+            "--config-env" if args.get(i).is_some_and(|(w, _)| w.to_ascii_lowercase().starts_with("core.worktree")) => {
+                return unknown_in(&dirs, None);
+            }
+            _ if a.to_ascii_lowercase().starts_with("--config-env=core.worktree") => return unknown_in(&dirs, None),
+            "--namespace" | "--config-env" | "--super-prefix" => i += 1,
             o if o.starts_with('-') => {}
             sub => break sub,
         }
@@ -2115,6 +2155,45 @@ mod tests {
         for cmd in [format!("ln -s {} t && git -C t reset --hard", at(&other)), format!("ln -s {} t; cd t && git reset --hard", at(&other))] {
             has(&cmd, &apart, &unknown);
         }
+        // An exported or assigned GIT_DIR and GIT_WORK_TREE count like the inline ones; the link or file that is the
+        // `.git` is made in the same command.
+        let o = at(&other);
+        for cmd in [
+            format!("export GIT_DIR={o}/.git; git reset --hard"),
+            format!("GIT_DIR={o}/.git; git reset --hard"),
+            format!("declare -x GIT_DIR={o}/.git && git reset --hard"),
+            format!("export GIT_WORK_TREE={o}; git checkout ."),
+            "export GIT_DIR=../../../other/.git; git reset --hard".to_string(),
+        ] {
+            has(&cmd, &apart, &other);
+        }
+        has(&format!("ln -s {o}/.git .git && git reset --hard"), &apart, &unknown);
+        assert_eq!(asks_all(&format!("export GIT_DIR={o}/.git; unset GIT_DIR; git status"), &at(&apart)), Vec::<PathBuf>::new());
+        assert!(!asks_all(&format!("(export GIT_DIR={o}/.git); git reset --hard"), &at(&apart)).contains(&other));
+        // What can happen to a new repository's folder, or to git's environment, between the clone or init and the git call.
+        let dest = format!("ln -s {o} t && git clone -q /src t; git -C t reset --hard");
+        for cmd in [
+            dest,
+            "git clone -q /src d && cd d && git reset --hard".to_string(),
+            format!("export GIT_DIR={o}/.git; git init m; git -C m reset --hard"),
+            format!("GIT_DIR={o}/.git git init m && git -C m reset --hard"),
+            format!("git init m && export GIT_DIR={o}/.git && git -C m reset --hard"),
+            format!("git clone -q /src m && GIT_WORK_TREE={o} git -C m checkout -f ."),
+            "git init m && HOME=/x git -C m reset --hard".to_string(),
+            format!("git clone -q /src m && git -C m -c core.worktree={o} checkout -f ."),
+            "git init m && rm -rf m/.git && GIT_CEILING_DIRECTORIES= git -C m reset --hard".to_string(),
+            format!("git init m && rm -rf m && ln -s {o} m && git -C m reset --hard"),
+            format!("git init m && echo 'gitdir: {o}/.git' > m/.git && git -C m reset --hard"),
+        ] {
+            for cwd in [&ws, &clone] {
+                let all = asks_all(&cmd, &at(cwd));
+                assert!(all.contains(&unknown) || all.contains(&other), "should ask: {cmd} (in {}) -> {all:?}", cwd.display());
+            }
+        }
+        // `-c core.worktree` on a folder that is there names the work tree.
+        has(&format!("git -C k -c core.worktree={o} checkout -f ."), &ws, &other);
+        has("git -c core.WorkTree=../../../other checkout -f .", &ws, &other);
+        has("git --config-env=core.worktree=WT checkout -f .", &ws, &unknown);
         // A `.git` that is a link to another `.git`, and one whose `commondir` names another repository.
         has("git -C sl checkout other", &ws, &other);
         has("git -C gc branch -D main", &ws, &other);
