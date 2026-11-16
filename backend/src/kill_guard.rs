@@ -378,9 +378,12 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     // `pushd` swaps the top two folders; `pushd +1` rotates the stack.
                     None => {
                         dirs.alts.clear();
-                        let to = dirs.stack.pop().unwrap_or_default();
+                        let to = dirs.stack.pop();
                         dirs.stack.push(from);
-                        dirs.cd(to);
+                        match to {
+                            Some(None) => dirs.lose(),
+                            to => dirs.cd(to.flatten()),
+                        }
                     }
                     Some((d, _)) if (stack_entry(d) || d == "-") && !after_dashes(args, i) => {
                         dirs.stack.push(from);
@@ -398,12 +401,22 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 continue;
             }
             "popd" => {
-                let to = match dirs.stack.pop() {
-                    Some(d) if args.is_empty() => d,
-                    _ => dirs.start.clone(),
-                };
-                dirs.alts.clear();
-                dirs.cd(to);
+                // `popd`, `popd -q`, `popd +0`: the top folder. Another entry, or `-n`, isn't one the guard follows.
+                let (_, i) = dir_word(args);
+                let plain = !args.iter().any(|a| a == "-n") && i.is_none_or(|i| args[i] == "+0");
+                match dirs.stack.pop() {
+                    _ if !plain => dirs.lose(),
+                    // The folder pushed was one the guard lost.
+                    Some(None) => dirs.lose(),
+                    Some(to) => {
+                        dirs.alts.clear();
+                        dirs.cd(to);
+                    }
+                    None => {
+                        dirs.alts.clear();
+                        dirs.cd(dirs.start.clone());
+                    }
+                }
                 continue;
             }
             "sh" | "bash" | "zsh" | "dash" | "ksh" => {
@@ -767,7 +780,9 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         // (it may bring a link, or an agent's `--work-tree` may name a checkout).
         let start = outer.start.clone().map(real);
         let near = start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd, &dirs.storage) || start.is_some_and(|s| cwd.starts_with(s)));
-        let swapped = dirs.swapped(&cwd, dir_options || tree.is_some() || git_dir.is_some());
+        // A work tree or repository named through a link that isn't there yet.
+        let named = tree.iter().chain(git_dir.iter()).flatten().any(|p| dirs.swapped(&real(p.clone()), true));
+        let swapped = named || dirs.swapped(&cwd, dir_options || tree.is_some() || git_dir.is_some());
         if dirs.dotgit || swapped || (dirs.made && near && !cwd.exists()) {
             return unknown_in(&dirs, None);
         }
@@ -2436,6 +2451,20 @@ mod tests {
             assert!(asks_all(&cmd, &at(&ws)).contains(&other), "should ask: {cmd}");
         }
         for cmd in ["cd -- loft && pnpm install", "cd -P loft && pnpm install", "cd -q -- loft && cargo build", "cd - && pnpm install", "cd -- -2 && pnpm install", "pushd -- loft && git reset --hard"] {
+            assert_eq!(asks_all(cmd, &at(&ws)), Vec::<PathBuf>::new(), "should run: {cmd}");
+        }
+        // `popd` with `-q` is a plain one; another entry, or `-n`, leaves the folder unknown; a lost folder stays lost.
+        for cmd in [
+            "pushd {o} && pushd ~ && popd -q && git reset --hard", "pushd -q {o} && pushd -q .. && popd -q && cargo build", "pushd {o} && pushd ~ && popd +0 && pnpm install",
+            "pushd {o} && pushd ~ && popd +1 && pnpm install", "pushd {o} && pushd ~ && popd -0 && pnpm install", "pushd {o} && pushd ~ && popd -n && pnpm install",
+            "cd {o} && cd +0 && pushd . && popd && pnpm install", "cd {o} && cd +0 && pushd sub && popd && git reset --hard", "cd {o}; cd +0; pushd .; popd; pnpm install",
+            // A work tree or repository named through a fresh link.
+            "ln -s ../../../../other t && git --git-dir=t/.git --work-tree=t reset --hard", "ln -s ../../../../other t && git --git-dir t/.git reset --hard", "ln -s ../../../../other t && GIT_DIR=t/.git git reset --hard",
+        ] {
+            let cmd = cmd.replace("{o}", &o);
+            assert!(!asks_all(&cmd, &at(&ws)).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in ["pushd loft && pushd .. && popd && popd && pnpm install", "pushd loft && popd -q && pnpm install", "pushd loft && pushd .. && popd +0 && pnpm install", "git --git-dir=loft/.git --work-tree=loft status"] {
             assert_eq!(asks_all(cmd, &at(&ws)), Vec::<PathBuf>::new(), "should run: {cmd}");
         }
         // A stack entry is a folder the guard can't tell; a folder after `--` named like one is a folder. -P in any order.
