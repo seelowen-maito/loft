@@ -375,6 +375,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         dirs.made = true;
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
+    // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
+    dirs.dotgit |= pending_dotgit;
 }
 
 /// Whether a command writes or names a path that ends in `.git` (also as `of=x/.git` or `--output=x/.git`), other than
@@ -2262,6 +2264,10 @@ mod tests {
         // Naming a path that ends in `.git`: a redirect, `of=`, `--output=`, a tool's argument.
         for cmd in ["printf x > t/.git; git reset --hard", "dd if=x of=t/.git; git reset --hard", "curl --output=t/.git u; git reset --hard", "tee .git < x; git reset --hard", "echo hi | tee t/.git && git add .", "cat x >> .git; git reset --hard"] {
             has(cmd, &clone, &unknown);
+        }
+        // A `.git` named by the last command inside `sh -c`, `bash -c` or `eval` still counts after it.
+        for cmd in [format!("sh -c 'ln -s {o}/.git .git'; git reset --hard"), format!("eval 'ln -s {o}/.git .git'; git reset --hard"), "bash -c \"cp ../pf .git\"; git reset --hard".to_string(), "(cp ../pf .git); git reset --hard".to_string()] {
+            has(&cmd, &clone, &unknown);
         }
         // ln, mv, cp and their GNU names with braces or a glob may name any folder.
         for cmd in ["ln -s {a,b} t; git reset --hard", "mv lo* old; git -C loft reset --hard", "gmv loft old && gln -s x loft; git -C loft reset --hard", "gln -s {a,b} t; git reset --hard", "gcp -s x . && git add .", "cp x? y; git reset --hard"] {
