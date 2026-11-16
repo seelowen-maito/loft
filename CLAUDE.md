@@ -18,4 +18,4 @@ What the workspace sweep and Clean count as build output is one table in `backen
 
 ### Agents' workspaces
 
-They live in `~/.local/share/loft/<checkout>/agent-local-storage/`, outside any repo, never in the checkout (`backend/src/storage.rs`, ADR 0005). Code finds them through `cfg.storage_dir`, never from the checkout's path.
+They live in `~/.local/share/loft/<checkout>-<hash>/agent-local-storage/`, outside any repo, never in the checkout (`backend/src/storage.rs`, ADR 0005). Code finds them through `cfg.storage_dir`, never from the checkout's path.

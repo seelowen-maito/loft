@@ -215,9 +215,11 @@ async fn serve() -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
     let db = db::Db::open(&data_dir.join("loft.db"))?;
     // Agents' workspaces live outside any repo (ADR 0005); an older install's move out of the checkout, before any run.
-    let storage_dir = storage::migrate(&root.join(storage::NAME), &storage::dir_for(&root, &storage::data_home()), &db, &sessions::claude_dir().join("projects"));
+    let chosen = storage::chosen(&root, &data_dir, &storage::data_home()?)?;
+    let storage_dir = storage::migrate(&root.join(storage::NAME), &chosen, &data_dir, &db, &sessions::claude_dir().join("projects"));
     let cfg = Config {
         port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
+        root: root.clone(),
         storage_dir,
         xcrun: "xcrun".into(),
         xcode: state::XcodeLookup::system(),

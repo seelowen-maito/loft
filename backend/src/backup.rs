@@ -145,11 +145,11 @@ fn found(root: &Path, at: NaiveDateTime) -> Last {
     Last { at: local(at), bytes: size("loft.db") + size("settings.json"), path }
 }
 
-/// Why `dir` can't hold backups, if it can't: in the agents' workspaces (`loft`) agents can read every chat, and
-/// in a git work tree, Loft's own checkout too, the GitHub token in `settings.json` could be committed and pushed.
-pub fn refuse(dir: &Path, loft: Option<&Path>) -> Option<&'static str> {
-    if loft.is_some_and(|l| inside(dir, l)) {
-        return Some("Backups folder can't be inside the agents' workspaces, where agents can read it");
+/// Why `dir` can't hold backups, if it can't: in Loft's folders (`loft`: its checkout and the agents' workspaces)
+/// agents can read every chat, and in a git work tree the GitHub token in `settings.json` could be committed and pushed.
+pub fn refuse(dir: &Path, loft: &[&Path]) -> Option<&'static str> {
+    if loft.iter().any(|l| inside(dir, l)) {
+        return Some("Backups folder can't be inside Loft's folder or the agents' workspaces, where agents can read it");
     }
     if resolved(dir).ancestors().any(|a| a.join(".git").exists()) {
         return Some("Backups folder can't be inside a git repository, where it could be committed and pushed");
@@ -220,12 +220,12 @@ pub async fn run(state: &AppState) -> Status {
     let root = dir(&state.settings.get());
     let db = state.db.path().unwrap_or_default();
     let settings = db.with_file_name("settings.json");
-    let loft = Some(state.cfg.storage_dir.clone());
+    let loft = [state.cfg.root.clone(), state.cfg.storage_dir.clone()];
     let r = {
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
             // Settings checked this when it was saved, but a symlink can change since.
-            let made = if let Some(why) = refuse(&root, loft.as_deref()) {
+            let made = if let Some(why) = refuse(&root, &[loft[0].as_path(), loft[1].as_path()]) {
                 Err(anyhow::anyhow!("{why}: {}", root.display()))
             } else {
                 make(&db, &settings, &root, Local::now().naive_local())

@@ -2017,7 +2017,7 @@ pub(crate) mod tests {
         assert_eq!(ceiling, st.cfg.storage_dir.as_os_str());
         // The storage folder sits in a repo, as it would in a home folder kept in git.
         let git = |dir: &Path, args: &[&str]| std::process::Command::new("git").args(args).current_dir(dir).env("GIT_CEILING_DIRECTORIES", &ceiling).output().unwrap();
-        let checkout = st.cfg.storage_dir.parent().unwrap();
+        let checkout = st.cfg.root.as_path();
         assert!(git(checkout, &["init", "-q"]).status.success());
         let ws = workspace(&st, &a.id);
         std::fs::create_dir_all(ws.join("repo")).unwrap();
@@ -2034,7 +2034,7 @@ pub(crate) mod tests {
     fn a_relative_storage_folder_still_gives_git_an_absolute_ceiling() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
-        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() };
+        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone(), root: st.cfg.root.clone() };
         let st = AppState { cfg: std::sync::Arc::new(cfg), ..st };
         let cmd = build_command(&st, &a, false).unwrap();
         let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap();
@@ -2301,7 +2301,7 @@ esac
 
     pub(crate) fn fake_claude_state() -> (AppState, Agent) {
         let mut st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let bin = dir.join("fake-claude");
         std::fs::write(&bin, FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -3118,7 +3118,7 @@ esac
     #[test]
     fn at_paths_start_at_the_projects_folder_when_there_is_one() {
         let st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let projects = dir.join("projects");
         std::fs::create_dir_all(projects.join("work/notes")).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();

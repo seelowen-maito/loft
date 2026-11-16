@@ -9,11 +9,25 @@ Agents' workspaces lived in `<loft checkout>/agent-local-storage`, inside the us
 Workspaces live outside any repository and outside the projects folder: `$XDG_DATA_HOME/loft/<checkout>/agent-local-storage`, by default `~/.local/share/loft/...`, on macOS too.
 - **The folder keeps its name**, `agent-local-storage`: the guard knows a workspace by it.
 - **No space in the path**: `~/Library/Application Support` would make every path in an agent's commands need quoting.
-- **One per checkout** (`<checkout>` is its path with every non-alphanumeric character as `-`, like Claude Code's project folders), so a copy of Loft an agent runs from its clone for QA keeps workspaces of its own instead of sweeping the real ones.
-- **A one-time move on start** (`storage::migrate`), before any run: when `<checkout>/agent-local-storage` exists and the new folder doesn't, it is renamed there. Then every text column in the database that named the old path names the new one (chats, memories, tasks, ...), the clones' and worktrees' git links are repointed, Claude Code's transcripts move so sessions resume, and each workspace gets a copy of the checkout's Claude Code memory, which it shared while inside the checkout. A failed rename (another volume, no permission) logs an error and Loft keeps using the old folder; there is no copy fallback.
+- **One per checkout**: `<checkout>` is the checkout's folder name and 8 hex characters of a hash of its path (`loft-1a2b3c4d`), so a copy of Loft an agent runs from its clone for QA keeps workspaces of its own instead of sweeping the real ones. It is short, so Claude Code's transcript folders for the workspaces stay under its 200-character name limit.
+- **Chosen once**: the first start records the folder in `.loft/storage-dir`, and later starts use it, so a different `$XDG_DATA_HOME` (launchd's, a shell's) can't point Loft at an empty second folder. Without a home folder Loft doesn't start.
+- **Loft's checkout is `cfg.root`**, never the workspaces' parent: herdr's plugin, the iOS transcribe helper and the backup check use it.
+- **A move on start** (`storage::migrate`), before any run, when `<checkout>/agent-local-storage` is there and the new folder isn't (or is empty):
+  1. the database is copied to `.loft/loft.db.before-0005`, and a marker, `.loft/moving-workspaces`, records the old path;
+  2. the old folder is renamed to the new one. If that fails (another volume, no permission), the marker goes, an error is logged and Loft keeps using the old folder. There is no copy fallback;
+  3. while the marker is there, every start runs these steps, each safe to repeat: every text value in the database that names the old path names the new one (one transaction: chats, memories, tasks, ...); git links are repointed (a worktree's or submodule's `.git` file, `.git/config`, worktrees' `gitdir`, submodules' configs with `core.worktree`); small text files in the workspaces outside clones (`notes/` and the like) are rewritten; Claude Code's transcript folders of the workspaces and every folder in them move, so sessions resume; each workspace gets a copy of the checkout's Claude Code memory (which it shared while inside the checkout), with its paths rewritten. The marker goes once all of them worked, so a crash or a failed step is finished on the next start.
+- **Both folders full with no move under way** (an older build run again after the move): Loft logs an error, uses the new folder and moves nothing; the old one is left for the user to sort out.
 - **The guard stays as strict as before**: nothing in kill_guard.rs changes. `GIT_CEILING_DIRECTORIES` stays, for a home folder kept in git.
+
+## Not migrated
+Agents see the old path in these; most rebuild or go on their own:
+- Files inside clones and worktrees (the project's files), build output (`target/`, `.cargo-build/`, `node_modules/` shebangs and links, Python virtualenvs): rebuild or reinstall them.
+- `scratch/` (Loft clears it in a week) and files over 1 MB.
+- Text inside Claude Code transcripts (each message's `cwd`), and transcript folders whose new name would pass 200 characters (Claude Code cuts and hashes those).
+- Processes still running from before the restart (an idle agent's dev server): they keep working, since a rename on one volume keeps their open files, but their environment and printed paths are old, and a `cd <old path>` fails.
+- The checkout's own Claude Code memory is copied, not moved: the user's sessions in the checkout keep theirs.
 
 ## Consequences
 - A missing clone in a workspace finds no repository above it, so the guard has nothing to ask about.
 - Workspaces are no longer deleted with the checkout. A Loft run with `LOFT_ROOT` (demos, tests) gets its own folder under the data folder, left behind when that root goes.
-- Backups must not sit in the workspaces folder; Loft's checkout stays refused as a git repository.
+- Backups must not sit in Loft's checkout or the workspaces folder.

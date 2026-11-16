@@ -535,25 +535,25 @@ esac
 
     /// Points the state's `xcrun` at a fake of its own.
     pub(crate) fn fake_xcrun(st: &mut AppState) {
-        let dir = st.cfg.storage_dir.parent().unwrap().join("xcrun");
+        let dir = st.cfg.root.as_path().join("xcrun");
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("xcrun");
         std::fs::write(&bin, FAKE_XCRUN).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: bin, xcode: st.cfg.xcode.clone() });
+        st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: bin, xcode: st.cfg.xcode.clone(), root: st.cfg.root.clone() });
     }
 
     /// A fake `xcode-select` printing `selected` for `-p` and logging each call, and a temp root for /Applications and
     /// /Volumes, beside the fake `xcrun`, with nothing found yet. Returns the root.
     pub(crate) fn fake_xcode_select(st: &mut AppState, selected: &str, developer_dir: Option<PathBuf>) -> PathBuf {
-        let dir = st.cfg.storage_dir.parent().unwrap().join("xcode");
+        let dir = st.cfg.root.as_path().join("xcode");
         let root = dir.join("root");
         std::fs::create_dir_all(&root).unwrap();
         let bin = dir.join("xcode-select");
         std::fs::write(&bin, format!("#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/xcode-select.log\"\necho '{selected}'\n")).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let xcode = XcodeLookup { developer_dir, xcode_select: bin, root: root.clone() };
-        st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode });
+        st.cfg = Arc::new(crate::state::Config { port: st.cfg.port, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode, root: st.cfg.root.clone() });
         st.xcode = Default::default();
         root
     }

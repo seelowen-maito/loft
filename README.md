@@ -90,7 +90,7 @@ The `ios/` folder has a native iPhone app for agent status, approvals, tasks and
 
 ## How agents run
 
-Each agent runs headless Claude Code in its own folder under `~/.local/share/loft/<checkout>/agent-local-storage/` (`$XDG_DATA_HOME` when set), outside any repo; an older install moves its workspaces there from the checkout on start ([ADR 0005](docs/adr/0005-workspaces-outside-the-checkout.md)). Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
+Each agent runs headless Claude Code in its own folder under `~/.local/share/loft/<checkout>-<hash>/agent-local-storage/` (`$XDG_DATA_HOME` when set), outside any repo; an older install moves its workspaces there from the checkout on start ([ADR 0005](docs/adr/0005-workspaces-outside-the-checkout.md)). Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
 
 ## Development
 

@@ -44,6 +44,9 @@ pub struct Decision {
 
 pub struct Config {
     pub port: u16,
+    /// Loft's checkout: its `herdr/` and `ios/` sources, and `.loft/` with the database. Never the workspaces' parent.
+    pub root: PathBuf,
+    /// The agents' workspaces, outside any repo (storage.rs).
     pub storage_dir: PathBuf,
     /// `xcrun`, which runs `simctl` (simulator.rs). Tests point it at a fake.
     pub xcrun: PathBuf,
