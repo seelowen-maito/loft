@@ -22,6 +22,8 @@ struct ChatView: View {
     /// "Got it, looking into …": the on-device model's first reply to a message to the Orchestrator, shown until the
     /// real reply comes after message `after` (or for two minutes at most).
     @State private var quickAck: (agentId: String, after: Int64, text: String, at: Date)?
+    /// The message picked with Reply, quoted above the message box and sent with the next message (spec #572).
+    @State private var replyingTo: MessageQuote?
 
     private var shownQuickAck: String? {
         guard let a = quickAck, a.agentId == agent.id, Date().timeIntervalSince(a.at) < 120,
@@ -58,6 +60,7 @@ struct ChatView: View {
                 .onDisappear { if nav.chatNote?.agentId == agent.id { nav.chatNote = nil } }  // shown once
                 Divider()
             }
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     if store.historyHasMore[agent.id] == true, !shown.isEmpty {
@@ -68,7 +71,11 @@ struct ChatView: View {
                     let shown = shown
                     ForEach(Array(shown.enumerated()), id: \.element.id) { i, m in
                         // The sticker shows once per run of replies from the same agent.
-                        MessageRow(message: m, agent: agent, showsSticker: i == 0 || Self.speaker(shown[i - 1]) != Self.speaker(m))
+                        MessageRow(message: m, agent: agent, showsSticker: i == 0 || Self.speaker(shown[i - 1]) != Self.speaker(m),
+                                   reply: store.info?.supports(.reply) == true && m.isQuotable
+                                       ? { replyingTo = MessageQuote(of: m, agentName: agent.name) } : nil,
+                                   jump: { id in withAnimation { proxy.scrollTo(id, anchor: .top) } })
+                            .id(m.id)
                     }
                     ForEach(store.pending(for: agent.id)) { PendingRow(message: $0) }
                     if let a = shownQuickAck { QuickAckRow(text: a) }
@@ -80,6 +87,7 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .accessibilityIdentifier("messageList")
+            }
             .overlay {
                 if let loadError, shown.isEmpty {
                     ContentUnavailableView("Couldn't load the chat", systemImage: "exclamationmark.bubble", description: Text(loadError.title))
@@ -110,7 +118,7 @@ struct ChatView: View {
                 .padding(.horizontal, 12).padding(.top, 8)
                 .accessibilityIdentifier("routeSuggestion")
             }
-            Composer(agent: agent, text: $draft, dictated: $draftByVoice, talk: { talking = true }) { sent in
+            Composer(agent: agent, text: $draft, dictated: $draftByVoice, replyingTo: $replyingTo, talk: { talking = true }) { sent in
                 route = nil
                 quickAck = nil
                 guard store.orchestratorId == agent.id else { return }
@@ -166,6 +174,9 @@ private struct MessageRow: View {
     let agent: Agent
     /// The first of a run of replies from the same agent: it shows the sticker.
     var showsSticker = true
+    /// Reply to this message (nil when it can't be quoted), and jump to the one it quotes.
+    var reply: (() -> Void)?
+    var jump: (Int64) -> Void = { _ in }
 
     /// The user's own message. Another agent's handover, delegation or FYI also comes as role user, with who sent
     /// it: that one is incoming, on the left, as on the iPhone and the web.
@@ -206,6 +217,9 @@ private struct MessageRow: View {
                     if !photos.isEmpty {
                         HStack { ForEach(photos, id: \.self) { Photo(url: $0) } }
                     }
+                    if let q = message.replyQuote {
+                        QuoteBlock(quote: q) { jump(q.id) }
+                    }
                     if !message.displayContent.isEmpty {
                         if isUser {
                             // As on the web: your messages in a faint bubble on the right.
@@ -232,15 +246,25 @@ private struct MessageRow: View {
                     Text(message.createdAt, style: .time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
                 }
             }
+            .contextMenu {
+                if let reply {
+                    Button { reply() } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
+                }
+                Button { copy() } label: { Label("Copy", systemImage: "doc.on.doc") }
+            }
             // Selectable text isn't read by a combined element, so the label says it.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(spoken)
-            .accessibilityAction(named: "Copy") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(message.displayContent, forType: .string)
-            }
+            .accessibilityAction(named: "Copy") { copy() }
+            .accessibilityAction(named: "Reply") { reply?() }
+            .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
             .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
         }
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.displayContent, forType: .string)
     }
 
     /// The agent whose sticker shows: the other agent that sent it, or the chat's own agent.
@@ -254,6 +278,7 @@ private struct MessageRow: View {
         var parts: [String] = []
         if let from = message.fromAgentName { parts.append(message.isMentionReply ? "\(from), answering your mention" : "From \(from)") }
         if !message.photos.isEmpty { parts.append(message.photos.count == 1 ? "Image" : "\(message.photos.count) images") }
+        if let q = message.replyQuote { parts.append("Replying to \(q.authorLabel): \(q.excerpt)") }
         parts.append(message.displayContent)
         parts.append(message.createdAt.formatted(date: .omitted, time: .shortened))
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
@@ -350,6 +375,8 @@ private struct Composer: View {
     @Binding var text: String
     /// The message comes from dictation or Talk: its reply is read aloud.
     @Binding var dictated: Bool
+    /// The quote above the box, sent with the next message as its `reply_to`.
+    @Binding var replyingTo: MessageQuote?
     /// Opens Talk with this agent.
     let talk: () -> Void
     /// Called with the text just sent.
@@ -408,6 +435,9 @@ private struct Composer: View {
                         }
                     }
                 }
+            }
+            if let q = replyingTo {
+                ReplyBar(quote: q) { replyingTo = nil }
             }
             if !attachments.isEmpty {
                 HStack {
@@ -561,16 +591,18 @@ private struct Composer: View {
     private func send() {
         guard canSend else { return }
         let message = text, images = attachments.compactMap(\.uploaded)
+        let meta = MessageQuote.meta(nil, replyingTo: replyingTo)
         text = ""
         attachments = []
+        replyingTo = nil
         sent(message)
         if dictated {
             dictated = false
-            Task { await store.sendByVoice(message, to: agent.id, images: images, reads: voice.readReplies) { answer, id in
+            Task { await store.sendByVoice(message, to: agent.id, meta: meta, images: images, reads: voice.readReplies) { answer, id in
                 _ = await voice.speaker.readReply(answer, messageId: id, isActive: { true })
             } }
         } else {
-            Task { await store.send(message, to: agent.id, images: images) }
+            Task { await store.send(message, to: agent.id, meta: meta, images: images) }
         }
     }
 
@@ -648,6 +680,60 @@ private struct AttachmentChip: View {
     }
 }
 
+/// The quote above the message box while replying, with ✕ to remove it. Plain text, never markdown.
+private struct ReplyBar: View {
+    let quote: MessageQuote
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrowshape.turn.up.left").foregroundStyle(WebTheme.fg3)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Replying to \(quote.authorLabel)").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
+                Text(verbatim: quote.excerpt).font(.system(size: 12)).foregroundStyle(WebTheme.fg2).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Button(action: remove) { Image(systemName: "xmark.circle.fill").font(.system(size: 14)).contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .foregroundStyle(WebTheme.fg3)
+                .help("Remove the quote")
+                .accessibilityLabel("Remove the quote")
+                .accessibilityIdentifier("replyQuoteRemove")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(WebTheme.line))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Replying to \(quote.authorLabel): \(quote.excerpt)")
+        .accessibilityIdentifier("replyQuote")
+    }
+}
+
+/// The message a reply quotes, above its text: who wrote it and a line or two, as plain text. A click jumps to it.
+private struct QuoteBlock: View {
+    let quote: MessageQuote
+    let jump: () -> Void
+
+    var body: some View {
+        Button(action: jump) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2).fill(Theme.accent).frame(width: 3)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(quote.authorLabel).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
+                    Text(verbatim: quote.excerpt).font(.system(size: 12)).foregroundStyle(WebTheme.fg2)
+                        .lineLimit(2).multilineTextAlignment(.leading)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(WebTheme.fg.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Go to the quoted message")
+        .accessibilityIdentifier("messageQuote")
+    }
+}
+
 /// The line at the top of a chat that was opened here because Herdr couldn't (`MacNav.chatNote`).
 struct ChatNoteBanner: View {
     let text: String
@@ -674,6 +760,39 @@ func renderChatNote(to file: String) {
     renderer.scale = 2
     if let tiff = renderer.nsImage?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
         try? png.write(to: URL(fileURLWithPath: file))
+    }
+    NSApp.terminate(nil)
+}
+
+/// `-render-reply <folder>`: a reply as the chat shows it (the quoted message, the reply with its quote) and the quote
+/// above the message box, drawn to dark.png and light.png, then quits. For screenshots (spec #572).
+@MainActor
+func renderReply(to folder: String) async {
+    // The fixture's Lead chat: its question, a reply to it (stored as the server does), and its next question.
+    let api = FixtureAPI()
+    guard let agent = try? await api.agents().first(where: { $0.id == "orch" }),
+          let history = try? await api.messages(agentId: "orch", limit: 50, before: nil),
+          let asked = history.first(where: { $0.id == 2 }),
+          let reply = try? await api.sendMessage(agentId: "orch", text: "Wait for QA before the iOS part.", clientId: "r",
+                                                 meta: ["reply_to": .number(2)]).message,
+          let next = history.last(where: { $0.role == "assistant" && $0.kind == "text" && $0.id != 2 })
+    else { return NSApp.terminate(nil) }
+    let store = LoftStore(api: api)
+    for (name, scheme) in [("dark", ColorScheme.dark), ("light", .light)] {
+        NSAppearance.current = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        let view = VStack(alignment: .leading, spacing: 12) {
+            MessageRow(message: asked, agent: agent)
+            MessageRow(message: reply, agent: agent)
+            MessageRow(message: next, agent: agent)
+            ReplyBar(quote: MessageQuote(of: next, agentName: agent.name)) {}
+        }
+        .padding(24).frame(width: 720)
+        .background(WebTheme.canvas).environment(\.colorScheme, scheme).environment(store)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        if let tiff = renderer.nsImage?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
+        }
     }
     NSApp.terminate(nil)
 }

@@ -41,4 +41,15 @@ final class VoiceRepliesTests: XCTestCase {
         await store.sendByVoice("Run the smoke tests", to: "qa", reads: true, keepWaiting: { false }) { text, _ in heard.append(text) }
         XCTAssertTrue(heard.isEmpty)
     }
+
+    /// A dictated reply on the Mac goes through here: the quote goes up with it (spec #572).
+    @MainActor
+    func testAMessageByVoiceCarriesTheQuote() async throws {
+        let store = try await connected()
+        defer { store.deactivate() }
+        let meta = MessageQuote.meta(nil, replyingTo: MessageQuote(id: 30, author: nil, excerpt: ""))
+        await store.sendByVoice("Run the smoke tests", to: "qa", meta: meta, reads: false) { _, _ in }
+        XCTAssertTrue(store.pending(for: "qa").isEmpty, "sent, not failed")
+        XCTAssertEqual(store.conversation("qa").last { $0.content == "Run the smoke tests" }?.replyQuote?.id, 30)
+    }
 }

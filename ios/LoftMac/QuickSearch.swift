@@ -102,6 +102,7 @@ final class QuickSearchController {
         // Needs no window: a directly launched app may not open one.
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-render-chat-note"), i + 1 < args.count { Task { renderChatNote(to: args[i + 1]) } }
+        if let i = args.firstIndex(of: "-render-reply"), i + 1 < args.count { Task { await renderReply(to: args[i + 1]) } }
         if let i = args.firstIndex(of: "-render-quick-search"), i + 2 < args.count {
             Task { await renderQuickSearch(self, query: args[i + 1], to: args[i + 2]) }
         }
