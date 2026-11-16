@@ -28,7 +28,7 @@ struct AgentsSection: View {
                                     .padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 4)
                                 ForEach(section.agents) { a in
                                     AgentListRow(agent: a, showsGroup: section.id == "leads", selected: a.id == nav.agentId) {
-                                        nav.agentId = a.id
+                                        nav.openChat(a.id)
                                     }
                                     .id(a.id)
                                 }
