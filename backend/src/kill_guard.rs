@@ -172,6 +172,13 @@ impl Dirs {
         self.old = std::mem::replace(&mut self.cwd, to);
     }
 
+    /// Whether the folder the shell is in (`cwd`, links followed) may be swapped for a link by an earlier `ln`, `mv` or
+    /// `cp` of the command, or sits behind a path the guard couldn't read. Such a path matters only when something besides
+    /// where the command started names the folder: a `cd` or, for `named`, an option.
+    fn swapped(&self, cwd: &Path, named: bool) -> bool {
+        self.touched.iter().any(|t| cwd.starts_with(t) || self.cwd.as_ref().is_some_and(|c| c.starts_with(t))) || (self.unreadable && (self.moved || named))
+    }
+
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
     fn keep_made(&mut self, inner: &Dirs) {
         self.made |= inner.made;
@@ -370,6 +377,11 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 for alt in dirs.alts.clone() {
                     let mut at = Dirs { cwd: Some(alt), alts: vec![], ..dirs.clone() };
                     folders.extend(command_folders(name, args, live, &vars, &mut at));
+                }
+                // The folder it runs in may be a link an earlier `ln`, `mv` or `cp` of this command makes (git checks its own).
+                let swapped = name != "git" && !folders.is_empty() && dirs.cwd.clone().map(real).is_some_and(|c| dirs.swapped(&c, false));
+                if swapped {
+                    folders.extend(unknown_in(dirs, None));
                 }
                 if dirs.unknown && !folders.is_empty() {
                     folders.push(PathBuf::from(UNKNOWN));
@@ -640,10 +652,8 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         // (it may bring a link, or an agent's `--work-tree` may name a checkout).
         let start = outer.start.clone().map(real);
         let near = start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd, &dirs.storage) || start.is_some_and(|s| cwd.starts_with(s)));
-        let touched = dirs.touched.iter().any(|t| cwd.starts_with(t) || dirs.cwd.as_ref().is_some_and(|c| c.starts_with(t)));
-        // A path the guard couldn't read matters only when git doesn't simply run where the command started.
-        let unreadable = dirs.unreadable && (dirs.moved || dir_options || tree.is_some() || git_dir.is_some());
-        if dirs.dotgit || touched || unreadable || (dirs.made && near && !cwd.exists()) {
+        let swapped = dirs.swapped(&cwd, dir_options || tree.is_some() || git_dir.is_some());
+        if dirs.dotgit || swapped || (dirs.made && near && !cwd.exists()) {
             return unknown_in(&dirs, None);
         }
     }
@@ -2249,6 +2259,9 @@ mod tests {
             ("tar xf x.tar && git -C t/l reset --hard", &clone),
             ("ln -s ../../../../other t && git -C t reset --hard", &ws),
             ("ln -s ../../../../other t; cd t && git reset --hard", &ws),
+            ("ln -s ../../../../other t && cd t && pnpm install", &ws),
+            ("mv a t && cd t && cargo build", &ws),
+            ("cp -s ../../../../other t; cd t; xcodebuild build", &ws),
             ("echo 'gitdir: x' > a/.git; git -C a checkout other", &clone),
             ("mkdir t && echo 'gitdir: x' > t/.git && git -C t checkout other", &clone),
             ("mkdir t && cp g t/.git && git -C t checkout other", &clone),
