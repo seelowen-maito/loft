@@ -1051,6 +1051,9 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     if id.starts_with("permission:") || id.starts_with("grill:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
     }
+    if id == "workspaces_not_moved" {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "This one goes once a start moves the workspaces; it can't be dismissed.".into()));
+    }
     let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !items.iter().any(|i| i.id == id) {
         return Err(not_found());
@@ -1458,6 +1461,15 @@ mod tests {
         assert!(same_site(&h(Some("same-origin"))).is_ok());
         assert!(same_site(&h(Some("cross-site"))).is_err());
         assert!(same_site(&h(Some("same-site"))).is_err());
+    }
+
+    #[tokio::test]
+    async fn workspaces_that_didnt_move_cant_be_dismissed() {
+        let st = crate::tasks::tests::state();
+        st.rt.lock().unwrap().workspaces_not_moved = Some("/x/agent-local-storage already holds files".into());
+        assert!(dismiss_item(State(st.clone()), Path("workspaces_not_moved".into())).await.is_err());
+        assert!(st.db.dismissed_needs_you().unwrap().is_empty(), "nothing is kept");
+        assert!(collect(&st).unwrap().iter().any(|i| i.kind == "workspaces_not_moved"), "still shown");
     }
 
     #[test]
