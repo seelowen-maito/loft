@@ -406,6 +406,12 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String]) -> Vec<PathB
     {
         return hidden.into_iter().collect();
     }
+    // The folder this command's clone makes is a repository of its own, not part of the one around it.
+    if let Some(cwd) = dirs.cwd.clone().map(real)
+        && dirs.fresh.contains(&cwd)
+    {
+        return vec![cwd];
+    }
     let found = dirs.cwd.map(|d| repo_root(d, &dirs.ceiling));
     // A `.git` file points at the repository, which may be another checkout's.
     let linked = found.as_deref().and_then(linked_repo);
@@ -1869,6 +1875,10 @@ mod tests {
             "cd \"$DIR\" && git pull",
         ] {
             assert_eq!(asks_all(cmd, &at(&clone)), Vec::<PathBuf>::new(), "should run: {cmd}");
+        }
+        // A clone's folder is from its own -C, and what the next command does there is the clone's.
+        for cmd in ["git -C loft clone x ../y && git -C y add *.md", "git -C loft clone x ../y && git -C y reset --hard"] {
+            assert_eq!(asks_all(cmd, &at(&ws)), Vec::<PathBuf>::new(), "should run: {cmd}");
         }
         std::fs::remove_dir_all(root).unwrap();
     }
