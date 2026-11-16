@@ -142,9 +142,9 @@ struct Dirs {
     unreadable: bool,
     /// The shell has `cd`'d (or `pushd`/`popd`'d) since the command began.
     moved: bool,
-    /// GIT_DIR and GIT_WORK_TREE as the shell has them (`export GIT_DIR=x`, `GIT_DIR=x;`), resolved where they were set.
-    env_git_dir: Option<Option<PathBuf>>,
-    env_tree: Option<Option<PathBuf>>,
+    /// GIT_DIR or GIT_WORK_TREE appears somewhere in the command so far (in any word, assigned, exported, unset or
+    /// hidden in a name): git may use a repository the guard can't follow, so every git call after it is unknown.
+    git_env: bool,
 }
 
 impl Dirs {
@@ -168,20 +168,12 @@ impl Dirs {
         self.old = std::mem::replace(&mut self.cwd, to);
     }
 
-    /// `export GIT_DIR=x`, `GIT_WORK_TREE=x;`: the shell's own value from here on. `unset` takes it back.
-    fn set_env(&mut self, word: &str) {
-        if let Some(d) = word.strip_prefix("GIT_DIR=") {
-            self.env_git_dir = Some(self.at(d));
-        } else if let Some(d) = word.strip_prefix("GIT_WORK_TREE=") {
-            self.env_tree = Some(self.at(d));
-        }
-    }
-
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
     fn keep_made(&mut self, inner: &Dirs) {
         self.made |= inner.made;
         self.dotgit |= inner.dotgit;
         self.unreadable |= inner.unreadable;
+        self.git_env |= inner.git_env;
         self.touched.extend(inner.touched.iter().cloned());
     }
 
@@ -238,6 +230,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     let cmds = parse(text);
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
+    let mut pending_dotgit = false;
     for i in 0..cmds.len() {
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
@@ -248,6 +241,10 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             saved.push((s, dirs.clone()));
         }
         let all = &cmds[i].words;
+        // A `.git` an earlier command names (`> t/.git`, `of=t/.git`, `ln -s x .git`) matters from the next on.
+        dirs.dotgit |= std::mem::take(&mut pending_dotgit);
+        pending_dotgit = names_dotgit(all, &cmds[i].targets);
+        dirs.git_env |= mentions_git_env(all, &cmds[i].targets, &cmds[i].stdin);
         let words = match unwrap(all, &mut false) {
             Run::Words(words) => words,
             Run::Text(text) => {
@@ -259,35 +256,24 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         let live = &cmds[i].live[all.len() - words.len()..];
         // `GIT_DIR=x git ...`, `env GIT_WORK_TREE=x git ...`
         let vars: Vec<&String> = all[..all.len() - words.len()].iter().filter(|w| assignment(w).is_some()).collect();
-        let Some((name, args)) = words.split_first() else {
-            // `GIT_DIR=x` on its own sets it for the shell.
-            all.iter().for_each(|w| dirs.set_env(w));
-            continue;
-        };
+        let Some((name, args)) = words.split_first() else { continue };
         let (args, live) = (args, &live[1..]);
         let name = base(name);
-        match name {
-            "export" | "declare" | "typeset" | "readonly" | "local" => args.iter().for_each(|a| dirs.set_env(a)),
-            "unset" => {
-                for a in args {
-                    match a.as_str() {
-                        "GIT_DIR" => dirs.env_git_dir = None,
-                        "GIT_WORK_TREE" => dirs.env_tree = None,
-                        _ => {}
-                    }
-                }
+        // GNU coreutils under their Homebrew names (`gmv`, `gln`, `gcp`).
+        let tool = name.strip_prefix('g').filter(|n| matches!(*n, "ln" | "mv" | "cp" | "rm" | "install")).unwrap_or(name);
+        if matches!(tool, "ln" | "mv" | "cp" | "rm" | "rmdir" | "unlink" | "install" | "rsync" | "ditto") {
+            // Braces or a glob: it may name any folder.
+            if args.iter().zip(live).any(|(a, &l)| hides(a, l)) {
+                dirs.dotgit = true;
             }
-            _ => {}
-        }
-        if matches!(name, "ln" | "mv" | "cp" | "rm" | "rmdir" | "unlink" | "install" | "rsync" | "ditto") {
             // What the command writes into, when it only puts files in a folder (`cp x .`), isn't swapped: skipped when
             // it can't make a link or a `.git` there. Anything else it names may be.
-            let copies = matches!(name, "mv" | "cp" | "install" | "rsync" | "ditto");
+            let copies = matches!(tool, "mv" | "cp" | "install" | "rsync" | "ditto");
             let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
             let dest = args.iter().position(|a| a == "-t" || a == "--target-directory").and_then(|i| args.get(i + 1)).or_else(|| args.iter().find_map(|a| a.strip_prefix("--target-directory=").map(|_| a))).or(paths.last().copied().filter(|_| copies));
             let links = args.iter().any(|a| {
                 let long = a.starts_with("--");
-                (long && a.contains("link")) || (!long && a.starts_with('-') && a.chars().any(|c| if name == "rsync" { matches!(c, 'l' | 'a') } else { matches!(c, 's' | 'l') }))
+                (long && a.contains("link")) || (!long && a.starts_with('-') && a.chars().any(|c| if tool == "rsync" { matches!(c, 'l' | 'a') } else { matches!(c, 's' | 'l') }))
             });
             let git = paths.iter().any(|p| Path::new(p).file_name().is_some_and(|n| n == ".git"));
             let here = |p: &Path| dirs.cwd.as_ref().is_some_and(|c| c.starts_with(p));
@@ -297,12 +283,6 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     Some(p) => dirs.touched.extend([real(p.clone()), p]),
                     None => dirs.unreadable = true,
                 }
-            }
-        }
-        if !matches!(name, "cd" | "pushd" | "popd") {
-            // Any command can make a folder, a link or a `.git`: tar, ln, cp, echo > t/.git.
-            if name != "git" {
-                dirs.dotgit |= words.iter().filter(|w| assignment(w).is_none()).chain(&cmds[i].targets).any(|w| Path::new(w).file_name().is_some_and(|n| n == ".git"));
             }
         }
         if matches!(name, "cd" | "pushd" | "popd") {
@@ -395,6 +375,20 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         dirs.made = true;
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
+}
+
+/// Whether a command writes or names a path that ends in `.git` (also as `of=x/.git` or `--output=x/.git`), other than
+/// as a plain `GIT_DIR=` or `GIT_WORK_TREE=` word, which `mentions_git_env` already covers.
+fn names_dotgit(words: &[String], targets: &[String]) -> bool {
+    let ends = |p: &str| Path::new(p).file_name().is_some_and(|n| n == ".git");
+    words.iter().filter(|w| !w.starts_with("GIT_DIR=") && !w.starts_with("GIT_WORK_TREE=")).chain(targets).any(|w| ends(w) || w.split_once('=').is_some_and(|(_, v)| ends(v)))
+}
+
+/// Whether any of a command's words, redirect targets or input text names GIT_DIR or GIT_WORK_TREE, even through a
+/// name hidden by a glob or an expansion (`GIT_D*`, `${!GIT_*}`).
+fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
+    let hit = |t: &str| t.contains("GIT_DIR") || t.contains("GIT_WORK_TREE") || (t.contains("GIT_") && t.contains(['$', '*', '?', '[', '{']));
+    words.iter().chain(targets).any(|w| hit(w)) || hit(stdin)
 }
 
 /// The folders one command (not a `cd`, a shell or an `eval`) changes, run in `dirs`.
@@ -512,12 +506,26 @@ pub const UNKNOWN: &str = "/loft-unknown-folder";
 /// What the shell expands (braces, globs) or an earlier command of this run may still make (a folder, a link, a
 /// `.git` file) hides the folder or repository: then the answer is `unknown_in`.
 fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool]) -> Vec<PathBuf> {
+    let mut unknown = false;
+    let mut folders = git_folders(outer, vars, args, live, &mut unknown);
+    if unknown {
+        folders.push(PathBuf::from(UNKNOWN));
+    }
+    folders
+}
+
+/// `git_changes` but for the `unknown` answer a change makes beside the folders.
+fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool], unknown: &mut bool) -> Vec<PathBuf> {
     let mut dirs = outer.clone();
-    let (mut tree, mut git_dir) = (dirs.env_tree.clone(), dirs.env_git_dir.clone());
+    let (mut tree, mut git_dir) = (None, None);
+    let mut relative = false;
+    let absolute = |d: &str| d.starts_with(['/', '~']) || d.starts_with("$HOME") || d.starts_with("${HOME}");
     for v in vars {
         if let Some(d) = v.strip_prefix("GIT_WORK_TREE=") {
+            relative |= !absolute(d);
             tree = Some(dirs.at(d));
         } else if let Some(d) = v.strip_prefix("GIT_DIR=") {
+            relative |= !absolute(d);
             git_dir = Some(dirs.at(d));
         }
     }
@@ -536,6 +544,7 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
             let path = if takes_value && hid(i) { args.get(i).map(|w| w.0.as_str()) } else { value("--git-dir").or(value("--work-tree")) };
             return unknown_in(&dirs, path);
         }
+        let rel_next = args.get(i).is_some_and(|(d, _)| !absolute(d));
         let mut next = || {
             i += 1;
             args.get(i - 1).and_then(|(d, _)| dirs.at(d))
@@ -546,10 +555,22 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
                 let to = next();
                 dirs.cwd = to;
             }
-            "--work-tree" => tree = Some(next()),
-            "--git-dir" => git_dir = Some(next()),
-            _ if value("--work-tree").is_some() => tree = Some(value("--work-tree").and_then(|d| dirs.at(d))),
-            _ if value("--git-dir").is_some() => git_dir = Some(value("--git-dir").and_then(|d| dirs.at(d))),
+            "--work-tree" => {
+                relative |= rel_next;
+                tree = Some(next());
+            }
+            "--git-dir" => {
+                relative |= rel_next;
+                git_dir = Some(next());
+            }
+            _ if value("--work-tree").is_some() => {
+                relative |= value("--work-tree").is_some_and(|d| !absolute(d));
+                tree = Some(value("--work-tree").and_then(|d| dirs.at(d)));
+            }
+            _ if value("--git-dir").is_some() => {
+                relative |= value("--git-dir").is_some_and(|d| !absolute(d));
+                git_dir = Some(value("--git-dir").and_then(|d| dirs.at(d)));
+            }
             // `-c core.worktree=x` names the work tree as `--work-tree` does.
             "-c" => {
                 if let Some((_, v)) = args.get(i).and_then(|(w, _)| w.split_once('=')).filter(|(k, _)| k.eq_ignore_ascii_case("core.worktree")) {
@@ -570,6 +591,9 @@ fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
     if git_reads(sub, &rest) || (sub == "config" && rest.iter().any(|a| matches!(*a, "--global" | "--system"))) {
         return vec![];
     }
+    // GIT_DIR or GIT_WORK_TREE anywhere in the command: git may use a repository the guard can't follow. A relative
+    // one is read from the folder `-C` moves to, not from the one before it.
+    *unknown |= dirs.git_env || (relative && dir_options);
     // `clone` and `init` make a new repository: in the folder they name, or the folder they run in, not the one around it.
     if let Some(valued) = match sub {
         "clone" => Some(&["--branch", "--origin", "--config", "--depth", "--reference", "--reference-if-able", "--template", "--separate-git-dir", "--upload-pack", "--jobs", "--filter", "--shallow-since", "--shallow-exclude", "--server-option", "--bundle-uri", "-b", "-o", "-c", "-u", "-j"][..]),
@@ -2192,8 +2216,8 @@ mod tests {
         for cmd in [format!("ln -s {} t && git -C t reset --hard", at(&other)), format!("ln -s {} t; cd t && git reset --hard", at(&other))] {
             has(&cmd, &apart, &unknown);
         }
-        // An exported or assigned GIT_DIR and GIT_WORK_TREE count like the inline ones; the link or file that is the
-        // `.git` is made in the same command.
+        // GIT_DIR or GIT_WORK_TREE anywhere in the command: every git call after it is unknown (an inline one is also
+        // resolved), whatever way it is set, hidden or undone.
         let o = at(&other);
         for cmd in [
             format!("export GIT_DIR={o}/.git; git reset --hard"),
@@ -2201,12 +2225,36 @@ mod tests {
             format!("declare -x GIT_DIR={o}/.git && git reset --hard"),
             format!("export GIT_WORK_TREE={o}; git checkout ."),
             "export GIT_DIR=../../../other/.git; git reset --hard".to_string(),
+            format!("(export GIT_DIR={o}/.git); git reset --hard"),
+            format!("f() {{ export GIT_DIR={o}/.git; }}; f; git reset --hard"),
+            format!("if true; then GIT_DIR={o}/.git; fi; git reset --hard"),
+            format!("export GIT_D\"I\"R={o}/.git; git reset --hard"),
+            format!("sh -c 'export GIT_DIR={o}/.git'; git reset --hard"),
+            format!("eval \"export GIT_DIR={o}/.git\"; git reset --hard"),
+            "unset -m 'GIT_D*'; git reset --hard".to_string(),
+            "unset ${!GIT_*}; git reset --hard".to_string(),
+            format!("env GIT_DIR={o}/.git git reset --hard"),
+            format!("export GIT_DIR={o}/.git; unset GIT_DIR; git reset --hard"),
+            format!("read GIT_DIR <<< {o}/.git; git reset --hard"),
         ] {
-            has(&cmd, &apart, &other);
+            has(&cmd, &apart, &unknown);
+            has(&cmd, &clone, &unknown);
         }
+        has(&format!("GIT_DIR={o}/.git git reset --hard"), &apart, &other);
         has(&format!("ln -s {o}/.git .git && git reset --hard"), &apart, &unknown);
-        assert_eq!(asks_all(&format!("export GIT_DIR={o}/.git; unset GIT_DIR; git status"), &at(&apart)), Vec::<PathBuf>::new());
-        assert!(!asks_all(&format!("(export GIT_DIR={o}/.git); git reset --hard"), &at(&apart)).contains(&other));
+        // A relative one is read from the folder `-C` moves to.
+        for cmd in ["git --git-dir=../fake/.git -C loft reset --hard", "git --git-dir ../fake/.git -C loft reset --hard", "GIT_DIR=../fake git -C loft reset --hard", "git --work-tree=.. -C loft checkout .", "GIT_WORK_TREE=. git -C loft checkout ."] {
+            has(cmd, &ws, &unknown);
+        }
+        // Naming a path that ends in `.git`: a redirect, `of=`, `--output=`, a tool's argument.
+        for cmd in ["printf x > t/.git; git reset --hard", "dd if=x of=t/.git; git reset --hard", "curl --output=t/.git u; git reset --hard", "tee .git < x; git reset --hard", "echo hi | tee t/.git && git add .", "cat x >> .git; git reset --hard"] {
+            has(cmd, &clone, &unknown);
+        }
+        // ln, mv, cp and their GNU names with braces or a glob may name any folder.
+        for cmd in ["ln -s {a,b} t; git reset --hard", "mv lo* old; git -C loft reset --hard", "gmv loft old && gln -s x loft; git -C loft reset --hard", "gln -s {a,b} t; git reset --hard", "gcp -s x . && git add .", "cp x? y; git reset --hard", "rm -rf lo[f]t; git reset --hard"] {
+            has(cmd, &clone, &unknown);
+        }
+        assert_eq!(asks_all(&format!("export GIT_DIR={o}/.git; git status"), &at(&apart)), Vec::<PathBuf>::new());
         // What can happen to a new repository's folder, or to git's environment, between the clone or init and the git call.
         let dest = format!("ln -s {o} t && git clone -q /src t; git -C t reset --hard");
         for cmd in [
