@@ -70,9 +70,11 @@ struct SpecRow: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(spec.title).font(.body).readableLineLimit(2)
             HStack(spacing: 6) {
+                // The project (its last path part) and the badge keep their size; the ref truncates in the middle, so its `#n` always shows.
                 Text(SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                    .truncationMode(.middle)
                 if let project = SpecViews.project(spec) {
-                    Text(project).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                    Text(project).font(.caption).foregroundStyle(.secondary).fixedSize()
                         .accessibilityLabel("Project \(project)")
                 }
                 if let badge {
@@ -80,6 +82,7 @@ struct SpecRow: View {
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Theme.accent.opacity(0.15), in: Capsule())
                         .foregroundStyle(Theme.accent)
+                        .fixedSize()
                 }
             }
             if let p {

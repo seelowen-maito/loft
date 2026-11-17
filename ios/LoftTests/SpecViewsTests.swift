@@ -62,6 +62,13 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertNil(SpecViews.project(none))
     }
 
+    func testProjectShowsOnlyItsLastPathPartSoItDoesNotRepeatTheRepo() {
+        var t = spec(); t.project = "dineout/dineout/pos"
+        XCTAssertEqual(SpecViews.project(t), "pos")
+        t.project = "Passora"
+        XCTAssertEqual(SpecViews.project(t), "Passora")
+    }
+
     func testDecodesTheSummaryEndpoint() throws {
         let json = ###"[{"state":"running","started":true,"agent_id":"a","agent_name":"Dev","pr":null,"spec":146,"current":{"number":148,"title":"T"},"repo":"o/r","spec_id":"x","local":false,"tickets":[{"number":148,"id":null,"title":"T","state":"started","skipped":"","verdicts":{"qa":"pass"}}]}]"###
         let d = try JSONCoding.decoder.decode([DeliverySummary].self, from: Data(json.utf8))
