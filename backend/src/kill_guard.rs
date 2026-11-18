@@ -155,6 +155,8 @@ struct Dirs {
     /// what follows it (`pending_chain` is the list). They become `alts` at the first command of another list.
     pending: Vec<PathBuf>,
     pending_chain: usize,
+    /// The command being checked is negated (`! cd x`) or not last in its pipeline: a failed `cd` doesn't stop the list.
+    goes_on: bool,
     /// An earlier `ln`, `mv`, `cp` or `rm` names a path the guard can't tell (`"$LOCK"`).
     unreadable: bool,
     /// The shell has `cd`'d (or `pushd`/`popd`'d) since the command began.
@@ -339,7 +341,8 @@ impl Dirs {
         // So does one through a folder an earlier `rm` or `mv` of the command names and then up (`gone/..`).
         if self.passes_in(dir, &self.removed) || fails {
             // The rest of this `&&` list only runs when the `cd` worked.
-            self.pending_chain = self.chain;
+            // A `cd` that doesn't stop the list has its places seen by the next command, whatever list that is in.
+            self.pending_chain = if self.goes_on { usize::MAX } else { self.chain };
             for a in self.alts.iter().cloned().chain(self.cwd.clone()) {
                 if !self.pending.contains(&a) {
                     self.pending.push(a);
@@ -405,6 +408,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             saved.push((s, dirs.clone()));
         }
         dirs.flush(cmds[i].chain);
+        dirs.goes_on = cmds[i].piped || cmds[i].words.first().is_some_and(|w| w == "!");
         let all = &cmds[i].words;
         // A `.git` an earlier command names (`> t/.git`, `of=t/.git`, `ln -s x .git`) matters from the next on.
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
@@ -573,7 +577,10 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 continue;
             }
             "eval" => {
+                // The text numbers its lists from zero: what is pending before and after it is seen by what follows.
+                dirs.flush(usize::MAX);
                 changes(&args.join(" "), dirs, depth + 1, out);
+                dirs.flush(usize::MAX);
                 dirs.made = true;
                 continue;
             }
@@ -1472,6 +1479,8 @@ struct Cmd {
     /// Its `&&` list: the commands joined by `&&` or `|` since the last `;`, newline, `||` or `&`. The ones after a `cd` in
     /// it only run when that `cd` worked.
     chain: usize,
+    /// It is not the last command of its pipeline.
+    piped: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1619,6 +1628,10 @@ impl Level {
 
     /// `|`: the next command reads this one's output.
     fn pipe(&mut self, p: &mut Parse) {
+        self.end_word(p);
+        if let Some(id) = self.cur {
+            p.cmds[id].piped = true;
+        }
         self.end(p);
         self.open_list = true;
         self.frame().place += 1;
@@ -2567,6 +2580,12 @@ mod tests {
             format!("cd {pr}; mkdir {w}/zz/../nope; {nope}"),
             format!("cd {pr}; mkdir {w}/nope > {w}/zzz/log; {nope}"),
             format!("cd {pr}; cargo new {w}/nope --vcs; {nope}"),
+            // A failed cd that doesn't stop the list: negated, not last in its pipeline, or text with its own lists.
+            format!("cd {pr}; ! cd {w}/nope && pnpm install"),
+            format!("cd {pr}; cd {w}/nope | cat && pnpm install"),
+            format!("cd {pr}; cd {w}/nope | true && pnpm install"),
+            format!("cd {pr}; cd {w}/nope |& cat && pnpm install"),
+            format!("cd {pr}; eval 'true; true; cd {w}/nope'; pnpm install"),
             // After `||` anywhere past the cd, the rest runs when it failed.
             format!("cd {pr}; cd {w}/nope || true && pnpm install"),
             format!("cd {pr}; cd {w}/nope && true || pnpm install"),
