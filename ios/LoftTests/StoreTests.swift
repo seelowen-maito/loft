@@ -53,7 +53,10 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func stopRun(agentId: String) async throws {}
     var deleted: [(String, Bool)] = []
     func deleteAgent(id: String, purgeFiles: Bool) async throws { try check(); deleted.append((id, purgeFiles)) }
-    func restartRun(agentId: String) async throws {}
+    /// Restarting a run that waits on background work ends the wait, as the server does.
+    func restartRun(agentId: String) async throws {
+        if let i = agentList.firstIndex(where: { $0.id == agentId }) { agentList[i].waitingOn = nil; agentList[i].waitingSince = nil }
+    }
     func resetSession(agentId: String) async throws {}
     func compact(agentId: String) async throws {}
     func sessions(agentId: String) async throws -> PastSessions { PastSessions(sessions: [], current: nil) }
@@ -271,7 +274,7 @@ final class StoreTests: XCTestCase {
     func testAgentEventsUpsertAndDelete() async throws {
         let store = try await connectedStore(MockAPI())
         var a = store.agents[0]
-        a.status = "running"
+        a.running = true // #594: Working comes from the live run, not the saved status.
         store.apply(.agentUpdated(a))
         XCTAssertEqual(store.state(of: store.agents[0]), .working)
         store.apply(.agentDeleted("a1"))
