@@ -778,10 +778,15 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
     match name {
         "git" => git_changes(dirs, vars, args, live),
         "cargo" => match flags(args, &["--manifest-path"], CARGO_CHANGES) {
-            (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
-                Some(m) if folder_expands(m) => unknown_in(dirs, None),
-                Some(m) => dirs.at(m).and_then(|f| f.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(m).then(|| PathBuf::from(UNKNOWN))).collect(),
-                None => dirs.cwd.clone().into_iter().collect(),
+            (manifests, Some(s)) if CARGO_CHANGES.contains(&s) => match manifests[..] {
+                [] => dirs.cwd.clone().into_iter().collect(),
+                _ => manifests
+                    .iter()
+                    .flat_map(|&m| match m {
+                        m if folder_expands(m) => unknown_in(dirs, None),
+                        m => dirs.at(m).and_then(|f| f.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(m).then(|| PathBuf::from(UNKNOWN))).collect(),
+                    })
+                    .collect(),
             },
             _ => vec![],
         },
@@ -797,9 +802,10 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
                 Some(d) if folder_expands(d) => unknown_in(dirs, None),
                 Some(d) => [dirs.at_text(d), dirs.at(d)].into_iter().flatten().chain(dirs.passes(d).then(|| PathBuf::from(UNKNOWN))).collect(),
             };
+            let each = |dirs: Vec<&str>| if dirs.is_empty() { folders(None) } else { dirs.into_iter().flat_map(|d| folders(Some(d))).collect() };
             match flags(args, dir_flags, PM_CHANGES) {
-                (dir, Some(s)) if PM_CHANGES.contains(&s) => folders(dir),
-                (dir, None) if pm == "yarn" => folders(dir), // a bare `yarn` installs
+                (dir, Some(s)) if PM_CHANGES.contains(&s) => each(dir),
+                (dir, None) if pm == "yarn" => each(dir), // a bare `yarn` installs
                 _ => vec![],
             }
         }
@@ -817,29 +823,38 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
     }
 }
 
-/// The value of the first of the folder `options` in `args` (`--dir x`, `--dir=x` or `-Cx`), and the subcommand: the
-/// first word that isn't an option or the word after one (`--filter x` takes a value the guard can't tell from a
-/// subcommand). When every word follows an option (`--filter x --silent install`) it's the first in `subs`, else the first.
-fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Option<&'a str>, Option<&'a str>) {
-    let mut value = None;
-    let (mut words, mut after_option) = (vec![], false);
+/// Every value of the folder `options` in `args` (`--dir x`, `--dir=x`, `-Cx`, `-sC x`, `--dir` by a prefix of three or
+/// more letters, as npm takes it), since a tool may take the last of a repeated one. And the subcommand: the first word
+/// that isn't the word after an option, or is in `subs`; else the first word. (`--filter x` takes a value the guard can't
+/// tell from a subcommand.)
+fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a str>, Option<&'a str>) {
+    let (mut values, mut words, mut after_option) = (vec![], vec![], false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let was = std::mem::replace(&mut after_option, false);
-        if options.contains(&a.as_str()) {
-            value = value.or(it.next().map(String::as_str));
-        } else if let Some(v) = options.iter().find_map(|o| a.strip_prefix(o).and_then(|r| r.strip_prefix('='))) {
-            value = value.or(Some(v));
-        } else if let Some(v) = options.iter().filter(|o| !o.starts_with("--")).find_map(|o| a.strip_prefix(o).filter(|r| !r.is_empty())) {
-            value = value.or(Some(v));
+        let name = a.split_once('=').map_or(a.as_str(), |(n, _)| n);
+        let long = |o: &&str| o.starts_with("--") && name.len() > 2 && o.starts_with(name);
+        let short = |o: &&str| !o.starts_with("--") && a.starts_with('-') && !a.starts_with("--") && a[1..].contains(&o[1..]);
+        if options.iter().any(|o| long(o)) {
+            match a.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
+                Some(v) => values.push(v),
+                None => values.extend(it.next().map(String::as_str)),
+            }
+        } else if let Some(o) = options.iter().find(|o| short(o)) {
+            let rest = a[1..].split_once(&o[1..]).map_or("", |(_, r)| r);
+            let rest = rest.strip_prefix('=').unwrap_or(rest);
+            match rest {
+                "" => values.extend(it.next().map(String::as_str)),
+                v => values.push(v),
+            }
         } else if !a.starts_with(['-', '+']) {
             words.push((a.as_str(), was));
         } else {
             after_option = true;
         }
     }
-    let sub = words.iter().find(|w| !w.1).map(|w| w.0).or_else(|| words.iter().map(|w| w.0).find(|w| subs.contains(w))).or(words.first().map(|w| w.0));
-    (value, sub)
+    let sub = words.iter().find(|w| !w.1 || subs.contains(&w.0)).or(words.first()).map(|w| w.0);
+    (values, sub)
 }
 
 /// Git's own subcommands. Anything else may be an alias, which can run any shell command (`!…`).
@@ -2949,6 +2964,19 @@ mod tests {
             "pnpm --filter x --silent -C /nowhere/dev/loft install",
             "G=GIT_DIR; env $G=/nowhere/dev/loft/.git git reset --hard",
             "E=GIT_DIR=/nowhere/dev/loft/.git; env $E git reset --hard",
+            // An option before the subcommand, a word after it; bundled, abbreviated and repeated folder options.
+            "cd /nowhere/dev/loft && npm -s install lodash",
+            "cd /nowhere/dev/loft && pnpm --silent add lodash",
+            "cd /nowhere/dev/loft && cargo -q test some_test",
+            "cd /nowhere/dev/loft && cargo +nightly test name",
+            "npm --prefix /nowhere/dev/loft --silent install lodash",
+            "pnpm -C /nowhere/dev/loft --silent add lodash",
+            "pnpm --filter x --silent add lodash -C /nowhere/dev/loft",
+            "npm -sC /nowhere/dev/loft install",
+            "npm --prefi /nowhere/dev/loft install",
+            "npm --prefi=/nowhere/dev/loft install",
+            "npm -C . -C /nowhere/dev/loft install",
+            "npm --prefix . -C /nowhere/dev/loft install",
         ] {
             for cwd in [CLONE, WORKSPACE] {
                 assert!(!asks_all(cmd, cwd).is_empty(), "should ask in {cwd}: {cmd}");
