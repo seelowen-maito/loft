@@ -897,6 +897,11 @@ pub fn fyi_from_loft(state: &AppState, to: &Agent, text: &str) {
     let _ = state.db.add_pending_fyi(&to.id, &format!("[FYI from Loft, not from the user. It needs no action and no reply.]\n{text}"));
 }
 
+/// A needs-action message from Loft itself (a Delivery that stalled): it wakes the agent, and the run sees `text` as its prompt.
+pub fn needs_action_from_loft(state: &AppState, to: &Agent, text: &str) {
+    start(state, &to.id, Some(format!("[From Loft, not from the user.]\n{text}")), "delivery", false);
+}
+
 /// The most FYIs put in front of one prompt; older ones are only counted.
 const MAX_FYIS_PER_PROMPT: usize = 20;
 
