@@ -1310,7 +1310,7 @@ pub(crate) mod tests {
         fake.route("GET", &format!("/repos/{slug}/commits/abc1234def/status"), 200, json!({ "statuses": [] }));
         fake.route("POST", &format!("/repos/{slug}/issues/500/labels"), 200, json!([{ "name": "qa:passed" }]));
         fake.route("DELETE", &format!("/repos/{slug}/issues/500/labels/qa%3Afailed"), 404, json!({ "message": "Label does not exist" }));
-        let said = crate::prs::set_verdict(&st, &qa, &format!("https://github.com/{slug}/pull/500"), "qa", true, "abc1234").await.unwrap();
+        let said = crate::prs::set_verdict(&st, &qa, &format!("https://github.com/{slug}/pull/500"), "qa", true, "abc1234", "").await.unwrap();
         assert!(said.contains("qa:passed"), "{said}");
     }
 

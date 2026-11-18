@@ -167,10 +167,11 @@ pub(crate) async fn restart_quiet(state: &AppState) {
     }
 }
 
-/// Checks for quiet runs once a minute.
+/// Checks for quiet runs, and saved statuses no live run backs, once a minute.
 pub async fn quiet_watcher(state: AppState) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
+        reconcile_status(&state);
         restart_quiet(&state).await;
     }
 }
@@ -386,7 +387,12 @@ pub async fn ask_permission_for(
     }
     add_msg(state, agent_id, None, "system", "permission", &req.tool_name, json!({ "request_id": req.id }));
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
-    let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
+    {
+        // The text to bring back is the one from before the first of overlapping asks.
+        let mut rt = state.rt.lock().unwrap();
+        let ask = rt.asks.entry(agent_id.to_string()).or_insert_with(|| (0, state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default()));
+        ask.0 += 1;
+    }
     let waiting = if source == QUESTIONS { "Waiting for your answers".into() } else { format!("Waiting for permission: {tool_name}") };
     set_status(state, agent_id, "waiting", &waiting);
 
@@ -399,10 +405,62 @@ pub async fn ask_permission_for(
         _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()), input: None },
     };
     drop(pending);
-    if is_running(state, agent_id) {
-        set_status(state, agent_id, "running", &prev);
-    }
+    asked(state, agent_id);
     decision
+}
+
+/// One of the agent's permission asks ended. Once none is left, it goes back to its run with the text from
+/// before them, or to idle when no run is live. The run check and the save happen under the run lock, and only
+/// over a status still "waiting", so a run that ends meanwhile can't leave it saved as running.
+fn asked(state: &AppState, agent_id: &str) {
+    let saved = {
+        let mut rt = state.rt.lock().unwrap();
+        let Some(ask) = rt.asks.get_mut(agent_id) else { return };
+        ask.0 = ask.0.saturating_sub(1);
+        if ask.0 > 0 {
+            return;
+        }
+        let (_, prev) = rt.asks.remove(agent_id).unwrap_or_default();
+        let (status, text) = if rt.running.contains_key(agent_id) { ("running", prev) } else { ("idle", String::new()) };
+        state.db.update_agent(agent_id, |a| {
+            if a.status == "waiting" {
+                a.status = status.into();
+                a.status_text = text.chars().take(160).collect();
+            }
+        })
+    };
+    if let Ok(Some(a)) = saved {
+        emit_agent(state, &a);
+    }
+}
+
+/// Sets an agent saved as running or waiting back to idle when it has no live run and nothing waits on the
+/// user: a panic, a dead process or a missed update left it behind.
+pub(crate) fn reconcile_status(state: &AppState) {
+    let Ok(agents) = state.db.list_agents() else { return };
+    for a in agents.into_iter().filter(|a| a.status == "running" || a.status == "waiting") {
+        let asking = state.db.list_permissions(Some(&a.id)).map_or(true, |ps| ps.iter().any(|p| p.status == "pending"));
+        let interviewing = crate::grill::active(state, &a.id).is_some_and(|s| crate::grill::open_round(&s).is_some());
+        if asking || interviewing {
+            continue;
+        }
+        let saved = {
+            let rt = state.rt.lock().unwrap();
+            if rt.running.contains_key(&a.id) || rt.asks.contains_key(&a.id) {
+                continue;
+            }
+            state.db.update_agent(&a.id, |a| {
+                if a.status == "running" || a.status == "waiting" {
+                    a.status = "idle".into();
+                    a.status_text = String::new();
+                }
+            })
+        };
+        if let Ok(Some(now)) = saved {
+            tracing::info!("{}: saved as {} with no live run, now idle", a.name, a.status);
+            emit_agent(state, &now);
+        }
+    }
 }
 
 /// Resolve a pending request from the UI. `always` persists the rule into the agent config. `answers` answers an
@@ -3534,6 +3592,91 @@ esac
         assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.starts_with("Restarted by Loft")));
         // It answered: the count starts over.
         assert!(!st.rt.lock().unwrap().auto_restarts.contains_key(&a.id));
+    }
+
+    fn saved(st: &AppState, id: &str) -> (String, String) {
+        let a = st.db.get_agent(id).unwrap().unwrap();
+        (a.status, a.status_text)
+    }
+
+    fn save_status(st: &AppState, id: &str, status: &str, text: &str) {
+        st.db.update_agent(id, |a| (a.status, a.status_text) = (status.into(), text.into())).unwrap();
+    }
+
+    /// The agent's permission asks still waiting on the user.
+    fn pending(st: &AppState, id: &str) -> Vec<String> {
+        st.db.list_permissions(Some(id)).unwrap().into_iter().filter(|p| p.status == "pending").map(|p| p.id).collect()
+    }
+
+    /// Asks a permission for the agent in the background, as an MCP call does, once the asks before it are saved.
+    async fn ask(st: &AppState, id: &str, tool: &str) -> tokio::task::JoinHandle<Decision> {
+        let n = pending(st, id).len();
+        let (st2, id2, tool) = (st.clone(), id.to_string(), tool.to_string());
+        let h = tokio::spawn(async move { ask_permission_for(&st2, &id2, "prompt", &tool, json!({}), "", String::new(), Duration::from_secs(30)).await });
+        until("the ask", 5, || pending(st, id).len() == n + 1 && saved(st, id).0 == "waiting").await;
+        h
+    }
+
+    #[test]
+    fn the_watcher_sets_a_stale_running_or_waiting_to_idle_and_leaves_live_runs_and_asks_alone() {
+        let st = crate::tasks::tests::state();
+        let [stale_run, stale_wait, live, asking] = ["A", "B", "C", "D"].map(|n| crate::tasks::tests::agent(&st, n));
+        save_status(&st, &stale_run.id, "running", "Building");
+        save_status(&st, &stale_wait.id, "waiting", "Waiting for permission: Bash");
+        save_status(&st, &live.id, "running", "Building");
+        st.rt.lock().unwrap().running.insert(live.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &asking.id, "waiting", "Waiting for permission: Bash");
+        st.db.save_permission(&crate::db::PermissionRequest {
+            id: "p-d".into(), agent_id: asking.id.clone(), source: "prompt".into(), tool_name: "Bash".into(), input: json!({}),
+            reason: String::new(), rule: String::new(), status: "pending".into(), created_at: crate::db::now(),
+        }).unwrap();
+        let mut events = st.events.subscribe();
+
+        reconcile_status(&st);
+        assert_eq!(saved(&st, &stale_run.id), ("idle".into(), String::new()));
+        assert_eq!(saved(&st, &stale_wait.id), ("idle".into(), String::new()));
+        assert_eq!(saved(&st, &live.id), ("running".into(), "Building".into()), "a live run");
+        assert_eq!(saved(&st, &asking.id), ("waiting".into(), "Waiting for permission: Bash".into()), "a pending permission");
+        let mut updated = vec![];
+        while let Ok(Event::AgentUpdated { agent }) = events.try_recv() {
+            updated.push(agent["id"].as_str().unwrap().to_string());
+        }
+        updated.sort();
+        let mut want = vec![stale_run.id.clone(), stale_wait.id.clone()];
+        want.sort();
+        assert_eq!(updated, want, "the corrected agents are emitted");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overlapping_asks_stay_waiting_until_the_last_then_bring_back_the_text_from_before() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &a.id, "running", "Building the app");
+        let first = ask(&st, &a.id, "Bash").await;
+        let second = ask(&st, &a.id, "Write").await;
+        let ids = pending(&st, &a.id);
+
+        decide(&st, &ids[0], "allow", None, None, None).unwrap();
+        until("the first ask to end", 5, || st.rt.lock().unwrap().asks.get(&a.id).map(|a| a.0) == Some(1)).await;
+        assert_eq!(saved(&st, &a.id).0, "waiting", "one ask is still pending");
+
+        decide(&st, &ids[1], "allow", None, None, None).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("running".into(), "Building the app".into()));
+        assert!(!st.rt.lock().unwrap().asks.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ask_outside_a_run_leaves_the_agent_idle_once_answered() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        save_status(&st, &a.id, "idle", "");
+        let h = ask(&st, &a.id, "Kill").await;
+        decide(&st, &pending(&st, &a.id)[0], "deny", None, None, None).unwrap();
+        h.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("idle".into(), String::new()));
     }
 
     #[tokio::test(flavor = "multi_thread")]

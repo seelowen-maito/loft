@@ -122,7 +122,7 @@ public enum QuickSearch {
         public init(_ a: Agent) {
             if a.status == "waiting" { self = .needsYou }
             else if a.running == true, a.waitingOn?.isEmpty == false { self = .waiting }
-            else if a.running == true || a.status == "running" { self = .working }
+            else if a.running == true { self = .working }
             else if a.status == "error" { self = .error }
             else if (a.intervalMinutes ?? 0) > 0 { self = .sleeping }
             else { self = .idle }
