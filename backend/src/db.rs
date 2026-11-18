@@ -489,6 +489,8 @@ pub struct PullRequest {
     pub behind_by: i64,
     /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
     pub ready_sha: String,
+    /// The head commit the team's Lead was told is ready to merge (every verdict it needs passed), so it is told once.
+    pub ready_told_sha: String,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a

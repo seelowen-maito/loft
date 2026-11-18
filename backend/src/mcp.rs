@@ -129,12 +129,13 @@ fn base_tools() -> Value {
         },
         {
             "name": "set_pr_verdict",
-            "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
+            "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. A fail wakes the agent that opened the PR; once every verdict the PR needs has passed on its head, the team's Lead is woken to tell the user it's ready to merge. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
             "inputSchema": { "type": "object", "properties": {
                 "pr": { "type": "string", "description": "https://github.com/<owner>/<repo>/pull/<number>" },
                 "kind": { "type": "string", "enum": ["tests", "qa", "security"] },
                 "verdict": { "type": "string", "enum": ["pass", "fail"] },
-                "sha": { "type": "string", "description": "The PR's head commit you checked (at least 7 characters)." }
+                "sha": { "type": "string", "description": "The PR's head commit you checked (at least 7 characters)." },
+                "comment": { "type": "string", "description": "Optional: the link to your comment on the PR that explains the verdict. A fail wakes the PR's opener with it." }
             }, "required": ["pr", "kind", "verdict", "sha"] }
         },
         {
@@ -357,7 +358,7 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
         },
         "set_pr_verdict" => match state.db.get_agent(agent_id) {
             Ok(Some(me)) => match s("verdict").as_str() {
-                v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha")).await {
+                v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha"), &s("comment")).await {
                     Ok(t) => text(t),
                     Err(e) => tool_error(e),
                 },
