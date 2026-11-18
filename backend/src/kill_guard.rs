@@ -175,6 +175,10 @@ struct Dirs {
 impl Dirs {
     /// `w` with each `$NAME` and `${NAME}` that an earlier command set to a literal replaced by it.
     fn literals(&self, w: &str) -> String {
+        // `=$X` is zsh's path of a command.
+        if w.starts_with('=') {
+            return w.to_string();
+        }
         let c: Vec<char> = w.chars().collect();
         let (mut out, mut i) = (String::new(), 0);
         while i < c.len() {
@@ -185,7 +189,9 @@ impl Dirs {
                 let len = c[from.min(c.len())..].iter().take_while(|ch| ch.is_ascii_alphanumeric() || **ch == '_').count();
                 let end = from + len;
                 let name: String = c[from..end].iter().collect();
-                if len > 0 && !name.starts_with(|ch: char| ch.is_ascii_digit()) && (!braced || c.get(end) == Some(&'}')) {
+                // Plain reads only: `$D:h`, `$D[2,-1]` and `${D#x}` aren't the literal.
+                let plain = if braced { c.get(end) == Some(&'}') } else { c.get(end).is_none_or(|n| !"[:#%^~@(".contains(*n)) };
+                if len > 0 && !name.starts_with(|ch: char| ch.is_ascii_digit()) && plain {
                     i = end + usize::from(braced);
                     if let Some(v) = self.lits.get(&name) {
                         out.push_str(v);
@@ -201,6 +207,22 @@ impl Dirs {
         out
     }
 
+    /// Forgets each variable `words` name other than as a plain read (`$D`, `${D}`): `for D in`, `D[1,-1]=`, `${D::=x}`,
+    /// `print -v D`, `trap "D=x"`, `typeset -T D d`.
+    fn mention(&mut self, words: &[String]) {
+        self.lits.retain(|name, _| {
+            !words.iter().any(|w| {
+                w.match_indices(name.as_str()).any(|(at, _)| {
+                    let before = w[..at].chars().next_back();
+                    let after = w[at + name.len()..].chars().next();
+                    let ident = |ch: Option<char>| ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+                    let plain = before == Some('$') || (w[..at].ends_with("${") && after == Some('}'));
+                    !ident(before) && !ident(after) && !plain
+                })
+            })
+        });
+    }
+
     /// Records or forgets the variables an assignment-only command sets: only a plain literal that doesn't start with `-`
     /// (an option), set where it surely runs, is kept. The ones the shell sets itself aren't.
     fn assign(&mut self, words: &[String], sure: bool) {
@@ -208,7 +230,7 @@ impl Dirs {
             let Some(k) = assignment(w) else { continue };
             let v = w.split_once('=').map_or("", |(_, v)| v);
             let plain = !v.is_empty() && !v.starts_with('-') && v.chars().all(|c| c.is_ascii_alphanumeric() || "/._-:+@,%=".contains(c));
-            if sure && plain && !w.contains("+=") && !matches!(k, "PWD" | "OLDPWD" | "HOME" | "IFS" | "PATH") {
+            if sure && plain && !w.contains("+=") && !v.starts_with('=') && !matches!(k, "PWD" | "OLDPWD" | "HOME" | "IFS" | "PATH" | "_" | "MATCH" | "match" | "REPLY" | "reply" | "OPTARG" | "OPTIND" | "LINENO" | "RANDOM" | "SECONDS" | "status" | "pipestatus" | "argv") {
                 self.lits.insert(k.to_string(), v.to_string());
             } else {
                 self.lits.remove(k);
@@ -479,7 +501,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         }
         dirs.flush(cmds[i].chain);
         dirs.goes_on = cmds[i].piped || cmds[i].or || cmds[i].words.first().is_some_and(|w| w == "!");
-        dirs.lits_off |= cmds[i].defines || cmds[i].words.iter().any(|w| w == "function");
+        dirs.lits_off |= cmds[i].defines || cmds[i].words.iter().any(|w| matches!(w.as_str(), "function" | "trap" | "typeset" | "declare" | "float" | "integer" | "select") || w.starts_with("functions["));
+        dirs.mention(&cmds[i].words);
         // A variable an earlier command set to a literal reads as it, where this command surely runs.
         let sure = !(cmds[i].maybe || cmds[i].piped || dirs.lits_off);
         let resolved: Vec<String> = if sure && !dirs.lits.is_empty() { cmds[i].words.iter().map(|w| dirs.literals(w)).collect() } else { cmds[i].words.clone() };
@@ -841,7 +864,7 @@ fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
 fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String], dirs: &mut Dirs) -> Vec<PathBuf> {
     match name {
         // These read a folder option anywhere: a word from an expansion may be one (`npm install $K`).
-        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_arg(args) => unknown_in(dirs, None),
+        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_arg(name, args) => unknown_in(dirs, None),
         "git" => git_changes(dirs, vars, args, live),
         "cargo" => match flags(args, &["--manifest-path"], CARGO_CHANGES) {
             (manifests, Some(s)) if CARGO_CHANGES.contains(&s) => match manifests[..] {
@@ -933,13 +956,14 @@ fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a st
 }
 
 /// Whether an argument of cargo, npm, pnpm, yarn or bun comes from an expansion the guard can't read, other than the
-/// value of an option that names no folder (`--filter $PKG`, `-p $CRATE`) or the script after `run`.
-fn hidden_arg(args: &[String]) -> bool {
+/// value of an option that names no folder (`--filter $PKG`, `-p $CRATE`; `npm --tag $K` may take `$K` as an option, cargo
+/// and pnpm don't) or the script after `run`.
+fn hidden_arg(tool: &str, args: &[String]) -> bool {
     const VALUED: &[&str] = &["--filter", "-F", "-p", "--package", "--workspace", "-w", "--features", "--bin", "--example", "--test", "--bench", "--target", "--profile", "--loglevel", "--reporter", "--registry", "--tag", "--jobs", "-j", "--color"];
     args.iter().enumerate().any(|(i, a)| {
         let prev = i.checked_sub(1).map(|p| args[p].as_str());
         let valued = |o: &str| VALUED.contains(&o);
-        folder_expands(a) && !prev.is_some_and(|p| valued(p) || (matches!(p, "run" | "run-script") && args[..i - 1].iter().all(|b| b.starts_with('-')))) && !a.split_once('=').is_some_and(|(o, _)| valued(o))
+        folder_expands(a) && !prev.is_some_and(|p| (valued(p) && matches!(tool, "cargo" | "pnpm")) || (matches!(p, "run" | "run-script") && args[..i - 1].iter().all(|b| b.starts_with('-')))) && !a.split_once('=').is_some_and(|(o, _)| valued(o))
     })
 }
 
@@ -3094,6 +3118,21 @@ mod tests {
             "K=--manifest-path=/nowhere/dev/loft/Cargo.toml; cargo build $K",
             "cd /nowhere/dev/loft && npm install $PKG",
             "cd /nowhere/dev/loft && cargo test $NAME",
+            "D=/nowhere/dev/loft/agent-local-storage/abc/loft; for D in /nowhere/dev/loft; do :; done; git -C $D reset --hard",
+            "D=/nowhere/dev/loft/agent-local-storage/abc/loft; : ${D::=/nowhere/dev/loft}; git -C $D reset --hard",
+            "D=/nowhere/dev/loft/agent-local-storage/abc/loft; : ${X:=${D::=/nowhere/dev/loft}}; git -C $D reset --hard",
+            "D=/nowhere/dev/loft/agent-local-storage/abc/loft; print -v D /nowhere/dev/loft; git -C $D reset --hard",
+            "D=/nowhere/dev/loft/agent-local-storage/abc/loft; D[1,-1]=/nowhere/dev/loft; git -C $D reset --hard",
+            "D=/nowhere/dev/loft/agent-local-storage/abc/loft; trap \"D=/nowhere/dev/loft\" DEBUG; git -C $D reset --hard",
+            "D=/nowhere/dev/loft/agent-local-storage/abc/loft; functions[f]=\"D=/nowhere/dev/loft\"; f; git -C $D reset --hard",
+            "typeset -T D d; D=/nowhere/dev/loft/agent-local-storage/abc/loft; d=(/nowhere/dev/loft); git -C $D reset --hard",
+            "_=/nowhere/dev/loft/agent-local-storage/abc/loft; echo /nowhere/dev/loft >/dev/null; git -C $_ reset --hard",
+            "MATCH=/nowhere/dev/loft/agent-local-storage/abc/loft; [[ /nowhere/dev/loft =~ .* ]]; git -C $MATCH reset --hard",
+            "D=/nowhere/dev/loft/agent-local-storage/abc/loft; cd $D && git reset --hard; D=/nowhere/dev/loft; pnpm -C $D install",
+            "X=echo; : ${X::=git}; $X -C /nowhere/dev/loft reset --hard",
+            "X=echo; X[1,-1]=git; $X -C /nowhere/dev/loft reset --hard",
+            "X=git; =$X -C /nowhere/dev/loft reset --hard",
+            "K=--prefix=/nowhere/dev/loft; npm --tag $K install",
             "P=--prefix=/nowhere/dev/loft; X=npm; $X install $P",
             "G=IT_DIR; read G$G <<< /nowhere/dev/loft/.git; export G$G; git reset --hard",
             // A word that names an option, the command or a variable comes from an expansion.
