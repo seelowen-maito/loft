@@ -134,9 +134,11 @@ public enum SpecViews {
         return "Loft" + (spec.project.isEmpty ? "" : " · \(spec.project)")
     }
 
-    /// The project a spec row shows next to its ref; nil when the ref already names it (a plan kept in Loft) or there is none.
+    /// The project a spec row shows next to its ref, by its last path part (`pos`, not `dineout/dineout/pos`, which repeats
+    /// the repo); nil when the ref already names it (a plan kept in Loft) or there is none.
     public static func project(_ spec: HBTask) -> String? {
-        spec.github == nil || spec.project.isEmpty ? nil : spec.project
+        guard spec.github != nil, let last = spec.project.split(separator: "/").last else { return nil }
+        return String(last)
     }
 
     /// Tickets done of all: the Delivery's, else GitHub's sub-issue count, else the spec's sub-issues in Loft; nil when none.
