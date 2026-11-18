@@ -170,20 +170,28 @@ impl Dirs {
         resolve(if absolute { Path::new("/") } else { self.cwd.as_deref()? }, path, physical)
     }
 
-    /// A `popd` or bare `pushd` that finds the stack empty after a `cd`: autopushd stacked the folder some `cd` left, so
-    /// the shell is in the one where the command started or in any of those.
-    fn pop_left(&mut self) {
-        let left = std::mem::take(&mut self.left);
-        if left.contains(&None) {
+    /// autopushd stacks the folder every `cd` leaves, which the stack here doesn't hold: after a `popd` or bare `pushd` the
+    /// shell may be in any of the folders `left` (those before it) lists, whatever the stack says. A folder the guard
+    /// couldn't tell, or more than 8 places, is lost.
+    fn add_left(&mut self, left: Vec<Option<PathBuf>>) {
+        let mut alts = std::mem::take(&mut self.alts);
+        for f in left {
+            match f {
+                None => return self.lose(),
+                Some(f) if self.cwd.as_ref() != Some(&f) && !alts.contains(&f) => alts.push(f),
+                Some(_) => {}
+            }
+        }
+        if alts.len() > 8 {
             return self.lose();
         }
-        let start = self.start.clone();
-        self.alts = left.into_iter().flatten().filter(|f| Some(f) != start.as_ref()).take(8).collect();
-        self.cd(start);
+        self.alts = alts;
     }
 
     fn cd(&mut self, to: Option<PathBuf>) {
-        self.left.push(self.cwd.clone());
+        if !self.left.contains(&self.cwd) {
+            self.left.push(self.cwd.clone());
+        }
         self.old = std::mem::replace(&mut self.cwd, to);
     }
 
@@ -259,9 +267,17 @@ impl Dirs {
                 alts.push(p);
             }
         }
-        // A folder that isn't there (and no earlier command made) may be a `cd` that fails: the shell stays where it was.
-        if !self.made && to.as_ref().is_some_and(|t| missing(t)) {
-            alts.extend(self.cwd.clone().filter(|c| !alts.contains(c)));
+        // A folder that isn't there (and no `ln`, `mv`, ... of the command names) may be a `cd` that fails: the shell stays
+        // where it was, or where an earlier failed `cd` left it.
+        if to.as_ref().is_some_and(|t| missing(t) && !self.touched.iter().any(|m| t.starts_with(m))) {
+            for a in self.alts.iter().cloned().chain(self.cwd.clone()) {
+                if !alts.contains(&a) {
+                    alts.push(a);
+                }
+            }
+            if alts.len() > 8 {
+                return self.lose();
+            }
         }
         self.alts = alts;
         self.cd(to);
@@ -401,6 +417,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             "pushd" => {
                 let (physical, i) = dir_word(args);
                 let from = dirs.cwd.clone();
+                let left = dirs.left.clone();
                 match i.map(|i| (args[i].as_str(), live[i])) {
                     // `pushd` swaps the top two folders; `pushd +1` rotates the stack.
                     None => {
@@ -408,11 +425,11 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                         let to = dirs.stack.pop();
                         dirs.stack.push(from);
                         match to {
-                            // zsh's autopushd stacks the folder every `cd` leaves, which the guard doesn't follow.
-                            None if moved => dirs.pop_left(),
+                            None if moved => dirs.cd(dirs.start.clone()),
                             Some(None) => dirs.lose(),
                             to => dirs.cd(to.flatten()),
                         }
+                        dirs.add_left(left);
                     }
                     Some((d, _)) if ((stack_entry(d) || d == "-") && !after_dashes(args, i)) || expands(d) => {
                         dirs.stack.push(from);
@@ -434,10 +451,9 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 let (_, i) = dir_word(args);
                 // With zsh's pushdminus `popd +0` removes the bottom entry, so it isn't the top one either.
                 let plain = !args.iter().any(|a| a == "-n") && i.is_none();
+                let left = dirs.left.clone();
                 match dirs.stack.pop() {
                     _ if !plain => dirs.lose(),
-                    // autopushd: a `cd` of this command stacked the folder it left, which the guard doesn't follow.
-                    None if moved => dirs.pop_left(),
                     // The folder pushed was one the guard lost.
                     Some(None) => dirs.lose(),
                     Some(to) => {
@@ -449,6 +465,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                         dirs.cd(dirs.start.clone());
                     }
                 }
+                dirs.add_left(left);
                 continue;
             }
             "sh" | "bash" | "zsh" | "dash" | "ksh" => {
@@ -2225,6 +2242,28 @@ mod tests {
         }
         for cmd in ["cd /nowhere/dev/loft/agent-local-storage/abc/loft && cd src && popd && git pull", "pushd /tmp && popd && git pull", "cd nope; git pull"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn autopushd_and_failed_cds_in_longer_forms_ask() {
+        let (u, w, none) = (USER, "/nowhere/dev/loft/agent-local-storage/abc", "/tmp/loft-guard-no-such-folder");
+        let many: String = (0..10).map(|n| format!("cd /tmp/d{n}; ")).collect();
+        for cmd in [
+            format!("pushd -q /tmp; cd {u}; cd {w}; popd -q; git reset --hard"),
+            format!("cd {u}; cd /tmp; cd {w}; popd; popd; git reset --hard"),
+            format!("cd {u}; cd {w}; popd; pushd; pushd; git reset --hard"),
+            format!("cd {u}; cd {w}; pushd; pushd; pushd; git reset --hard"),
+            // More than 8 folders: the guard gives up and asks.
+            format!("cd {u}; {many}cd {w}; popd; git reset --hard"),
+            format!("cd {u}; mkdir -p /tmp/x; cd {none}; pnpm install"),
+            format!("cd {u}; touch /tmp/x; cd {none}; pnpm install"),
+            format!("cd {u}; cd {none}; cd {none}2; git reset --hard"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in [format!("cd {u}; cd {w}; popd; pushd; git reset --hard")] {
+            assert!(asks_all(&cmd, CLONE).contains(&PathBuf::from(u)), "should ask: {cmd}");
         }
     }
 
