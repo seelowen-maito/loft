@@ -462,7 +462,11 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         let live = &cmds[i].live[all.len() - words.len()..];
         // `GIT_DIR=x git ...`, `env GIT_WORK_TREE=x git ...`
         let vars: Vec<&String> = all[..all.len() - words.len()].iter().filter(|w| assignment(w).is_some()).collect();
-        let Some((name, args)) = words.split_first() else { continue };
+        let Some((name, args)) = words.split_first() else {
+            // Only assignments (`PATH=./bin:$PATH;`): they change what the commands after it run or read.
+            dirs.made |= all.iter().any(|w| assignment(w).is_some());
+            continue;
+        };
         let (args, live) = (args, &live[1..]);
         let name = base(name);
         let chdir = env_chdir(&all[..all.len() - words.len()]);
@@ -2871,6 +2875,13 @@ mod tests {
             "sudo git fetch && git -C ./loft push",
             "command git fetch && git -C ./loft push",
             "git fetch --upload-pa='ln -s /x lnk;:' . && cd lnk && git push",
+            // A variable the shell already exports, set by a command of its own.
+            "PATH=./bin:$PATH; git fetch; git -C ./loft push",
+            "HOME=/x; git status; git -C ./loft push",
+            "XDG_CONFIG_HOME=/x; git status; git -C ./loft push",
+            "EDITOR=./mk; git commit; git -C ./loft push",
+            "PATH=./bin:$PATH; git fetch && cd lnk && git push",
+            "HOME=/x; git status && cd lnk && git push",
             "git checkout main && cd loft && git push",
         ] {
             assert!(!asks_all(cmd, WS).is_empty(), "should ask: {cmd}");
