@@ -149,8 +149,12 @@ struct Dirs {
     /// What earlier `rm`, `rmdir`, `unlink` and the source of `mv` name, as written and with links followed: a `cd` through
     /// one and up (`gone/..`) fails.
     removed: Vec<PathBuf>,
-    /// What earlier `mkdir` and `cargo new` of this command make: a `cd` into one works.
-    created: Vec<PathBuf>,
+    /// The `&&` list the command being checked is in (see `Cmd::chain`).
+    chain: usize,
+    /// Where the shell stays when a `cd` fails: not for the rest of that `cd`'s `&&` list, which then doesn't run, but for
+    /// what follows it (`pending_chain` is the list). They become `alts` at the first command of another list.
+    pending: Vec<PathBuf>,
+    pending_chain: usize,
     /// An earlier `ln`, `mv`, `cp` or `rm` names a path the guard can't tell (`"$LOCK"`).
     unreadable: bool,
     /// The shell has `cd`'d (or `pushd`/`popd`'d) since the command began.
@@ -195,9 +199,9 @@ impl Dirs {
         self.alts = alts;
     }
 
-    /// Whether a `cd` into `folder` works: it is there, or a command of the line names or makes it.
+    /// Whether a `cd` into `folder` works: it is there, or a command of the line names it.
     fn there(&self, folder: &Path) -> bool {
-        self.created.iter().any(|c| c == folder) || !missing(folder) || self.touched.iter().any(|m| folder.starts_with(m))
+        !missing(folder) || self.touched.iter().any(|m| folder.starts_with(m))
     }
 
     /// Whether a `cd` to `path`, as written, fails: each folder it goes through (up from one too) must be there.
@@ -217,17 +221,21 @@ impl Dirs {
         !self.there(&at)
     }
 
-    /// Whether a `mkdir` (with `-p`: `parents`) or `cargo new` of `path` works: no file has the name, and the folder it
-    /// goes in is there (with `-p`: the nearest part that is there is a folder).
-    fn can_make(&self, path: &Path, parents: bool) -> bool {
-        if path.exists() && !path.is_dir() {
-            return false;
+    /// A command of another `&&` list than the one a `cd` failed in: the shell may have stayed where that `cd` left it.
+    fn flush(&mut self, chain: usize) {
+        self.chain = chain;
+        if self.pending.is_empty() || chain == self.pending_chain {
+            return;
         }
-        let mut up = path.ancestors().skip(1);
-        if !parents {
-            return up.next().is_some_and(|a| self.there(a));
+        self.popped = true;
+        for a in std::mem::take(&mut self.pending) {
+            if !self.alts.contains(&a) {
+                self.alts.push(a);
+            }
         }
-        up.find(|a| self.there(a) || a.exists()).is_some_and(|a| self.there(a))
+        if self.alts.len() > 8 {
+            self.lose();
+        }
     }
 
     /// `path` from the current folder as written, with `..` not folded (the folder the OS looks up).
@@ -296,7 +304,6 @@ impl Dirs {
         self.git_env |= inner.git_env;
         self.touched.extend(inner.touched.iter().cloned());
         self.removed.extend(inner.removed.iter().cloned());
-        self.created.extend(inner.created.iter().cloned());
     }
 
     /// `cd` to a glob or braces: the folder the literal part names, with the topmost checkout around as another place.
@@ -331,13 +338,14 @@ impl Dirs {
         let fails = to.as_ref().is_some_and(|t| !self.there(t)) || self.written(dir).is_some_and(|r| self.fails(&r));
         // So does one through a folder an earlier `rm` or `mv` of the command names and then up (`gone/..`).
         if self.passes_in(dir, &self.removed) || fails {
-            self.popped = true;
+            // The rest of this `&&` list only runs when the `cd` worked.
+            self.pending_chain = self.chain;
             for a in self.alts.iter().cloned().chain(self.cwd.clone()) {
-                if !alts.contains(&a) {
-                    alts.push(a);
+                if !self.pending.contains(&a) {
+                    self.pending.push(a);
                 }
             }
-            if alts.len() > 8 {
+            if self.pending.len() > 8 {
                 return self.lose();
             }
         }
@@ -396,6 +404,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         for &s in &scope[saved.len()..] {
             saved.push((s, dirs.clone()));
         }
+        dirs.flush(cmds[i].chain);
         let all = &cmds[i].words;
         // A `.git` an earlier command names (`> t/.git`, `of=t/.git`, `ln -s x .git`) matters from the next on.
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
@@ -459,23 +468,6 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     Some(p) if copies && !links && !git && dest.is_some_and(|d| d == a) && here(&p) => {}
                     Some(p) => dirs.touched.extend([real(p.clone()), p]),
                     None => dirs.unreadable = true,
-                }
-            }
-        }
-        // A folder these make is there for a `cd` after them, when they surely run and can make it (with `-p`, its parents too).
-        if cmds[i].sure {
-            let flags = args.iter().filter(|a| a.starts_with('-')).map(String::as_str);
-            let (makes, parents): (Vec<&String>, bool) = match (tool, args.first().map(String::as_str)) {
-                // `-m <mode>` takes a word that isn't a folder.
-                ("mkdir", _) if !args.iter().any(|a| a == "-m" || a.starts_with("--mode")) => (args.iter().filter(|a| !a.starts_with('-')).collect(), flags.clone().any(|f| f == "--parents" || (!f.starts_with("--") && f.contains('p')))),
-                ("cargo", Some("new" | "init")) => (args[1..].iter().filter(|a| !a.starts_with('-')).take(1).collect(), true),
-                _ => (vec![], false),
-            };
-            for a in makes {
-                if let Some(p) = dirs.at_text(a).filter(|p| dirs.can_make(p, parents)) {
-                    let new: Vec<PathBuf> = p.ancestors().take_while(|a| !dirs.there(a)).map(Path::to_path_buf).collect();
-                    dirs.created.extend(new);
-                    dirs.created.push(p);
                 }
             }
         }
@@ -1477,8 +1469,9 @@ struct Cmd {
     stdin: String,
     /// The subshells it runs in (`( )`, `$( )`, backticks), outermost first, by number: a `cd` there stays there.
     scope: Vec<usize>,
-    /// It surely runs when the line does: at the top level, not after `&&` or `||`, not run in the background.
-    sure: bool,
+    /// Its `&&` list: the commands joined by `&&` or `|` since the last `;`, newline, `||` or `&`. The ones after a `cd` in
+    /// it only run when that `cd` worked.
+    chain: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -1506,6 +1499,8 @@ struct Parse {
     /// The subshells open, and how many there have been.
     scope: Vec<usize>,
     scopes: usize,
+    /// The `&&` list being lexed.
+    chain: usize,
 }
 
 impl Parse {
@@ -1536,13 +1531,13 @@ struct Level {
     frames: Vec<Frame>,
     /// Heredocs started on this line: their delimiter and command.
     heredocs: Vec<(String, usize)>,
-    /// A `&&` or `||` came since the last `;` or newline: the next commands may not run.
-    after_and_or: bool,
+    /// A `&&`, `||` or `|` ended the line so far: a newline continues the list.
+    open_list: bool,
 }
 
 impl Level {
     fn new() -> Self {
-        Level { cur: None, word: String::new(), in_word: false, live: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![], after_and_or: false }
+        Level { cur: None, word: String::new(), in_word: false, live: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![], open_list: false }
     }
 
     fn frame(&mut self) -> &mut Frame {
@@ -1552,7 +1547,8 @@ impl Level {
     /// The command being lexed, started if need be.
     fn cmd(&mut self, p: &mut Parse) -> usize {
         *self.cur.get_or_insert_with(|| {
-            p.cmds.push(Cmd { scope: p.scope.clone(), sure: !self.after_and_or && self.frames.len() == 1 && p.scope.is_empty(), ..Default::default() });
+            self.open_list = false;
+            p.cmds.push(Cmd { scope: p.scope.clone(), chain: p.chain, ..Default::default() });
             p.cmds.len() - 1
         })
     }
@@ -1624,6 +1620,7 @@ impl Level {
     /// `|`: the next command reads this one's output.
     fn pipe(&mut self, p: &mut Parse) {
         self.end(p);
+        self.open_list = true;
         self.frame().place += 1;
     }
 }
@@ -1769,7 +1766,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             }
             ';' => {
                 l.separate(p);
-                l.after_and_or = false;
+                p.chain += 1;
                 // `;;`, `;&`, `;;&` end a `case` branch: a pattern comes next.
                 if matches!(next, Some(';' | '&')) {
                     i += 1;
@@ -1786,21 +1783,21 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 i = redirect(&mut l, c, i + 1, '>');
             }
             '&' => {
-                // `a &` runs `a` in the background: not sure to be done when the next command runs.
-                let background = next != Some('&');
-                if !background {
+                // `&&` goes on with the list, `&` ends it.
+                if next == Some('&') {
                     i += 1;
+                    l.separate(p);
+                    l.open_list = true;
+                } else {
+                    l.separate(p);
+                    p.chain += 1;
                 }
-                if let (true, Some(id)) = (background, l.cur) {
-                    p.cmds[id].sure = false;
-                }
-                l.separate(p);
-                l.after_and_or |= !background;
             }
             '|' if next == Some('|') => {
                 i += 1;
                 l.separate(p);
-                l.after_and_or = true;
+                p.chain += 1;
+                l.open_list = true;
             }
             '|' => {
                 if next == Some('&') {
@@ -1810,7 +1807,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             }
             '\n' => {
                 l.separate(p);
-                l.after_and_or = false;
+                if !l.open_list {
+                    p.chain += 1;
+                }
                 i = read_heredocs(p, c, i, &mut l.heredocs);
             }
             '<' | '>' => {
@@ -2541,31 +2540,53 @@ mod tests {
         // autopushd: the popd goes back to where the command began or to the folder a cd left; both are asked about.
         assert!(asks_all("cd loft; cd /tmp; popd; git stash", &at(&ws)).contains(&project));
         assert_eq!(in_storage_at("cd -; git checkout main", &clone), Vec::<PathBuf>::new());
-        // A mkdir or cargo new that may fail or not run makes no folder for the cd: the shell stays in the checkout.
+        // The guard doesn't guess what a mkdir or cargo new does: a cd after one with `;` may fail, and the shell stays.
         std::fs::write(ws.join("notes/a.txt"), "").unwrap();
         let (pr, w) = (project.display(), ws.display());
+        let nope = format!("cd {w}/nope; pnpm install");
         for cmd in [
             format!("cd {pr}; mkdir {w}/nope/deep; cd {w}/nope/deep; pnpm install"),
-            format!("cd {pr} && mkdir {w}/nope/deep && cd {w}/nope/deep && pnpm install"),
             format!("cd {pr}; mkdir -p {w}/notes/a.txt/x; cd {w}/notes/a.txt/x; pnpm install"),
             format!("cd {pr}; mkdir {w}/notes/a.txt; cd {w}/notes/a.txt; pnpm install"),
             format!("cd {pr}; mkdir {w}/made; cd {w}/made/sub; pnpm install"),
-            format!("cd {pr}; [ -f {w}/flag ] && mkdir {w}/made2; cd {w}/made2; pnpm install"),
-            format!("cd {pr}; if false; then mkdir {w}/made2; fi; cd {w}/made2; pnpm install"),
-            format!("cd {pr}; false || mkdir {w}/made2; cd {w}/made2; pnpm install"),
-            format!("cd {pr}; mkdir {w}/made2 & cd {w}/made2; pnpm install"),
-            format!("cd {pr}; cargo new {w}/notes/a.txt/x; cd {w}/notes/a.txt/x; pnpm install"),
-            format!("cd {pr}; [ -f {w}/flag ] && cargo new {w}/made2; cd {w}/made2; pnpm install"),
-            format!("cd {pr}; cargo new {w}/made3; cd {w}/made3/sub; pnpm install"),
+            format!("cd {pr}; mkdir {w}/made5; cd {w}/made5; pnpm install"),
+            format!("cd {pr}; mkdir -m 755 {w}/out; cd {w}/out; pnpm install"),
+            format!("cd {pr}; cargo new {w}/made6; cd {w}/made6; cargo build"),
+            format!("cd {pr}; [ -d {w}/out ] || mkdir {w}/out; cd {w}/out; pnpm install"),
+            format!("cd {pr}; if [ ! -d {w}/out ]; then mkdir {w}/out; fi; cd {w}/out; pnpm install"),
+            // A mkdir that doesn't run, or fails.
+            format!("cd {pr}; [ -f {w}/flag ] &&\nmkdir {w}/nope; {nope}"),
+            format!("cd {pr}; [ -f {w}/flag ] || # note\nmkdir {w}/nope; {nope}"),
+            format!("cd {pr}; f() {{ mkdir {w}/nope; }}; {nope}"),
+            format!("cd {pr}; cat <<EOF\nmkdir {w}/nope\nEOF\n{nope}"),
+            format!("cd {pr}; echo a # b; mkdir {w}/nope\n{nope}"),
+            format!("cd {pr}; xargs mkdir {w}/nope </dev/null; {nope}"),
+            format!("cd {pr}; sudo -n mkdir {w}/nope; {nope}"),
+            format!("cd {pr}; mkdir -pm bad {w}/nope; {nope}"),
+            format!("cd {pr}; mkdir --version {w}/nope; {nope}"),
+            format!("cd {pr}; mkdir {w}/zz/../nope; {nope}"),
+            format!("cd {pr}; mkdir {w}/nope > {w}/zzz/log; {nope}"),
+            format!("cd {pr}; cargo new {w}/nope --vcs; {nope}"),
+            // After `||` anywhere past the cd, the rest runs when it failed.
+            format!("cd {pr}; cd {w}/nope || true && pnpm install"),
+            format!("cd {pr}; cd {w}/nope && true || pnpm install"),
         ] {
+            let cmd = cmd.replace("\\n", "\n");
             assert!(in_storage_at(&cmd, &ws).contains(&project), "should ask: {cmd}");
         }
-        // ...and a mkdir that works, even a first one of an `&&` list or with `-p`, makes it.
-        for cmd in [format!("cd {pr}; mkdir -p {w}/made4/deep && cd {w}/made4/deep && pnpm install"), format!("cd {pr}; mkdir {w}/made5; cd {w}/made5; pnpm install"), format!("cd {pr}; cargo new {w}/made6; cd {w}/made6; cargo build")] {
-            assert_eq!(in_storage_at(&cmd, &ws), Vec::<PathBuf>::new(), "should run: {cmd}");
+        // What follows a cd through `&&` only runs when it worked, whatever the mkdir did.
+        for cmd in [
+            format!("cd {pr} && mkdir {w}/nope/deep && cd {w}/nope/deep && pnpm install"),
+            format!("cd {pr} && mkdir -p {w}/made4/deep && cd {w}/made4/deep && pnpm install"),
+            format!("cd {pr} && mkdir -m 755 {w}/out && cd {w}/out && cd .. && git add -A"),
+            format!("cd {pr} && cd {w}/nope &&\n pnpm install"),
+            format!("cd {pr} && cd {w}/nope |\n cat && pnpm install"),
+        ] {
+            let cmd = cmd.replace("\\n", "\n");
+            assert_eq!(in_storage_at(&cmd, &ws).iter().filter(|f| **f != project).count(), 0, "should run: {cmd}");
         }
         // A folder the command makes and leaves again is no failed cd: these ran on main and still run.
-        for cmd in ["mkdir -p out && cd out && cd .. && git add -A", "cargo new foo && cd foo; cargo build; cd ..; git add -A"] {
+        for cmd in ["mkdir -p out && cd out && cd .. && git add -A", "cargo new foo && cd foo && cargo build && cd .. && git add -A", "mkdir -m 755 out && cd out && cd .. && git add -A", "cd backend && mkdir -p tmp && cd tmp && cd ../.. && git add -A"] {
             assert_eq!(in_storage_at(cmd, &clone), Vec::<PathBuf>::new(), "should run: {cmd}");
             std::fs::create_dir_all(clone.join("backend")).unwrap();
             assert_eq!(in_storage_at(cmd, &clone.join("backend")), Vec::<PathBuf>::new(), "should run in backend/: {cmd}");
