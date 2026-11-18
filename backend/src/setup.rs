@@ -1124,7 +1124,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
             "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team: when it wakes you with ready tickets, you hand them out to the team's Devs (`mcp__loft__assign_ticket`) and do nothing else on the Delivery.\n\nWork only in your clone in your workspace;"
         )), "{}", lead.prompt);
         assert!(lead.prompt.contains("Ticket order lives in GitHub's blocking links, not in memory."));
-        // It no longer hands out or tracks tickets: Loft's Delivery does.
+        // It no longer tracks tickets by hand: Loft's Delivery does; it only hands out the ones Loft names.
         for gone in ["Handing out work", "in-progress", "needs-human", "changes-requested", "## Tracking"] {
             assert!(!lead.prompt.contains(gone), "still has {gone}");
         }

@@ -3470,6 +3470,7 @@ pub(crate) mod tests {
         let w = woken(&st, &lead);
         assert!(w.iter().any(|w| w.contains("[Loft Delivery: spec #40] The Delivery stalled at #41: the run Loft woke for its step ended without its call. First ended its run asking: \"Should the API keep the old route or drop it?\"")), "{w:?}");
         assert!(st.db.take_pending_fyis(&lead.id).unwrap().is_empty(), "not an FYI");
+        assert!(st.rt.lock().unwrap().queued_for_user.contains(&lead.id), "its reply tells the user: an Unread reply");
 
         // Its call comes after all (the user replied): the question goes with the stall.
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
