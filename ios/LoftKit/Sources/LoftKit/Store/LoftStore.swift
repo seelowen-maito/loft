@@ -147,6 +147,8 @@ public final class LoftStore {
         // as connected, and a slow notification service (seen on a busy Simulator) held it at "Connecting…".
         // Only what hasn't been seen, here or on the web.
         let count = list.unseen
+        // `swift test` runs without an app bundle, where the notification center aborts.
+        guard Bundle.main.bundleURL.pathExtension.hasPrefix("app") else { return }
         Task.detached { try? await UNUserNotificationCenter.current().setBadgeCount(count) }
     }
 
@@ -555,6 +557,8 @@ public final class LoftStore {
                 Task { try? await loadDelivery(id) }
             }
             if deliveryWatchers > 0 { loadDeliveries(soon: true) }
+        case .resync:
+            Task { try? await refresh() }
         case .other:
             break
         }
