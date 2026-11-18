@@ -919,6 +919,10 @@ pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str,
     let fresh = ticket.is_some_and(|t| ticket_boundary(state, &to.id, t, crate::delivery::fresh_context_applies(state, to)));
     if let Some(t) = ticket {
         meta["ticket"] = json!(t);
+        // Marks this message as a hand-over: a report back on the ticket answers it.
+        if report_back {
+            meta["report_back"] = json!(true);
+        }
     }
     meta["from_agent"] = json!({ "id": from.id, "name": from.name });
     let msg = add_msg(state, &to.id, None, "user", "text", text, meta).map(|m| m.id);

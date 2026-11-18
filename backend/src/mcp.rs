@@ -506,9 +506,10 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 return woke(w);
             }
             // The dashboard reads the message id off a queued result to show when it's delivered.
-            // A report on a ticket the recipient handed the sender answers that hand-over: it hands nothing back.
+            // A report on a ticket the recipient handed the sender (a message that asked for a report back) answers that hand-over:
+            // it hands nothing back. An answer to a plain question on the ticket is not one.
             let report = ticket.as_deref().is_some_and(|t| {
-                state.db.list_messages(&from.id, 1000, None).unwrap_or_default().iter().any(|m| m.meta["from_agent"]["id"] == to.id.as_str() && m.meta["ticket"] == t)
+                state.db.list_messages(&from.id, 1000, None).unwrap_or_default().iter().any(|m| m.meta["from_agent"]["id"] == to.id.as_str() && m.meta["ticket"] == t && m.meta["report_back"] == true)
             });
             text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref(), !report) {
                 Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),
@@ -1127,10 +1128,15 @@ mod tests {
         let p = &prompts(&st, &from)[0];
         assert!(p.contains("#12 done: PR #13 ready") && !p.contains("report back"), "{p}");
 
+        // The Dev's report was no hand-over: the Lead's follow-up on the same ticket is one, and asks for a report back.
+        message(&st, &from, json!({ "agent": to.id, "text": "Also fix the lint", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
+        assert!(prompts(&st, &to)[1].contains("Also fix the lint") && prompts(&st, &to)[1].contains("report back"), "{}", prompts(&st, &to)[1]);
+
         // A message about no ticket hands nothing over.
         message(&st, &from, json!({ "agent": to.id, "text": "Which branch?", "kind": "needs_action" })).await;
-        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
-        assert!(!prompts(&st, &to)[1].contains("report back"), "{}", prompts(&st, &to)[1]);
+        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
+        assert!(!prompts(&st, &to)[2].contains("report back"), "{}", prompts(&st, &to)[2]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
