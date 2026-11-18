@@ -128,6 +128,8 @@ struct Dirs {
     stack: Vec<Option<PathBuf>>,
     /// The folders this command's `cd`s left, each of which zsh's autopushd may have stacked.
     left: Vec<Option<PathBuf>>,
+    /// A `popd` or bare `pushd` ran: with autopushd `cd -` may go to a folder the guard's `old` doesn't hold.
+    popped: bool,
     /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
     ceiling: Vec<PathBuf>,
     /// The storage folder Loft uses (the run's ceiling, whatever the command does to git's).
@@ -290,10 +292,10 @@ fn missing(folder: &Path) -> bool {
     !folder.is_dir()
 }
 
-/// The same, with the tests' made-up `/nowhere` folders counted as there.
+/// The same, with the tests' made-up `/nowhere` folders counted as there, but for the ones named `nope*`.
 #[cfg(test)]
 fn missing(folder: &Path) -> bool {
-    !folder.is_dir() && !folder.starts_with("/nowhere")
+    !folder.is_dir() && !(folder.starts_with("/nowhere") && !folder.file_name().is_some_and(|n| n.to_string_lossy().starts_with("nope")))
 }
 
 /// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
@@ -407,8 +409,16 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                         dirs.cd(dirs::home_dir());
                     }
                     Some(("-", _)) => {
-                        dirs.alts.clear();
+                        // After a failed `cd` or a `popd` the folder `cd -` goes to may be any the command left.
+                        let keep = !dirs.alts.is_empty() || dirs.popped;
+                        let left = dirs.left.clone();
+                        if !keep {
+                            dirs.alts.clear();
+                        }
                         dirs.cd(dirs.old.clone().or(dirs.start.clone()));
+                        if keep {
+                            dirs.add_left(left);
+                        }
                     }
                     // zsh's `cd -2`, `cd +1`: a folder of the stack, which the guard doesn't follow. After `--` it's a folder.
                     Some((d, _)) if stack_entry(d) && !after_dashes(args, i) => dirs.lose(),
@@ -425,6 +435,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 let (physical, i) = dir_word(args);
                 let from = dirs.cwd.clone();
                 let left = dirs.left.clone();
+                dirs.popped = true;
                 match i.map(|i| (args[i].as_str(), live[i])) {
                     // `pushd` swaps the top two folders; `pushd +1` rotates the stack.
                     None => {
@@ -459,6 +470,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 // With zsh's pushdminus `popd +0` removes the bottom entry, so it isn't the top one either.
                 let plain = !args.iter().any(|a| a == "-n") && i.is_none();
                 let left = dirs.left.clone();
+                dirs.popped = true;
                 match dirs.stack.pop() {
                     _ if !plain => dirs.lose(),
                     // The folder pushed was one the guard lost.
@@ -2254,23 +2266,28 @@ mod tests {
 
     #[test]
     fn autopushd_and_failed_cds_in_longer_forms_ask() {
-        let (u, w, none) = (USER, "/nowhere/dev/loft/agent-local-storage/abc", "/tmp/loft-guard-no-such-folder");
-        let many: String = (0..10).map(|n| format!("cd /tmp/d{n}; ")).collect();
+        let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
+        // More than 8 places the shell may be: the guard gives up and asks.
+        let many: String = (0..10).map(|n| format!("cd {w}/a{n}; ")).collect();
         for cmd in [
             format!("pushd -q /tmp; cd {u}; cd {w}; popd -q; git reset --hard"),
             format!("cd {u}; cd /tmp; cd {w}; popd; popd; git reset --hard"),
             format!("cd {u}; cd {w}; popd; pushd; pushd; git reset --hard"),
             format!("cd {u}; cd {w}; pushd; pushd; pushd; git reset --hard"),
-            // More than 8 folders: the guard gives up and asks.
-            format!("cd {u}; {many}cd {w}; popd; git reset --hard"),
-            format!("cd {u}; mkdir -p /tmp/x; cd {none}; pnpm install"),
-            format!("cd {u}; touch /tmp/x; cd {none}; pnpm install"),
-            format!("cd {u}; cd {none}; cd {none}2; git reset --hard"),
+            format!("cd {w}; {many}cd {u}; cd {w}; popd; git reset --hard"),
+            // A failed cd after other commands, and after another failed one.
+            format!("cd {u}; mkdir -p /tmp/x; cd {w}/nope; pnpm install"),
+            format!("cd {u}; touch /tmp/x; cd {w}/nope; pnpm install"),
+            format!("cd {u}; cd {w}/nope; cd {w}/nope2; git reset --hard"),
+            // `cd -` after a failed cd or a popd.
+            format!("cd {u}; cd {w}; cd {w}/nope; cd -; pnpm install"),
+            format!("cd {u}; cd {w}; cd {w}/nope; cd -; git reset --hard"),
+            format!("cd /tmp; cd {u}; cd {w}/nope; cd -; cd -; pnpm install"),
+            format!("cd {u}; cd {w}; popd; cd -; cd -; pnpm install"),
+            format!("cd {u}; cd {w}; pushd; cd -; cd -; pnpm install"),
         ] {
-            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
-        }
-        for cmd in [format!("cd {u}; cd {w}; popd; pushd; git reset --hard")] {
-            assert!(asks_all(&cmd, CLONE).contains(&PathBuf::from(u)), "should ask: {cmd}");
+            let asked = asks_all(&cmd, CLONE);
+            assert!(asked.contains(&PathBuf::from(u)) || asked.iter().any(|f| f.as_os_str() == UNKNOWN), "should ask: {cmd}");
         }
     }
 
