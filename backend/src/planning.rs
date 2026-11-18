@@ -7156,6 +7156,25 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_close_that_readies_a_ticket_wakes_the_lead_even_when_every_dev_is_busy() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/close-busy";
+        let (dev, _) = building_both(&st, &fake, "close-busy", &[]).await;
+        let lead = busy(&st, "Lead", "close-busy", "lead");
+        // The Dev is building another ticket, so nobody is free when Store closes and API becomes ready.
+        crate::delivery::update(&st, slug, 40, |d| {
+            let mut t = d.ticket(42).unwrap().clone();
+            (t.number, t.state, t.agent, t.blocked_by) = (43, "started".into(), dev.id.clone(), vec![]);
+            d.tickets.push(t);
+        });
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let w = woken(&st, &lead);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("#41 closed.") && w[0].contains("Ready, but every Dev is busy: #42."), "{}", w[0]);
+    }
+
+    #[tokio::test]
     async fn a_finished_delivery_wakes_the_planner_and_the_lead() {
         let st = state();
         let fake = own_fake(&st);

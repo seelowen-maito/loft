@@ -1993,17 +1993,26 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
 }
 
 /// Ticket #n closed: the Lead is woken with what closed and what's still open, unless `advance` just woke it
-/// with tickets to hand out. The caller holds the repo's publish lock.
+/// with tickets to hand out (it does when a Dev is free). The caller holds the repo's publish lock.
 fn tell_closed(state: &AppState, repo: &str, spec: i64, n: i64) {
     let Some(d) = state.db.get_delivery(repo, spec).ok().flatten() else { return };
     let Some(lead) = lead_of(state, &d) else { return };
-    if d.state != "running" || !ready_tickets(&d).is_empty() {
+    if d.state != "running" {
         return;
     }
+    // `advance` wakes the Lead with the ready tickets when a Dev is free to take them.
+    let ready = ready_tickets(&d);
+    if !ready.is_empty() && state.db.list_agents().unwrap_or_default().iter().any(|a| is_team_dev(&d, a) && free(&d, &a.id)) {
+        return;
+    }
+    let ready = match ready.iter().map(|t| tag(&d, t)).collect::<Vec<_>>() {
+        r if r.is_empty() => "Nothing is ready to hand out yet.".to_string(),
+        r => format!("Ready, but every Dev is busy: {}.", r.join(", ")),
+    };
     let open: Vec<String> = d.tickets.iter().filter(|t| t.state != "closed").map(|t| tag(&d, t)).collect();
     let open = if open.is_empty() { "none".to_string() } else { open.join(", ") };
     let closed = d.ticket(n).map_or_else(|| format!("#{n}"), |t| tag(&d, t));
-    wake_lead(state, &d, &lead, &format!("{closed} closed. Still open: {open}. Nothing is ready to hand out yet."));
+    wake_lead(state, &d, &lead, &format!("{closed} closed. Still open: {open}. {ready}"));
 }
 
 /// Ticket #n passed: the PR no longer waits for changes on it, so `changes-requested` comes off, unless another
