@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { onConnection, onServerEvent, type ServerEvent } from "../lib/events.ts";
-import { errorText } from "../lib/useAction.ts";
+import { onConnection, onServerEvent, type ServerEvent } from "../lib/events";
+import { errorText } from "../lib/useAction";
 
 /** A live list: null until its first load, `failed` with the reason when that load failed. */
 export type ListState<T> = { items: T[] | null; failed: string | null };
