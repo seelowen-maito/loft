@@ -1055,11 +1055,16 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
     let state = state.clone();
     let agent_id = agent_id.to_string();
     tokio::spawn(async move {
+        let _ended = RunEnded { state: state.clone(), agent_id: agent_id.clone(), kill: kill.clone() };
         let mut prompt = prompt;
         let mut trigger = trigger;
         let mut for_user = for_user;
         let mut throwaway = throwaway;
         loop {
+            #[cfg(test)]
+            if prompt.contains("loft-test-panic") {
+                panic!("a run panicked");
+            }
             // Only between runs: a ticket boundary queued behind a run waits for it to end. A Redraw leaves the Session alone.
             if !throwaway {
                 fresh_boundary(&state, &agent_id);
@@ -1074,6 +1079,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let failed = match run_once(&state, &agent_id, &full, trigger, for_user, throwaway, kill.clone(), &mut delivered).await {
                 Ok(failed) => failed,
                 Err(e) => {
+                    state.rt.lock().unwrap().runs.remove(&agent_id);
                     // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
                     if !delivered {
                         let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
@@ -1125,6 +1131,8 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             }
             match next {
                 Some((p, t, u, w)) => {
+                    // A Stop pressed after the last run ended was for that run, not the queued one.
+                    let _ = tokio::time::timeout(Duration::ZERO, kill.notified()).await;
                     prompt = p;
                     trigger = t;
                     for_user = u;
@@ -1137,6 +1145,40 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             emit_agent(&state, &a);
         }
     });
+}
+
+/// Ends the run in Loft's books however its task ends: after a panic (or any way out that skipped the normal
+/// end) the agent is still marked running, so this clears the live run, its info and the saved status. A run
+/// started after this one ended has its own kill switch, and is left alone.
+struct RunEnded {
+    state: AppState,
+    agent_id: String,
+    kill: Arc<Notify>,
+}
+
+impl Drop for RunEnded {
+    fn drop(&mut self) {
+        let saved = {
+            // A panic while the lock was held poisons it: the run still has to end, and Loft to go on serving.
+            self.state.rt.clear_poison();
+            let mut rt = self.state.rt.lock().unwrap_or_else(|e| e.into_inner());
+            if !rt.running.get(&self.agent_id).is_some_and(|k| Arc::ptr_eq(k, &self.kill)) {
+                return;
+            }
+            rt.running.remove(&self.agent_id);
+            rt.runs.remove(&self.agent_id);
+            rt.waiting.remove(&self.agent_id);
+            rt.redrawing.remove(&self.agent_id);
+            tracing::warn!("agent {}: its run ended without finishing", self.agent_id);
+            self.state.db.update_agent(&self.agent_id, |a| {
+                a.status = "error".into();
+                a.status_text = "Last run failed".into();
+            })
+        };
+        if let Ok(Some(a)) = saved {
+            emit_agent(&self.state, &a);
+        }
+    }
 }
 
 /// The run that takes the agent's queue takes the Delivery steps it was woken for.
@@ -1546,6 +1588,8 @@ async fn run_process(
     let mut replied = false;
     let mut held_end: Option<Value> = None;
     let preempt = Arc::new(Notify::new());
+    // Claude has exited, but a process it left behind can keep its pipes open: read what's buffered until then.
+    let mut drain_until: Option<tokio::time::Instant> = None;
     state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), for_user, ..Default::default() });
     loop {
         let waiting = replied && !bg.is_empty();
@@ -1578,6 +1622,14 @@ async fn run_process(
                 tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
                 terminate(&mut child).await;
                 loft_stopped = true;
+                None
+            }
+            _ = child.wait(), if drain_until.is_none() => {
+                drain_until = Some(tokio::time::Instant::now() + EXIT_GRACE);
+                continue;
+            }
+            _ = async { tokio::time::sleep_until(drain_until.unwrap()).await }, if drain_until.is_some() => {
+                tracing::info!("agent {agent_id}: run {run_id}: claude exited while another process holds its output");
                 None
             }
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
@@ -2292,6 +2344,7 @@ case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
 case "$prompt" in *crash*) exit 1;; esac
+case "$prompt" in *leftover*) sleep 20 & exit 1;; esac
 case "$prompt" in *sigterm*) kill -TERM $$;; esac
 case "$prompt" in *exit-143*) exit 143;; esac
 case "$prompt" in *sigkill*) kill -KILL $$;; esac
@@ -3231,6 +3284,48 @@ esac
 
     async fn idle(st: &AppState, id: &str) {
         until("the runs to end", 10, || !is_running(st, id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_claude_that_dies_while_a_leftover_process_holds_its_output_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "leftover").await.ok().unwrap();
+        // The leftover `sleep 20` keeps stdout open: the run ends on claude's exit, not on the pipe closing.
+        until("the run to end", 5, || !is_running(&st, &a.id)).await;
+        let now = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert_eq!((now.status.as_str(), now.status_text.as_str()), ("error", "Last run failed"));
+        assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panic_in_a_run_ends_it_and_loft_keeps_serving() {
+        let (st, a) = fake_claude_state();
+        save_status(&st, &a.id, "running", "Building");
+        let _ = send(&st, &a.id, "loft-test-panic").await.ok().unwrap();
+        until("the run to end", 5, || !is_running(&st, &a.id)).await;
+        assert_eq!(saved(&st, &a.id), ("error".into(), "Last run failed".into()));
+        assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
+        // The next message runs as usual.
+        let _ = send(&st, &a.id, "hello again").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(prompts(&st, &a.id).contains("hello again"));
+        assert_eq!(saved(&st, &a.id).0, "idle");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_left_over_from_the_last_run_doesnt_stop_the_next_queued_one() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        started(&st, &a.id, 1).await;
+        let _ = send(&st, &a.id, "chatty next").await.ok().unwrap();
+        // The second Stop finds no run waiting on it: it must not carry over to the queued run.
+        assert!(stop(&st, &a.id) && stop(&st, &a.id));
+        until("the queued run", 10, || prompts(&st, &a.id).contains("chatty next")).await;
+        idle(&st, &a.id).await;
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert_eq!(msgs.iter().filter(|m| m.content.starts_with("Stopped by user")).count(), 1, "only the busy run was stopped");
+        assert!(msgs.iter().any(|m| m.role == "assistant" && m.content == "On it."), "the queued run replied");
+        assert_eq!(saved(&st, &a.id).0, "idle");
     }
 
     #[tokio::test(flavor = "multi_thread")]
