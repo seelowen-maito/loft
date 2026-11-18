@@ -467,9 +467,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             dirs.made |= all.iter().any(|w| assignment(w).is_some());
             continue;
         };
-        // `env $NAME=x cmd`, `env $ASSIGNMENT cmd`: env sets whatever the expansion says, so what runs is unknown.
-        let guarded = |a: &String| matches!(base(a), "git" | "cargo" | "npm" | "pnpm" | "yarn" | "bun" | "xcodebuild");
-        if expands(name) && (all[..all.len() - words.len()].iter().any(|w| base(w) == "env") || args.iter().any(guarded)) {
+        // A command word from an expansion (`$X -C d reset`, `env $NAME=x cmd`, `env $ASSIGNMENT cmd`): what runs is unknown.
+        if expands(name) {
             out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
             dirs.made = true;
             continue;
@@ -772,7 +771,7 @@ fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
     };
     // A name from an expansion that `read`, `export`, `declare`... sets (`read $G`, `export $G`), or zsh's `${(P)G::=x}`.
     let sets = words.iter().any(|w| matches!(w.as_str(), "read" | "export" | "declare" | "typeset" | "readonly" | "local" | "vared"))
-        && words.iter().any(|w| w.starts_with('$'));
+        && words.iter().any(|w| w.split('=').next().is_some_and(|n| n.contains('$')));
     if sets || words.iter().any(|w| w.contains("${(P)")) {
         return true;
     }
@@ -783,8 +782,9 @@ fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
 /// The folders one command (not a `cd`, a shell or an `eval`) changes, run in `dirs`.
 fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String], dirs: &mut Dirs) -> Vec<PathBuf> {
     match name {
+        // A word from an expansion may be an option, a folder or the subcommand (`npm install $K`, `git log $RANGE`).
+        "git" | "cargo" | "npm" | "pnpm" | "yarn" | "bun" if args.iter().any(|a| folder_expands(a)) => unknown_in(dirs, None),
         "git" => git_changes(dirs, vars, args, live),
-        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_option(args) => unknown_in(dirs, None),
         "cargo" => match flags(args, &["--manifest-path"], CARGO_CHANGES) {
             (manifests, Some(s)) if CARGO_CHANGES.contains(&s) => match manifests[..] {
                 [] => dirs.cwd.clone().into_iter().collect(),
@@ -872,13 +872,6 @@ fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a st
     }
     let sub = words.iter().find(|w| !w.1 || subs.contains(&w.0)).or(words.first()).map(|w| w.0);
     (values, sub)
-}
-
-/// Whether a word up to the first that isn't an option (a tool's folder option or subcommand) comes from an expansion
-/// (`npm $K install` with `K=--prefix=x`): the guard can't tell what it is.
-fn hidden_option(args: &[String]) -> bool {
-    let end = args.iter().position(|a| !a.starts_with(['-', '+'])).map_or(args.len(), |p| p + 1);
-    args[..end].iter().any(|a| expands(a))
 }
 
 /// Git's own subcommands. Anything else may be an alias, which can run any shell command (`!…`).
@@ -3011,6 +3004,17 @@ mod tests {
             "cd /nowhere/dev/loft && npm --pre=/nowhere/dev/loft/agent-local-storage/abc/loft install",
             "cd /nowhere/dev/loft && npm --pref=/nowhere/dev/loft/agent-local-storage/abc/loft ci",
             "cd /nowhere/dev/loft && cargo --m build",
+            // The command word, or a word anywhere in the arguments of a guarded command, from an expansion.
+            "X=git; $X -C /nowhere/dev/loft reset --hard",
+            "X=npm; $X --prefix /nowhere/dev/loft install",
+            "X=cargo; $X build --manifest-path /nowhere/dev/loft/Cargo.toml",
+            "X=git; command $X -C /nowhere/dev/loft reset --hard",
+            "K=--prefix=/nowhere/dev/loft; npm install $K",
+            "K=--dir=/nowhere/dev/loft; pnpm install \"$K\"",
+            "K=--manifest-path=/nowhere/dev/loft/Cargo.toml; cargo build $K",
+            "cd /nowhere/dev/loft && npm install $PKG",
+            "cd /nowhere/dev/loft && git log $RANGE",
+            "G=IT_DIR; read G$G <<< /nowhere/dev/loft/.git; export G$G; git reset --hard",
             // A word that names an option, the command or a variable comes from an expansion.
             "K=--work-tree=/nowhere/dev/loft; git $K checkout .",
             "K=-c; git $K core.worktree=/nowhere/dev/loft checkout .",
