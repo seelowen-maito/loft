@@ -796,9 +796,10 @@ fn branch_name(d: &Delivery) -> &'static str {
     if d.standalone { "ticket branch" } else { "spec branch" }
 }
 
-/// The line every role brief ends its rules with: what the agent's own instructions can and can't change.
+/// The line every role brief ends its rules with: what the agent's own instructions can and can't change, and to decide
+/// instead of ending on a question.
 fn own_rules(what: &str) -> String {
-    format!("Your own instructions can add anything to this brief, like how to {what} in this project, but they can't change the Delivery's tools, its branch or how the work closes or merges.")
+    format!("Your own instructions can add anything to this brief, like how to {what} in this project, but they can't change the Delivery's tools, its branch or how the work closes or merges. Decide with sensible defaults and carry on: don't end your run on a question. If a decision truly belongs to the user, mark the ticket blocked with the question (`mcp__loft__update_issue`, status `blocked`, the question in `error`) instead.")
 }
 
 /// The Dev role brief, sent with the wake that hands a ticket to the Dev.

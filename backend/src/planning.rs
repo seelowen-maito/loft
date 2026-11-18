@@ -4601,6 +4601,7 @@ pub(crate) mod tests {
         let limit = "but they can't change the Delivery's tools, its branch or how the work closes or merges.";
         let only = |w: &str, mine: Option<&str>| {
             assert!(w.contains(limit), "no limits in {w}");
+            assert!(w.contains("don't end your run on a question") && w.contains("mark the ticket blocked with the question"), "no decide-or-block in {w}");
             for r in roles {
                 assert_eq!(w.contains(r), Some(r) == mine, "{r:?} in {w}");
             }
