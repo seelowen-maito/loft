@@ -31,7 +31,16 @@ enum LoftShortcut: UInt32, CaseIterable {
         }
     }
 
-    var current: MacShortcut? { MacShortcut.read(UserDefaults.standard.string(forKey: pref), default: fallback) }
+    var current: MacShortcut? {
+        #if DEBUG
+        // UI tests (#569): only a shortcut passed as a launch argument (`-quickSearchShortcut control-option-command-40`),
+        // never a default, so the app under test doesn't take the keys of the Loft open on this Mac.
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
+            return (UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)[pref] as? String).flatMap(MacShortcut.init(stored:))
+        }
+        #endif
+        return MacShortcut.read(UserDefaults.standard.string(forKey: pref), default: fallback)
+    }
 
     /// The window's menu shortcuts: a global one with the same keys would take them from Loft and every other app.
     static let menuKeys: [(MacShortcut, String)] =

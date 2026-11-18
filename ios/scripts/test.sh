@@ -64,6 +64,10 @@ if [[ "${suites[*]}" == LoftMacUITests/* ]]; then
     echo "Automation Mode needs a password here; allow it once with: sudo automationmodetool enable-automationmode-without-authentication" >&2
     exit 1
   fi
+  # The app under test gets its own bundle id, so XCUITest never attaches to or quits the Loft installed on this
+  # Mac, and its defaults and Keychain group are its own. The base id is read as Xcode does: Local.xcconfig first.
+  base_id=$(sed -nE 's/^[[:space:]]*LOFT_BUNDLE_ID[[:space:]]*=[[:space:]]*([^[:space:]]+).*/\1/p' Config/Local.xcconfig 2>/dev/null | tail -1)
+  ui_id=(LOFT_BUNDLE_ID="${base_id:-${LOFT_BUNDLE_ID:-com.example.loft}}.uitest")
 else
   sim="${SIMULATOR:-$(xcrun simctl list devices booted | grep -m1 -E 'iPhone' | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/' || true)}"
   if [[ -z "$sim" ]]; then echo "No booted iPhone Simulator; boot one or set SIMULATOR." >&2; exit 1; fi
@@ -71,7 +75,8 @@ else
   scheme=Loft
 fi
 # LoftKit is a Swift package, which Xcode refuses under legacy build locations (an Xcode setting on this Mac).
-common=(-project Loft.xcodeproj -scheme "$scheme" -destination "$dest" -derivedDataPath "$derived" -IDEBuildLocationStyle=Unique)
+common=(-project Loft.xcodeproj -scheme "$scheme" -destination "$dest" -derivedDataPath "$derived" -IDEBuildLocationStyle=Unique
+        ${ui_id[@]+"${ui_id[@]}"})
 limits=(-parallel-testing-enabled NO -test-timeouts-enabled YES
         -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60)
 # xcodebuild's full output per suite stays here for a look after the run.
