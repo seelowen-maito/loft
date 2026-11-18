@@ -284,9 +284,16 @@ impl Dirs {
     }
 }
 
-/// Whether a folder isn't there, so a `cd` to it fails. (The tests' made-up `/nowhere` folders count as there.)
+/// Whether a folder isn't there, so a `cd` to it fails.
+#[cfg(not(test))]
 fn missing(folder: &Path) -> bool {
-    !folder.is_dir() && !(cfg!(test) && folder.starts_with("/nowhere"))
+    !folder.is_dir()
+}
+
+/// The same, with the tests' made-up `/nowhere` folders counted as there.
+#[cfg(test)]
+fn missing(folder: &Path) -> bool {
+    !folder.is_dir() && !folder.starts_with("/nowhere")
 }
 
 /// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
