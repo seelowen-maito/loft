@@ -43,6 +43,8 @@ struct ChatView: View {
     @State private var routeSuggestion: RouteSuggestion?
     /// A task picked in "Attach an issue", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
+    /// The message picked with Reply, quoted above the message box and sent with the next message (spec #572).
+    @State private var replyingTo: MessageQuote?
     /// Photos and a video picked in the composer, uploading or up, until they go with a message.
     @State private var attachments: [AttachmentDraft] = []
     @State private var pickingTask = false
@@ -123,7 +125,16 @@ struct ChatView: View {
                             .padding(.top, 40)
                     }
                     ForEach(items) { item in
-                        ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand, clearWith: clearWith).id(item.id)
+                        ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand, clearWith: clearWith,
+                                     reply: store.info?.supports(.reply) == true ? { replyingTo = MessageQuote(of: $0, agentName: agent.name) } : nil,
+                                     jump: { id in
+                                         // The original may be loaded but not drawn yet: draw down to it first.
+                                         let key = ChatItem.key(message: id)
+                                         guard let i = all.firstIndex(where: { $0.id == key }) else { return }
+                                         shown = max(shown, all.count - i)
+                                         DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
+                                     })
+                            .id(item.id)
                     }
                     ForEach(store.pending(for: agentId)) { p in
                         PendingBubble(message: p).id(p.id)
@@ -223,6 +234,24 @@ struct ChatView: View {
                     .padding(.top, 6)
                     .background(.bar)
                 }
+                if let q = replyingTo {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrowshape.turn.up.left").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Replying to \(q.authorLabel)").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+                            Text(verbatim: q.excerpt).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        Button { replyingTo = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Remove the quote")
+                    }
+                    .padding(.horizontal, Theme.gutter)
+                    .background(.bar)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Replying to \(q.authorLabel): \(q.excerpt)")
+                    .accessibilityIdentifier("replyQuote")
+                }
                 if let t = attached {
                     HStack(spacing: 6) {
                         Image(systemName: "paperclip").foregroundStyle(.secondary)
@@ -268,9 +297,10 @@ struct ChatView: View {
                         runCommand(action, text: text)
                     } else if !attachments.isEmpty {
                         // A message with photos or a video is always plain chat.
-                        let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
+                        let meta = MessageQuote.meta(attached.map { .object(["task_id": .string($0.id)]) }, replyingTo: replyingTo)
                         let files = attachments.compactMap(\.uploaded)
                         attached = nil
+                        replyingTo = nil
                         attachments = []
                         Task { await store.send(text, to: agentId, meta: meta, images: files) }
                     // While a round waits, a voice turn answers the question the voice is on (tagged so it can't land
@@ -283,8 +313,9 @@ struct ChatView: View {
                         voice.sendWithStatus(text, to: agentId)
                     } else {
                         quickReply(to: text)
-                        let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
+                        let meta = MessageQuote.meta(attached.map { .object(["task_id": .string($0.id)]) }, replyingTo: replyingTo)
                         attached = nil
+                        replyingTo = nil
                         Task { await store.send(text, to: agentId, meta: meta) }
                     }
                 }
@@ -704,11 +735,13 @@ enum ChatItem: Identifiable, Hashable {
 
     var id: String {
         switch self {
-        case .message(let m): "m\(m.id)"
+        case .message(let m): Self.key(message: m.id)
         case .tools(let id, _): "t\(id)"
         case .divider(let id, _, _): "d\(id)"
         }
     }
+
+    static func key(message id: Int64) -> String { "m\(id)" }
 
     static func build(_ messages: [ChatMessage]) -> [ChatItem] {
         var out: [ChatItem] = []
@@ -763,6 +796,9 @@ private struct ChatItemView: View {
     var currentQuestionId: String?
     var command: (GrillCommand) -> Void = { _ in }
     var clearWith: (String) async -> Void = { _ in }
+    /// Reply to a message (nil on a server without replies), and jump to a quoted one.
+    var reply: ((ChatMessage) -> Void)?
+    var jump: (Int64) -> Void = { _ in }
 
     var body: some View {
         switch item {
@@ -778,7 +814,7 @@ private struct ChatItemView: View {
                 MessageBubble(message: m, agent: agent)
                 if let card = m.grill?.endCard { EndCardView(message: m, card: card, clearWith: clearWith) }
             }
-        case .message(let m): MessageBubble(message: m, agent: agent)
+        case .message(let m): MessageBubble(message: m, agent: agent, reply: m.isQuotable ? reply : nil, jump: jump)
         case .tools(_, let calls): ToolGroup(calls: calls)
         case .divider(_, let text, let date):
             HStack {
@@ -796,6 +832,8 @@ private struct MessageBubble: View {
     @Environment(Speaker.self) private var speaker
     let message: ChatMessage
     let agent: Agent
+    var reply: ((ChatMessage) -> Void)?
+    var jump: (Int64) -> Void = { _ in }
 
     private var isUser: Bool { message.role == "user" && message.fromAgentName == nil }
 
@@ -876,6 +914,9 @@ private struct MessageBubble: View {
                         }
                         .accessibilityIdentifier("tagChips")
                     }
+                    if let q = message.replyQuote {
+                        QuoteBlock(quote: q) { jump(q.id) }
+                    }
                     if message.videos.isEmpty && message.photos.isEmpty || !message.displayContent.isEmpty {
                         CollapsibleText(text: message.displayContent)
                             .font(.body)
@@ -884,6 +925,14 @@ private struct MessageBubble: View {
                             .foregroundStyle(isUser ? Theme.onAccent : .primary)
                             .background(isUser ? AnyShapeStyle(Theme.accent.gradient) : AnyShapeStyle(Theme.card),
                                         in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .contextMenu {
+                                if let reply {
+                                    Button { reply(message) } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
+                                }
+                                // The long press opens this menu instead of text selection: keep Copy in it.
+                                Button { UIPasteboard.general.string = message.displayContent } label: { Label("Copy", systemImage: "doc.on.doc") }
+                            }
                     }
                     HStack(spacing: 6) {
                         Text(isUser ? message.createdAt.formatted(date: .omitted, time: .shortened)
@@ -906,7 +955,33 @@ private struct MessageBubble: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(isUser ? "You" : message.fromAgentName ?? agent.name)\(message.isFYI ? ", FYI" : ""): \(message.displayContent)")
             .accessibilityAction(named: "Read aloud") { if !isUser { speaker.speak(message) } }
+            .accessibilityAction(named: "Reply") { reply?(message) }
+            .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
         }
+    }
+}
+
+/// The message a reply quotes, above its bubble: who wrote it and a line of it, as plain text. A tap jumps to it.
+private struct QuoteBlock: View {
+    let quote: MessageQuote
+    let jump: () -> Void
+
+    var body: some View {
+        Button(action: jump) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2).fill(Theme.accent).frame(width: 3)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(quote.authorLabel).font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+                    Text(verbatim: quote.excerpt).font(.footnote).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.leading)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("messageQuote")
     }
 }
 

@@ -19,6 +19,8 @@ type Hook = {
   setText: (t: string) => void;
   attachments: { key: string; file?: string }[];
   taskId: string | null;
+  reply: { id: number; author: string | null; excerpt: string } | null;
+  setReply: (q: Hook["reply"]) => void;
   putDraft: (id: string, d: typeof EMPTY_DRAFT) => void;
   removeImage: (key: string) => void;
 };
@@ -47,8 +49,8 @@ function composer(agent: string) {
 }
 
 test("switching agents shows the new agent's Draft and keeps the old one stored", () => {
-  saveDraft("a", { text: "for A", images: ["a.png"], task: "t1" });
-  saveDraft("b", { text: "for B", images: [], task: null });
+  saveDraft("a", { text: "for A", images: ["a.png"], task: "t1", reply: null });
+  saveDraft("b", { text: "for B", images: [], task: null, reply: null });
   const c = composer("a");
   assert.equal(c.now().text, "for A");
   assert.deepEqual(c.now().attachments.map((x) => x.file), ["a.png"]);
@@ -58,7 +60,7 @@ test("switching agents shows the new agent's Draft and keeps the old one stored"
   assert.equal(c.now().text, "for B");
   assert.deepEqual(c.now().attachments, []);
   assert.equal(c.now().taskId, null);
-  assert.deepEqual(loadDraft("a"), { text: "for A, edited", images: ["a.png"], task: "t1" });
+  assert.deepEqual(loadDraft("a"), { text: "for A, edited", images: ["a.png"], task: "t1", reply: null });
   assert.equal(loadDraft("b").text, "for B");
   c.show("a");
   assert.equal(c.now().text, "for A, edited");
@@ -79,7 +81,7 @@ test("a command for A that finishes while B is shown empties A's Draft and leave
 });
 
 test("a command for the shown agent empties its composer and its Draft", () => {
-  saveDraft("a", { text: "hello", images: ["a.png"], task: "t1" });
+  saveDraft("a", { text: "hello", images: ["a.png"], task: "t1", reply: null });
   const c = composer("a");
   act(() => c.now().putDraft("a", EMPTY_DRAFT));
   assert.equal(c.now().text, "");
@@ -89,8 +91,28 @@ test("a command for the shown agent empties its composer and its Draft", () => {
   c.unmount();
 });
 
+test("a reply's quote is set, kept per agent, removed, and gone once the message is sent", () => {
+  const quote = { id: 7, author: "Dev", excerpt: "Which port?" };
+  const c = composer("a");
+  act(() => c.now().setReply(quote));
+  assert.deepEqual(loadDraft("a").reply, quote);
+  c.show("b");
+  assert.equal(c.now().reply, null);
+  c.show("a");
+  assert.deepEqual(c.now().reply, quote);
+  act(() => c.now().setReply(null));
+  assert.equal(localStorage.getItem("loft:draft:a"), null, "✕ leaves nothing behind");
+  act(() => c.now().setReply(quote));
+  act(() => c.now().setText("7420"));
+  // Sending empties the Draft, the quote with it.
+  act(() => c.now().putDraft("a", EMPTY_DRAFT));
+  assert.equal(c.now().reply, null);
+  assert.equal(localStorage.getItem("loft:draft:a"), null);
+  c.unmount();
+});
+
 test("a Draft's image whose file is gone is dropped from the composer and the Draft", () => {
-  saveDraft("a", { text: "look", images: ["gone.png", "kept.png"], task: null });
+  saveDraft("a", { text: "look", images: ["gone.png", "kept.png"], task: null, reply: null });
   const c = composer("a");
   const host = document.body.appendChild(document.createElement("div"));
   const root = createRoot(host);

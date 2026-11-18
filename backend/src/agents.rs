@@ -167,10 +167,11 @@ pub(crate) async fn restart_quiet(state: &AppState) {
     }
 }
 
-/// Checks for quiet runs once a minute.
+/// Checks for quiet runs, and saved statuses no live run backs, once a minute.
 pub async fn quiet_watcher(state: AppState) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
+        reconcile_status(&state);
         restart_quiet(&state).await;
     }
 }
@@ -334,25 +335,27 @@ pub async fn ask_permission(
 }
 
 /// Marks a request expired when it ends unanswered: at the timeout, or when whoever asked stops waiting (a kill
-/// whose command was stopped), so a later answer can't act on it.
+/// whose command was stopped, a run stopped mid-call), so a later answer can't act on it. Answered or not, the
+/// ask then stops counting toward the agent's status (`asked`).
 struct Unanswered<'a> {
     state: &'a AppState,
+    agent_id: String,
     id: String,
     answered: bool,
 }
 
 impl Drop for Unanswered<'_> {
     fn drop(&mut self) {
-        if self.answered {
-            return;
+        if !self.answered {
+            self.state.rt.lock().unwrap().waiters.remove(&self.id);
+            if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id)
+                && r.status == "pending" {
+                    r.status = "expired".into();
+                    let _ = self.state.db.save_permission(&r);
+                    self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
+                }
         }
-        self.state.rt.lock().unwrap().waiters.remove(&self.id);
-        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id)
-            && r.status == "pending" {
-                r.status = "expired".into();
-                let _ = self.state.db.save_permission(&r);
-                self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
-            }
+        asked(self.state, &self.agent_id);
     }
 }
 
@@ -386,11 +389,16 @@ pub async fn ask_permission_for(
     }
     add_msg(state, agent_id, None, "system", "permission", &req.tool_name, json!({ "request_id": req.id }));
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
-    let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
+    {
+        // The text to bring back is the one from before the first of overlapping asks.
+        let mut rt = state.rt.lock().unwrap();
+        let ask = rt.asks.entry(agent_id.to_string()).or_insert_with(|| (0, state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default()));
+        ask.0 += 1;
+    }
     let waiting = if source == QUESTIONS { "Waiting for your answers".into() } else { format!("Waiting for permission: {tool_name}") };
     set_status(state, agent_id, "waiting", &waiting);
 
-    let mut pending = Unanswered { state, id: req.id.clone(), answered: false };
+    let mut pending = Unanswered { state, agent_id: agent_id.to_string(), id: req.id.clone(), answered: false };
     let decision = match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(d)) => {
             pending.answered = true;
@@ -399,10 +407,61 @@ pub async fn ask_permission_for(
         _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()), input: None },
     };
     drop(pending);
-    if is_running(state, agent_id) {
-        set_status(state, agent_id, "running", &prev);
-    }
     decision
+}
+
+/// One of the agent's permission asks ended. Once none is left, it goes back to its run with the text from
+/// before them, or to idle when no run is live. The run check and the save happen under the run lock, and only
+/// over a status still "waiting", so a run that ends meanwhile can't leave it saved as running.
+fn asked(state: &AppState, agent_id: &str) {
+    let saved = {
+        let mut rt = state.rt.lock().unwrap();
+        let Some(ask) = rt.asks.get_mut(agent_id) else { return };
+        ask.0 = ask.0.saturating_sub(1);
+        if ask.0 > 0 {
+            return;
+        }
+        let (_, prev) = rt.asks.remove(agent_id).unwrap_or_default();
+        let (status, text) = if rt.running.contains_key(agent_id) { ("running", prev) } else { ("idle", String::new()) };
+        state.db.update_agent(agent_id, |a| {
+            if a.status == "waiting" {
+                a.status = status.into();
+                a.status_text = text.chars().take(160).collect();
+            }
+        })
+    };
+    if let Ok(Some(a)) = saved {
+        emit_agent(state, &a);
+    }
+}
+
+/// Sets an agent saved as running or waiting back to idle when it has no live run and nothing waits on the
+/// user: a panic, a dead process or a missed update left it behind.
+pub(crate) fn reconcile_status(state: &AppState) {
+    let Ok(agents) = state.db.list_agents() else { return };
+    for a in agents.into_iter().filter(|a| a.status == "running" || a.status == "waiting") {
+        let asking = state.db.list_permissions(Some(&a.id)).map_or(true, |ps| ps.iter().any(|p| p.status == "pending"));
+        let interviewing = crate::grill::active(state, &a.id).is_some_and(|s| crate::grill::open_round(&s).is_some());
+        if asking || interviewing {
+            continue;
+        }
+        let saved = {
+            let rt = state.rt.lock().unwrap();
+            if rt.running.contains_key(&a.id) || rt.asks.contains_key(&a.id) {
+                continue;
+            }
+            state.db.update_agent(&a.id, |a| {
+                if a.status == "running" || a.status == "waiting" {
+                    a.status = "idle".into();
+                    a.status_text = String::new();
+                }
+            })
+        };
+        if let Ok(Some(now)) = saved {
+            tracing::info!("{}: saved as {} with no live run, now idle", a.name, a.status);
+            emit_agent(state, &now);
+        }
+    }
 }
 
 /// Resolve a pending request from the UI. `always` persists the rule into the agent config. `answers` answers an
@@ -508,7 +567,8 @@ These rules are Loft's and apply to every message you send another agent with `m
 3. Send a verdict only to the agent that acts on it, not to everyone.
 4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
 5. Don't reply to an FYI.
-6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.";
+6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.
+7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
@@ -555,7 +615,7 @@ You are **{name}** ({role}), an autonomous agent living inside Loft — the user
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review while that clone exists; if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first and carry on. Never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
-- Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first.
+- Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first, in a command of its own: run git on the new clone in the next command, not in the same one (`git clone x t && git -C t …` asks the user, because the guard can't know yet what the clone brought).
 - Write git commands with the literal absolute path: no shell variables, `cd` chains or `$(…)` in them.
 - Before each new branch, `git fetch origin` and create it from the remote: `git switch -c <branch> origin/<base>`, where `<base>` is the branch named in the ticket's `## Branch` section, or otherwise the default branch (`origin/HEAD`, whether it's `main` or `master`). Before each build or review round, `git fetch origin` and `git pull --ff-only` on your branch. Never build a ticket on a local default branch you haven't fetched.
 - Before you submit a ticket, mark a PR ready or start a review round, `git fetch origin` and `git merge origin/<base>` into your branch (merge, not rebase, so nobody force-pushes), resolve any conflicts, re-run the tests, then push. Loft refuses a submission whose branch is behind its base.
@@ -655,6 +715,10 @@ pub fn enqueue(state: &AppState, agent_id: &str, text: Option<String>, trigger: 
 pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str) -> Option<Message> {
     let prompt = text.as_ref().map(|t| {
         let p = crate::uploads::prompt(t, &meta);
+        let p = match crate::reply::prompt_block(state, agent_id, &meta) {
+            Some(q) => format!("{q}\n\n{p}"),
+            None => p,
+        };
         let refs: Vec<String> = meta["task_refs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         let p = if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) };
         // A task that is both attached and tagged is described once, by its reference header.
@@ -844,24 +908,36 @@ pub fn message_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str
 
 /// `message_from_agent`, with extra `meta` on the stored message (e.g. which task it is about).
 pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text: &str, meta: Value) {
-    message_on_ticket(state, from, to, text, meta, None);
+    message_on_ticket(state, from, to, text, meta, None, false);
 }
 
 /// `message_from_agent_with` about `ticket` (a `message_ticket_key`), if it names one: at a ticket boundary,
 /// the recipient's Fresh context setting applies before the run, as on a Delivery wake. A Lead builds the
 /// tickets itself when its team has no Dev. Returns the message's id when it waits for a run to end.
-pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>) -> Option<i64> {
+/// With `report_back`, an agent's needs-action message hands `ticket` over: the recipient is told to report back.
+pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>, report_back: bool) -> Option<i64> {
     let fresh = ticket.is_some_and(|t| ticket_boundary(state, &to.id, t, crate::delivery::fresh_context_applies(state, to)));
     if let Some(t) = ticket {
         meta["ticket"] = json!(t);
+        // Marks this message as a hand-over: a report back on the ticket answers it.
+        if report_back {
+            meta["report_back"] = json!(true);
+        }
     }
     meta["from_agent"] = json!({ "id": from.id, "name": from.name });
     let msg = add_msg(state, &to.id, None, "user", "text", text, meta).map(|m| m.id);
-    let prompt = format!(
+    let mut prompt = format!(
         "[Message from agent {name} (id {id}), not from the user]\n{text}\n\n[Your replies in this chat are seen by the user, not by {name}. To answer {name}, call `mcp__loft__message_agent` with agent \"{id}\".]",
         name = from.name,
         id = from.id,
     );
+    if let Some(t) = ticket.filter(|_| report_back) {
+        prompt.push_str(&format!(
+            "\n[When this work is done, or blocked, report back to {name}: call `mcp__loft__message_agent` with agent \"{id}\", kind \"needs_action\" and ticket \"{t}\", saying what you did and where it is.]",
+            name = from.name,
+            id = from.id,
+        ));
+    }
     start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg, false);
     let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.contains(id)));
     if queued.is_some() {
@@ -891,6 +967,11 @@ pub const LOFT_SENDER: &str = "loft-delivery";
 pub fn fyi_from_loft(state: &AppState, to: &Agent, text: &str) {
     add_msg(state, &to.id, None, "user", "text", text, json!({ "from_agent": { "id": LOFT_SENDER, "name": "Loft" }, "fyi": true }));
     let _ = state.db.add_pending_fyi(&to.id, &format!("[FYI from Loft, not from the user. It needs no action and no reply.]\n{text}"));
+}
+
+/// A needs-action message from Loft itself (a Delivery that stalled): it wakes the agent, and the run sees `text` as its prompt; its reply is an Unread reply.
+pub fn needs_action_from_loft(state: &AppState, to: &Agent, text: &str) {
+    start(state, &to.id, Some(format!("[From Loft, not from the user.]\n{text}")), "delivery", true);
 }
 
 /// The most FYIs put in front of one prompt; older ones are only counted.
@@ -978,11 +1059,16 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
     let state = state.clone();
     let agent_id = agent_id.to_string();
     tokio::spawn(async move {
+        let _ended = RunEnded { state: state.clone(), agent_id: agent_id.clone(), kill: kill.clone() };
         let mut prompt = prompt;
         let mut trigger = trigger;
         let mut for_user = for_user;
         let mut throwaway = throwaway;
         loop {
+            #[cfg(test)]
+            if prompt.contains("loft-test-panic") {
+                panic!("a run panicked");
+            }
             // Only between runs: a ticket boundary queued behind a run waits for it to end. A Redraw leaves the Session alone.
             if !throwaway {
                 fresh_boundary(&state, &agent_id);
@@ -997,6 +1083,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let failed = match run_once(&state, &agent_id, &full, trigger, for_user, throwaway, kill.clone(), &mut delivered).await {
                 Ok(failed) => failed,
                 Err(e) => {
+                    state.rt.lock().unwrap().runs.remove(&agent_id);
                     // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
                     if !delivered {
                         let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
@@ -1048,6 +1135,8 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             }
             match next {
                 Some((p, t, u, w)) => {
+                    // A Stop pressed after the last run ended was for that run, not the queued one.
+                    let _ = tokio::time::timeout(Duration::ZERO, kill.notified()).await;
                     prompt = p;
                     trigger = t;
                     for_user = u;
@@ -1060,6 +1149,40 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             emit_agent(&state, &a);
         }
     });
+}
+
+/// Ends the run in Loft's books however its task ends: after a panic (or any way out that skipped the normal
+/// end) the agent is still marked running, so this clears the live run, its info and the saved status. A run
+/// started after this one ended has its own kill switch, and is left alone.
+struct RunEnded {
+    state: AppState,
+    agent_id: String,
+    kill: Arc<Notify>,
+}
+
+impl Drop for RunEnded {
+    fn drop(&mut self) {
+        let saved = {
+            // A panic while the lock was held poisons it: the run still has to end, and Loft to go on serving.
+            self.state.rt.clear_poison();
+            let mut rt = self.state.rt.lock().unwrap_or_else(|e| e.into_inner());
+            if !rt.running.get(&self.agent_id).is_some_and(|k| Arc::ptr_eq(k, &self.kill)) {
+                return;
+            }
+            rt.running.remove(&self.agent_id);
+            rt.runs.remove(&self.agent_id);
+            rt.waiting.remove(&self.agent_id);
+            rt.redrawing.remove(&self.agent_id);
+            tracing::warn!("agent {}: its run ended without finishing", self.agent_id);
+            self.state.db.update_agent(&self.agent_id, |a| {
+                a.status = "error".into();
+                a.status_text = "Last run failed".into();
+            })
+        };
+        if let Ok(Some(a)) = saved {
+            emit_agent(&self.state, &a);
+        }
+    }
 }
 
 /// The run that takes the agent's queue takes the Delivery steps it was woken for.
@@ -1276,8 +1399,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
         // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
         .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
-        // Workspaces live inside the user's checkout: git in a workspace with no clone stops here instead of finding it.
-        // Git ignores a relative ceiling.
+        // Workspaces live outside any repo (ADR 0005), but a home folder can be one: git in a workspace with no clone
+        // stops here instead of finding it. Git ignores a relative ceiling.
         .env("GIT_CEILING_DIRECTORIES", std::path::absolute(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone()))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
@@ -1469,6 +1592,8 @@ async fn run_process(
     let mut replied = false;
     let mut held_end: Option<Value> = None;
     let preempt = Arc::new(Notify::new());
+    // Claude has exited, but a process it left behind can keep its pipes open: read what's buffered until then.
+    let mut drain_until: Option<tokio::time::Instant> = None;
     state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), for_user, ..Default::default() });
     loop {
         let waiting = replied && !bg.is_empty();
@@ -1501,6 +1626,14 @@ async fn run_process(
                 tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
                 terminate(&mut child).await;
                 loft_stopped = true;
+                None
+            }
+            _ = child.wait(), if drain_until.is_none() => {
+                drain_until = Some(tokio::time::Instant::now() + EXIT_GRACE);
+                continue;
+            }
+            _ = async { tokio::time::sleep_until(drain_until.unwrap()).await }, if drain_until.is_some() => {
+                tracing::info!("agent {agent_id}: run {run_id}: claude exited while another process holds its output");
                 None
             }
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
@@ -2015,9 +2148,9 @@ pub(crate) mod tests {
         let cmd = build_command(&st, &a, false).unwrap();
         let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap().to_owned();
         assert_eq!(ceiling, st.cfg.storage_dir.as_os_str());
-        // The storage folder sits in a checkout, as agent-local-storage does in the user's loft checkout.
+        // The storage folder sits in a repo, as it would in a home folder kept in git.
         let git = |dir: &Path, args: &[&str]| std::process::Command::new("git").args(args).current_dir(dir).env("GIT_CEILING_DIRECTORIES", &ceiling).output().unwrap();
-        let checkout = st.cfg.storage_dir.parent().unwrap();
+        let checkout = st.cfg.root.as_path();
         assert!(git(checkout, &["init", "-q"]).status.success());
         let ws = workspace(&st, &a.id);
         std::fs::create_dir_all(ws.join("repo")).unwrap();
@@ -2034,7 +2167,7 @@ pub(crate) mod tests {
     fn a_relative_storage_folder_still_gives_git_an_absolute_ceiling() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
-        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() };
+        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone(), root: st.cfg.root.clone() };
         let st = AppState { cfg: std::sync::Arc::new(cfg), ..st };
         let cmd = build_command(&st, &a, false).unwrap();
         let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap();
@@ -2114,6 +2247,7 @@ pub(crate) mod tests {
                 "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
                 "5. Don't reply to an FYI.",
                 "6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.",
+                "7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.",
             ] {
                 assert!(section.contains(rule), "missing {rule}");
             }
@@ -2214,6 +2348,7 @@ case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
 case "$prompt" in *crash*) exit 1;; esac
+case "$prompt" in *leftover*) sleep 20 & exit 1;; esac
 case "$prompt" in *sigterm*) kill -TERM $$;; esac
 case "$prompt" in *exit-143*) exit 143;; esac
 case "$prompt" in *sigkill*) kill -KILL $$;; esac
@@ -2301,7 +2436,7 @@ esac
 
     pub(crate) fn fake_claude_state() -> (AppState, Agent) {
         let mut st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let bin = dir.join("fake-claude");
         std::fs::write(&bin, FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -3118,7 +3253,7 @@ esac
     #[test]
     fn at_paths_start_at_the_projects_folder_when_there_is_one() {
         let st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let projects = dir.join("projects");
         std::fs::create_dir_all(projects.join("work/notes")).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
@@ -3153,6 +3288,48 @@ esac
 
     async fn idle(st: &AppState, id: &str) {
         until("the runs to end", 10, || !is_running(st, id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_claude_that_dies_while_a_leftover_process_holds_its_output_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "leftover").await.ok().unwrap();
+        // The leftover `sleep 20` keeps stdout open: the run ends on claude's exit, not on the pipe closing.
+        until("the run to end", 5, || !is_running(&st, &a.id)).await;
+        let now = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert_eq!((now.status.as_str(), now.status_text.as_str()), ("error", "Last run failed"));
+        assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panic_in_a_run_ends_it_and_loft_keeps_serving() {
+        let (st, a) = fake_claude_state();
+        save_status(&st, &a.id, "running", "Building");
+        let _ = send(&st, &a.id, "loft-test-panic").await.ok().unwrap();
+        until("the run to end", 5, || !is_running(&st, &a.id)).await;
+        assert_eq!(saved(&st, &a.id), ("error".into(), "Last run failed".into()));
+        assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
+        // The next message runs as usual.
+        let _ = send(&st, &a.id, "hello again").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(prompts(&st, &a.id).contains("hello again"));
+        assert_eq!(saved(&st, &a.id).0, "idle");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_left_over_from_the_last_run_doesnt_stop_the_next_queued_one() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        started(&st, &a.id, 1).await;
+        let _ = send(&st, &a.id, "chatty next").await.ok().unwrap();
+        // The second Stop finds no run waiting on it: it must not carry over to the queued run.
+        assert!(stop(&st, &a.id) && stop(&st, &a.id));
+        until("the queued run", 10, || prompts(&st, &a.id).contains("chatty next")).await;
+        idle(&st, &a.id).await;
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert_eq!(msgs.iter().filter(|m| m.content.starts_with("Stopped by user")).count(), 1, "only the busy run was stopped");
+        assert!(msgs.iter().any(|m| m.role == "assistant" && m.content == "On it."), "the queued run replied");
+        assert_eq!(saved(&st, &a.id).0, "idle");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3525,6 +3702,112 @@ esac
         assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.starts_with("Restarted by Loft")));
         // It answered: the count starts over.
         assert!(!st.rt.lock().unwrap().auto_restarts.contains_key(&a.id));
+    }
+
+    fn saved(st: &AppState, id: &str) -> (String, String) {
+        let a = st.db.get_agent(id).unwrap().unwrap();
+        (a.status, a.status_text)
+    }
+
+    fn save_status(st: &AppState, id: &str, status: &str, text: &str) {
+        st.db.update_agent(id, |a| (a.status, a.status_text) = (status.into(), text.into())).unwrap();
+    }
+
+    /// The agent's permission asks still waiting on the user.
+    fn pending(st: &AppState, id: &str) -> Vec<String> {
+        st.db.list_permissions(Some(id)).unwrap().into_iter().filter(|p| p.status == "pending").map(|p| p.id).collect()
+    }
+
+    /// Asks a permission for the agent in the background, as an MCP call does, once the asks before it are saved.
+    async fn ask(st: &AppState, id: &str, tool: &str) -> tokio::task::JoinHandle<Decision> {
+        let n = pending(st, id).len();
+        let (st2, id2, tool) = (st.clone(), id.to_string(), tool.to_string());
+        let h = tokio::spawn(async move { ask_permission_for(&st2, &id2, "prompt", &tool, json!({}), "", String::new(), Duration::from_secs(30)).await });
+        until("the ask", 5, || pending(st, id).len() == n + 1 && saved(st, id).0 == "waiting").await;
+        h
+    }
+
+    #[test]
+    fn the_watcher_sets_a_stale_running_or_waiting_to_idle_and_leaves_live_runs_and_asks_alone() {
+        let st = crate::tasks::tests::state();
+        let [stale_run, stale_wait, live, asking] = ["A", "B", "C", "D"].map(|n| crate::tasks::tests::agent(&st, n));
+        save_status(&st, &stale_run.id, "running", "Building");
+        save_status(&st, &stale_wait.id, "waiting", "Waiting for permission: Bash");
+        save_status(&st, &live.id, "running", "Building");
+        st.rt.lock().unwrap().running.insert(live.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &asking.id, "waiting", "Waiting for permission: Bash");
+        st.db.save_permission(&crate::db::PermissionRequest {
+            id: "p-d".into(), agent_id: asking.id.clone(), source: "prompt".into(), tool_name: "Bash".into(), input: json!({}),
+            reason: String::new(), rule: String::new(), status: "pending".into(), created_at: crate::db::now(),
+        }).unwrap();
+        let mut events = st.events.subscribe();
+
+        reconcile_status(&st);
+        assert_eq!(saved(&st, &stale_run.id), ("idle".into(), String::new()));
+        assert_eq!(saved(&st, &stale_wait.id), ("idle".into(), String::new()));
+        assert_eq!(saved(&st, &live.id), ("running".into(), "Building".into()), "a live run");
+        assert_eq!(saved(&st, &asking.id), ("waiting".into(), "Waiting for permission: Bash".into()), "a pending permission");
+        let mut updated = vec![];
+        while let Ok(Event::AgentUpdated { agent }) = events.try_recv() {
+            updated.push(agent["id"].as_str().unwrap().to_string());
+        }
+        updated.sort();
+        let mut want = vec![stale_run.id.clone(), stale_wait.id.clone()];
+        want.sort();
+        assert_eq!(updated, want, "the corrected agents are emitted");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overlapping_asks_stay_waiting_until_the_last_then_bring_back_the_text_from_before() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &a.id, "running", "Building the app");
+        let first = ask(&st, &a.id, "Bash").await;
+        let second = ask(&st, &a.id, "Write").await;
+        let ids = pending(&st, &a.id);
+
+        decide(&st, &ids[0], "allow", None, None, None).unwrap();
+        until("the first ask to end", 5, || st.rt.lock().unwrap().asks.get(&a.id).map(|a| a.0) == Some(1)).await;
+        assert_eq!(saved(&st, &a.id).0, "waiting", "one ask is still pending");
+
+        decide(&st, &ids[1], "allow", None, None, None).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("running".into(), "Building the app".into()));
+        assert!(!st.rt.lock().unwrap().asks.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_ask_stops_counting_and_the_next_answered_ask_restores_the_status() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        save_status(&st, &a.id, "idle", "");
+        // The MCP call is cancelled: a run stopped mid-call, or a kill whose command stopped.
+        let h = ask(&st, &a.id, "Kill").await;
+        h.abort();
+        until("the ask to expire", 5, || pending(&st, &a.id).is_empty()).await;
+        assert_eq!(saved(&st, &a.id), ("idle".into(), String::new()));
+        assert!(!st.rt.lock().unwrap().asks.contains_key(&a.id));
+
+        // The next ask, in a run, counts from zero again.
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &a.id, "running", "Building");
+        let h = ask(&st, &a.id, "Bash").await;
+        decide(&st, &pending(&st, &a.id)[0], "allow", None, None, None).unwrap();
+        h.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("running".into(), "Building".into()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ask_outside_a_run_leaves_the_agent_idle_once_answered() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        save_status(&st, &a.id, "idle", "");
+        let h = ask(&st, &a.id, "Kill").await;
+        decide(&st, &pending(&st, &a.id)[0], "deny", None, None, None).unwrap();
+        h.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("idle".into(), String::new()));
     }
 
     #[tokio::test(flavor = "multi_thread")]

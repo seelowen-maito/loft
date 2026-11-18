@@ -747,7 +747,7 @@ pub(crate) mod tests {
     /// Settings with push configured, for a test state.
     pub(crate) fn configure(st: &AppState) {
         let mut s = st.settings.get();
-        s.projects_dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        s.projects_dir = st.cfg.root.as_path().to_path_buf();
         s.push.key_id = "ABC123DEFG".into();
         s.push.team_id = "TEAM123456".into();
         st.settings.save(s).unwrap();

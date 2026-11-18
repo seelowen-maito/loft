@@ -883,6 +883,28 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         });
     }
 
+    // The agents' workspaces stayed in the checkout on start (storage.rs): until a start moves them. Not dismissible:
+    // the guard asks about commands in a workspace with no clone until they move.
+    let not_moved = state.rt.lock().unwrap().workspaces_not_moved.clone();
+    if let Some(why) = not_moved {
+        items.push(Item {
+            kind: "workspaces_not_moved",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("Agents' workspaces didn't move", MAX_TITLE),
+            reason: text("They stay in Loft's checkout, where Loft keeps using them.", MAX_REASON),
+            text: text(&format!("{why}.\n\nAgents work as before. Fix that, then restart Loft to move them (docs/adr/0005)."), MAX_TEXT),
+            created_at: Utc::now().to_rfc3339(),
+            links: vec![],
+            actions: vec![],
+            push: ("Agents' workspaces didn't move".to_string(), String::new()),
+            project: None,
+            pr: None,
+            id: "workspaces_not_moved".to_string(),
+        });
+    }
+
     let dismissed: HashSet<String> = state.db.dismissed_needs_you().map_err(e)?.into_iter().collect();
     items.retain(|i| !dismissed.contains(&i.id));
     // Most urgent first; within the same urgency, the longest waiting first.
@@ -1028,6 +1050,9 @@ pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Result<J
 pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     if id.starts_with("permission:") || id.starts_with("grill:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
+    }
+    if id == "workspaces_not_moved" {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "This one goes once a start moves the workspaces; it can't be dismissed.".into()));
     }
     let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !items.iter().any(|i| i.id == id) {
@@ -1436,6 +1461,25 @@ mod tests {
         assert!(same_site(&h(Some("same-origin"))).is_ok());
         assert!(same_site(&h(Some("cross-site"))).is_err());
         assert!(same_site(&h(Some("same-site"))).is_err());
+    }
+
+    #[tokio::test]
+    async fn workspaces_that_didnt_move_cant_be_dismissed() {
+        let st = crate::tasks::tests::state();
+        st.rt.lock().unwrap().workspaces_not_moved = Some("/x/agent-local-storage already holds files".into());
+        assert!(dismiss_item(State(st.clone()), Path("workspaces_not_moved".into())).await.is_err());
+        assert!(st.db.dismissed_needs_you().unwrap().is_empty(), "nothing is kept");
+        assert!(collect(&st).unwrap().iter().any(|i| i.kind == "workspaces_not_moved"), "still shown");
+    }
+
+    #[test]
+    fn workspaces_that_didnt_move_show_why() {
+        let st = crate::tasks::tests::state();
+        let shown = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "workspaces_not_moved").map(|i| i.text).collect::<Vec<_>>();
+        assert!(shown(&st).is_empty());
+        st.rt.lock().unwrap().workspaces_not_moved = Some("/x/agent-local-storage already holds files".into());
+        let text = shown(&st);
+        assert!(text.len() == 1 && text[0].starts_with("/x/agent-local-storage already holds files."), "{text:?}");
     }
 
     #[tokio::test]

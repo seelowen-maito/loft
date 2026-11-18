@@ -147,6 +147,8 @@ public final class LoftStore {
         // as connected, and a slow notification service (seen on a busy Simulator) held it at "Connecting…".
         // Only what hasn't been seen, here or on the web.
         let count = list.unseen
+        // `swift test` runs without an app bundle, where the notification center aborts.
+        guard Bundle.main.bundleURL.pathExtension.hasPrefix("app") else { return }
         Task.detached { try? await UNUserNotificationCenter.current().setBadgeCount(count) }
     }
 
@@ -555,6 +557,8 @@ public final class LoftStore {
                 Task { try? await loadDelivery(id) }
             }
             if deliveryWatchers > 0 { loadDeliveries(soon: true) }
+        case .resync:
+            Task { try? await refresh() }
         case .other:
             break
         }
@@ -688,7 +692,7 @@ public final class LoftStore {
             // update can be missed (a reconnect, the app in the background), and the reply was then never read.
             let after = conversation(agentId).filter { $0.id > id }
             let runEnded = after.firstIndex { $0.kind == "run_start" }.map { start in after[start...].contains { $0.kind == "run_end" } } ?? false
-            let running = !runEnded && (a?.running == true || a?.status == "running")
+            let running = !runEnded && a?.running == true
             let replies = after.filter { $0.role == "assistant" && $0.kind == "text" }
             // The whole reply: once the run is over and nothing in it has changed (a new piece, an edit) for a moment.
             let candidate = replies.isEmpty || running ? nil : replies.map(\.displayContent).joined(separator: "\n\n")

@@ -435,6 +435,8 @@ public enum ServerFeature: String {
     case agentDevices = "agent_devices"
     /// Settings › Disk lists what an idle agent left running, with Stop them; an agent is busy only in a run.
     case leftProcesses = "left_processes"
+    /// A message can reply to an earlier one in the chat (spec #572).
+    case reply
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.
@@ -575,6 +577,8 @@ public enum ServerEvent {
     case needsYou(count: Int, new: Int? = nil, ids: [String])
     /// The Delivery of spec (or standalone ticket) `repo#spec` changed: a card showing it reloads.
     case delivery(repo: String, spec: Int)
+    /// The stream lagged and dropped events: load everything again, as after a reconnect.
+    case resync
     case other(String)
 
     private struct Envelope: Decodable { let type: String }
@@ -609,6 +613,7 @@ public enum ServerEvent {
         case "delivery":
             let b = try d.decode(DeliveryBody.self, from: data)
             return .delivery(repo: b.repo, spec: b.spec)
+        case "resync": return .resync
         default: return .other(type)
         }
     }

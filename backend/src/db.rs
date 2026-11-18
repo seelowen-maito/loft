@@ -489,6 +489,8 @@ pub struct PullRequest {
     pub behind_by: i64,
     /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
     pub ready_sha: String,
+    /// The head commit the team's Lead was told is ready to merge (every verdict it needs passed), so it is told once.
+    pub ready_told_sha: String,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
@@ -1362,6 +1364,37 @@ impl Db {
     /// The database file, for backups (backup.rs), which read it through a connection of their own.
     pub fn path(&self) -> Option<std::path::PathBuf> {
         self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
+    }
+
+    /// A copy of the whole database at `to`, a file that mustn't exist yet (`VACUUM INTO`).
+    pub fn copy_to(&self, to: &Path) -> Result<()> {
+        self.0.lock().unwrap().execute("VACUUM INTO ?1", [to.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// Replaces `from` with `to` in every text value of every table, whatever its column's declared type, in one
+    /// transaction: the absolute paths stored in chats, memories, tasks and the rest, when the agents' workspaces
+    /// move (storage.rs). Returns the number of values changed.
+    pub fn replace_everywhere(&self, from: &str, to: &str) -> Result<usize> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let tables: Vec<String> = tx
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut n = 0;
+        for t in tables {
+            let cols: Vec<String> = tx
+                .prepare("SELECT name FROM pragma_table_info(?1)")?
+                .query_map([&t], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for col in cols {
+                let sql = format!("UPDATE \"{t}\" SET \"{col}\" = replace(\"{col}\", ?1, ?2) WHERE typeof(\"{col}\") = 'text' AND instr(\"{col}\", ?1) > 0");
+                n += tx.execute(&sql, params![from, to])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Raw access for tests elsewhere in the crate that need to set up rows directly.

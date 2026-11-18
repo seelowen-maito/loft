@@ -13,7 +13,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, I
 Object.assign(globalThis, { EventSource: class { onopen = null; onerror = null; onmessage = null } });
 
 type Item = { id: string; v: number };
-type Ev = { type: "put"; item: Item } | { type: "gone"; id: string } | { type: "other" };
+type Ev = { type: "put"; item: Item } | { type: "gone"; id: string } | { type: "other" } | { type: "resync" };
 type Store = {
   get: () => { items: Item[] | null; failed: string | null };
   ensure: () => void;
@@ -154,4 +154,20 @@ test("an edit in place shows in every component, from one load", async () => {
   assert.equal(l.loads(), 1);
   for (const s of seen) assert.deepEqual(s.at(-1), [{ id: "a", v: 9 }]);
   act(() => root.unmount());
+});
+
+test("a resync loads a list that is wanted again, and leaves one nobody asked for alone", async () => {
+  const unasked = list();
+  unasked.store.event({ type: "resync" });
+  assert.equal(unasked.loads(), 0);
+
+  const l = list();
+  l.store.ensure();
+  await l.answer([{ id: "a", v: 1 }]);
+  l.store.event({ type: "other" });
+  assert.equal(l.loads(), 1, "other events load nothing");
+  l.store.event({ type: "resync" });
+  assert.equal(l.loads(), 2);
+  await l.answer([{ id: "a", v: 2 }]);
+  assert.deepEqual(l.store.get().items, [{ id: "a", v: 2 }]);
 });

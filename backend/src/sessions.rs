@@ -39,7 +39,11 @@ fn config_dir_of(v: Option<String>) -> Option<PathBuf> {
 /// isn't an ASCII letter or digit turned into `-`, as its JavaScript regex does, so an emoji becomes `--`.
 /// Very long names are cut and given a hash suffix, so those are found by their first 200 characters.
 pub fn transcripts_dir(cwd: &Path) -> PathBuf {
-    let projects = claude_dir().join("projects");
+    transcripts_dir_in(&claude_dir().join("projects"), cwd)
+}
+
+/// [`transcripts_dir`] in Claude Code's `projects` folder.
+pub fn transcripts_dir_in(projects: &Path, cwd: &Path) -> PathBuf {
     let real = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let name: String = real
         .to_string_lossy()
@@ -49,7 +53,7 @@ pub fn transcripts_dir(cwd: &Path) -> PathBuf {
     if name.len() <= 200 {
         return projects.join(name);
     }
-    std::fs::read_dir(&projects)
+    std::fs::read_dir(projects)
         .ok()
         .and_then(|d| d.flatten().map(|e| e.path()).find(|p| p.file_name().is_some_and(|f| f.to_string_lossy().starts_with(&name[..200]))))
         .unwrap_or_else(|| projects.join(&name[..200]))

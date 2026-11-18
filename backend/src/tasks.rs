@@ -1251,6 +1251,7 @@ pub(crate) mod tests {
             db: crate::db::Db::open(&dir.join("loft.db")).unwrap(),
             cfg: Arc::new(crate::state::Config {
                 port: 0,
+                root: dir.clone(),
                 storage_dir: dir.join("agents"),
                 xcrun: dir.join("no-xcrun"),
                 // No xcode-select to run, so `xcrun` is run as it is.
