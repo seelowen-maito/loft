@@ -30,7 +30,7 @@ final class MacAlerts: NSObject, UNUserNotificationCenterDelegate {
         NSApp?.dockTile.badgeLabel = NeedsYouAlerts.badge(for: list)
         guard let list else { return }
         let fresh = alerts.fresh(in: list)
-        if !fresh.isEmpty, !NSApp.isActive { Task { await post(fresh) } }
+        if !fresh.isEmpty, !NSApp.isActive, !TestMode.noAlerts { Task { await post(fresh) } }
     }
 
     private func post(_ items: [NeedsYouItem]) async {

@@ -81,6 +81,9 @@ public enum TestMode {
     /// `-hold-reading`: reading aloud plays no audio and holds its state (the Skip/Stop bar) until Skip or Stop,
     /// so a UI test sees it however soon the Simulator's voice would end, or fail to start.
     public static let holdReading = flag("-hold-reading")
+    /// `-no-alerts`: the Mac posts no Needs you notifications, so their permission prompt never takes the focus
+    /// from the window (or the quick search panel) a UI test is typing into.
+    public static let noAlerts = flag("-no-alerts")
 
     private static func flag(_ name: String) -> Bool {
         #if DEBUG

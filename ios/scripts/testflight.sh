@@ -6,10 +6,11 @@
 # is needed. For headless runs (CI), set ASC_KEY_PATH, ASC_KEY_ID and ASC_ISSUER_ID to an
 # App Store Connect API key instead.
 #
-#   ./testflight.sh               tests, archive, upload
+#   ./testflight.sh               unit tests, archive, upload
+#   ./testflight.sh --ui          the app's UI smoke tests too (the Mac's drive this Mac's screen)
 #   ./testflight.sh --fast        skip the tests
 #   ./testflight.sh --no-upload   archive and export the signed app to ios/build/testflight(-mac)/export
-#   ./testflight.sh --mac         the Mac app instead (its tests drive this Mac's screen; --fast skips them)
+#   ./testflight.sh --mac         the Mac app instead
 #   VERSION=0.2.0 ./testflight.sh set the version shown in TestFlight (default: the project's)
 #
 # Needs LOFT_TEAM_ID and LOFT_BUNDLE_ID, in ios/Config/Local.xcconfig or the environment.
@@ -20,9 +21,10 @@ cd "$(dirname "$0")/.."
 for arg in "$@"; do
   case "$arg" in
     --fast) SKIP_TESTS=1 ;;
+    --ui) UI=1 ;;
     --no-upload) UPLOAD=0 ;;
     --mac) MAC=1 ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -79,14 +81,21 @@ fi
 started=$(date +%s)
 
 if [[ "${SKIP_TESTS:-0}" != 1 ]]; then
+  # The unit tests: LoftKit's (the Mac app's logic lives there) and, for the iPhone, LoftTests. UI tests only with --ui.
+  step "Running LoftKit's unit tests" swift test --package-path LoftKit
   if [[ "${MAC:-0}" == 1 ]]; then
-    dest="platform=macOS"
+    dest="platform=macOS" suites=()
+    [[ "${UI:-0}" == 1 ]] && suites=(-only-testing:LoftMacUITests/LoftMacUITests)
   else
     dest="id=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in sorted(d.items(), reverse=True) if "iOS" in k for x in v if x["name"].startswith("iPhone")))')"
+    suites=(-only-testing:LoftTests)
+    [[ "${UI:-0}" == 1 ]] && suites+=(-only-testing:LoftUITests/LoftUITests)
   fi
   # A test that hangs (e.g. waiting on a speech model) fails after 2 minutes instead of blocking the release.
-  step "Running tests" xcodebuild test -project Loft.xcodeproj -scheme "$target" -destination "$dest" -derivedDataPath build/test -IDEBuildLocationStyle=Unique \
-    -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -maximum-test-execution-time-allowance 180
+  if [[ ${#suites[@]} -gt 0 ]]; then
+    step "Running tests" xcodebuild test -project Loft.xcodeproj -scheme "$target" -destination "$dest" -derivedDataPath build/test -IDEBuildLocationStyle=Unique \
+      "${suites[@]}" -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -maximum-test-execution-time-allowance 180
+  fi
 fi
 
 rm -rf "$ARCHIVE"
