@@ -783,7 +783,7 @@ fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
 fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String], dirs: &mut Dirs) -> Vec<PathBuf> {
     match name {
         // These read a folder option anywhere: a word from an expansion may be one (`npm install $K`).
-        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_arg(args) => unknown_in(dirs, None),
+        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_arg(name, args) => unknown_in(dirs, None),
         "git" => git_changes(dirs, vars, args, live),
         "cargo" => match flags(args, &["--manifest-path"], CARGO_CHANGES) {
             (manifests, Some(s)) if CARGO_CHANGES.contains(&s) => match manifests[..] {
@@ -837,10 +837,20 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
 /// tell from a subcommand.)
 fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a str>, Option<&'a str>) {
     let (mut values, mut words, mut after_option) = (vec![], vec![], false);
-    let mut it = args.iter();
+    // npm reads an attached value that starts with `-` as another option (`--tag=--prefix=x`).
+    let mut items: Vec<&str> = vec![];
+    for a in args {
+        let mut a = a.as_str();
+        items.push(a);
+        while let Some(v) = a.strip_prefix('-').and_then(|_| a.split_once('=')).map(|(_, v)| v).filter(|v| v.starts_with('-')) {
+            items.push(v);
+            a = v;
+        }
+    }
+    let mut it = items.into_iter();
     while let Some(a) = it.next() {
         let was = std::mem::replace(&mut after_option, false);
-        let name = a.split_once('=').map_or(a.as_str(), |(n, _)| n);
+        let name = a.split_once('=').map_or(a, |(n, _)| n);
         let long = |o: &&str| o.starts_with("--") && name.len() > 2 && o.starts_with(name);
         let short = |o: &&str| !o.starts_with("--") && a.starts_with('-') && !a.starts_with("--") && a[1..].contains(&o[1..]);
         if options.iter().any(|o| long(o)) {
@@ -852,20 +862,20 @@ fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a st
                 Some(v) => values.push(v),
                 // The next word may be a value or the subcommand, so it's both.
                 None if !options.contains(&name) => {
-                    values.extend(it.clone().next().map(String::as_str));
+                    values.extend(it.clone().next());
                     after_option = true;
                 }
-                None => values.extend(it.next().map(String::as_str)),
+                None => values.extend(it.next()),
             }
         } else if let Some(o) = options.iter().find(|o| short(o)) {
             let rest = a[1..].split_once(&o[1..]).map_or("", |(_, r)| r);
             let rest = rest.strip_prefix('=').unwrap_or(rest);
             match rest {
-                "" => values.extend(it.next().map(String::as_str)),
+                "" => values.extend(it.next()),
                 v => values.push(v),
             }
         } else if !a.starts_with(['-', '+']) {
-            words.push((a.as_str(), was));
+            words.push((a, was));
         } else {
             after_option = true;
         }
@@ -875,13 +885,13 @@ fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a st
 }
 
 /// Whether an argument of cargo, npm, pnpm, yarn or bun comes from an expansion the guard can't read, other than the
-/// attached value of an option that names no folder (`--filter=$PKG`) or the script after `run`. A separate value
-/// (`npm --tag $K`) may be an option itself.
-fn hidden_arg(args: &[String]) -> bool {
+/// attached value of an option that names no folder (`--filter=$PKG`; npm, yarn and bun read a value that starts with `-`
+/// as an option: `npm --tag=$K`) or the script after `run`. A separate value (`npm --tag $K`) may be an option itself.
+fn hidden_arg(tool: &str, args: &[String]) -> bool {
     const VALUED: &[&str] = &["--filter", "-F", "-p", "--package", "--workspace", "-w", "--features", "--bin", "--example", "--test", "--bench", "--target", "--profile", "--loglevel", "--reporter", "--registry", "--tag", "--jobs", "-j", "--color"];
     args.iter().enumerate().any(|(i, a)| {
         let run = i > 0 && matches!(args[i - 1].as_str(), "run" | "run-script") && args[..i - 1].iter().all(|b| b.starts_with('-'));
-        folder_expands(a) && !run && !a.split_once('=').is_some_and(|(o, _)| VALUED.contains(&o))
+        folder_expands(a) && !run && !(matches!(tool, "cargo" | "pnpm") && a.split_once('=').is_some_and(|(o, _)| VALUED.contains(&o)))
     })
 }
 
@@ -3035,6 +3045,13 @@ mod tests {
             "K=--manifest-path=/nowhere/dev/loft/Cargo.toml; cargo build $K",
             "cd /nowhere/dev/loft && npm install $PKG",
             "cd /nowhere/dev/loft && cargo test $NAME",
+            "K=--prefix=/nowhere/dev/loft; npm --tag=$K install",
+            "K=--prefix=/nowhere/dev/loft; npm -p=$K install",
+            "K=--prefix=/nowhere/dev/loft; npm install --tag=$K",
+            "npm --tag=--prefix=/nowhere/dev/loft install",
+            "npm -p=--prefix=/nowhere/dev/loft install",
+            "npm install --tag=--prefix=/nowhere/dev/loft",
+            "npm --tag=-C=/nowhere/dev/loft install",
             "cd /nowhere/dev/loft && pnpm --filter $PKG test",
             "cd /nowhere/dev/loft && cargo test -p $CRATE",
             "PKG=pnpm; cd /nowhere/dev/loft && $PKG install",
