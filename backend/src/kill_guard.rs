@@ -2713,7 +2713,7 @@ mod tests {
             format!("f cd() {{ :; }}; cd {w}; pnpm install"),
             format!("functions[cd]=':'; cd {w}; pnpm install"),
             format!("autoload cd; cd {w}; pnpm install"),
-            format!("autoload -Uz popd; popd; pnpm install"),
+            "autoload -Uz popd; popd; pnpm install".to_string(),
             format!("always cd {w}; pnpm install"),
             format!("disable cd; cd {w}; pnpm install"),
             format!("disable -r cd; cd {w} && pnpm install"),
