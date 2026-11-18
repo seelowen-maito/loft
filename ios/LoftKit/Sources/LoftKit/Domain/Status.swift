@@ -15,10 +15,14 @@ public enum AgentState: String, CaseIterable, Hashable {
             self = .waitingApproval
             return
         }
+        // Working comes from the live run: a saved "running" without one is stale.
+        if agent.running == true {
+            self = .working
+            return
+        }
         switch agent.status {
-        case "running": self = .working
-        case "error": self = agent.running == true ? .working : .failed
-        case "idle": self = agent.running == true ? .working : .idle
+        case "error": self = .failed
+        case "idle", "running": self = .idle
         default: self = .unknown
         }
     }
