@@ -159,6 +159,8 @@ struct Dirs {
     goes_on: bool,
     /// An earlier `ln`, `mv`, `cp` or `rm` names a path the guard can't tell (`"$LOCK"`).
     unreadable: bool,
+    /// A function named `cd`, `pushd`, `popd` or `chdir` was defined, or `disable` ran: a `cd` may not be the builtin.
+    shadowed: bool,
     /// The shell has `cd`'d (or `pushd`/`popd`'d) since the command began.
     moved: bool,
     /// GIT_DIR or GIT_WORK_TREE appears somewhere in the command so far (in any word, assigned, exported, unset or
@@ -499,7 +501,14 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             dirs.moved = true;
         }
         // Another program's `cd` doesn't move the shell, for the commands after it too.
-        let foreign = matches!(name, "cd" | "chdir" | "pushd" | "popd") && !shell_builtin(&all[..all.len() - words.len()], &cmds[i].quoted, &words[0]);
+        let family = |n: &str| matches!(base(n), "cd" | "chdir" | "pushd" | "popd");
+        let defines = (cmds[i].defines && all.first().is_some_and(|n| family(n))) || (all.first().is_some_and(|f| f == "function") && all[1..].iter().take_while(|n| !KEYWORDS.contains(&n.as_str())).any(|n| family(n)));
+        dirs.shadowed |= defines || name == "disable";
+        // `cd() { ... }` isn't a `cd`.
+        if cmds[i].defines && defines {
+            continue;
+        }
+        let foreign = matches!(name, "cd" | "chdir" | "pushd" | "popd") && (dirs.shadowed || !shell_builtin(&all[..all.len() - words.len()], &cmds[i].quoted, &words[0]));
         dirs.goes_on |= foreign;
         let maybe = cmds[i].maybe || cmds[i].piped || foreign;
         let before: Vec<PathBuf> = dirs.alts.iter().cloned().chain(dirs.cwd.clone()).collect();
@@ -1441,20 +1450,36 @@ fn command_position(words: &[String], quoted: &[bool]) -> bool {
 }
 
 /// Whether a `cd`, `pushd` or `popd` is the shell's own: what `unwrap` peeled off before it (`prefix`, with `quoted` for each
-/// word) is only assignments, keywords, `time`, `builtin`, `noglob`, `nocorrect` and a `function`'s names, and its name
-/// (`name`, as written) isn't a path. Another program's `cd` (`env cd x`, `/usr/bin/cd x`, `"time" cd x`) succeeds
-/// and the shell stays where it was.
+/// word) is, in this order, unquoted keywords, `time` and `!` (and a `function`'s names), then unquoted assignments to
+/// valid names, then at most one of `builtin`, `noglob`, `nocorrect` and `-`; and its name (`name`, as written) isn't a
+/// path. Another program's `cd` (`env cd x`, `/usr/bin/cd x`, `"time" cd x`) succeeds and the shell stays where it was.
 fn shell_builtin(prefix: &[String], quoted: &[bool], name: &str) -> bool {
-    let mut names = false;
-    !name.contains('/')
-        && prefix.iter().zip(quoted).all(|(w, &q)| {
-            if assignment(w).is_some() {
-                return true;
+    if name.contains('/') {
+        return false;
+    }
+    // 0: keywords, 1: assignments, 2: a modifier.
+    let (mut phase, mut names, mut timed) = (0, false, false);
+    for (w, &q) in prefix.iter().zip(quoted) {
+        if names {
+            if q || !KEYWORDS.contains(&w.as_str()) {
+                continue;
             }
-            let own = !q && (KEYWORDS.contains(&w.as_str()) || matches!(w.as_str(), "time" | "builtin" | "noglob" | "nocorrect" | "function"));
-            names = if w == "function" { true } else { names && !own };
-            own || names
-        })
+            names = false;
+        }
+        let keyword = !q && (KEYWORDS.contains(&w.as_str()) || matches!(w.as_str(), "time" | "function"));
+        let assign = !q && assignment(w).is_some_and(|k| !k.starts_with(|c: char| c.is_ascii_digit()));
+        let modifier = !q && matches!(w.as_str(), "builtin" | "noglob" | "nocorrect" | "-");
+        if keyword && phase == 0 && !(w == "time" && std::mem::replace(&mut timed, true)) {
+            names = w == "function";
+        } else if assign && phase <= 1 {
+            phase = 1;
+        } else if modifier && phase < 2 {
+            phase = 2;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 /// What a simple command runs once its wrappers are peeled off.
@@ -1503,7 +1528,7 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             "arch" => &["-arch", "-e", "-d"],
             "watch" => &["-n", "--interval"],
             "script" => &["-t", "-T", "-E", "-I", "-O", "-B"],
-            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" | "noglob" | "nocorrect" => &[],
+            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" | "noglob" | "nocorrect" | "-" => &[],
             _ => return Run::Words(rest(i)),
         };
         *bypass |= matches!(name, "sudo" | "doas" | "command" | "builtin");
@@ -1571,6 +1596,8 @@ struct Cmd {
     maybe: bool,
     /// A `||` came before it in its list (`a || cd x && b`: `b` runs when the `cd` didn't).
     or: bool,
+    /// `NAME()` follows it: it is a function's name.
+    defines: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1946,6 +1973,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 // `()` after a name, or alone (zsh): a function whose body follows.
                 if c[..i - 1].iter().rev().find(|ch| !matches!(ch, ' ' | '\t')) == Some(&'(') {
                     l.func_next = true;
+                    if let Some(c) = p.cmds.last_mut().filter(|c| c.words.len() == 1) {
+                        c.defines = true;
+                    }
                 }
                 if l.frames.len() > 1 {
                     l.frames.pop();
@@ -2649,6 +2679,24 @@ mod tests {
             format!("if false; \"then\" cd {w}; fi && pnpm install"),
             format!("env pushd {w} && pnpm install"),
             format!("pushd {u}; env popd && pnpm install"),
+            // Prefix words in any other order are a command of their own.
+            format!("noglob time cd {w}; pnpm install"),
+            format!("noglob ! cd {w}; pnpm install"),
+            format!("noglob FOO=1 cd {w}; pnpm install"),
+            format!("noglob nocorrect cd {w}; pnpm install"),
+            format!("builtin time cd {w}; pnpm install"),
+            format!("builtin FOO=1 cd {w}; pnpm install"),
+            format!("time time cd {w}; pnpm install"),
+            format!("\"FOO=1\" cd {w}; pnpm install"),
+            format!("FOO\\=1 cd {w}; pnpm install"),
+            format!("1FOO=1 cd {w}; pnpm install"),
+            // A `cd` redefined, or disabled.
+            format!("cd() {{ :; }}; cd {w}; pnpm install"),
+            format!("function cd {{ :; }}; cd {w}; pnpm install"),
+            format!("function cd {{ :; }}; pushd {w}; pnpm install"),
+            format!("pushd() {{ :; }}; pushd {w}; pnpm install"),
+            format!("disable cd; cd {w}; pnpm install"),
+            format!("disable -r cd; cd {w} && pnpm install"),
             // zsh `always`: its block goes on with the group before it.
             format!("{{ cd {w} }} always {{ true }} | cat; pnpm install"),
             format!("{{ cd {w} }} always {{ true }} & pnpm install"),
@@ -2669,6 +2717,8 @@ mod tests {
             format!("case x; echo in; git -C {u} reset --hard"),
             format!("function f g {{ cd {u}; }}; f; pnpm install"),
             format!("function f g h {{ cd {u}; }}; pnpm install"),
+            // zsh's `-` precommand modifier before a plain command.
+            format!("- cd {u}; pnpm install"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
@@ -2693,6 +2743,11 @@ mod tests {
             "f() { cd backend; cargo test; }; f".to_string(),
             "function f g { cd backend; cargo test; }; f".to_string(),
             "builtin cd backend && cargo test".to_string(),
+            "- cd backend && cargo test".to_string(),
+            "time ! cd backend || cargo test".to_string(),
+            "FOO=1 BAR=2 builtin cd backend && cargo test".to_string(),
+            "noglob cd backend && cargo test".to_string(),
+            "cd backend; cd() { :; }".to_string(),
             "noglob cd backend && cargo test".to_string(),
             "nocorrect cd backend && cargo test".to_string(),
             "time cd backend && cargo test".to_string(),
