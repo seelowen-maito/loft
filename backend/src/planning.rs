@@ -7191,6 +7191,22 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_lead_that_planned_the_spec_is_woken_once_when_it_is_done() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/done-planner-lead";
+        let (dev, _) = building_both(&st, &fake, "done-planner-lead", &[]).await;
+        let mut lead = planner_of(&st, slug);
+        (lead.project, lead.role) = ("done-planner-lead".into(), "lead".into());
+        st.db.save_agent(&lead).unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Builder" })).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let done = woken(&st, &lead).iter().filter(|w| w.contains("is done.")).count();
+        assert_eq!(done, 1);
+    }
+
+    #[tokio::test]
     async fn with_the_planner_gone_the_teams_lead_is_woken_and_with_neither_nobody() {
         for (name, lead) in [("done-lead", true), ("done-nobody", false)] {
             let st = state();
