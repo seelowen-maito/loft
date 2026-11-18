@@ -468,7 +468,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             continue;
         };
         // `env $NAME=x cmd`, `env $ASSIGNMENT cmd`: env sets whatever the expansion says, so what runs is unknown.
-        if expands(name) && all[..all.len() - words.len()].iter().any(|w| base(w) == "env") {
+        let guarded = |a: &String| matches!(base(a), "git" | "cargo" | "npm" | "pnpm" | "yarn" | "bun" | "xcodebuild");
+        if expands(name) && (all[..all.len() - words.len()].iter().any(|w| base(w) == "env") || args.iter().any(guarded)) {
             out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
             dirs.made = true;
             continue;
@@ -769,6 +770,12 @@ fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
         let name = w.split('=').next().unwrap_or(w);
         w.starts_with("GIT_DIR") || w.starts_with("GIT_WORK_TREE") || w.contains("GIT_DIR=") || w.contains("GIT_WORK_TREE=") || (name.starts_with("GIT_") && name.contains(['$', '*', '?', '[', '{'])) || name.contains("${!GIT")
     };
+    // A name from an expansion that `read`, `export`, `declare`... sets (`read $G`, `export $G`), or zsh's `${(P)G::=x}`.
+    let sets = words.iter().any(|w| matches!(w.as_str(), "read" | "export" | "declare" | "typeset" | "readonly" | "local" | "vared"))
+        && words.iter().any(|w| w.starts_with('$'));
+    if sets || words.iter().any(|w| w.contains("${(P)")) {
+        return true;
+    }
     let shell = words.iter().any(|w| matches!(base(w), "eval" | "sh" | "bash" | "zsh" | "dash" | "ksh"));
     words.iter().chain(targets).any(|w| hit(w) || (shell && named(w))) || (shell && named(stdin))
 }
@@ -777,6 +784,7 @@ fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
 fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String], dirs: &mut Dirs) -> Vec<PathBuf> {
     match name {
         "git" => git_changes(dirs, vars, args, live),
+        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_option(args) => unknown_in(dirs, None),
         "cargo" => match flags(args, &["--manifest-path"], CARGO_CHANGES) {
             (manifests, Some(s)) if CARGO_CHANGES.contains(&s) => match manifests[..] {
                 [] => dirs.cwd.clone().into_iter().collect(),
@@ -855,6 +863,13 @@ fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a st
     }
     let sub = words.iter().find(|w| !w.1 || subs.contains(&w.0)).or(words.first()).map(|w| w.0);
     (values, sub)
+}
+
+/// Whether a word up to the first that isn't an option (a tool's folder option or subcommand) comes from an expansion
+/// (`npm $K install` with `K=--prefix=x`): the guard can't tell what it is.
+fn hidden_option(args: &[String]) -> bool {
+    let end = args.iter().position(|a| !a.starts_with(['-', '+'])).map_or(args.len(), |p| p + 1);
+    args[..end].iter().any(|a| expands(a))
 }
 
 /// Git's own subcommands. Anything else may be an alias, which can run any shell command (`!…`).
@@ -951,6 +966,10 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         let Some((a, _)) = args.get(i) else { return vec![] };
         i += 1;
         let a = a.as_str();
+        // An option or subcommand from an expansion (`git $K checkout .`) may be any of them.
+        if expands(a) {
+            return unknown_in(&dirs, None);
+        }
         let value = |o: &str| a.strip_prefix(o).and_then(|r| r.strip_prefix('='));
         let takes_value = matches!(a, "-C" | "--work-tree" | "--git-dir" | "-c" | "--namespace" | "--config-env" | "--super-prefix");
         // A variable or a substitution in a folder option: the shell tells git where, the guard can't.
@@ -2977,6 +2996,15 @@ mod tests {
             "npm --prefi=/nowhere/dev/loft install",
             "npm -C . -C /nowhere/dev/loft install",
             "npm --prefix . -C /nowhere/dev/loft install",
+            // A word that names an option, the command or a variable comes from an expansion.
+            "K=--work-tree=/nowhere/dev/loft; git $K checkout .",
+            "K=-c; git $K core.worktree=/nowhere/dev/loft checkout .",
+            "K=--prefix=/nowhere/dev/loft; npm $K install",
+            "K=-C; pnpm $K /nowhere/dev/loft install",
+            "E=env; G=GIT_DIR; $E $G=/nowhere/dev/loft/.git git reset --hard",
+            "G=GIT_DIR; read $G <<< /nowhere/dev/loft/.git; export $G; git reset --hard",
+            "G=GIT_DIR; : ${(P)G::=/nowhere/dev/loft/.git}; export $G; git reset --hard",
+            "G=GIT_DIR; export $G=/nowhere/dev/loft/.git; git reset --hard",
         ] {
             for cwd in [CLONE, WORKSPACE] {
                 assert!(!asks_all(cmd, cwd).is_empty(), "should ask in {cwd}: {cmd}");
