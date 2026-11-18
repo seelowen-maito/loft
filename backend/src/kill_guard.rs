@@ -844,9 +844,13 @@ fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a st
         let long = |o: &&str| o.starts_with("--") && name.len() > 2 && o.starts_with(name);
         let short = |o: &&str| !o.starts_with("--") && a.starts_with('-') && !a.starts_with("--") && a[1..].contains(&o[1..]);
         if options.iter().any(|o| long(o)) {
+            // npm ignores an ambiguous prefix (`--pre`, `--pre=x`): the folder may be the current one.
+            if !options.contains(&name) {
+                values.push(".");
+            }
             match a.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
                 Some(v) => values.push(v),
-                // npm ignores an ambiguous prefix (`--pre`): the next word may be a value or the subcommand, so it's both.
+                // The next word may be a value or the subcommand, so it's both.
                 None if !options.contains(&name) => {
                     values.extend(it.clone().next().map(String::as_str));
                     after_option = true;
@@ -3004,6 +3008,8 @@ mod tests {
             "cd /nowhere/dev/loft && npm --pre install lodash",
             "cd /nowhere/dev/loft && npm --pr ci",
             "cd /nowhere/dev/loft && npm --pre install",
+            "cd /nowhere/dev/loft && npm --pre=/nowhere/dev/loft/agent-local-storage/abc/loft install",
+            "cd /nowhere/dev/loft && npm --pref=/nowhere/dev/loft/agent-local-storage/abc/loft ci",
             "cd /nowhere/dev/loft && cargo --m build",
             // A word that names an option, the command or a variable comes from an expansion.
             "K=--work-tree=/nowhere/dev/loft; git $K checkout .",
