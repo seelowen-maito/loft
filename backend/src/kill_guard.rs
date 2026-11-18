@@ -146,6 +146,11 @@ struct Dirs {
     /// What earlier `ln`, `mv`, `cp`, `rm` and the like of this command name, as written and with links followed: a folder
     /// among them (or below one) may be swapped for a link before git runs.
     touched: Vec<PathBuf>,
+    /// What earlier `rm`, `rmdir`, `unlink` and the source of `mv` name, as written and with links followed: a `cd` through
+    /// one and up (`gone/..`) fails.
+    removed: Vec<PathBuf>,
+    /// What earlier `mkdir` and `cargo new` of this command make: a `cd` into one works.
+    created: Vec<PathBuf>,
     /// An earlier `ln`, `mv`, `cp` or `rm` names a path the guard can't tell (`"$LOCK"`).
     unreadable: bool,
     /// The shell has `cd`'d (or `pushd`/`popd`'d) since the command began.
@@ -217,12 +222,16 @@ impl Dirs {
     /// Whether `path` goes through a folder an earlier `ln`, `mv` or `cp` names and then up (`t/..`): the link isn't
     /// there yet, so the guard folds the `..` back to where `t` sits, while the shell lands beside what it points at.
     fn passes(&self, path: &str) -> bool {
+        self.passes_in(path, &self.touched)
+    }
+
+    fn passes_in(&self, path: &str, folders: &[PathBuf]) -> bool {
         let parts: Vec<&str> = path.split('/').collect();
         // Each `..`, with what is before it folded as text (`real/../t/..` goes up from `t`; a first `..` from the folder
         // the shell is in).
         (0..parts.len()).filter(|&u| parts[u] == "..").any(|u| {
             let before = if u == 0 { ".".to_string() } else { parts[..u].join("/") };
-            self.at_text(&before).is_some_and(|p| self.touched.iter().any(|t| p.starts_with(t) || real(p.clone()).starts_with(t)))
+            self.at_text(&before).is_some_and(|p| folders.iter().any(|t| p.starts_with(t) || real(p.clone()).starts_with(t)))
         })
     }
 
@@ -251,6 +260,8 @@ impl Dirs {
         self.unreadable |= inner.unreadable;
         self.git_env |= inner.git_env;
         self.touched.extend(inner.touched.iter().cloned());
+        self.removed.extend(inner.removed.iter().cloned());
+        self.created.extend(inner.created.iter().cloned());
     }
 
     /// `cd` to a glob or braces: the folder the literal part names, with the topmost checkout around as another place.
@@ -284,7 +295,7 @@ impl Dirs {
         // The path as written counts too: `nope/..` folds to a folder that is there, but the shell refuses it.
         let raw = self.written(dir);
         // So does one through a folder an earlier `rm` or `mv` of the command names and then up (`gone/..`).
-        if self.passes(dir) || [to.as_ref(), raw.as_ref()].into_iter().flatten().any(|t| missing(t) && !self.touched.iter().any(|m| t.starts_with(m))) {
+        if self.passes_in(dir, &self.removed) || [to.as_ref(), raw.as_ref()].into_iter().flatten().any(|t| missing(t) && !self.touched.iter().chain(&self.created).any(|m| t.starts_with(m))) {
             self.popped = true;
             for a in self.alts.iter().cloned().chain(self.cwd.clone()) {
                 if !alts.contains(&a) {
@@ -402,12 +413,29 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     }
                 }
             }
+            for a in &paths {
+                let gone = matches!(tool, "rm" | "rmdir" | "unlink") || (tool == "mv" && dest.is_none_or(|d| d != a.as_str()));
+                if let Some(p) = dirs.at_text(a).filter(|_| gone) {
+                    dirs.removed.extend([real(p.clone()), p]);
+                }
+            }
             for a in paths {
                 match dirs.at_text(a) {
                     Some(p) if copies && !links && !git && dest.is_some_and(|d| d == a) && here(&p) => {}
                     Some(p) => dirs.touched.extend([real(p.clone()), p]),
                     None => dirs.unreadable = true,
                 }
+            }
+        }
+        // A folder these make is there for a `cd` after them.
+        let makes = match (tool, args.first().map(String::as_str)) {
+            ("mkdir", _) => args.iter().filter(|a| !a.starts_with('-')).collect(),
+            ("cargo", Some("new" | "init")) => args[1..].iter().filter(|a| !a.starts_with('-')).take(1).collect(),
+            _ => vec![],
+        };
+        for a in makes {
+            if let Some(p) = dirs.at_text(a) {
+                dirs.created.push(p);
             }
         }
         let moved = dirs.moved;
@@ -2459,6 +2487,12 @@ mod tests {
         // autopushd: the popd goes back to where the command began or to the folder a cd left; both are asked about.
         assert!(asks_all("cd loft; cd /tmp; popd; git stash", &at(&ws)).contains(&project));
         assert_eq!(in_storage_at("cd -; git checkout main", &clone), Vec::<PathBuf>::new());
+        // A folder the command makes and leaves again is no failed cd: these ran on main and still run.
+        for cmd in ["mkdir -p out && cd out && cd .. && git add -A", "cargo new foo && cd foo; cargo build; cd ..; git add -A"] {
+            assert_eq!(in_storage_at(cmd, &clone), Vec::<PathBuf>::new(), "should run: {cmd}");
+            std::fs::create_dir_all(clone.join("backend")).unwrap();
+            assert_eq!(in_storage_at(cmd, &clone.join("backend")), Vec::<PathBuf>::new(), "should run in backend/: {cmd}");
+        }
         // A cd that fails in the agent's own clone stays in it; from the workspace it may stay in the checkout around.
         assert_eq!(in_storage_at("cd nope; git checkout main", &clone), Vec::<PathBuf>::new());
         assert_eq!(asks("cd nope; git checkout main", &at(&ws)), Some(project.clone()));
