@@ -555,7 +555,7 @@ You are **{name}** ({role}), an autonomous agent living inside Loft — the user
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review while that clone exists; if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first and carry on. Never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
-- Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first.
+- Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first, in a command of its own: run git on the new clone in the next command, not in the same one (`git clone x t && git -C t …` asks the user, because the guard can't know yet what the clone brought).
 - Write git commands with the literal absolute path: no shell variables, `cd` chains or `$(…)` in them.
 - Before each new branch, `git fetch origin` and create it from the remote: `git switch -c <branch> origin/<base>`, where `<base>` is the branch named in the ticket's `## Branch` section, or otherwise the default branch (`origin/HEAD`, whether it's `main` or `master`). Before each build or review round, `git fetch origin` and `git pull --ff-only` on your branch. Never build a ticket on a local default branch you haven't fetched.
 - Before you submit a ticket, mark a PR ready or start a review round, `git fetch origin` and `git merge origin/<base>` into your branch (merge, not rebase, so nobody force-pushes), resolve any conflicts, re-run the tests, then push. Loft refuses a submission whose branch is behind its base.
@@ -655,6 +655,10 @@ pub fn enqueue(state: &AppState, agent_id: &str, text: Option<String>, trigger: 
 pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str) -> Option<Message> {
     let prompt = text.as_ref().map(|t| {
         let p = crate::uploads::prompt(t, &meta);
+        let p = match crate::reply::prompt_block(state, agent_id, &meta) {
+            Some(q) => format!("{q}\n\n{p}"),
+            None => p,
+        };
         let refs: Vec<String> = meta["task_refs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         let p = if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) };
         // A task that is both attached and tagged is described once, by its reference header.
@@ -1276,8 +1280,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
         // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
         .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
-        // Workspaces live inside the user's checkout: git in a workspace with no clone stops here instead of finding it.
-        // Git ignores a relative ceiling.
+        // Workspaces live outside any repo (ADR 0005), but a home folder can be one: git in a workspace with no clone
+        // stops here instead of finding it. Git ignores a relative ceiling.
         .env("GIT_CEILING_DIRECTORIES", std::path::absolute(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone()))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
@@ -2015,9 +2019,9 @@ pub(crate) mod tests {
         let cmd = build_command(&st, &a, false).unwrap();
         let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap().to_owned();
         assert_eq!(ceiling, st.cfg.storage_dir.as_os_str());
-        // The storage folder sits in a checkout, as agent-local-storage does in the user's loft checkout.
+        // The storage folder sits in a repo, as it would in a home folder kept in git.
         let git = |dir: &Path, args: &[&str]| std::process::Command::new("git").args(args).current_dir(dir).env("GIT_CEILING_DIRECTORIES", &ceiling).output().unwrap();
-        let checkout = st.cfg.storage_dir.parent().unwrap();
+        let checkout = st.cfg.root.as_path();
         assert!(git(checkout, &["init", "-q"]).status.success());
         let ws = workspace(&st, &a.id);
         std::fs::create_dir_all(ws.join("repo")).unwrap();
@@ -2034,7 +2038,7 @@ pub(crate) mod tests {
     fn a_relative_storage_folder_still_gives_git_an_absolute_ceiling() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
-        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() };
+        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone(), root: st.cfg.root.clone() };
         let st = AppState { cfg: std::sync::Arc::new(cfg), ..st };
         let cmd = build_command(&st, &a, false).unwrap();
         let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap();
@@ -2301,7 +2305,7 @@ esac
 
     pub(crate) fn fake_claude_state() -> (AppState, Agent) {
         let mut st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let bin = dir.join("fake-claude");
         std::fs::write(&bin, FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -3118,7 +3122,7 @@ esac
     #[test]
     fn at_paths_start_at_the_projects_folder_when_there_is_one() {
         let st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let projects = dir.join("projects");
         std::fs::create_dir_all(projects.join("work/notes")).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();

@@ -225,16 +225,18 @@
       <div class="copytext">
         <div class="eyebrow">05 · Lean</div>
         <h3>Lean by design.</h3>
-        <p>Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in one folder.</p>
+        <p>Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in two folders.</p>
         <ul>
           <li>Your own agent settings, hooks and MCP servers stay yours</li>
           <li>No loft account and no cloud service to sign up for</li>
-          <li>Delete one folder and it's gone</li>
+          <li>Delete two folders and it's gone</li>
         </ul>
       </div>
       <div class="card" aria-hidden="true">
         <div class="tree"><span class="d">loft/</span>
-├── <span class="a">.loft/</span>                <span class="c"># settings, chats, memory</span>
+└── <span class="a">.loft/</span>                <span class="c"># settings, chats, memory</span>
+
+<span class="d">~/.local/share/loft/</span>
 └── <span class="a">agent-local-storage/</span>
     ├── <span class="d">reviewer/</span>         <span class="c"># its own clone</span>
     ├── <span class="d">builder/</span>

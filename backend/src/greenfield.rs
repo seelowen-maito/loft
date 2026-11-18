@@ -520,7 +520,7 @@ mod tests {
 
     /// An empty bare repo standing in for the one GitHub creates: its path is the clone URL.
     fn remote(st: &AppState, name: &str) -> PathBuf {
-        let r = st.cfg.storage_dir.parent().unwrap().join("remotes").join(format!("{name}.git"));
+        let r = st.cfg.root.as_path().join("remotes").join(format!("{name}.git"));
         std::fs::create_dir_all(&r).unwrap();
         git(&r, &["init", "-q", "--bare"]);
         r
@@ -680,7 +680,7 @@ mod tests {
         let fake = own_fake(&st);
         owners_on(&fake);
         let (a, dir) = new_project(&st, "gf-retry", &[("main.py", "print(1)\n")]);
-        let gone = st.cfg.storage_dir.parent().unwrap().join("remotes").join("missing.git");
+        let gone = st.cfg.root.as_path().join("remotes").join("missing.git");
         fake.route("POST", "/orgs/members-only/repos", 201, json!({ "clone_url": gone, "html_url": "https://github.com/members-only/gf-retry" }));
         let qid = ask(&st, &a, Some("Sim, privado em members-only"), true);
 

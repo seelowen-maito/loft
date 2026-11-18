@@ -31,6 +31,7 @@ mod processes;
 mod prs;
 mod push;
 mod signin;
+mod reply;
 mod repos;
 mod schedule;
 mod sessions;
@@ -39,6 +40,7 @@ mod setup;
 mod signing;
 mod simulator;
 mod state;
+mod storage;
 mod sweep;
 mod system;
 mod tailnet;
@@ -211,19 +213,26 @@ async fn serve() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf());
     let data_dir = root.join(".loft");
+    std::fs::create_dir_all(&data_dir)?;
+    let db = db::Db::open(&data_dir.join("loft.db"))?;
+    // Agents' workspaces live outside any repo (ADR 0005); an older install's move out of the checkout, before any run.
+    let chosen = storage::chosen(&root, &data_dir, storage::data_home)?;
+    let settings = settings::Store::load(&data_dir)?;
+    let projects_dir = settings.boot().projects_dir.clone();
+    let (storage_dir, not_moved) = storage::migrate(&root.join(storage::NAME), &chosen, &root, &projects_dir, &data_dir, &db, &sessions::claude_dir().join("projects"))?;
     let cfg = Config {
         port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
-        storage_dir: root.join("agent-local-storage"),
+        root: root.clone(),
+        storage_dir,
         xcrun: "xcrun".into(),
         xcode: state::XcodeLookup::system(),
     };
     std::fs::create_dir_all(&cfg.storage_dir)?;
-    std::fs::create_dir_all(&data_dir)?;
     agents::remove_old_agent_files(&cfg.storage_dir);
 
     let (events, _) = broadcast::channel(1024);
     let state = AppState {
-        db: db::Db::open(&data_dir.join("loft.db"))?,
+        db,
         cfg: Arc::new(cfg),
         events,
         rt: Arc::new(Mutex::new(Runtime::default())),
@@ -233,7 +242,7 @@ async fn serve() -> anyhow::Result<()> {
         gh_pace: Arc::new(github::Pace::default()),
         gh_budget: Arc::new(Default::default()),
         update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
-        settings: Arc::new(settings::Store::load(&data_dir)?),
+        settings: Arc::new(settings),
         usage: Arc::new(usage::Cache::default()),
         system: Arc::new(system::Cache::default()),
         grill_locks: Arc::new(grill::Locks::default()),
@@ -244,6 +253,8 @@ async fn serve() -> anyhow::Result<()> {
         xcode: Arc::new(Default::default()),
         needs_you: Arc::new(Default::default()),
     };
+    // Needs you says why, until the move happens.
+    state.rt.lock().unwrap().workspaces_not_moved = not_moved;
     setup::ensure_loft(&state);
     {
         let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();

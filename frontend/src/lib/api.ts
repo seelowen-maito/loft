@@ -755,9 +755,12 @@ export const api = {
   workspaceSize: (id: string) => req<{ bytes: number }>("GET", `/agents/${id}/workspace-size`),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
   messages: (id: string) => req<Message[]>("GET", `/agents/${id}/messages?limit=400`),
-  /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */
-  send: (id: string, text: string, images: string[] = [], taskId?: string) =>
-    req<{ ok: boolean; queued: boolean }>("POST", `/agents/${id}/messages`, { text, images, ...(taskId ? { meta: { task_id: taskId } } : {}) }),
+  /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. `replyTo`: the id
+   * of the message in this chat it replies to, which the agent gets quoted first. */
+  send: (id: string, text: string, images: string[] = [], taskId?: string, replyTo?: number) =>
+    req<{ ok: boolean; queued: boolean }>("POST", `/agents/${id}/messages`, {
+      text, images, ...(taskId ? { meta: { task_id: taskId } } : {}), ...(replyTo != null ? { reply_to: replyTo } : {}),
+    }),
   /** "Set up the team with lofty" on an end-of-planning card: sends its setup message once. */
   sendTeamSetup: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),

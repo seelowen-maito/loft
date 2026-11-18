@@ -65,7 +65,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "host": crate::tailnet::host(),
         // Lets clients (the iOS app) tell what this server supports.
-        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes"],
+        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply"],
     }))
 }
 
@@ -119,7 +119,7 @@ pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>
     // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
     // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
     if s.backup_dir != state.settings.get().backup_dir
-        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent())
+        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), &[&state.cfg.root, &state.cfg.storage_dir])
     {
         return Err(bad(why));
     }
@@ -507,14 +507,17 @@ pub struct SendMessage {
     /// Uploads (from `POST /agents/{id}/uploads`) to send with the text.
     #[serde(default)]
     images: Vec<String>,
+    /// The id of an earlier message in this chat the user replies to: the agent gets it quoted first.
+    reply_to: Option<i64>,
 }
 
 pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>, Json(m): Json<SendMessage>) -> ApiResult<Value> {
-    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let agent = state.db.get_agent(&id)?.ok_or_else(not_found)?;
     if m.text.trim().is_empty() && m.images.is_empty() {
         return Err(bad("empty message"));
     }
     crate::uploads::validate(&state, &id, &m.images)?;
+    let reply = m.reply_to.map(|r| crate::reply::reply_meta(&state, &agent, r)).transpose()?;
     let client_id = m.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
     if let Some(c) = &client_id
         && let Some(prev) = state.db.find_client_message(&id, c)? {
@@ -526,12 +529,20 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !m.images.is_empty() {
         meta["images"] = json!(m.images);
     }
-    let agent = state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    if let Some(r) = reply {
+        meta["reply_to"] = r;
+    }
     let grill = m.meta.as_ref().and_then(|v| v.get("grill")).filter(|g| g.is_object());
     let meta = match crate::grill::on_user_message(&state, &agent, m.text.trim(), grill, meta)? {
         crate::grill::Routed::Normal(meta) => meta,
         crate::grill::Routed::Handled { message, wake } => {
             if let Some(p) = wake {
+                // A reply that starts a grill or is a grill command: the agent gets the quote first, as in chat.
+                let quote = message.as_ref().and_then(|m| crate::reply::prompt_block(&state, &id, &m.meta));
+                let p = match quote {
+                    Some(q) => format!("{q}\n\n{p}"),
+                    None => p,
+                };
                 agents::wake(&state, &id, p, "grill");
             }
             return Ok(Json(json!({ "ok": true, "queued": queued, "message": message })));
@@ -1598,7 +1609,7 @@ mod find_tests {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Dev");
         // Like agent-local-storage/ in the Loft checkout: the workspaces live in a repo that ignores them.
-        let checkout = st.cfg.storage_dir.parent().unwrap();
+        let checkout = st.cfg.root.as_path();
         std::fs::write(checkout.join(".gitignore"), "agents/\n").unwrap();
         git(checkout, &["init", "-q"]);
         let ws = crate::agents::workspace(&st, &a.id);

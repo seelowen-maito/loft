@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { DRAFT_SET, loadDraft, saveDraft, type Draft } from "./draft";
 import { isVideo } from "./video";
+import type { Quote } from "./reply";
 
 /** A pasted image (or attached video): shown at once from `preview`, sendable once uploaded (`file`). */
 export type Attachment = { key: string; preview: string; file?: string; error?: string; video?: boolean };
@@ -16,9 +17,11 @@ export function useDraft(agent: string) {
   const [text, setText] = useState(initial.text);
   const [attachments, setAttachments] = useState<Attachment[]>(() => draftImages(agent, initial.images));
   const [taskId, setTaskId] = useState<string | null>(initial.task);
+  const [reply, setReply] = useState<Quote | null>(initial.reply);
   const showDraft = (id: string, d: Draft) => {
     setText(d.text);
     setTaskId(d.task);
+    setReply(d.reply);
     setAttachments((a) => (a.forEach((x) => URL.revokeObjectURL(x.preview)), draftImages(id, d.images)));
   };
   // On a switch the new agent's Draft is swapped in before anything renders or saves,
@@ -42,8 +45,8 @@ export function useDraft(agent: string) {
   // Every change is saved as this agent's Draft; an emptied composer deletes it.
   const imageList = images.join("\n");
   useEffect(() => {
-    saveDraft(agent, { text, images: imageList ? imageList.split("\n") : [], task: taskId });
-  }, [agent, text, imageList, taskId]);
+    saveDraft(agent, { text, images: imageList ? imageList.split("\n") : [], task: taskId, reply });
+  }, [agent, text, imageList, taskId, reply]);
 
   // Another part of the page (Talk's Edit in chat) changed this agent's saved Draft: show it.
   useEffect(() => {
@@ -58,5 +61,5 @@ export function useDraft(agent: string) {
   const removeImage = (key: string) =>
     setAttachments((a) => a.filter((x) => (x.key === key ? (URL.revokeObjectURL(x.preview), false) : true)));
 
-  return { text, setText, attachments, setAttachments, images, taskId, setTaskId, putDraft, removeImage };
+  return { text, setText, attachments, setAttachments, images, taskId, setTaskId, reply, setReply, putDraft, removeImage };
 }

@@ -942,7 +942,7 @@ mod tests {
     async fn a_dev_agent_waits_for_a_direction_and_opens_the_interview() {
         let st = state();
         // The avatar run really starts: point it at a stand-in for claude that stays busy and does nothing.
-        let bin = st.cfg.storage_dir.parent().unwrap().join("idle-claude");
+        let bin = st.cfg.root.as_path().join("idle-claude");
         std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let mut set = st.settings.get();
@@ -972,7 +972,7 @@ mod tests {
     async fn a_kickoff_that_never_opens_the_interview_is_asked_again_and_its_text_stays_hidden() {
         let st = state();
         // A model that only narrates: it never posts a round.
-        let bin = st.cfg.storage_dir.parent().unwrap().join("chatty-claude");
+        let bin = st.cfg.root.as_path().join("chatty-claude");
         std::fs::write(&bin, r#"#!/bin/sh
 prompt=$(cat)
 printf '%s\n---\n' "$prompt" >> prompts.log

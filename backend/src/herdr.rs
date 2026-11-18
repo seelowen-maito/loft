@@ -26,7 +26,7 @@ use crate::state::AppState;
 const PLUGIN_ID: &str = "loft";
 
 fn root(state: &AppState) -> PathBuf {
-    state.cfg.storage_dir.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+    state.cfg.root.clone()
 }
 
 fn plugin_dir(state: &AppState) -> PathBuf {
@@ -310,6 +310,15 @@ pub async fn binary(State(state): State<AppState>, headers: axum::http::HeaderMa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_plugin_is_found_in_the_checkout_not_beside_the_workspaces() {
+        let st = crate::tasks::tests::state();
+        let elsewhere = crate::testdir::for_this_test("data").join("loft/loft-1a2b3c4d/agent-local-storage");
+        let st = AppState { cfg: std::sync::Arc::new(crate::state::Config { port: 0, root: st.cfg.root.clone(), storage_dir: elsewhere, xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() }), ..st };
+        assert_eq!(plugin_dir(&st), st.cfg.root.join("herdr"));
+        assert_eq!(crate::voice::helper(&st), st.cfg.root.join("ios/LoftKit/.build/release/loft-transcribe"));
+    }
 
     /// An empty folder for a socket, unique per test.
     fn temp() -> PathBuf {
