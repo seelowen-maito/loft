@@ -506,7 +506,11 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 return woke(w);
             }
             // The dashboard reads the message id off a queued result to show when it's delivered.
-            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref(), true) {
+            // A report on a ticket the recipient handed the sender answers that hand-over: it hands nothing back.
+            let report = ticket.as_deref().is_some_and(|t| {
+                state.db.list_messages(&from.id, 1000, None).unwrap_or_default().iter().any(|m| m.meta["from_agent"]["id"] == to.id.as_str() && m.meta["ticket"] == t)
+            });
+            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref(), !report) {
                 Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),
                 None => format!("Delivered. {} is reading it now.", to.name),
             })
@@ -1116,6 +1120,12 @@ mod tests {
         until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
         let p = &prompts(&st, &to)[0];
         assert!(p.contains("Build #12") && p.contains(&line), "{p}");
+
+        // The report back answers that hand-over: the Lead isn't asked to report back in turn.
+        message(&st, &to, json!({ "agent": from.id, "text": "#12 done: PR #13 ready", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the Lead's run", 10, || !is_running(&st, &from.id) && !prompts(&st, &from).is_empty()).await;
+        let p = &prompts(&st, &from)[0];
+        assert!(p.contains("#12 done: PR #13 ready") && !p.contains("report back"), "{p}");
 
         // A message about no ticket hands nothing over.
         message(&st, &from, json!({ "agent": to.id, "text": "Which branch?", "kind": "needs_action" })).await;
