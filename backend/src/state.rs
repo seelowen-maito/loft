@@ -12,6 +12,8 @@ use crate::repos::RepoCache;
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    /// This client's stream lagged and dropped events: it reloads its lists.
+    Resync,
     AgentUpdated { agent: serde_json::Value },
     AgentDeleted { agent_id: String },
     Message { message: serde_json::Value },
