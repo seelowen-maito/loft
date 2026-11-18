@@ -364,6 +364,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     }
                     // zsh's `cd -2`, `cd +1`: a folder of the stack, which the guard doesn't follow. After `--` it's a folder.
                     Some((d, _)) if stack_entry(d) && !after_dashes(args, i) => dirs.lose(),
+                    // A variable or a substitution: the guard can't tell where the shell lands.
+                    Some((d, _)) if expands(d) => dirs.lose(),
                     // A glob or braces: the shell may go to any folder it lists. The literal part of the path names
                     // where they start, and the checkout around stands for the rest.
                     Some((dir, true)) if hides(dir, true) => dirs.hide(dir),
@@ -385,7 +387,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                             to => dirs.cd(to.flatten()),
                         }
                     }
-                    Some((d, _)) if (stack_entry(d) || d == "-") && !after_dashes(args, i) => {
+                    Some((d, _)) if ((stack_entry(d) || d == "-") && !after_dashes(args, i)) || expands(d) => {
                         dirs.stack.push(from);
                         dirs.lose();
                     }
@@ -892,6 +894,11 @@ fn outermost_checkout(folder: &Path) -> PathBuf {
 
 /// Whether the shell turns `word` into names the guard can't list: it has a glob or braces (`{a,b}`, `{1..3}`) outside
 /// quotes (`live`, from the lexer). The ones a git word has are expanded first (`expand_args`).
+/// A folder word with a variable, a command substitution or a backtick: where it goes is known only to the shell.
+fn expands(word: &str) -> bool {
+    word.contains(['$', '`'])
+}
+
 fn hides(word: &str, live: bool) -> bool {
     let braces = word.find('{').is_some_and(|i| !word[..i].ends_with('$') && word[i..].contains('}') && (word[i..].contains(',') || word[i..].contains("..")));
     live && (word.contains(['*', '?', '[']) || braces)
@@ -1541,10 +1548,12 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                             i += 1;
                         }
                         '$' if c.get(i) == Some(&'(') => {
+                            l.word.push('$');
                             l.cmd(p);
                             i = lex(p, c, i + 1, Some(')'));
                         }
                         '`' => {
+                            l.word.push('$');
                             l.cmd(p);
                             i = lex(p, c, i, Some('`'));
                         }
@@ -1555,11 +1564,15 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             '`' if stop == Some('`') => break,
             '`' => {
                 l.in_word = true;
+                l.word.push('$');
                 l.cmd(p);
                 i = lex(p, c, i, Some('`'));
             }
             '$' | '<' | '>' if next == Some('(') => {
                 l.in_word = true;
+                if ch == '$' {
+                    l.word.push('$');
+                }
                 l.cmd(p);
                 i = lex(p, c, i + 1, Some(')'));
             }
@@ -2108,8 +2121,6 @@ mod tests {
             ("cargo --version", USER),
             ("xcodebuild -list", USER),
             ("pnpm run dev", USER),
-            // A folder the guard can't tell.
-            ("cd \"$DIR\" && git pull", CLONE),
         ] {
             assert_eq!(asks(cmd, cwd), None, "should run: {cmd} (in {cwd})");
         }
@@ -2150,6 +2161,25 @@ mod tests {
         }
         assert_eq!(asks("cd -; git pull", USER), user);
         assert_eq!(asks("cd /tmp; popd; git pull", USER), user);
+    }
+
+    #[test]
+    fn a_cd_to_a_folder_named_by_a_variable_asks() {
+        for cmd in [
+            "cd /nowhere/dev/loft && cd /nowhere/dev/loft/agent-local-storage && cd $OLDPWD && git reset --hard",
+            "D=/nowhere/dev/loft; cd $D && git reset --hard",
+            "cd \"$(git rev-parse --show-toplevel)\" && git reset --hard",
+            "cd `pwd` && git reset --hard",
+            "pushd $X && git reset --hard",
+            "cd ${D}/sub && git reset --hard",
+            "cd -P $D && git reset --hard",
+            "popd $X; git reset --hard",
+        ] {
+            assert!(!asks_all(cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in ["cd -; git pull", "cd /nowhere/dev/loft/agent-local-storage/abc/loft && git pull", "cd loft && git pull"] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
     }
 
     #[test]
@@ -2617,7 +2647,6 @@ mod tests {
             "git checkout -b feat/{x}",
             "git -C . reset --hard",
             "git -C ${HOME}/x status",
-            "cd \"$DIR\" && git pull",
         ] {
             assert_eq!(asks_all(cmd, &at(&clone)), Vec::<PathBuf>::new(), "should run: {cmd}");
         }
