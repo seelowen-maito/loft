@@ -88,7 +88,7 @@ ios/
     DesignSystem/            Colors, status badges, cards, empty states
     Features/                Overview, Agents, Tasks, Chat (incl. dictation), Settings
   LoftTests/             Unit tests
-  LoftUITests/           UI tests against fixtures
+  LoftUITests/           UI smoke tests against fixtures (and legacy UI tests, not run by default)
 ```
 
 - **One store, server-authoritative.** `LoftStore` (`@MainActor @Observable`) holds what the server last said. Every action waits for the server's answer before the UI changes. Statuses come from the server and the app doesn't invent any. Agent states are normalized to Working, Needs approval, Idle, Last run failed and Unknown, because those are the only states Loft can report. There is no pause, and no blocked state for agents (tasks can be blocked).
@@ -241,18 +241,27 @@ Small and medium widgets for the Mac desktop and the iPhone home screen: Needs y
 **Tests**
 
 ```sh
-ios/scripts/test.sh                 # build once, unit tests, then UI tests, with every test's time
-ios/scripts/test.sh --unit          # unit tests only: under a minute
+ios/scripts/test.sh                 # the unit tests (LoftKit's `swift test`, then LoftTests), with every test's time
+ios/scripts/test.sh --ui            # the iPhone's UI smoke tests
+ios/scripts/test.sh --mac-ui        # the Mac's UI smoke tests: they take over the Mac's screen
+ios/scripts/test.sh --ui-legacy     # legacy UI tests (also --mac-ui-legacy): see below
 ios/scripts/test.sh --no-build --only LoftTests/StoreTests   # rerun one class on the last build
-ios/scripts/test.sh --no-build --ui --only LoftUITests/LoftUITests/testOverview   # one UI test
+ios/scripts/test.sh --no-build --ui --only LoftUITests/LoftUITests/testChatSend   # one UI test
 cd backend && cargo test
 ```
 
-The script builds once (`build-for-testing`), runs the unit tests, and runs the UI tests only if those pass. It prints each test's time, slowest first, and flags a suite that goes over its target: 1 minute for unit tests, 2 for UI tests. Each test gets 60 s, which is the shortest limit Xcode allows. Tests run one at a time on one Simulator, never on clones. Set `SIMULATOR` to pick an already-booted device (the default is the first booted iPhone). The script never creates, boots or erases a Simulator: whoever schedules test runs owns them. Set `DERIVED_DATA` to keep builds warm, and `RESULT` to get result bundles. When `xcode-select` points at the Command Line Tools, the script finds Xcode itself, or you can set `DEVELOPER_DIR`.
+The script runs LoftKit's tests with `swift test` (no Simulator), builds once (`build-for-testing`) and runs LoftTests. UI tests run only with `--ui` or `--mac-ui`, and `testflight.sh` runs them only with `--ui`. It prints each test's time, slowest first, and flags a suite that goes over its target: 1 minute for unit tests, 2 for UI tests. Each test gets 60 s, which is the shortest limit Xcode allows. Tests run one at a time on one Simulator, never on clones. Set `SIMULATOR` to pick an already-booted device (the default is the first booted iPhone). The script never creates, boots or erases a Simulator: whoever schedules test runs owns them. Set `DERIVED_DATA` to keep builds warm, and `RESULT` to get result bundles. When `xcode-select` points at the Command Line Tools, the script finds Xcode itself, or you can set `DEVELOPER_DIR`.
 
 **Rerunning without a rebuild.** A full run builds once into `DERIVED_DATA` (default `ios/build`). As long as no code changed since, `--no-build` reuses that build and starts testing straight away, so a failing or slow test can be rerun on its own in seconds with `--only`. Rebuild (drop `--no-build`) after pulling or switching branches, or the run tests the old code. Keep the same `DERIVED_DATA` and Simulator for both runs.
 
-Rules belong in unit tests. UI tests check only that screens show and respond: each one is a single launch walking a whole journey, with `-no-animations -no-speech -no-ai` (no animations, microphone, speech recognizer or on-device model), and waits of 5 s or less.
+**A UI test only for what a unit test can't reach.** Rules, labels, counts, filters, formatting, routing and fixture data belong in unit tests on the store, the view models and the helpers (rendering a view with `ImageRenderer` is fine there). Each app keeps a small UI smoke suite for the core flows that need a real window, focus or the system:
+
+- iPhone (`LoftUITests`): launch and connect (the demo), the tabs, open an agent's chat and send, approve or deny a permission.
+- Mac (`LoftMacUITests`): launch and connect (the demo), sidebar navigation (clicks, ⌘1–⌘5, ↓), open an agent's chat and send, quick search.
+
+Run the Mac UI tests with `test.sh --mac-ui`. It builds into `ios/build`, on the Mac's own disk: a DerivedData folder on an external drive makes macOS ask whether "LoftMacUITests-Runner" may access files on a removable volume, and that prompt stops the run. Leave `DERIVED_DATA` unset, or point it at the internal disk. If every test hangs on its first query until the time limit, look at the screen: a system prompt (from UserNotificationCenter: a permission or removable-volume request) blocks the accessibility queries until someone answers it. Each Mac UI test launches Loft with `-ApplePersistenceIgnoreState YES` and opens the sidebar if an earlier run left it collapsed.
+
+A new UI test outside those flows needs a reason a unit test can't cover it. The legacy UI tests (`LoftLegacyUITests`, `LoftMacLegacyUITests`) check rules that still live inside SwiftUI views; they run only with `--ui-legacy` or `--mac-ui-legacy`, and each one goes once its logic moves out of the view and gets unit tests. Each UI test is a single launch walking one flow, with `-no-animations -no-speech -no-ai` (no animations, microphone, speech recognizer or on-device model), and waits of 5 s or less.
 
 UI tests run against an in-app fixture server (`-ui-testing`, Debug builds only), so no agents run. The backend tests use a temporary database.
 
