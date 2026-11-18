@@ -126,6 +126,8 @@ struct Dirs {
     cwd: Option<PathBuf>,
     old: Option<PathBuf>,
     stack: Vec<Option<PathBuf>>,
+    /// The folders this command's `cd`s left, each of which zsh's autopushd may have stacked.
+    left: Vec<Option<PathBuf>>,
     /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
     ceiling: Vec<PathBuf>,
     /// The storage folder Loft uses (the run's ceiling, whatever the command does to git's).
@@ -168,7 +170,20 @@ impl Dirs {
         resolve(if absolute { Path::new("/") } else { self.cwd.as_deref()? }, path, physical)
     }
 
+    /// A `popd` or bare `pushd` that finds the stack empty after a `cd`: autopushd stacked the folder some `cd` left, so
+    /// the shell is in the one where the command started or in any of those.
+    fn pop_left(&mut self) {
+        let left = std::mem::take(&mut self.left);
+        if left.contains(&None) {
+            return self.lose();
+        }
+        let start = self.start.clone();
+        self.alts = left.into_iter().flatten().filter(|f| Some(f) != start.as_ref()).take(8).collect();
+        self.cd(start);
+    }
+
     fn cd(&mut self, to: Option<PathBuf>) {
+        self.left.push(self.cwd.clone());
         self.old = std::mem::replace(&mut self.cwd, to);
     }
 
@@ -244,9 +259,18 @@ impl Dirs {
                 alts.push(p);
             }
         }
+        // A folder that isn't there (and no earlier command made) may be a `cd` that fails: the shell stays where it was.
+        if !self.made && to.as_ref().is_some_and(|t| missing(t)) {
+            alts.extend(self.cwd.clone().filter(|c| !alts.contains(c)));
+        }
         self.alts = alts;
         self.cd(to);
     }
+}
+
+/// Whether a folder isn't there, so a `cd` to it fails. (The tests' made-up `/nowhere` folders count as there.)
+fn missing(folder: &Path) -> bool {
+    !folder.is_dir() && !(cfg!(test) && folder.starts_with("/nowhere"))
 }
 
 /// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
@@ -347,6 +371,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 }
             }
         }
+        let moved = dirs.moved;
         if matches!(name, "cd" | "pushd" | "popd") {
             dirs.moved = true;
         }
@@ -383,6 +408,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                         let to = dirs.stack.pop();
                         dirs.stack.push(from);
                         match to {
+                            // zsh's autopushd stacks the folder every `cd` leaves, which the guard doesn't follow.
+                            None if moved => dirs.pop_left(),
                             Some(None) => dirs.lose(),
                             to => dirs.cd(to.flatten()),
                         }
@@ -405,9 +432,12 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             "popd" => {
                 // `popd`, `popd -q`, `popd +0`: the top folder. Another entry, or `-n`, isn't one the guard follows.
                 let (_, i) = dir_word(args);
-                let plain = !args.iter().any(|a| a == "-n") && i.is_none_or(|i| args[i] == "+0");
+                // With zsh's pushdminus `popd +0` removes the bottom entry, so it isn't the top one either.
+                let plain = !args.iter().any(|a| a == "-n") && i.is_none();
                 match dirs.stack.pop() {
                     _ if !plain => dirs.lose(),
+                    // autopushd: a `cd` of this command stacked the folder it left, which the guard doesn't follow.
+                    None if moved => dirs.pop_left(),
                     // The folder pushed was one the guard lost.
                     Some(None) => dirs.lose(),
                     Some(to) => {
@@ -2183,6 +2213,22 @@ mod tests {
     }
 
     #[test]
+    fn zsh_autopushd_and_a_failed_cd_before_a_semicolon_ask() {
+        for cmd in [
+            "cd /nowhere/dev/loft && cd /nowhere/dev/loft/agent-local-storage && popd && git reset --hard",
+            "cd /nowhere/dev/loft; cd /nowhere/dev/loft/agent-local-storage; pushd; git reset --hard",
+            "pushd /nowhere/dev/loft && pushd /tmp && popd +0 && git reset --hard",
+            "cd /nowhere/dev/loft; cd /tmp/loft-guard-no-such-folder; git reset --hard",
+            "cd /nowhere/dev/loft && cd /tmp/loft-guard-no-such-folder ; cargo build",
+        ] {
+            assert!(!asks_all(cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in ["cd /nowhere/dev/loft/agent-local-storage/abc/loft && cd src && popd && git pull", "pushd /tmp && popd && git pull", "cd nope; git pull"] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
     fn a_subshells_cd_stays_in_it() {
         let user = Some(PathBuf::from(USER));
         for cmd in ["(cd /nowhere/dev/loft); git pull", "(cd /nowhere/dev/loft && ls); git pull", "echo $(cd /nowhere/dev/loft; pwd); git pull", "x=`cd /nowhere/dev/loft`; git pull"] {
@@ -2318,10 +2364,15 @@ mod tests {
         }
         assert_eq!(in_storage("git clone --separate-git-dir ../x/mine.git /src mine"), Vec::<PathBuf>::new());
         // Before this command, the shell may have been anywhere: the workspace stands for it.
-        for cmd in ["cd -; git checkout main", "cd loft; cd /tmp; popd; git stash", "cd loft && popd && git reset --hard"] {
+        for cmd in ["cd -; git checkout main", "cd loft && popd && git reset --hard"] {
             assert_eq!(asks(cmd, &at(&ws)), Some(project.clone()), "should ask: {cmd}");
         }
+        // autopushd: the popd goes back to where the command began or to the folder a cd left; both are asked about.
+        assert!(asks_all("cd loft; cd /tmp; popd; git stash", &at(&ws)).contains(&project));
         assert_eq!(in_storage_at("cd -; git checkout main", &clone), Vec::<PathBuf>::new());
+        // A cd that fails in the agent's own clone stays in it; from the workspace it may stay in the checkout around.
+        assert_eq!(in_storage_at("cd nope; git checkout main", &clone), Vec::<PathBuf>::new());
+        assert_eq!(asks("cd nope; git checkout main", &at(&ws)), Some(project.clone()));
         // In the agent's clone, or a folder of it: its own repository.
         assert_eq!(in_storage_at("git checkout main", &clone), Vec::<PathBuf>::new());
         assert_eq!(in_storage_at("git reset --hard", &clone.join("backend")), Vec::<PathBuf>::new());
@@ -2487,14 +2538,14 @@ mod tests {
         for cmd in [
             "pushd {o} && pushd ~ && popd -q && git reset --hard", "pushd -q {o} && pushd -q .. && popd -q && cargo build", "pushd {o} && pushd ~ && popd +0 && pnpm install",
             "pushd {o} && pushd ~ && popd +1 && pnpm install", "pushd {o} && pushd ~ && popd -0 && pnpm install", "pushd {o} && pushd ~ && popd -n && pnpm install",
-            "cd {o} && cd +0 && pushd . && popd && pnpm install", "cd {o} && cd +0 && pushd sub && popd && git reset --hard", "cd {o}; cd +0; pushd .; popd; pnpm install",
+            "cd {o} && cd +0 && pushd . && popd && pnpm install", "cd {o} && cd +0 && pushd sub && popd && git reset --hard", "cd {o}; cd +0; pushd .; popd; pnpm install", "pushd {o} && pushd .. && popd +0 && pnpm install",
             // A work tree or repository named through a fresh link.
             "ln -s ../../../../other t && git --git-dir=t/.git --work-tree=t reset --hard", "ln -s ../../../../other t && git --git-dir t/.git reset --hard", "ln -s ../../../../other t && GIT_DIR=t/.git git reset --hard",
         ] {
             let cmd = cmd.replace("{o}", &o);
             assert!(!asks_all(&cmd, &at(&ws)).is_empty(), "should ask: {cmd}");
         }
-        for cmd in ["pushd loft && pushd .. && popd && popd && pnpm install", "pushd loft && popd -q && pnpm install", "pushd loft && pushd .. && popd +0 && pnpm install", "git --git-dir=loft/.git --work-tree=loft status"] {
+        for cmd in ["pushd loft && pushd .. && popd && popd && pnpm install", "pushd loft && popd -q && pnpm install", "git --git-dir=loft/.git --work-tree=loft status"] {
             assert_eq!(asks_all(cmd, &at(&ws)), Vec::<PathBuf>::new(), "should run: {cmd}");
         }
         // A stack entry is a folder the guard can't tell; a folder after `--` named like one is a folder. -P in any order.
