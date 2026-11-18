@@ -203,7 +203,7 @@ export default function NeedsYouPage() {
   useServerEvents(
     useCallback(
       (e: ServerEvent) => {
-        if (e.type === "needs_you" && idsChanged(shown.current, e.ids)) load();
+        if (e.type === "resync" || (e.type === "needs_you" && idsChanged(shown.current, e.ids))) load();
       },
       [load],
     ),

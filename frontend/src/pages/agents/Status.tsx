@@ -1,16 +1,9 @@
 import type { Agent } from "../../lib/api";
-import { NEEDS_YOU_LABEL } from "../../lib/taskStatus";
+import { statusOf } from "../../lib/agentStatus";
 import { cx } from "../../lib/format";
 import { RunTimer } from "../../components/RunTimer";
 
-export function statusOf(a: Agent): { label: string; dot: string; text: string } {
-  if (a.status === "waiting") return { label: NEEDS_YOU_LABEL, dot: "bg-warn", text: "text-warn" };
-  if (a.running && a.waiting_on?.length) return { label: "Waiting", dot: "bg-info animate-pulse-soft", text: "text-info" };
-  if (a.running || a.status === "running") return { label: "Working", dot: "bg-accent animate-pulse-soft", text: "text-accent" };
-  if (a.status === "error") return { label: "Error", dot: "bg-bad", text: "text-bad" };
-  if (a.interval_minutes > 0) return { label: "Sleeping", dot: "bg-info/70", text: "text-fg-2" };
-  return { label: "Idle", dot: "bg-fg-3", text: "text-fg-3" };
-}
+export { statusOf };
 
 /** The state label, then the status text, or with `elapsed` the run time while running instead (not on a phone: the ✻ line shows it there). */
 export function StatusPill({ agent, withText = true, elapsed = false }: { agent: Agent; withText?: boolean; elapsed?: boolean }) {
