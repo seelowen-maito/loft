@@ -44,6 +44,10 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(FocusSession(minutes: 10_000, from: start).secondsLeft(at: start), 480 * 60)
     }
 
+    func testTheSidebarShowsOnlyAgentsAndIssues() {
+        XCTAssertEqual(FocusSession.sections, [.agents, .issues])
+    }
+
     func testTheLastDurationIsRemembered() {
         XCTAssertEqual(FocusDuration.remembered(0), 25)  // nothing saved yet
         XCTAssertEqual(FocusDuration.remembered(50), 50)
@@ -53,29 +57,29 @@ final class FocusSessionTests: XCTestCase {
 }
 
 final class FocusAllowListTests: XCTestCase {
-    private let loft = "dev.loft.mac", focus = "dev.loft.mac.focus"
-    private var list: FocusAllowList { .starting(loftBundleId: loft, focusBundleId: focus) }
+    private let loft = "dev.loft.mac"
+    private var list: FocusAllowList { .starting(loftBundleId: loft) }
 
     func testItStartsWithLoftAndTheCodingTools() {
-        XCTAssertEqual(list.apps.map(\.name), ["Loft", "Loft Focus", "Xcode", "Terminal", "iTerm", "Visual Studio Code", "Cursor", "Simulator"])
+        XCTAssertEqual(list.apps.map(\.name), ["Loft", "Xcode", "Terminal", "iTerm", "Visual Studio Code", "Cursor", "Simulator"])
         XCTAssertTrue(list.allows(loft))
         XCTAssertTrue(list.allows("com.apple.dt.Xcode"))
     }
 
     func testAppsOffTheListAreHidden() {
-        XCTAssertTrue(list.hides(bundleId: "com.apple.Safari", isRegularApp: true, focusBundleId: focus))
-        XCTAssertFalse(list.hides(bundleId: "com.apple.Terminal", isRegularApp: true, focusBundleId: focus))
+        XCTAssertTrue(list.hides(bundleId: "com.apple.Safari", isRegularApp: true, loftBundleId: loft))
+        XCTAssertFalse(list.hides(bundleId: "com.apple.Terminal", isRegularApp: true, loftBundleId: loft))
     }
 
     func testBackgroundAppsAndAppsWithoutABundleIdStay() {
-        XCTAssertFalse(list.hides(bundleId: "com.example.menubar", isRegularApp: false, focusBundleId: focus))
-        XCTAssertFalse(list.hides(bundleId: nil, isRegularApp: true, focusBundleId: focus))
+        XCTAssertFalse(list.hides(bundleId: "com.example.menubar", isRegularApp: false, loftBundleId: loft))
+        XCTAssertFalse(list.hides(bundleId: nil, isRegularApp: true, loftBundleId: loft))
     }
 
-    func testLoftFocusNeverHidesItself() {
+    func testLoftNeverHidesItself() {
         var l = list
-        l.remove(focus)
-        XCTAssertFalse(l.hides(bundleId: focus, isRegularApp: true, focusBundleId: focus))
+        l.remove(loft)
+        XCTAssertFalse(l.hides(bundleId: loft, isRegularApp: true, loftBundleId: loft))
     }
 
     func testAddingAndRemovingApps() {
@@ -83,19 +87,19 @@ final class FocusAllowListTests: XCTestCase {
         l.add(FocusApp(bundleId: "com.apple.Safari", name: "Safari"))
         l.add(FocusApp(bundleId: "com.apple.Safari", name: "Safari"))
         XCTAssertEqual(l.apps.filter { $0.bundleId == "com.apple.Safari" }.count, 1)
-        XCTAssertFalse(l.hides(bundleId: "com.apple.Safari", isRegularApp: true, focusBundleId: focus))
+        XCTAssertFalse(l.hides(bundleId: "com.apple.Safari", isRegularApp: true, loftBundleId: loft))
         l.remove("com.apple.dt.Xcode")
-        XCTAssertTrue(l.hides(bundleId: "com.apple.dt.Xcode", isRegularApp: true, focusBundleId: focus))
+        XCTAssertTrue(l.hides(bundleId: "com.apple.dt.Xcode", isRegularApp: true, loftBundleId: loft))
     }
 
     func testTheListIsSavedAndLoaded() {
         var l = list
         l.remove("com.apple.Terminal")
-        XCTAssertEqual(FocusAllowList.load(l.saved, loftBundleId: loft, focusBundleId: focus), l)
+        XCTAssertEqual(FocusAllowList.load(l.saved, loftBundleId: loft), l)
         // Nothing saved, or something unreadable: the starting list.
-        XCTAssertEqual(FocusAllowList.load(nil, loftBundleId: loft, focusBundleId: focus), list)
-        XCTAssertEqual(FocusAllowList.load(Data("nope".utf8), loftBundleId: loft, focusBundleId: focus), list)
+        XCTAssertEqual(FocusAllowList.load(nil, loftBundleId: loft), list)
+        XCTAssertEqual(FocusAllowList.load(Data("nope".utf8), loftBundleId: loft), list)
         // An emptied list stays empty.
-        XCTAssertEqual(FocusAllowList.load(FocusAllowList(apps: []).saved, loftBundleId: loft, focusBundleId: focus).apps, [])
+        XCTAssertEqual(FocusAllowList.load(FocusAllowList(apps: []).saved, loftBundleId: loft).apps, [])
     }
 }

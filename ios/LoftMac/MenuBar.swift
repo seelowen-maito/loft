@@ -103,6 +103,8 @@ struct MenuBarContent: View {
                     .accessibilityIdentifier("menuResult")
             }
             Divider()
+            MenuBarFocus { show() }
+            Divider()
             Button("Open Loft") { open(section: nil) }.foregroundStyle(Theme.accent)
             Button("Quit Loft") { NSApp.terminate(nil) }.keyboardShortcut("q")
         }
@@ -153,15 +155,47 @@ struct MenuBarContent: View {
     }
 }
 
+/// The popover's Focus row: the lengths, or the time left and End.
+struct MenuBarFocus: View {
+    @Environment(FocusController.self) private var focus
+    let showWindow: () -> Void
+
+    var body: some View {
+        if let session = focus.session {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack {
+                    Label("Focus · \(session.countdown(at: context.date)) left", systemImage: "timer")
+                    Spacer()
+                    Button("End") { focus.end() }.foregroundStyle(Theme.accent).accessibilityIdentifier("menuEndFocus")
+                }
+            }
+        } else {
+            HStack(spacing: 10) {
+                Label("Focus", systemImage: "timer")
+                Spacer()
+                ForEach(FocusDuration.presets, id: \.self) { m in
+                    Button("\(m)m") { focus.start(minutes: m) }.foregroundStyle(Theme.accent).accessibilityIdentifier("menuFocus-\(m)")
+                }
+                Button("…") {
+                    showWindow()
+                    focus.picksLength = true
+                }
+                .foregroundStyle(Theme.accent)
+                .help("Another length")
+            }
+        }
+    }
+}
+
 #if DEBUG
 /// `-render-menubar <folder>`: draws the popover and the bar label to PNGs once Loft's data is in, then quits. For
 /// screenshots where nobody can click the real menu bar item.
 @MainActor
-func renderMenuBar(store: LoftStore, nav: MacNav, to folder: String) async {
+func renderMenuBar(store: LoftStore, nav: MacNav, focus: FocusController, to folder: String) async {
     for _ in 0..<100 where store.needsYou == nil { try? await Task.sleep(for: .milliseconds(100)) }
     try? await Task.sleep(for: .seconds(1))
     func png<V: View>(_ view: V, _ name: String) {
-        let host = NSHostingView(rootView: view.environment(store).environment(nav).padding(8).background(Color(nsColor: .windowBackgroundColor)))
+        let host = NSHostingView(rootView: view.environment(store).environment(nav).environment(focus).padding(8).background(Color(nsColor: .windowBackgroundColor)))
         host.frame = NSRect(origin: .zero, size: host.fittingSize)
         host.layoutSubtreeIfNeeded()
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
@@ -169,6 +203,9 @@ func renderMenuBar(store: LoftStore, nav: MacNav, to folder: String) async {
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
     }
     png(MenuBarContent(), "popover")
+    focus.start(minutes: 25)
+    png(MenuBarContent(), "popover-focus")
+    focus.end()
     png(MenuBarLabel(), "label")
     NSApp.terminate(nil)
 }

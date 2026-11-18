@@ -1,6 +1,6 @@
 import Foundation
 
-/// A Loft Focus session (#609): it runs for a chosen length, and while it runs every app off the allow list is hidden.
+/// A focus session in the Mac app (#609): it runs for a chosen length, and while it runs every app off the allow list is hidden.
 public struct FocusSession: Equatable, Sendable {
     public let startedAt: Date
     public let endsAt: Date
@@ -9,6 +9,9 @@ public struct FocusSession: Equatable, Sendable {
         startedAt = now
         endsAt = now.addingTimeInterval(TimeInterval(FocusDuration.clamp(minutes) * 60))
     }
+
+    /// The window's sections while a session runs: only Agents and Issues.
+    public static let sections: [MacSection] = [.agents, .issues]
 
     /// Whole seconds left, never below 0.
     public func secondsLeft(at now: Date) -> Int {
@@ -68,12 +71,11 @@ public struct FocusAllowList: Equatable, Sendable {
 
     public init(apps: [FocusApp]) { self.apps = apps }
 
-    /// What a new install starts with: Loft, Loft Focus and the coding tools.
-    /// - loftBundleId: the main Mac app's bundle id, which depends on the build's `LOFT_BUNDLE_ID`.
-    public static func starting(loftBundleId: String, focusBundleId: String) -> FocusAllowList {
+    /// What a new install starts with: Loft and the coding tools.
+    /// - loftBundleId: the Mac app's bundle id, which depends on the build's `LOFT_BUNDLE_ID`.
+    public static func starting(loftBundleId: String) -> FocusAllowList {
         FocusAllowList(apps: [
             FocusApp(bundleId: loftBundleId, name: "Loft"),
-            FocusApp(bundleId: focusBundleId, name: "Loft Focus"),
             FocusApp(bundleId: "com.apple.dt.Xcode", name: "Xcode"),
             FocusApp(bundleId: "com.apple.Terminal", name: "Terminal"),
             FocusApp(bundleId: "com.googlecode.iterm2", name: "iTerm"),
@@ -85,10 +87,10 @@ public struct FocusAllowList: Equatable, Sendable {
 
     public func allows(_ bundleId: String) -> Bool { apps.contains { $0.bundleId == bundleId } }
 
-    /// Whether a running app is hidden while a session runs: a regular (Dock) app that isn't on the list. Loft Focus
-    /// itself always stays, even if it was taken off the list, and an app without a bundle id is left alone.
-    public func hides(bundleId: String?, isRegularApp: Bool, focusBundleId: String) -> Bool {
-        guard isRegularApp, let bundleId, bundleId != focusBundleId else { return false }
+    /// Whether a running app is hidden while a session runs: a regular (Dock) app that isn't on the list. Loft itself
+    /// always stays, even if it was taken off the list, and an app without a bundle id is left alone.
+    public func hides(bundleId: String?, isRegularApp: Bool, loftBundleId: String) -> Bool {
+        guard isRegularApp, let bundleId, bundleId != loftBundleId else { return false }
         return !allows(bundleId)
     }
 
@@ -105,8 +107,8 @@ public struct FocusAllowList: Equatable, Sendable {
     public var saved: Data { (try? JSONEncoder().encode(apps)) ?? Data() }
 
     /// The saved list, or the starting one when nothing (or nothing readable) is saved.
-    public static func load(_ data: Data?, loftBundleId: String, focusBundleId: String) -> FocusAllowList {
+    public static func load(_ data: Data?, loftBundleId: String) -> FocusAllowList {
         if let data, let apps = try? JSONDecoder().decode([FocusApp].self, from: data) { return FocusAllowList(apps: apps) }
-        return starting(loftBundleId: loftBundleId, focusBundleId: focusBundleId)
+        return starting(loftBundleId: loftBundleId)
     }
 }

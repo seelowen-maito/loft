@@ -2,8 +2,6 @@ import CoreSpotlight
 import LoftKit
 import SwiftUI
 
-// Loft Focus (#609) compiles this folder too, with its own `@main`.
-#if !LOFT_FOCUS
 /// Loft for Mac (spec #382): the same client as the iPhone app, in Mac windows with a sidebar of sections.
 @main
 struct LoftMacApp: App {
@@ -16,6 +14,7 @@ struct LoftMacApp: App {
     @State private var voicePanel: VoicePanelController
     @State private var spotlight: MacSpotlight?
     @State private var openLoft: ShortcutBinding
+    @State private var focus: FocusController
 
     init() {
         Prefs.registerDefaults()
@@ -47,6 +46,15 @@ struct LoftMacApp: App {
             Task { await AppStoreShots.render(store: store, nav: nav, quickSearch: quickSearch, voicePanel: voicePanel, to: folder) }
         }
         #endif
+        // The PR screenshots draw a session that hides nothing.
+        let focus = FocusController(hidesApps: !ProcessInfo.processInfo.arguments.contains { $0 == "-render-window" || $0 == "-render-menubar" })
+        _focus = State(initialValue: focus)
+        MacAppDelegate.dockMenu = {
+            focus.dockMenu {
+                quickSearch.showWindow?()
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
         MacAppDelegate.openSpotlightItem = { quickSearch.open(spotlightItem: $0) }
         _spotlight = State(initialValue: Self.indexesSpotlight ? MacSpotlight(store: store) : nil)
     }
@@ -83,6 +91,7 @@ struct LoftMacApp: App {
                 .environment(store)
                 .environment(nav)
                 .environment(voice)
+                .environment(focus)
                 .frame(minWidth: 1180, minHeight: 640)
                 .onAppear { store.activate() }
                 // A tap on a widget.
@@ -105,17 +114,21 @@ struct LoftMacApp: App {
                 #if DEBUG
                 .task {
                     let args = ProcessInfo.processInfo.arguments
-                    if let i = args.firstIndex(of: "-render-menubar"), i + 1 < args.count { await renderMenuBar(store: store, nav: nav, to: args[i + 1]) }
-                    if let i = args.firstIndex(of: "-render-window"), i + 1 < args.count { await renderWindow(store: store, nav: nav, to: args[i + 1]) }
+                    if let i = args.firstIndex(of: "-render-menubar"), i + 1 < args.count { await renderMenuBar(store: store, nav: nav, focus: focus, to: args[i + 1]) }
+                    if let i = args.firstIndex(of: "-render-window"), i + 1 < args.count { await renderWindow(store: store, nav: nav, focus: focus, to: args[i + 1]) }
                 }
                 #endif
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in store.saveNow() }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    // Quitting mid-session brings the hidden apps back.
+                    focus.end()
+                    store.saveNow()
+                }
         }
         // Room for the sidebar, the agents, the chat and the agent's settings side by side.
         .defaultSize(width: 1400, height: 860)
-        .commands { LoftCommands(nav: nav) }
+        .commands { LoftCommands(nav: nav, focus: focus) }
 
-        MenuBarExtra { MenuBarContent(voicePanel: voicePanel).tint(Theme.accent).environment(store).environment(nav) } label: { MenuBarLabel(alerts: alerts, quickSearch: quickSearch, voicePanel: voicePanel).environment(store) }
+        MenuBarExtra { MenuBarContent(voicePanel: voicePanel).tint(Theme.accent).environment(store).environment(nav).environment(focus) } label: { MenuBarLabel(alerts: alerts, quickSearch: quickSearch, voicePanel: voicePanel).environment(store) }
             .menuBarExtraStyle(.window)
 
         Settings {
@@ -127,8 +140,6 @@ struct LoftMacApp: App {
         }
     }
 }
-
-#endif
 
 /// Where the window is: the section, the agent whose chat is open, the issue pages open, and the New message picker.
 @MainActor
@@ -186,6 +197,7 @@ final class MacNav {
 
 struct LoftCommands: Commands {
     let nav: MacNav
+    let focus: FocusController
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -197,11 +209,16 @@ struct LoftCommands: Commands {
             ForEach(MacSection.allCases) { s in
                 Button(s.title) { show { nav.section = s } }
                     .keyboardShortcut(KeyEquivalent(Character(String(s.rawValue))))
+                    // A focus session leaves only Agents and Issues.
+                    .disabled(focus.session != nil && !FocusSession.sections.contains(s))
             }
             Divider()
             Button("Back") { nav.issuePath.removeLast() }
                 .keyboardShortcut("[")
                 .disabled(nav.section != .issues || nav.issuePath.isEmpty)
+        }
+        CommandMenu("Focus") {
+            FocusMenuItems(focus: focus) { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         }
     }
 
@@ -296,6 +313,7 @@ struct UnreachableScreen: View {
 struct MainWindow: View {
     @Environment(LoftStore.self) private var store
     @Environment(MacNav.self) private var nav
+    @Environment(FocusController.self) private var focus
 
     /// The App Store screenshots leave the demo's banner and the sections' sidebar out.
     private static var isAppStoreShot: Bool {
@@ -305,13 +323,22 @@ struct MainWindow: View {
         false
         #endif
     }
-    @State private var columns: NavigationSplitViewVisibility = isAppStoreShot ? .detailOnly : .automatic
+    /// `-render-window` shows the sections' sidebar (Focus mode's control lives under it).
+    private static var isWindowShot: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-render-window")
+        #else
+        false
+        #endif
+    }
+    @State private var columns: NavigationSplitViewVisibility = isAppStoreShot ? .detailOnly : isWindowShot ? .all : .automatic
 
     var body: some View {
         @Bindable var nav = nav
+        @Bindable var focus = focus
         NavigationSplitView(columnVisibility: $columns) {
             List(selection: $nav.section) {
-                ForEach(MacSection.allCases) { s in
+                ForEach(focus.session == nil ? MacSection.allCases : FocusSession.sections) { s in
                     Label(s.title, systemImage: s.symbol).accessibilityIdentifier("section-\(s.title)")
                         .badge(s == .needsYou ? store.needsYou?.count ?? 0 : 0)
                         .tag(s)
@@ -323,6 +350,8 @@ struct MainWindow: View {
             .scrollContentBackground(.hidden)
             .background(WebTheme.canvas)
             .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 0) {
+                FocusSidebarControl().padding(.horizontal, 10).padding(.vertical, 8)
                 Label {
                     Text(store.connection.label).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
                 } icon: {
@@ -333,6 +362,7 @@ struct MainWindow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
                     .accessibilityIdentifier("connectionLabel")
+                }
             }
         } detail: {
             Group {
@@ -350,6 +380,11 @@ struct MainWindow: View {
         // The web's page, cards and text colours behind every section.
         .webPage()
         .sheet(isPresented: $nav.picksRecipient) { RecipientPicker() }
+        .sheet(isPresented: $focus.picksLength) { FocusLengthSheet() }
+        // A session leaves only Agents and Issues: from another section, it goes to Agents.
+        .onChange(of: focus.session == nil) {
+            if focus.session != nil, !FocusSession.sections.contains(nav.section) { nav.section = .agents }
+        }
         .onChange(of: nav.section) { keepSidebarKeyboard() }
     }
 
@@ -430,7 +465,7 @@ struct RecipientPicker: View {
 /// Settings), then quits. For screenshots when a UI test can't drive the app (another copy of it is open, and XCUITest
 /// picks that one). `-appearance light|dark|system` picks the look for this launch only, without saving it.
 @MainActor
-func renderWindow(store: LoftStore, nav: MacNav, to folder: String) async {
+func renderWindow(store: LoftStore, nav: MacNav, focus: FocusController, to folder: String) async {
     for _ in 0..<80 where store.agents.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
     try? await Task.sleep(for: .seconds(1))
     func png(_ name: String) {
@@ -463,6 +498,23 @@ func renderWindow(store: LoftStore, nav: MacNav, to folder: String) async {
         HotKeyFailures.shared.refused[LoftShortcut.openLoft.rawValue] = LoftShortcut.openLoft.refusal(MacShortcut(keyCode: MacShortcut.space, modifiers: MacShortcut.command))
         try? await Task.sleep(for: .seconds(1))
         png("settings-refused")
+        HotKeyFailures.shared.refused[LoftShortcut.openLoft.rawValue] = nil
+        // A focus session (#609; this one hides nothing): only Agents and Issues, and the time left under the sidebar.
+        nav.section = .agents
+        try? await Task.sleep(for: .seconds(1))
+        png("focus-idle")
+        focus.start(minutes: 50)
+        try? await Task.sleep(for: .seconds(3))
+        png("focus-agents")
+        nav.section = .issues
+        try? await Task.sleep(for: .seconds(2))
+        png("focus-issues")
+        let dock = ImageRenderer(content: FocusDockIcon(timeLeft: "50m").frame(width: 128, height: 128))
+        dock.scale = 2
+        if let tiff = dock.nsImage?.tiffRepresentation, let data = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try? data.write(to: URL(fileURLWithPath: folder).appendingPathComponent("focus-dock.png"))
+        }
+        focus.end()
     }
     // The menu bar item (#516) on a light and a dark bar, with and without a count.
     for dark in [false, true] {
