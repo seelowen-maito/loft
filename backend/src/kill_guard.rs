@@ -427,7 +427,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             saved.push((s, dirs.clone()));
         }
         dirs.flush(cmds[i].chain);
-        dirs.goes_on = cmds[i].piped || cmds[i].words.first().is_some_and(|w| w == "!");
+        dirs.goes_on = cmds[i].piped || cmds[i].or || cmds[i].words.first().is_some_and(|w| w == "!");
         let all = &cmds[i].words;
         // A `.git` an earlier command names (`> t/.git`, `of=t/.git`, `ln -s x .git`) matters from the next on.
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
@@ -592,6 +592,9 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     }
                 }
                 dirs.add_left(left);
+                if maybe {
+                    dirs.may_stay(before);
+                }
                 continue;
             }
             "sh" | "bash" | "zsh" | "dash" | "ksh" => {
@@ -609,6 +612,9 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 dirs.flush(usize::MAX);
                 changes(&args.join(" "), dirs, depth + 1, out);
                 dirs.flush(usize::MAX);
+                if maybe {
+                    dirs.may_stay(before);
+                }
                 dirs.made = true;
                 continue;
             }
@@ -1422,7 +1428,7 @@ fn command_position(words: &[String]) -> bool {
         [f, _, rest @ ..] if f == "function" => rest,
         _ => words,
     };
-    words.iter().all(|w| KEYWORDS.contains(&w.as_str()))
+    words.iter().all(|w| KEYWORDS.contains(&w.as_str()) || w == "time")
 }
 
 /// What a simple command runs once its wrappers are peeled off.
@@ -1467,7 +1473,7 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             "arch" => &["-arch", "-e", "-d"],
             "watch" => &["-n", "--interval"],
             "script" => &["-t", "-T", "-E", "-I", "-O", "-B"],
-            "command" | "builtin" | "nohup" | "time" | "chronic" => &[],
+            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" => &[],
             _ => return Run::Words(rest(i)),
         };
         *bypass |= matches!(name, "sudo" | "doas" | "command" | "builtin");
@@ -1497,7 +1503,7 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             }
         }
         match name {
-            "timeout" | "script" => i += 1, // the duration, the typescript file
+            "timeout" | "script" | "repeat" => i += 1, // the duration, the typescript file, the count
             "watch" => return Run::Text(rest(i).join(" "), i),
             "parallel" => return Run::Text(rest(i).iter().take_while(|w| !w.starts_with(":::")).cloned().collect::<Vec<_>>().join(" "), i),
             _ => {}
@@ -1531,6 +1537,8 @@ struct Cmd {
     /// It may not run, or not in the shell the next command runs in: it follows `&&`, `||` or `|`, sits in an `if`, a loop
     /// or a `case`, or is sent to the background with `&`. A `cd` of it may leave the shell where it was.
     maybe: bool,
+    /// A `||` came before it in its list (`a || cd x && b`: `b` runs when the `cd` didn't).
+    or: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1549,8 +1557,11 @@ struct Frame {
     place: usize,
     /// In a `case`: whether the next words are a pattern (up to its `)`).
     pattern: Option<bool>,
-    /// An `if`, a loop or a `case`: its commands may not run.
+    /// An `if`, a loop, a `case`, a function body or a group that may not run: its commands may not run.
     cond: bool,
+    /// The command that opened it, and whether `end` closes it (zsh `foreach`).
+    start: usize,
+    foreach: bool,
 }
 
 #[derive(Default)]
@@ -1562,6 +1573,8 @@ struct Parse {
     scopes: usize,
     /// The `&&` list being lexed.
     chain: usize,
+    /// A `||` came before in the list being lexed.
+    or: bool,
 }
 
 impl Parse {
@@ -1594,11 +1607,19 @@ struct Level {
     heredocs: Vec<(String, usize)>,
     /// A `&&`, `||` or `|` ended the line so far: a newline continues the list.
     open_list: bool,
+    /// The word has a quoted or escaped part: it is never a keyword.
+    quoted: bool,
+    /// Where the group (or `if`, loop) that just closed began: a `|` or `&` after it puts all of it in a subshell.
+    closed: Option<usize>,
+    /// A `case` was opened and its `in` (or zsh's `{`) hasn't come.
+    case_pending: bool,
+    /// A function's name was defined (`f()`, `function f`, `()`): its body, a `{` group, may not run.
+    func_next: bool,
 }
 
 impl Level {
     fn new() -> Self {
-        Level { cur: None, word: String::new(), in_word: false, live: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![], open_list: false }
+        Level { cur: None, word: String::new(), in_word: false, live: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![], open_list: false, quoted: false, closed: None, case_pending: false, func_next: false }
     }
 
     fn frame(&mut self) -> &mut Frame {
@@ -1610,12 +1631,13 @@ impl Level {
         *self.cur.get_or_insert_with(|| {
             let maybe = self.open_list || self.frames.iter().any(|f| f.cond);
             self.open_list = false;
-            p.cmds.push(Cmd { scope: p.scope.clone(), chain: p.chain, maybe, ..Default::default() });
+            p.cmds.push(Cmd { scope: p.scope.clone(), chain: p.chain, maybe, or: p.or, ..Default::default() });
             p.cmds.len() - 1
         })
     }
 
     fn end_word(&mut self, p: &mut Parse) {
+        let quoted = std::mem::take(&mut self.quoted);
         if !std::mem::take(&mut self.in_word) {
             self.word.clear();
             self.live = false;
@@ -1631,41 +1653,82 @@ impl Level {
                 cmd.stdin += &word;
                 cmd.stdin.push('\n');
             }
-            None => self.command_word(p, id, word, live),
+            None => self.command_word(p, id, word, live, quoted),
         }
     }
 
     /// Adds a word to the command, opening or closing a compound command when it's a keyword in command position.
-    fn command_word(&mut self, p: &mut Parse, id: usize, word: String, live: bool) {
-        if self.frame().pattern == Some(true) && word != "esac" {
+    /// A quoted or escaped word is never a keyword.
+    fn command_word(&mut self, p: &mut Parse, id: usize, word: String, live: bool, quoted: bool) {
+        self.closed = None;
+        let keyword = !quoted;
+        if self.frame().pattern == Some(true) && !(keyword && matches!(word.as_str(), "esac" | "}")) {
             return; // a `case` pattern
         }
-        let words = &mut p.cmds[id].words;
-        let first = command_position(words);
-        let opens_case = word == "in" && words.len() >= 2 && words[words.len() - 2] == "case" && command_position(&words[..words.len() - 2]);
+        let first = keyword && command_position(&p.cmds[id].words);
+        // A function's body that isn't a group (`f() cd x`) is the command that follows.
+        if self.func_next && p.cmds[id].words.is_empty() && word != "{" {
+            p.cmds[id].maybe = true;
+            self.func_next = false;
+        }
         if first {
+            let cond = Frame { cond: true, start: id, ..Default::default() };
             match word.as_str() {
-                "{" => self.frames.push(Frame::default()),
-                "while" | "until" | "if" | "for" | "select" => self.frames.push(Frame { cond: true, ..Default::default() }),
-                "}" | "done" | "fi" | "esac" if self.frames.len() > 1 => drop(self.frames.pop()),
+                "{" => {
+                    // The command the `{` begins (`{ cd x; }`) is in the group.
+                    let cond = p.cmds[id].maybe || self.func_next;
+                    p.cmds[id].maybe = cond;
+                    self.func_next = false;
+                    self.frames.push(Frame { cond, start: id, ..Default::default() });
+                }
+                "while" | "until" | "if" | "for" | "select" => self.frames.push(cond),
+                "foreach" => self.frames.push(Frame { foreach: true, ..cond }),
+                // zsh `repeat 0 cd x` and `repeat 0; do cd x; done`.
+                "repeat" => {
+                    p.cmds[id].maybe = true;
+                    self.frames.push(cond);
+                }
+                "case" => self.case_pending = true,
+                "function" => self.func_next = true,
+                "}" | "done" | "fi" | "esac" if self.frames.len() > 1 => self.pop(),
+                "end" if self.frames.len() > 1 && self.frame().foreach => self.pop(),
                 _ => {}
             }
         }
+        // `in`, or zsh's `{`, after a `case`'s word.
+        let opens_case = keyword && self.case_pending && (word == "in" || (word == "{" && !first));
         // A `}` ends a group (zsh needs no `;` before it) and the command in it: what follows isn't in the list the
         // group's last `cd` stopped, and `always { ... }` is a command of its own.
-        let closes = word == "}" && self.frames.len() > 1;
-        words.push(word);
+        let closes = keyword && word == "}" && self.frames.len() > 1;
+        p.cmds[id].words.push(word);
         p.cmds[id].live.push(live);
         if closes {
             if !first {
-                self.frames.pop();
+                self.pop();
             }
             p.chain += 1;
             return self.end(p);
         }
         if opens_case {
+            self.case_pending = false;
             self.end(p);
-            self.frames.push(Frame { pattern: Some(true), cond: true, ..Default::default() });
+            self.frames.push(Frame { pattern: Some(true), cond: true, start: id, ..Default::default() });
+        }
+    }
+
+    /// Closes the compound command open.
+    fn pop(&mut self) {
+        if let Some(f) = self.frames.pop() {
+            self.closed = Some(f.start);
+        }
+    }
+
+    /// A `|` or `&` right after a group, `if` or loop closed: all of it runs in a subshell.
+    fn background_group(&mut self, p: &mut Parse) {
+        if let Some(start) = self.closed.take() {
+            for c in &mut p.cmds[start..] {
+                c.maybe = true;
+            }
         }
     }
 
@@ -1696,6 +1759,7 @@ impl Level {
         if let Some(id) = self.cur {
             p.cmds[id].piped = true;
         }
+        self.background_group(p);
         self.end(p);
         self.open_list = true;
         self.frame().place += 1;
@@ -1746,16 +1810,19 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     if n != '\n' {
                         l.word.push(n);
                         l.in_word = true;
+                        l.quoted = true;
                     }
                     i += 1;
                 }
             }
             '$' if next == Some('\'') => {
                 l.in_word = true;
+                l.quoted = true;
                 i = ansi_c_quoted(c, i + 1, &mut l.word);
             }
             '\'' => {
                 l.in_word = true;
+                l.quoted = true;
                 while let Some(&q) = c.get(i) {
                     i += 1;
                     if q == '\'' {
@@ -1766,6 +1833,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             }
             '"' => {
                 l.in_word = true;
+                l.quoted = true;
                 while let Some(&q) = c.get(i) {
                     i += 1;
                     match q {
@@ -1834,6 +1902,10 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     depth -= 1;
                 }
                 l.end(p);
+                // `()` after a name, or alone (zsh): a function whose body follows.
+                if c[..i - 1].iter().rev().find(|ch| !matches!(ch, ' ' | '\t')) == Some(&'(') {
+                    l.func_next = true;
+                }
                 if l.frames.len() > 1 {
                     l.frames.pop();
                 }
@@ -1844,6 +1916,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             ';' => {
                 l.separate(p);
                 p.chain += 1;
+                p.or = false;
                 // `;;`, `;&`, `;;&` end a `case` branch: a pattern comes next.
                 if matches!(next, Some(';' | '&')) {
                     i += 1;
@@ -1871,14 +1944,17 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     if let Some(id) = l.cur {
                         p.cmds[id].maybe = true;
                     }
+                    l.background_group(p);
                     l.separate(p);
                     p.chain += 1;
+                    p.or = false;
                 }
             }
             '|' if next == Some('|') => {
                 i += 1;
                 l.separate(p);
                 p.chain += 1;
+                p.or = true;
                 l.open_list = true;
             }
             '|' => {
@@ -1891,6 +1967,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 l.separate(p);
                 if !l.open_list {
                     p.chain += 1;
+                    p.or = false;
                 }
                 i = read_heredocs(p, c, i, &mut l.heredocs);
             }
@@ -2449,6 +2526,93 @@ mod tests {
             format!("[ -d {w} ] && cd {w}; pnpm install"),
             format!("if true; then cd {w}; pnpm install; fi"),
             format!("(cd {u}; false && cd {w}); pnpm install"),
+        ] {
+            assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn a_cd_in_a_group_function_or_form_that_may_not_run_still_leaves_the_folder_before_it_as_a_place() {
+        let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
+        for tail in [
+            // `||` before the cd, then `&&`.
+            format!("true || cd {w} && pnpm install"),
+            format!("[ -d {w} ] || cd {w} && cargo build"),
+            format!("true || pushd {w} && pnpm install"),
+            format!("true || true || cd {w} && git reset --hard"),
+            // A group that may not run, or is piped or sent to the background.
+            format!("false && {{ true; cd {w}; }}; pnpm install"),
+            format!("true || {{ true; cd {w}; }}; pnpm install"),
+            format!("{{ cd {w}; }} | cat; pnpm install"),
+            format!("{{ cd {w}; true; }} |& cat; pnpm install"),
+            format!("true | {{ true; cd {w}; }} | cat; pnpm install"),
+            format!("{{ cd {w}; }} & pnpm install"),
+            format!("{{ {{ cd {w}; }}; }} & pnpm install"),
+            format!("{{ cd {w}; }} > /dev/null & pnpm install"),
+            // A quoted or escaped `}`, `fi`, `done` or `esac` closes nothing.
+            format!("if false; then echo \"}}\"; cd {w}; fi; pnpm install"),
+            format!("if false; then echo '}}' >> x.json; cd {w}; fi; pnpm install"),
+            format!("if false; then echo \\}}; cd {w}; fi; pnpm install"),
+            format!("for x in; do echo \"}}\"; cd {w}; done; pnpm install"),
+            format!("case $X in a) echo \"}}\"; cd {w};; esac; pnpm install"),
+            format!("if false; then \"fi\"; cd {w}; fi; pnpm install"),
+            format!("for x in; do \"done\"; cd {w}; done; pnpm install"),
+            format!("for x in; do \\done; cd {w}; done; pnpm install"),
+            format!("case $X in a) \"esac\"; cd {w};; esac; pnpm install"),
+            // popd.
+            "false && popd; pnpm install".to_string(),
+            "if false; then popd; fi; pnpm install".to_string(),
+            "popd | cat; pnpm install".to_string(),
+            "popd & pnpm install".to_string(),
+            "[ -d zzz ] && popd -q; git reset --hard".to_string(),
+            // A function body counts as run where it is defined.
+            format!("f() {{ cd {w}; }}; pnpm install"),
+            format!("function f {{ cd {w}; }}; pnpm install"),
+            format!("f() {{ cd {w}; }}; f | cat; pnpm install"),
+            format!("f() {{ cd {w}; }}; f & pnpm install"),
+            format!("f() {{ cd {w}; }}; false && f; pnpm install"),
+            format!("f()\n{{ cd {w}; }}; pnpm install"),
+            format!("f ( ) {{ cd {w}; }}; pnpm install"),
+            format!("() {{ cd {w} }} | cat; pnpm install"),
+            format!("() {{ cd {w} }} & pnpm install"),
+            // eval.
+            format!("false && eval 'cd {w}'; pnpm install"),
+            format!("if false; then eval 'cd {w}'; fi; pnpm install"),
+            format!("eval 'cd {w}' | cat; pnpm install"),
+            format!("eval 'cd {w}' & pnpm install"),
+            // Forms the lexer opens a frame for only with care.
+            format!("case $X\nin a) cd {w};; esac; pnpm install"),
+            format!("time case $X in a) cd {w};; esac; pnpm install"),
+            format!("case $X {{ a) cd {w};; }}; pnpm install"),
+            format!("repeat 0; do cd {w}; done; pnpm install"),
+            format!("repeat 0 cd {w}; pnpm install"),
+            format!("foreach x ($EMPTY) cd {w}; end; pnpm install"),
+            format!("time while false; do cd {w}; done; pnpm install"),
+        ] {
+            let cmd = format!("cd {u}; {tail}");
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        // The same from the agent's own clone: where it started is no checkout, so the places count nothing.
+        for cmd in [
+            format!("true || cd {w} && pnpm install"),
+            format!("{{ cd {w}; }} | cat; pnpm install"),
+            format!("if false; then echo \"}}\"; cd {w}; fi; pnpm install"),
+            "popd | cat; pnpm install".to_string(),
+            format!("f() {{ cd {w}; }}; pnpm install"),
+            format!("false && eval 'cd {w}'; pnpm install"),
+            format!("case $X\nin a) cd {w};; esac; pnpm install"),
+            format!("repeat 0; do cd {w}; done; pnpm install"),
+            // What the guard ran before keeps running.
+            format!("cd {w} && pnpm install"),
+            "cd backend && cargo test".to_string(),
+            "cd backend || exit 1; cargo test".to_string(),
+            "cd backend && pnpm dev &".to_string(),
+            "for x in a b; do cd backend; cargo test; cd ..; done".to_string(),
+            "case $X in a) cd backend;; esac; cargo test".to_string(),
+            "{ cd backend; cargo test; }".to_string(),
+            "f() { cd backend; cargo test; }; f".to_string(),
+            "eval 'cd backend && cargo test'".to_string(),
+            "echo \"}\" && cargo test".to_string(),
         ] {
             assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
         }
