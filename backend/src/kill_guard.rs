@@ -498,7 +498,10 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         if matches!(name, "cd" | "chdir" | "pushd" | "popd") {
             dirs.moved = true;
         }
-        let maybe = cmds[i].maybe || cmds[i].piped;
+        // Another program's `cd` doesn't move the shell, for the commands after it too.
+        let foreign = matches!(name, "cd" | "chdir" | "pushd" | "popd") && !shell_builtin(&all[..all.len() - words.len()], &cmds[i].quoted, &words[0]);
+        dirs.goes_on |= foreign;
+        let maybe = cmds[i].maybe || cmds[i].piped || foreign;
         let before: Vec<PathBuf> = dirs.alts.iter().cloned().chain(dirs.cwd.clone()).collect();
         let folders = match name {
             // zsh's other name for `cd`.
@@ -1437,6 +1440,23 @@ fn command_position(words: &[String], quoted: &[bool]) -> bool {
     (from..words.len()).all(keyword)
 }
 
+/// Whether a `cd`, `pushd` or `popd` is the shell's own: what `unwrap` peeled off before it (`prefix`, with `quoted` for each
+/// word) is only assignments, keywords, `time`, `builtin`, `noglob`, `nocorrect` and a `function`'s names, and its name
+/// (`name`, as written) isn't a path. Another program's `cd` (`env cd x`, `/usr/bin/cd x`, `"time" cd x`) succeeds
+/// and the shell stays where it was.
+fn shell_builtin(prefix: &[String], quoted: &[bool], name: &str) -> bool {
+    let mut names = false;
+    !name.contains('/')
+        && prefix.iter().zip(quoted).all(|(w, &q)| {
+            if assignment(w).is_some() {
+                return true;
+            }
+            let own = !q && (KEYWORDS.contains(&w.as_str()) || matches!(w.as_str(), "time" | "builtin" | "noglob" | "nocorrect" | "function"));
+            names = if w == "function" { true } else { names && !own };
+            own || names
+        })
+}
+
 /// What a simple command runs once its wrappers are peeled off.
 enum Run<'a> {
     Words(&'a [String]),
@@ -1483,7 +1503,7 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             "arch" => &["-arch", "-e", "-d"],
             "watch" => &["-n", "--interval"],
             "script" => &["-t", "-T", "-E", "-I", "-O", "-B"],
-            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" => &[],
+            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" | "noglob" | "nocorrect" => &[],
             _ => return Run::Words(rest(i)),
         };
         *bypass |= matches!(name, "sudo" | "doas" | "command" | "builtin");
@@ -2612,6 +2632,23 @@ mod tests {
             format!("repeat 0 cd {w}; pnpm install"),
             format!("foreach x ($EMPTY) cd {w}; end; pnpm install"),
             format!("time while false; do cd {w}; done; pnpm install"),
+            // A `cd` another program runs doesn't move the shell.
+            format!("env cd {w}; pnpm install"),
+            format!("env cd {w} && pnpm install"),
+            format!("nohup cd {w} && pnpm install"),
+            format!("nice cd {w} && pnpm install"),
+            format!("timeout 5 cd {w} && pnpm install"),
+            format!("sudo cd {w} && pnpm install"),
+            format!("xargs cd {w} && pnpm install"),
+            format!("command time cd {w} && pnpm install"),
+            format!("command cd {w} && pnpm install"),
+            format!("/usr/bin/cd {w} && pnpm install"),
+            format!("\\time cd {w} && pnpm install"),
+            format!("\"time\" cd {w} && pnpm install"),
+            format!("\"!\" cd {w} && pnpm install"),
+            format!("if false; \"then\" cd {w}; fi && pnpm install"),
+            format!("env pushd {w} && pnpm install"),
+            format!("pushd {u}; env popd && pnpm install"),
             // zsh `always`: its block goes on with the group before it.
             format!("{{ cd {w} }} always {{ true }} | cat; pnpm install"),
             format!("{{ cd {w} }} always {{ true }} & pnpm install"),
@@ -2655,6 +2692,14 @@ mod tests {
             "{ cd backend; cargo test; }".to_string(),
             "f() { cd backend; cargo test; }; f".to_string(),
             "function f g { cd backend; cargo test; }; f".to_string(),
+            "builtin cd backend && cargo test".to_string(),
+            "noglob cd backend && cargo test".to_string(),
+            "nocorrect cd backend && cargo test".to_string(),
+            "time cd backend && cargo test".to_string(),
+            "! cd backend || cargo test".to_string(),
+            "FOO=1 cd backend && cargo test".to_string(),
+            "\\cd backend && cargo test".to_string(),
+            "if true; then cd backend && cargo test; fi".to_string(),
             "{ cd backend } always { true }; cargo test".to_string(),
             "eval 'cd backend && cargo test'".to_string(),
             "echo \"}\" && cargo test".to_string(),
