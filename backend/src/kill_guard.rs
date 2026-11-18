@@ -677,7 +677,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
 /// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
 /// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
 fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
-    const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream"];
+    const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream", "--graph", "--name-only", "--force-with-lease", "-sb"];
     let [git, args @ ..] = words else { return false };
     let args = match args {
         [c, _, rest @ ..] if c == "-C" => rest,
@@ -690,8 +690,10 @@ fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
         && args.first().is_some_and(|sub| matches!(sub.as_str(), "fetch" | "push" | "commit" | "add" | "status" | "log" | "diff" | "show"))
         && args[1..].iter().all(|a| match a.strip_prefix('-') {
             None | Some("") | Some("-") => true,
+            // `-p` is a patch for these; `add -p` and `commit -p` are interactive, `fetch -p` prunes.
+            Some("p") => matches!(args[0].as_str(), "log" | "diff" | "show"),
             Some(o) if o.starts_with('-') => OPTIONS.contains(&a.as_str()),
-            Some(o) => o.chars().all(|c| "aAmqvunsf".contains(c)),
+            Some(o) => OPTIONS.contains(&a.as_str()) || o.chars().all(|c| "aAmqvunsf".contains(c)),
         })
 }
 
@@ -2830,6 +2832,8 @@ mod tests {
             "cd loft && git fetch && git pull",
             "git commit -am x && git push -u origin main",
             "git fetch --prune --tags && git -C loft push --set-upstream origin x",
+            "git log --graph --oneline -p && git status -sb && git diff --name-only && git -C loft push --force-with-lease",
+            "git show -p && git diff -p && git -C loft push",
         ] {
             assert_eq!(asks(cmd, WS), None, "should run: {cmd}");
         }
@@ -2882,6 +2886,12 @@ mod tests {
             "EDITOR=./mk; git commit; git -C ./loft push",
             "PATH=./bin:$PATH; git fetch && cd lnk && git push",
             "HOME=/x; git status && cd lnk && git push",
+            "export PATH=./bin:$PATH; git fetch; git -C ./loft push",
+            "typeset -x HOME=/x; git status; git -C ./loft push",
+            "declare -x EDITOR=./mk; git commit; git -C ./loft push",
+            "git add -p && git -C ./loft push",
+            "git commit -p && git -C ./loft push",
+            "git fetch -p && git -C ./loft push",
             "git checkout main && cd loft && git push",
         ] {
             assert!(!asks_all(cmd, WS).is_empty(), "should ask: {cmd}");
