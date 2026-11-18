@@ -274,7 +274,7 @@ final class StoreTests: XCTestCase {
     func testAgentEventsUpsertAndDelete() async throws {
         let store = try await connectedStore(MockAPI())
         var a = store.agents[0]
-        a.status = "running"
+        a.running = true // #594: Working comes from the live run, not the saved status.
         store.apply(.agentUpdated(a))
         XCTAssertEqual(store.state(of: store.agents[0]), .working)
         store.apply(.agentDeleted("a1"))
