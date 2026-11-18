@@ -462,7 +462,11 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         let live = &cmds[i].live[all.len() - words.len()..];
         // `GIT_DIR=x git ...`, `env GIT_WORK_TREE=x git ...`
         let vars: Vec<&String> = all[..all.len() - words.len()].iter().filter(|w| assignment(w).is_some()).collect();
-        let Some((name, args)) = words.split_first() else { continue };
+        let Some((name, args)) = words.split_first() else {
+            // Only assignments (`PATH=./bin:$PATH;`): they change what the commands after it run or read.
+            dirs.made |= all.iter().any(|w| assignment(w).is_some());
+            continue;
+        };
         let (args, live) = (args, &live[1..]);
         let name = base(name);
         let chdir = env_chdir(&all[..all.len() - words.len()]);
@@ -661,11 +665,36 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 folders
             }
         };
-        dirs.made = true;
+        dirs.made |= !makes_nothing(all, words, live);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
+}
+
+/// Whether a command (`git -C dir fetch`, `git commit -m x`) can't make a folder, a link or a `.git`: git's own history
+/// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
+/// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
+/// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
+fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
+    const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream", "--graph", "--name-only", "--force-with-lease", "-sb"];
+    let [git, args @ ..] = words else { return false };
+    let args = match args {
+        [c, _, rest @ ..] if c == "-C" => rest,
+        _ => args,
+    };
+    git == "git"
+        && all.len() == words.len()
+        && !live.iter().any(|&l| l)
+        && !words.iter().any(|w| w.contains(['$', '`']))
+        && args.first().is_some_and(|sub| matches!(sub.as_str(), "fetch" | "push" | "commit" | "add" | "status" | "log" | "diff" | "show"))
+        && args[1..].iter().all(|a| match a.strip_prefix('-') {
+            None | Some("") | Some("-") => true,
+            // `-p` is a patch for these; `add -p` and `commit -p` are interactive, `fetch -p` prunes.
+            Some("p") => matches!(args[0].as_str(), "log" | "diff" | "show"),
+            Some(o) if o.starts_with('-') => OPTIONS.contains(&a.as_str()),
+            Some(o) => OPTIONS.contains(&a.as_str()) || o.chars().all(|c| "aAmqvunsf".contains(c)),
+        })
 }
 
 /// Where cd's and pushd's folder is among `args`, past their options (`-L`, `-P`, `-q`, bundles like `-LP`, up to and
@@ -2786,6 +2815,86 @@ mod tests {
             "echo \"}\" && cargo test".to_string(),
         ] {
             assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn git_commands_that_make_nothing_dont_hide_the_folder_of_the_next() {
+        const WS: &str = "/nowhere/dev/loft/agent-local-storage/abc";
+        // The own clone, which isn't there for the guard to look at: an earlier fetch, commit or push can't have made it.
+        for cmd in [
+            "git -C ./loft fetch && git -C ./loft pull",
+            "git -C ./loft status; git -C ./loft log -1",
+            "git -C loft fetch && git -C loft pull",
+            "git -C loft commit -m x && git -C loft push",
+            "cd loft && git commit -m x && git push",
+            "cd loft/backend && git add -A && git commit -m x && git push",
+            "cd loft && git fetch && git pull",
+            "git commit -am x && git push -u origin main",
+            "git fetch --prune --tags && git -C loft push --set-upstream origin x",
+            "git log --graph --oneline -p && git status -sb && git diff --name-only && git -C loft push --force-with-lease",
+            "git show -p && git diff -p && git -C loft push",
+        ] {
+            assert_eq!(asks(cmd, WS), None, "should run: {cmd}");
+        }
+        assert_eq!(asks("cd backend && git commit -m x && git push", CLONE), None);
+        assert_eq!(asks("cd backend && git push", CLONE), None);
+        // The same aimed at the user's checkout.
+        for cmd in [
+            "git -C ./loft fetch && git -C ./loft pull",
+            "git -C ./loft status; git -C ./loft log -1; git -C ./loft push",
+            "git -C loft commit -m x && git -C loft push",
+            "cd loft && git commit -m x && git push",
+            "cd loft/backend && git add -A && git commit -m x && git push",
+        ] {
+            assert!(asks_all(cmd, "/nowhere/dev").contains(&PathBuf::from(USER)) || asks_all(cmd, "/nowhere/dev").iter().any(|f| f.starts_with(USER)), "should ask: {cmd}");
+        }
+        assert!(!asks_all("cd backend && git commit -m x && git push", USER).is_empty());
+        // What may make the folder (a pull writes the work tree, a clone, a mkdir, an option that runs a program) still hides it.
+        for cmd in [
+            "git pull && git -C ./loft push",
+            "git clone x loft && git -C ./loft push",
+            "mkdir loft && git -C ./loft push",
+            "git fetch --upload-pack=./mk && git -C ./loft push",
+            "git -c core.x=y commit -m x && git -C ./loft push",
+            // Options git takes by a unique prefix, the environment, a program named git, and what the shell expands.
+            "git fetch --upload-pa='ln -s /x lnk;:' . && git -C ./loft push",
+            "git fetch --upl ./mk . && git -C ./loft push",
+            "git push --receive-pa=./mk . main && git -C ./loft push",
+            "git push --exe=./mk . main && git -C ./loft push",
+            "GIT_SSH_COMMAND=./mk git fetch ssh://h/r && git -C ./loft push",
+            "env GIT_SSH_COMMAND=./mk git fetch ssh://h/r && git -C ./loft push",
+            "GIT_EDITOR=./mk git commit && git -C ./loft push",
+            "EDITOR=./mk git commit && git -C ./loft push",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=./mk git status && git -C ./loft push",
+            "GIT_EXTERNAL_DIFF=./mk git diff && git -C ./loft push",
+            "PATH=./bin:$PATH git fetch && git -C ./loft push",
+            "git fetch {--upload-pack=./mk,.} && git -C ./loft push",
+            "git fetch $OPT . && git -C ./loft push",
+            "O=--upload-pack=./mk; git fetch $O . && git -C ./loft push",
+            "git fetch \"$@\" && git -C ./loft push",
+            "xargs git fetch < args && git -C ./loft push",
+            "./git fetch && git -C ./loft push",
+            "/tmp/x/git status && git -C ./loft push",
+            "sudo git fetch && git -C ./loft push",
+            "command git fetch && git -C ./loft push",
+            "git fetch --upload-pa='ln -s /x lnk;:' . && cd lnk && git push",
+            // A variable the shell already exports, set by a command of its own.
+            "PATH=./bin:$PATH; git fetch; git -C ./loft push",
+            "HOME=/x; git status; git -C ./loft push",
+            "XDG_CONFIG_HOME=/x; git status; git -C ./loft push",
+            "EDITOR=./mk; git commit; git -C ./loft push",
+            "PATH=./bin:$PATH; git fetch && cd lnk && git push",
+            "HOME=/x; git status && cd lnk && git push",
+            "export PATH=./bin:$PATH; git fetch; git -C ./loft push",
+            "typeset -x HOME=/x; git status; git -C ./loft push",
+            "declare -x EDITOR=./mk; git commit; git -C ./loft push",
+            "git add -p && git -C ./loft push",
+            "git commit -p && git -C ./loft push",
+            "git fetch -p && git -C ./loft push",
+            "git checkout main && cd loft && git push",
+        ] {
+            assert!(!asks_all(cmd, WS).is_empty(), "should ask: {cmd}");
         }
     }
 
