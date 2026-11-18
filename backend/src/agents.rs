@@ -335,25 +335,27 @@ pub async fn ask_permission(
 }
 
 /// Marks a request expired when it ends unanswered: at the timeout, or when whoever asked stops waiting (a kill
-/// whose command was stopped), so a later answer can't act on it.
+/// whose command was stopped, a run stopped mid-call), so a later answer can't act on it. Answered or not, the
+/// ask then stops counting toward the agent's status (`asked`).
 struct Unanswered<'a> {
     state: &'a AppState,
+    agent_id: String,
     id: String,
     answered: bool,
 }
 
 impl Drop for Unanswered<'_> {
     fn drop(&mut self) {
-        if self.answered {
-            return;
+        if !self.answered {
+            self.state.rt.lock().unwrap().waiters.remove(&self.id);
+            if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id)
+                && r.status == "pending" {
+                    r.status = "expired".into();
+                    let _ = self.state.db.save_permission(&r);
+                    self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
+                }
         }
-        self.state.rt.lock().unwrap().waiters.remove(&self.id);
-        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id)
-            && r.status == "pending" {
-                r.status = "expired".into();
-                let _ = self.state.db.save_permission(&r);
-                self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
-            }
+        asked(self.state, &self.agent_id);
     }
 }
 
@@ -396,7 +398,7 @@ pub async fn ask_permission_for(
     let waiting = if source == QUESTIONS { "Waiting for your answers".into() } else { format!("Waiting for permission: {tool_name}") };
     set_status(state, agent_id, "waiting", &waiting);
 
-    let mut pending = Unanswered { state, id: req.id.clone(), answered: false };
+    let mut pending = Unanswered { state, agent_id: agent_id.to_string(), id: req.id.clone(), answered: false };
     let decision = match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(d)) => {
             pending.answered = true;
@@ -405,7 +407,6 @@ pub async fn ask_permission_for(
         _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()), input: None },
     };
     drop(pending);
-    asked(state, agent_id);
     decision
 }
 
@@ -3676,6 +3677,27 @@ esac
         second.await.unwrap();
         assert_eq!(saved(&st, &a.id), ("running".into(), "Building the app".into()));
         assert!(!st.rt.lock().unwrap().asks.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_ask_stops_counting_and_the_next_answered_ask_restores_the_status() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        save_status(&st, &a.id, "idle", "");
+        // The MCP call is cancelled: a run stopped mid-call, or a kill whose command stopped.
+        let h = ask(&st, &a.id, "Kill").await;
+        h.abort();
+        until("the ask to expire", 5, || pending(&st, &a.id).is_empty()).await;
+        assert_eq!(saved(&st, &a.id), ("idle".into(), String::new()));
+        assert!(!st.rt.lock().unwrap().asks.contains_key(&a.id));
+
+        // The next ask, in a run, counts from zero again.
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &a.id, "running", "Building");
+        let h = ask(&st, &a.id, "Bash").await;
+        decide(&st, &pending(&st, &a.id)[0], "allow", None, None, None).unwrap();
+        h.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("running".into(), "Building".into()));
     }
 
     #[tokio::test(flavor = "multi_thread")]

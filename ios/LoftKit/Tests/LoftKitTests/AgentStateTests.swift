@@ -20,6 +20,14 @@ final class AgentStateTests: XCTestCase {
         XCTAssertEqual(state("error", running: true), .working)
     }
 
+    func testASavedRunningWithoutALiveRunShowsNoStuckBar() {
+        var a = Agent(id: "a", name: "A", status: "running")
+        a.lastOutputAt = Date().addingTimeInterval(-30 * 60)
+        XCTAssertNil(RunWatch.of(a, newestMessage: nil))
+        a.running = true
+        XCTAssertEqual(RunWatch.of(a, newestMessage: nil), .silent(minutes: 30))
+    }
+
     func testTheOtherStates() {
         XCTAssertEqual(state("waiting"), .waitingApproval)
         XCTAssertEqual(state("idle", running: true, pending: 1), .waitingApproval)

@@ -12,8 +12,8 @@ public enum RunWatch: Equatable {
     /// `newestMessage`: when the agent's newest chat message was written. Agent updates aren't sent on
     /// every event, so the last activity is the later of that and `lastOutputAt`.
     public static func of(_ agent: Agent, newestMessage: Date?, now: Date = Date()) -> RunWatch? {
-        let running = agent.running == true || agent.status == "running"
-        guard running else { return nil }
+        // The live run only: a saved "running" without one is stale.
+        guard agent.running == true else { return nil }
         if let waits = agent.waitingOn, let first = waits.first {
             let since = agent.waitingSince ?? agent.lastOutputAt ?? now
             return .waiting(first: first, more: waits.count - 1, minutes: minutes(since, now))
