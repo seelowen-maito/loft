@@ -190,6 +190,16 @@ impl Dirs {
         self.alts = alts;
     }
 
+    /// `path` from the current folder as written, with `..` not folded (the folder the OS looks up).
+    fn written(&self, path: &str) -> Option<PathBuf> {
+        let home = || dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+        match path {
+            p if p == "~" || p.starts_with("~/") => Some(PathBuf::from(format!("{}{}", home()?, &p[1..]))),
+            p if p.starts_with('/') => Some(PathBuf::from(p)),
+            p => Some(self.cwd.as_deref()?.join(p)),
+        }
+    }
+
     fn cd(&mut self, to: Option<PathBuf>) {
         if !self.left.contains(&self.cwd) {
             self.left.push(self.cwd.clone());
@@ -271,7 +281,9 @@ impl Dirs {
         }
         // A folder that isn't there (and no `ln`, `mv`, ... of the command names) may be a `cd` that fails: the shell stays
         // where it was, or where an earlier failed `cd` left it.
-        if to.as_ref().is_some_and(|t| missing(t) && !self.touched.iter().any(|m| t.starts_with(m))) {
+        // The path as written counts too: `nope/..` folds to a folder that is there, but the shell refuses it.
+        let raw = self.written(dir);
+        if [to.as_ref(), raw.as_ref()].into_iter().flatten().any(|t| missing(t) && !self.touched.iter().any(|m| t.starts_with(m))) {
             self.popped = true;
             for a in self.alts.iter().cloned().chain(self.cwd.clone()) {
                 if !alts.contains(&a) {
@@ -296,7 +308,7 @@ fn missing(folder: &Path) -> bool {
 /// The same, with the tests' made-up `/nowhere` folders counted as there, but for the ones named `nope*`.
 #[cfg(test)]
 fn missing(folder: &Path) -> bool {
-    !folder.is_dir() && !(folder.starts_with("/nowhere") && !folder.file_name().is_some_and(|n| n.to_string_lossy().starts_with("nope")))
+    !folder.is_dir() && !(folder.starts_with("/nowhere") && !folder.components().any(|c| c.as_os_str().to_string_lossy().starts_with("nope")))
 }
 
 /// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
@@ -2288,6 +2300,10 @@ mod tests {
             format!("cd {u}; cd {w}; pushd; cd -; cd -; pnpm install"),
             // A cd that works after a failed one doesn't make `cd -` known.
             format!("cd {u}; cd {w}/nope; cd {w}; cd -; pnpm install"),
+            // A path through a missing folder and back up is refused too.
+            format!("cd {u}; cd {w}/nope/..; pnpm install"),
+            format!("cd {u}; cd {w}/nope.txt/..; pnpm install"),
+            format!("cd {u}; cd {w}/nope/../real; pnpm install"),
             format!("cd {u}; cd {w}/nope; cd {w}; cd -; git reset --hard"),
             format!("cd {u}; cd {w}/nope; cd; cd -; pnpm install"),
             format!("cd {u}; cd {w}/nope.txt; cd {w}; cd -; pnpm install"),
