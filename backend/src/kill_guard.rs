@@ -892,6 +892,10 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
             // `-c core.worktree=x` names the work tree as `--work-tree` does.
             "-c" => {
                 if let Some((_, v)) = args.get(i).and_then(|(w, _)| w.split_once('=')).filter(|(k, _)| k.eq_ignore_ascii_case("core.worktree")) {
+                    // A variable or a substitution, as in any folder option.
+                    if folder_expands(v) {
+                        return unknown_in(&dirs, None);
+                    }
                     tree = Some(dirs.at(v));
                 }
                 i += 1;
@@ -2420,6 +2424,8 @@ mod tests {
             "D=/nowhere/dev/loft; cargo --manifest-path $D/Cargo.toml build",
             "D=/nowhere/dev/loft; xcodebuild -project $D/X.xcodeproj build",
             "D=/nowhere/dev/loft; env -C $D pnpm install",
+            "D=/nowhere/dev/loft; git -c core.worktree=$D reset --hard",
+            "D=/nowhere/dev/loft; git -c core.worktree=$D checkout .",
             "D=/nowhere/dev/loft; chdir $D && pnpm install",
         ] {
             for cwd in [CLONE, WORKSPACE] {
