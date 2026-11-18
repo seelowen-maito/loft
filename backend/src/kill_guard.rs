@@ -467,6 +467,12 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             dirs.made |= all.iter().any(|w| assignment(w).is_some());
             continue;
         };
+        // `env $NAME=x cmd`, `env $ASSIGNMENT cmd`: env sets whatever the expansion says, so what runs is unknown.
+        if expands(name) && all[..all.len() - words.len()].iter().any(|w| base(w) == "env") {
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+            dirs.made = true;
+            continue;
+        }
         let (args, live) = (args, &live[1..]);
         let name = base(name);
         let chdir = env_chdir(&all[..all.len() - words.len()]);
@@ -771,7 +777,7 @@ fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
 fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String], dirs: &mut Dirs) -> Vec<PathBuf> {
     match name {
         "git" => git_changes(dirs, vars, args, live),
-        "cargo" => match flags(args, &["--manifest-path"]) {
+        "cargo" => match flags(args, &["--manifest-path"], CARGO_CHANGES) {
             (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
                 Some(m) if folder_expands(m) => unknown_in(dirs, None),
                 Some(m) => dirs.at(m).and_then(|f| f.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(m).then(|| PathBuf::from(UNKNOWN))).collect(),
@@ -781,7 +787,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
         },
         pm @ ("npm" | "pnpm" | "yarn" | "bun") => {
             let dir_flags: &[&str] = match pm {
-                "npm" => &["--prefix"],
+                "npm" => &["--prefix", "-C"],
                 "pnpm" => &["--dir", "-C"],
                 _ => &["--cwd"],
             };
@@ -791,7 +797,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
                 Some(d) if folder_expands(d) => unknown_in(dirs, None),
                 Some(d) => [dirs.at_text(d), dirs.at(d)].into_iter().flatten().chain(dirs.passes(d).then(|| PathBuf::from(UNKNOWN))).collect(),
             };
-            match flags(args, dir_flags) {
+            match flags(args, dir_flags, PM_CHANGES) {
                 (dir, Some(s)) if PM_CHANGES.contains(&s) => folders(dir),
                 (dir, None) if pm == "yarn" => folders(dir), // a bare `yarn` installs
                 _ => vec![],
@@ -811,20 +817,28 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
     }
 }
 
-/// The value of the first of the folder `options` in `args` (`--dir x` or `--dir=x`), and the first other word
-/// that isn't an option: the subcommand.
-fn flags<'a>(args: &'a [String], options: &[&str]) -> (Option<&'a str>, Option<&'a str>) {
-    let (mut value, mut sub) = (None, None);
+/// The value of the first of the folder `options` in `args` (`--dir x`, `--dir=x` or `-Cx`), and the subcommand: the
+/// first word that isn't an option or the word after one (`--filter x` takes a value the guard can't tell from a
+/// subcommand). When every word follows an option (`--filter x --silent install`) it's the first in `subs`, else the first.
+fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Option<&'a str>, Option<&'a str>) {
+    let mut value = None;
+    let (mut words, mut after_option) = (vec![], false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
+        let was = std::mem::replace(&mut after_option, false);
         if options.contains(&a.as_str()) {
             value = value.or(it.next().map(String::as_str));
         } else if let Some(v) = options.iter().find_map(|o| a.strip_prefix(o).and_then(|r| r.strip_prefix('='))) {
             value = value.or(Some(v));
+        } else if let Some(v) = options.iter().filter(|o| !o.starts_with("--")).find_map(|o| a.strip_prefix(o).filter(|r| !r.is_empty())) {
+            value = value.or(Some(v));
         } else if !a.starts_with(['-', '+']) {
-            sub = sub.or(Some(a.as_str()));
+            words.push((a.as_str(), was));
+        } else {
+            after_option = true;
         }
     }
+    let sub = words.iter().find(|w| !w.1).map(|w| w.0).or_else(|| words.iter().map(|w| w.0).find(|w| subs.contains(w))).or(words.first().map(|w| w.0));
     (value, sub)
 }
 
@@ -965,6 +979,10 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
             }
             // `-c core.worktree=x` names the work tree as `--work-tree` does.
             "-c" => {
+                // A key from an expansion (`-c $K=x`, `-c $E`) may be `core.worktree`.
+                if args.get(i).is_some_and(|(w, _)| expands(w.split_once('=').map_or(w.as_str(), |(k, _)| k))) {
+                    return unknown_in(&dirs, None);
+                }
                 if let Some((_, v)) = args.get(i).and_then(|(w, _)| w.split_once('=')).filter(|(k, _)| k.eq_ignore_ascii_case("core.worktree")) {
                     // A variable or a substitution, as in any folder option.
                     if folder_expands(v) {
@@ -2555,6 +2573,12 @@ mod tests {
             ("cargo --version", USER),
             ("xcodebuild -list", USER),
             ("pnpm run dev", USER),
+            ("pnpm run build", USER),
+            ("npm run build", USER),
+            // A folder option written as the guard reads it, inside the agent's own clone.
+            ("pnpm -Cfrontend test", CLONE),
+            ("npm -C frontend test", CLONE),
+            ("pnpm --filter web -C frontend build", CLONE),
         ] {
             assert_eq!(asks(cmd, cwd), None, "should run: {cmd} (in {cwd})");
         }
@@ -2917,6 +2941,14 @@ mod tests {
             "D=/nowhere/dev/loft; git -c core.worktree=$D reset --hard",
             "D=/nowhere/dev/loft; git -c core.worktree=$D checkout .",
             "D=/nowhere/dev/loft; chdir $D && pnpm install",
+            "K=core.worktree; git -c $K=/nowhere/dev/loft checkout .",
+            "E=core.worktree=/nowhere/dev/loft; git -c $E checkout .",
+            "pnpm -C/nowhere/dev/loft install",
+            "npm -C /nowhere/dev/loft install",
+            "pnpm --filter x -C /nowhere/dev/loft install",
+            "pnpm --filter x --silent -C /nowhere/dev/loft install",
+            "G=GIT_DIR; env $G=/nowhere/dev/loft/.git git reset --hard",
+            "E=GIT_DIR=/nowhere/dev/loft/.git; env $E git reset --hard",
         ] {
             for cwd in [CLONE, WORKSPACE] {
                 assert!(!asks_all(cmd, cwd).is_empty(), "should ask in {cwd}: {cmd}");
