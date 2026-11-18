@@ -1065,15 +1065,10 @@ fn expands(word: &str) -> bool {
     word.contains(['$', '`'])
 }
 
-/// What follows a `$PWD` or `${PWD}` that starts `word` and is the whole name: the rest of the path.
-fn pwd_rest(word: &str) -> Option<&str> {
-    ["$PWD", "${PWD}"].iter().find_map(|h| word.strip_prefix(h).filter(|r| r.is_empty() || r.starts_with('/')))
-}
-
-/// `expands` for a folder option's value: `$HOME` and `${HOME}` at the start are the home folder, and `$PWD` and `${PWD}`
-/// the folder the shell is in, which the guard knows (`Dirs::at`, for each place the shell may be in).
+/// `expands` for a folder option's value: `$HOME` and `${HOME}` at the start are the home folder, which the guard knows.
+/// `$PWD` and `$(pwd)` are not: a command can set `PWD`, redefine `pwd`, or run in another folder than the shell expands it in.
 fn folder_expands(word: &str) -> bool {
-    let rest = ["$HOME", "${HOME}"].iter().find_map(|h| word.strip_prefix(h).filter(|r| r.is_empty() || r.starts_with('/'))).or_else(|| pwd_rest(word)).unwrap_or(word);
+    let rest = ["$HOME", "${HOME}"].iter().find_map(|h| word.strip_prefix(h).filter(|r| r.is_empty() || r.starts_with('/'))).unwrap_or(word);
     expands(rest)
 }
 
@@ -1175,8 +1170,6 @@ fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
         p if p == "~" || p.starts_with("~/") => format!("{}{}", home()?, &p[1..]),
         p if p.starts_with("$HOME") => format!("{}{}", home()?, &p[5..]),
         p if p.starts_with("${HOME}") => format!("{}{}", home()?, &p[7..]),
-        // The folder the shell is in.
-        p if pwd_rest(p).is_some() => pwd_rest(p).unwrap().trim_start_matches('/').to_string(),
         p => p.to_string(),
     };
     if path.contains(['$', '`']) {
@@ -1752,11 +1745,6 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                             l.word.extend(c.get(i));
                             i += 1;
                         }
-                        // `$(pwd)` is the shell's folder, as `$PWD` is.
-                        '$' if c[i..].starts_with(&['(', 'p', 'w', 'd', ')']) => {
-                            l.word.push_str("$PWD");
-                            i += 5;
-                        }
                         '$' if c.get(i) == Some(&'(') => {
                             l.word.push('$');
                             l.cmd(p);
@@ -1777,11 +1765,6 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 l.word.push('$');
                 l.cmd(p);
                 i = lex(p, c, i, Some('`'));
-            }
-            '$' if c[i..].starts_with(&['(', 'p', 'w', 'd', ')']) => {
-                l.in_word = true;
-                l.word.push_str("$PWD");
-                i += 5;
             }
             '$' | '<' | '>' if next == Some('(') => {
                 l.in_word = true;
@@ -2432,26 +2415,28 @@ mod tests {
                 assert!(!asks_all(cmd, cwd).is_empty(), "should ask in {cwd}: {cmd}");
             }
         }
-        // The shell's own folder, named by `$PWD` or `$(pwd)`, is known.
+        // `$PWD` and `$(pwd)` are variables like any other: they ask, and the plain forms run.
         for cmd in [
             "git -C \"$PWD\" status",
             "git -C ${PWD} pull",
             "git -C \"$(pwd)\" pull",
-            "git -C $(pwd) pull",
             "pnpm --dir \"$PWD/frontend\" install",
             "cargo build --manifest-path \"$PWD/backend/Cargo.toml\"",
-        ] {
-            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
-        }
-        // In the checkout it asks; so does a folder a failed `cd` may have left.
-        for cmd in [
-            "cd /nowhere/dev/loft; git -C \"$PWD\" reset --hard",
-            "cd /nowhere/dev/loft; cd nope; git -C \"$PWD\" reset --hard",
-            "cd /nowhere/dev/loft; cd nope; pnpm --dir $PWD install",
-            "cd /nowhere/dev/loft; cd nope; git -C \"$(pwd)\" reset --hard",
-            "git -C $PWDX reset --hard",
+            // The command sets `PWD`, redefines `pwd`, or runs the option in another folder than the shell expands it in.
+            "PWD=/nowhere/dev/loft; git -C \"$PWD\" reset --hard",
+            "export PWD=/nowhere/dev/loft; git -C \"$PWD\" reset --hard",
+            "read PWD <<< /nowhere/dev/loft; git -C \"$PWD\" reset --hard",
+            "for PWD in /nowhere/dev/loft; do git -C \"$PWD\" reset --hard; done",
+            "pwd() { echo /nowhere/dev/loft; }; git -C \"$(pwd)\" reset --hard",
+            "alias pwd='echo /nowhere/dev/loft'; git -C \"$(pwd)\" reset --hard",
+            "env -C /nowhere/dev/loft git -C \"$PWD\" reset --hard",
+            "sh -c \"cd /nowhere/dev/loft && git -C $PWD reset --hard\"",
+            "eval \"cd /nowhere/dev/loft; git -C $PWD reset --hard\"",
         ] {
             assert!(!asks_all(cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in ["git -C . status", "git status", "pnpm --dir frontend install", "cargo build --manifest-path backend/Cargo.toml"] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
         // `chdir` goes where `cd` goes.
         assert_eq!(asks("chdir /nowhere/dev/loft && git pull", CLONE), Some(PathBuf::from(USER)));
