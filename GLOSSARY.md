@@ -150,6 +150,12 @@ _Avoid_: Feature PR, epic PR
 The GitHub user an issue is assigned to, shown with their GitHub profile picture. Always a person, never an agent: agents act on GitHub as the user who runs Loft.
 _Avoid_: Assignee (GitHub's field name; the concept is ownership), claimer
 
+## Platforms
+
+**Mac-only feature**:
+A part of Loft that exists only when Loft runs on a Mac: the Simulator, voice, Mac access, opening Terminal to log in, and Herdr setup. Elsewhere (Linux, Windows) the backend doesn't offer it and the web app hides it instead of showing an error.
+_Avoid_: Mac feature, native feature
+
 ## Usage and spend
 
 **Usage week**:
