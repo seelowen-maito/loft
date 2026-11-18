@@ -212,7 +212,9 @@ async fn checks(state: &AppState, slug: &str, sha: &str) -> Result<Value> {
 /// A checker's verdict on a PR: sets the label for `kind` (tests, qa or security) and removes its opposite in one
 /// call, after creating the label if the repo doesn't have it. `sha` is the head commit the checker tested.
 /// Only a QA, Security or Code reviewer agent in the team of the agent that opened the PR may.
-pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kind: &str, pass: bool, sha: &str) -> Result<String, String> {
+/// It wakes who acts on it: on a fail the PR's opener, and once every verdict the PR needs has passed on its
+/// head, the Lead of the opener's team. `comment` is the checker's comment on the PR, if it left one.
+pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kind: &str, pass: bool, sha: &str, comment: &str) -> Result<String, String> {
     let (slug, number) = github::extract_pr_links(url).into_iter().next().ok_or("pr must look like https://github.com/<owner>/<repo>/pull/<number>")?;
     let (_, good, bad) = *VERDICTS.iter().find(|(k, _, _)| *k == kind).ok_or("kind must be tests, qa or security")?;
     // The first agent that tracked it is its opener: a later share by another agent doesn't change whose team may.
@@ -220,9 +222,9 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
     let pr = known.ok_or_else(|| format!("Loft doesn't track {slug}#{number}: its opener shares it with share_pull_request first."))?;
     let opener = state.db.get_agent(&pr.agent_id).ok().flatten();
     let checker = matches!(me.role.as_str(), "qa" | "security" | "code_reviewer");
-    if !checker || opener.is_none_or(|o| me.team().is_empty() || o.team() != me.team()) {
+    let Some(opener) = opener.filter(|o| checker && !me.team().is_empty() && o.team() == me.team()) else {
         return Err("Only a QA, Security or Code reviewer agent of the team that opened this pull request can set its verdict.".into());
-    }
+    };
     // Read it fresh (a 304 when unchanged): a verdict is about the head commit it was tested on.
     let pr = refresh(state, &pr.id).await.map_err(|e| e.to_string())?;
     if sha.len() < 7 || !pr.head_sha.starts_with(sha) {
@@ -253,9 +255,55 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
     }
     // The last verdict a PR needs makes it ready now, not at the next poll.
     mark_ready_if_due(state, &mut pr).await;
+    let lead = if pass { lead_to_tell(state, &mut pr, &opener).await } else { None };
     state.db.save_pull_request(&pr).map_err(|e| e.to_string())?;
     emit(state, &pr);
+    let head = &pr.head_sha[..pr.head_sha.len().min(8)];
+    let comment = if comment.trim().is_empty() { String::new() } else { format!(" Comment: {}", comment.trim()) };
+    if !pass {
+        let ticket = ticket_of(state, &pr).await;
+        let about = ticket.as_deref().map_or(String::new(), |t| format!(" (ticket {t})"));
+        let text = format!(
+            "[Verdict] {want} on {} at head {head}{about}.{comment}\nFix it, push, and tell {} the new head.",
+            pr.url, me.name
+        );
+        crate::agents::message_on_ticket(state, me, &opener, &text, json!({ "verdict": want }), ticket.as_deref());
+    } else if let Some(lead) = lead {
+        let ticket = ticket_of(state, &pr).await;
+        let about = ticket.as_deref().map_or(String::new(), |t| format!(" (ticket {t})"));
+        let text = format!(
+            "[Verdict] {}{about} is ready to merge: every verdict it needs has passed on its head {head} (the last was {want}, by {}).{comment}\nTell the user it's ready to merge.",
+            pr.url, me.name
+        );
+        crate::agents::message_on_ticket(state, me, &lead, &text, json!({ "verdict": want }), ticket.as_deref());
+    }
     Ok(format!("{want} is on {slug}#{number}."))
+}
+
+/// The Lead of the opener's team, when every verdict the PR needs has passed on its current head and the Lead
+/// wasn't told yet for this head (it marks it told). None otherwise.
+async fn lead_to_tell(state: &AppState, pr: &mut PullRequest, opener: &crate::db::Agent) -> Option<crate::db::Agent> {
+    if pr.state != "open" || pr.head_sha.is_empty() || pr.passes_sha != pr.head_sha || pr.ready_told_sha == pr.head_sha {
+        return None;
+    }
+    if pr.labels.iter().any(|l| VERDICTS.iter().any(|(_, _, bad)| bad == l)) || !kind_known(state, pr).await {
+        return None;
+    }
+    let have = |kind: &str| VERDICTS.iter().any(|(k, good, _)| *k == kind && pr.labels.iter().any(|l| l == good));
+    if !required(&pr.kind).iter().all(|k| have(k)) || opener.team().is_empty() {
+        return None;
+    }
+    let lead = state.db.list_agents().ok()?.into_iter().find(|a| a.role == "lead" && a.team() == opener.team())?;
+    pr.ready_told_sha = pr.head_sha.clone();
+    Some(lead)
+}
+
+/// The ticket a PR closes (its body's first "Closes #N"), as `owner/repo#N`, read fresh from GitHub.
+async fn ticket_of(state: &AppState, pr: &PullRequest) -> Option<String> {
+    let v = github::get(state, &format!("/repos/{}/pulls/{}", pr.slug, pr.number)).await.ok()?;
+    let body = v["body"].as_str().unwrap_or("");
+    let n = body.split('#').skip(1).filter_map(|s| s.split(|c: char| !c.is_ascii_digit()).next()?.parse::<i64>().ok()).find(|n| crate::delivery::closes_issue(body, *n))?;
+    Some(format!("{}#{n}", pr.slug))
 }
 
 /// What a PR's changed files make it: `ios` (any file under ios/), else `ui` (anything under frontend/), else
@@ -293,20 +341,8 @@ async fn mark_ready_if_due(state: &AppState, pr: &mut PullRequest) {
     if pr.labels.iter().any(|l| VERDICTS.iter().any(|(_, _, bad)| bad == l)) {
         return;
     }
-    if pr.kind_sha != pr.head_sha {
-        // More files than one page lists: take the strictest kind rather than guess.
-        let kind = if pr.changed_files > 100 {
-            Ok("ios")
-        } else {
-            match github::get(state, &format!("/repos/{}/pulls/{}/files?per_page=100", pr.slug, pr.number)).await {
-                Ok(v) => Ok(kind_of(&v.as_array().into_iter().flatten().filter_map(|f| f["filename"].as_str().map(String::from)).collect::<Vec<_>>())),
-                Err(e) => Err(e),
-            }
-        };
-        match kind {
-            Ok(k) => (pr.kind, pr.kind_sha) = (k.into(), pr.head_sha.clone()),
-            Err(e) => return tracing::warn!("files of {}#{}: {e}", pr.slug, pr.number),
-        }
+    if !kind_known(state, pr).await {
+        return;
     }
     let have = |kind: &str| VERDICTS.iter().any(|(k, good, _)| *k == kind && pr.labels.iter().any(|l| l == good));
     if !required(&pr.kind).iter().all(|k| have(k)) || (!required(&pr.kind).is_empty() && pr.passes_sha != pr.head_sha) {
@@ -321,6 +357,30 @@ async fn mark_ready_if_due(state: &AppState, pr: &mut PullRequest) {
         Ok(v) => tracing::warn!("marking {}#{} ready: {}", pr.slug, pr.number, v["errors"]),
         Err(e) => tracing::warn!("marking {}#{} ready: {e}", pr.slug, pr.number),
     }
+}
+
+/// Reads the PR's kind for its head when it isn't known yet (one files read per head). False when that fails.
+async fn kind_known(state: &AppState, pr: &mut PullRequest) -> bool {
+    if pr.kind_sha == pr.head_sha {
+        return true;
+    }
+    // More files than one page lists: take the strictest kind rather than guess.
+    let kind = if pr.changed_files > 100 {
+        Ok("ios")
+    } else {
+        match github::get(state, &format!("/repos/{}/pulls/{}/files?per_page=100", pr.slug, pr.number)).await {
+            Ok(v) => Ok(kind_of(&v.as_array().into_iter().flatten().filter_map(|f| f["filename"].as_str().map(String::from)).collect::<Vec<_>>())),
+            Err(e) => Err(e),
+        }
+    };
+    match kind {
+        Ok(k) => (pr.kind, pr.kind_sha) = (k.into(), pr.head_sha.clone()),
+        Err(e) => {
+            tracing::warn!("files of {}#{}: {e}", pr.slug, pr.number);
+            return false;
+        }
+    }
+    true
 }
 
 fn names(v: &Value) -> Vec<String> {
@@ -729,7 +789,9 @@ mod tests {
 
 
     /// A dev that opened the PR, and a reviewer of the same project.
+    /// Claude is stubbed out, since a verdict can wake an agent.
     fn team(st: &AppState, project: &str) -> (crate::db::Agent, crate::db::Agent) {
+        no_claude(st);
         let mut dev = crate::tasks::tests::agent(st, &format!("Dev {project}"));
         (dev.project, dev.group) = (project.into(), project.into());
         st.db.save_agent(&dev).unwrap();
@@ -760,7 +822,7 @@ mod tests {
         register(&st, &dev.id, slug, 5, None).await.unwrap();
         let url = "https://github.com/octo/pr-verdict/pull/5";
 
-        let said = set_verdict(&st, &qa, url, "tests", true, "abc1234").await.unwrap();
+        let said = set_verdict(&st, &qa, url, "tests", true, "abc1234", "").await.unwrap();
         assert!(said.contains("tests:green"), "{said}");
         let writes: Vec<_> = fake.seen("/repos/octo/pr-verdict/").into_iter().filter(|r| r.method != "GET").collect();
         assert_eq!(writes.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["POST", "POST", "DELETE"], "the label is created, added, and its opposite removed");
@@ -775,7 +837,7 @@ mod tests {
         fake.route("POST", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "tests:green", "qa:failed"]));
         fake.route("DELETE", "/repos/octo/pr-verdict/issues/5/labels/qa%3Apassed", 404, json!({ "message": "Label does not exist" }));
         fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
-        set_verdict(&st, &qa, url, "qa", false, "abc1234").await.unwrap();
+        set_verdict(&st, &qa, url, "qa", false, "abc1234", "").await.unwrap();
         let pr = st.db.find_pull_request(&dev.id, slug, 5).unwrap().unwrap();
         assert_eq!(pr.labels, ["bug", "tests:green", "qa:failed"], "a 404 on the opposite is fine: it wasn't there");
         let creates = fake.seen("/repos/octo/pr-verdict/labels").into_iter().filter(|r| r.method == "POST").count();
@@ -786,7 +848,7 @@ mod tests {
         fake.route("POST", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "needs-docs", "tests:green", "security:passed"]));
         fake.route("DELETE", "/repos/octo/pr-verdict/issues/5/labels/security%3Afindings", 404, json!({ "message": "Label does not exist" }));
         fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
-        set_verdict(&st, &qa, url, "security", true, "abc1234").await.unwrap();
+        set_verdict(&st, &qa, url, "security", true, "abc1234", "").await.unwrap();
         let pr = st.db.find_pull_request(&dev.id, slug, 5).unwrap().unwrap();
         assert!(pr.labels.contains(&"needs-docs".to_string()), "{:?}", pr.labels);
     }
@@ -830,7 +892,7 @@ mod tests {
         let before = fake.seen("/").len();
 
         for who in [&dev, &other_qa] {
-            let err = set_verdict(&st, who, url, "tests", true, "ccc3333").await.unwrap_err();
+            let err = set_verdict(&st, who, url, "tests", true, "ccc3333", "").await.unwrap_err();
             assert!(err.starts_with("Only a QA, Security or Code reviewer agent of the team"), "{err}");
         }
         // Every checker role of the team's group may, wherever its project is; the old "reviewer" role may not.
@@ -844,13 +906,13 @@ mod tests {
         st.db.save_agent(&qa).unwrap();
         let mut old = sec.clone();
         old.role = "reviewer".into();
-        assert!(set_verdict(&st, &old, url, "tests", true, "zzz9999").await.unwrap_err().starts_with("Only a QA"));
-        let err = set_verdict(&st, &sec, url, "tests", true, "zzz9999").await.unwrap_err();
+        assert!(set_verdict(&st, &old, url, "tests", true, "zzz9999", "").await.unwrap_err().starts_with("Only a QA"));
+        let err = set_verdict(&st, &sec, url, "tests", true, "zzz9999", "").await.unwrap_err();
         assert!(err.contains("Its head is now"), "{err}");
-        let err = set_verdict(&st, &qa, url, "tests", true, "zzz9999").await.unwrap_err();
+        let err = set_verdict(&st, &qa, url, "tests", true, "zzz9999", "").await.unwrap_err();
         assert!(err.contains("Its head is now ccc3333"), "{err}");
-        assert!(set_verdict(&st, &qa, url, "lint", true, "ccc3333").await.unwrap_err().contains("kind must be"));
-        assert!(set_verdict(&st, &qa, "https://github.com/octo/pr-auth/pull/99", "tests", true, "ccc3333").await.unwrap_err().contains("doesn't track octo/pr-auth#99"));
+        assert!(set_verdict(&st, &qa, url, "lint", true, "ccc3333", "").await.unwrap_err().contains("kind must be"));
+        assert!(set_verdict(&st, &qa, "https://github.com/octo/pr-auth/pull/99", "tests", true, "ccc3333", "").await.unwrap_err().contains("doesn't track octo/pr-auth#99"));
         let writes = fake.seen("/").into_iter().skip(before).filter(|r| r.method != "GET").count();
         assert_eq!(writes, 0, "a refused verdict writes nothing to GitHub");
     }
@@ -892,8 +954,8 @@ mod tests {
         register(&st, &other_dev.id, slug, 7, None).await.unwrap();
         let url = "https://github.com/octo/pr-takeover/pull/7";
 
-        assert!(set_verdict(&st, &other_qa, url, "qa", true, "ccc3333").await.unwrap_err().starts_with("Only a QA"));
-        set_verdict(&st, &qa, url, "qa", true, "ccc3333").await.unwrap();
+        assert!(set_verdict(&st, &other_qa, url, "qa", true, "ccc3333", "").await.unwrap_err().starts_with("Only a QA"));
+        set_verdict(&st, &qa, url, "qa", true, "ccc3333", "").await.unwrap();
     }
 
     #[tokio::test]
@@ -958,7 +1020,7 @@ mod tests {
         fake.route("POST", "/repos/octo/rdy-last/labels", 201, json!({}));
         fake.route("POST", "/repos/octo/rdy-last/issues/8/labels", 200, label_objects(&["tests:green", "security:passed"]));
         fake.route("DELETE", "/repos/octo/rdy-last/issues/8/labels/security%3Afindings", 404, json!({ "message": "Label does not exist" }));
-        set_verdict(&st, &qa, "https://github.com/octo/rdy-last/pull/8", "security", true, "abcdef1").await.unwrap();
+        set_verdict(&st, &qa, "https://github.com/octo/rdy-last/pull/8", "security", true, "abcdef1", "").await.unwrap();
         let pr = st.db.get_pull_request(&pr.id).unwrap().unwrap();
         assert!(!pr.draft && pr.ready_sha == "abcdef1234");
         assert_eq!(ready_calls(&fake), 1);
@@ -967,4 +1029,103 @@ mod tests {
         assert!(reasons.iter().any(|r| r.starts_with("Loft marked it ready")), "{reasons:?}");
     }
 
+
+    /// The messages agents sent `to` (their wakes), with their ticket, and no real Claude started for them.
+    fn wakes(st: &AppState, to: &crate::db::Agent) -> Vec<(String, Option<String>, String)> {
+        st.db.list_messages(&to.id, 50, None).unwrap().into_iter()
+            .filter(|m| m.role == "user" && m.meta.get("from_agent").is_some())
+            .map(|m| (m.meta["from_agent"]["name"].as_str().unwrap_or("").to_string(), m.meta["ticket"].as_str().map(String::from), m.content))
+            .collect()
+    }
+
+    fn no_claude(st: &AppState) {
+        let mut s = st.settings.get();
+        s.claude_bin = "/nonexistent/claude".into();
+        st.settings.save(s).unwrap();
+    }
+
+    /// A team's Lead, in the group `team` makes.
+    fn lead(st: &AppState, project: &str) -> crate::db::Agent {
+        let mut l = crate::tasks::tests::agent(st, &format!("Lead {project}"));
+        (l.project, l.group, l.role) = (project.into(), project.into(), "lead".into());
+        st.db.save_agent(&l).unwrap();
+        l
+    }
+
+    #[tokio::test]
+    async fn a_fail_wakes_the_opener_naming_the_pr_its_ticket_the_head_and_the_comment() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/v-fail";
+        let (dev, qa) = team(&st, "v-fail");
+        let boss = lead(&st, "v-fail");
+        let mut p = pull(slug, 9, "abc1234def");
+        p["body"] = json!("Adds the cap.\n\nCloses #42");
+        fake.route("GET", "/repos/octo/v-fail/pulls/9", 200, p);
+        settled_checks(&fake, slug, "abc1234def");
+        fake.route("POST", "/repos/octo/v-fail/labels", 201, json!({}));
+        fake.route("POST", "/repos/octo/v-fail/issues/9/labels", 200, label_objects(&["qa:failed"]));
+        fake.route("DELETE", "/repos/octo/v-fail/issues/9/labels/qa%3Apassed", 404, json!({}));
+        register(&st, &dev.id, slug, 9, None).await.unwrap();
+        let link = "https://github.com/octo/v-fail/pull/9#issuecomment-1";
+
+        set_verdict(&st, &qa, "https://github.com/octo/v-fail/pull/9", "qa", false, "abc1234", link).await.unwrap();
+        let w = wakes(&st, &dev);
+        assert_eq!(w.len(), 1, "{w:?}");
+        let (from, ticket, text) = &w[0];
+        assert_eq!((from.as_str(), ticket.as_deref()), ("Tester v-fail", Some("octo/v-fail#42")));
+        for part in ["https://github.com/octo/v-fail/pull/9", "qa:failed", "abc1234d", link] {
+            assert!(text.contains(part), "{part} in {text}");
+        }
+        assert!(wakes(&st, &boss).is_empty(), "a fail isn't for the Lead");
+    }
+
+    #[tokio::test]
+    async fn the_last_needed_pass_on_the_head_wakes_the_lead_once() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/v-ready";
+        let (dev, qa) = team(&st, "v-ready");
+        let boss = lead(&st, "v-ready");
+        let mut p = pull(slug, 3, "abcdef1234");
+        p["labels"] = label_objects(&["tests:green"]);
+        p["body"] = json!("Fixes #7");
+        fake.route("GET", "/repos/octo/v-ready/pulls/3", 200, p);
+        settled_checks(&fake, slug, "abcdef1234");
+        fake.route("GET", "/repos/octo/v-ready/pulls/3/files", 200, json!([{ "filename": "backend/src/a.rs" }]));
+        fake.route("POST", "/repos/octo/v-ready/labels", 201, json!({}));
+        fake.route("POST", "/repos/octo/v-ready/issues/3/labels", 200, label_objects(&["tests:green", "security:passed"]));
+        fake.route("DELETE", "/repos/octo/v-ready/issues/3/labels/security%3Afindings", 404, json!({}));
+        register(&st, &dev.id, slug, 3, None).await.unwrap();
+        let url = "https://github.com/octo/v-ready/pull/3";
+
+        set_verdict(&st, &qa, url, "security", true, "abcdef1", "").await.unwrap();
+        let w = wakes(&st, &boss);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0].1.as_deref(), Some("octo/v-ready#7"));
+        assert!(w[0].2.contains(url) && w[0].2.contains("ready to merge") && w[0].2.contains("abcdef12"), "{}", w[0].2);
+        set_verdict(&st, &qa, url, "security", true, "abcdef1", "").await.unwrap();
+        assert_eq!(wakes(&st, &boss).len(), 1, "once per head");
+        assert!(wakes(&st, &dev).is_empty(), "a pass doesn't wake the opener");
+    }
+
+    #[tokio::test]
+    async fn a_verdict_on_an_old_head_wakes_nobody() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/v-old";
+        let (dev, qa) = team(&st, "v-old");
+        let boss = lead(&st, "v-old");
+        let mut p = pull(slug, 4, "new5678abc");
+        p["labels"] = label_objects(&["tests:green"]);
+        fake.route("GET", "/repos/octo/v-old/pulls/4", 200, p);
+        settled_checks(&fake, slug, "new5678abc");
+        register(&st, &dev.id, slug, 4, None).await.unwrap();
+        let url = "https://github.com/octo/v-old/pull/4";
+
+        for pass in [false, true] {
+            assert!(set_verdict(&st, &qa, url, "security", pass, "old1234", "").await.is_err());
+        }
+        assert!(wakes(&st, &dev).is_empty() && wakes(&st, &boss).is_empty());
+    }
 }
