@@ -661,7 +661,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 folders
             }
         };
-        dirs.made |= !makes_nothing(name, args);
+        dirs.made |= !makes_nothing(all, words, live);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
@@ -669,15 +669,26 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
 }
 
 /// Whether a command (`git -C dir fetch`, `git commit -m x`) can't make a folder, a link or a `.git`: git's own history
-/// and remote commands, which don't write the work tree (`pull`, `checkout` do), without an option that runs a program.
-fn makes_nothing(name: &str, args: &[String]) -> bool {
+/// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
+/// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
+/// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
+fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
+    const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream"];
+    let [git, args @ ..] = words else { return false };
     let args = match args {
-        [c, _, rest @ ..] if name == "git" && c == "-C" => rest,
+        [c, _, rest @ ..] if c == "-C" => rest,
         _ => args,
     };
-    name == "git"
+    git == "git"
+        && all.len() == words.len()
+        && !live.iter().any(|&l| l)
+        && !words.iter().any(|w| w.contains(['$', '`']))
         && args.first().is_some_and(|sub| matches!(sub.as_str(), "fetch" | "push" | "commit" | "add" | "status" | "log" | "diff" | "show"))
-        && !args.iter().any(|a| a.starts_with("--upload-pack") || a.starts_with("--receive-pack") || a.starts_with("--exec") || a == "-c" || a.starts_with("--config"))
+        && args[1..].iter().all(|a| match a.strip_prefix('-') {
+            None | Some("") | Some("-") => true,
+            Some(o) if o.starts_with('-') => OPTIONS.contains(&a.as_str()),
+            Some(o) => o.chars().all(|c| "aAmqvunsf".contains(c)),
+        })
 }
 
 /// Where cd's and pushd's folder is among `args`, past their options (`-L`, `-P`, `-q`, bundles like `-LP`, up to and
@@ -2813,6 +2824,8 @@ mod tests {
             "cd loft && git commit -m x && git push",
             "cd loft/backend && git add -A && git commit -m x && git push",
             "cd loft && git fetch && git pull",
+            "git commit -am x && git push -u origin main",
+            "git fetch --prune --tags && git -C loft push --set-upstream origin x",
         ] {
             assert_eq!(asks(cmd, WS), None, "should run: {cmd}");
         }
@@ -2836,6 +2849,28 @@ mod tests {
             "mkdir loft && git -C ./loft push",
             "git fetch --upload-pack=./mk && git -C ./loft push",
             "git -c core.x=y commit -m x && git -C ./loft push",
+            // Options git takes by a unique prefix, the environment, a program named git, and what the shell expands.
+            "git fetch --upload-pa='ln -s /x lnk;:' . && git -C ./loft push",
+            "git fetch --upl ./mk . && git -C ./loft push",
+            "git push --receive-pa=./mk . main && git -C ./loft push",
+            "git push --exe=./mk . main && git -C ./loft push",
+            "GIT_SSH_COMMAND=./mk git fetch ssh://h/r && git -C ./loft push",
+            "env GIT_SSH_COMMAND=./mk git fetch ssh://h/r && git -C ./loft push",
+            "GIT_EDITOR=./mk git commit && git -C ./loft push",
+            "EDITOR=./mk git commit && git -C ./loft push",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=./mk git status && git -C ./loft push",
+            "GIT_EXTERNAL_DIFF=./mk git diff && git -C ./loft push",
+            "PATH=./bin:$PATH git fetch && git -C ./loft push",
+            "git fetch {--upload-pack=./mk,.} && git -C ./loft push",
+            "git fetch $OPT . && git -C ./loft push",
+            "O=--upload-pack=./mk; git fetch $O . && git -C ./loft push",
+            "git fetch \"$@\" && git -C ./loft push",
+            "xargs git fetch < args && git -C ./loft push",
+            "./git fetch && git -C ./loft push",
+            "/tmp/x/git status && git -C ./loft push",
+            "sudo git fetch && git -C ./loft push",
+            "command git fetch && git -C ./loft push",
+            "git fetch --upload-pa='ln -s /x lnk;:' . && cd lnk && git push",
             "git checkout main && cd loft && git push",
         ] {
             assert!(!asks_all(cmd, WS).is_empty(), "should ask: {cmd}");
