@@ -577,6 +577,8 @@ public enum ServerEvent {
     case needsYou(count: Int, new: Int? = nil, ids: [String])
     /// The Delivery of spec (or standalone ticket) `repo#spec` changed: a card showing it reloads.
     case delivery(repo: String, spec: Int)
+    /// The stream lagged and dropped events: load everything again, as after a reconnect.
+    case resync
     case other(String)
 
     private struct Envelope: Decodable { let type: String }
@@ -611,6 +613,7 @@ public enum ServerEvent {
         case "delivery":
             let b = try d.decode(DeliveryBody.self, from: data)
             return .delivery(repo: b.repo, spec: b.spec)
+        case "resync": return .resync
         default: return .other(type)
         }
     }

@@ -82,8 +82,8 @@ export default function TasksPage() {
 
   useServerEvents(
     useCallback((e: ServerEvent) => {
-      // The board reloads the Deliveries once after a burst of changes.
-      if (e.type === "task") {
+      // The board reloads the Deliveries once after a burst of changes, and after the stream lagged (`resync`).
+      if (e.type === "task" || e.type === "resync") {
         clearTimeout(reload.current);
         reload.current = setTimeout(loadDeliveries, 1500);
       }

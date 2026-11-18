@@ -20,7 +20,7 @@ export function PlanCard({ taskId, agents }: { taskId: string; agents: Agent[] }
     useCallback(
       (e: ServerEvent) => {
         if (e.type === "task" && (e.task.id === taskId || e.task.parent_id === taskId)) load();
-        if (e.type === "pull_request") load();
+        if (e.type === "pull_request" || e.type === "resync") load();
       },
       [taskId, load],
     ),

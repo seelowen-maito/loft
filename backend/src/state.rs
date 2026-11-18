@@ -12,6 +12,8 @@ use crate::repos::RepoCache;
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    /// This client's stream lagged and dropped events: it reloads its lists.
+    Resync,
     AgentUpdated { agent: serde_json::Value },
     AgentDeleted { agent_id: String },
     Message { message: serde_json::Value },
@@ -162,6 +164,9 @@ pub struct Runtime {
     pub backup: crate::backup::Status,
     /// The running or last clean of agents' build output: its log (sweep.rs)
     pub clean: crate::sweep::Log,
+    /// agent id -> its permission asks still waiting on the user, and its status text from before the first
+    /// (agents::ask_permission_for), so overlapping asks restore it once the last is answered
+    pub asks: HashMap<String, (usize, String)>,
     /// permission request id -> waiter blocked inside an MCP call
     pub waiters: HashMap<String, oneshot::Sender<Decision>>,
 }
