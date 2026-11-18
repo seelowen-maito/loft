@@ -2,6 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { Agent, GrillSession, Message, Task, TaskComment, PermissionRequest, PullRequest, SystemReading, UpdateStatus } from "./api";
 
 export type ServerEvent =
+  | { type: "resync" }
   | { type: "agent_updated"; agent: Agent }
   | { type: "agent_deleted"; agent_id: string }
   | { type: "message"; message: Message }
