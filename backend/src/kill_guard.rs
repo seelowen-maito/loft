@@ -431,6 +431,18 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         dirs.flush(cmds[i].chain);
         dirs.goes_on = cmds[i].piped || cmds[i].or || cmds[i].words.first().is_some_and(|w| w == "!");
         let all = &cmds[i].words;
+        let family = |n: &str| matches!(base(n), "cd" | "chdir" | "pushd" | "popd");
+        // A function named like one of them, however it is written (`function cd`, `{ cd() { … } }`, `f cd()`), a
+        // `functions[cd]=…`, an `autoload cd`, or `disable`, anywhere in the command.
+        let defines = (cmds[i].defines && all.iter().any(|n| family(n)))
+            || all.iter().position(|f| f == "function").is_some_and(|f| all[f + 1..].iter().take_while(|n| !KEYWORDS.contains(&n.as_str())).any(|n| family(n)))
+            || all.iter().any(|w| w.strip_prefix("functions[").is_some_and(|r| r.split(']').next().is_some_and(family)))
+            || (all.iter().any(|w| w == "autoload") && all.iter().any(|n| family(n)));
+        dirs.shadowed |= defines || all.iter().any(|w| w == "disable");
+        // `cd() { ... }` isn't a `cd`.
+        if cmds[i].defines && defines {
+            continue;
+        }
         // A `.git` an earlier command names (`> t/.git`, `of=t/.git`, `ln -s x .git`) matters from the next on.
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
         pending_dotgit = names_dotgit(all, &cmds[i].targets);
@@ -501,13 +513,6 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             dirs.moved = true;
         }
         // Another program's `cd` doesn't move the shell, for the commands after it too.
-        let family = |n: &str| matches!(base(n), "cd" | "chdir" | "pushd" | "popd");
-        let defines = (cmds[i].defines && all.first().is_some_and(|n| family(n))) || (all.first().is_some_and(|f| f == "function") && all[1..].iter().take_while(|n| !KEYWORDS.contains(&n.as_str())).any(|n| family(n)));
-        dirs.shadowed |= defines || name == "disable";
-        // `cd() { ... }` isn't a `cd`.
-        if cmds[i].defines && defines {
-            continue;
-        }
         let foreign = matches!(name, "cd" | "chdir" | "pushd" | "popd") && (dirs.shadowed || !shell_builtin(&all[..all.len() - words.len()], &cmds[i].quoted, &words[0]));
         dirs.goes_on |= foreign;
         let maybe = cmds[i].maybe || cmds[i].piped || foreign;
@@ -1674,13 +1679,15 @@ struct Level {
     always: Option<(usize, bool)>,
     /// A `case` was opened and its `in` (or zsh's `{`) hasn't come.
     case_pending: bool,
+    /// The command the last `(` ended: `()` right after it makes it a function's name.
+    paren_cmd: Option<usize>,
     /// A function's name was defined (`f()`, `function f`, `()`): its body, a `{` group, may not run.
     func_next: bool,
 }
 
 impl Level {
     fn new() -> Self {
-        Level { cur: None, word: String::new(), in_word: false, live: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![], open_list: false, quoted: false, closed: None, always: None, case_pending: false, func_next: false }
+        Level { cur: None, word: String::new(), in_word: false, live: false, redirect: None, frames: vec![Frame::default()], heredocs: vec![], open_list: false, quoted: false, closed: None, always: None, paren_cmd: None, case_pending: false, func_next: false }
     }
 
     fn frame(&mut self) -> &mut Frame {
@@ -1766,9 +1773,11 @@ impl Level {
         // A `}` ends a group (zsh needs no `;` before it) and the command in it: what follows isn't in the list the
         // group's last `cd` stopped, and `always { ... }` is a command of its own.
         let closes = keyword && word == "}" && self.frames.len() > 1;
+        let word_is_always = word == "always";
         p.cmds[id].words.push(word);
         p.cmds[id].live.push(live);
-        p.cmds[id].quoted.push(quoted);
+        // `always` is a keyword only right after a group's `}`: anywhere else it is a command's name.
+        p.cmds[id].quoted.push(quoted || (word_is_always && closed.is_none()));
         if closes {
             if !first {
                 self.pop();
@@ -1960,7 +1969,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 if stop == Some(')') {
                     depth += 1;
                 }
+                let named = if l.in_word { Some(l.cmd(p)) } else { l.cur };
                 l.end(p);
+                l.paren_cmd = named;
                 l.frames.push(Frame::default());
                 p.open_scope();
             }
@@ -1973,8 +1984,8 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 // `()` after a name, or alone (zsh): a function whose body follows.
                 if c[..i - 1].iter().rev().find(|ch| !matches!(ch, ' ' | '\t')) == Some(&'(') {
                     l.func_next = true;
-                    if let Some(c) = p.cmds.last_mut().filter(|c| c.words.len() == 1) {
-                        c.defines = true;
+                    if let Some(id) = l.paren_cmd.take() {
+                        p.cmds[id].defines = true;
                     }
                 }
                 if l.frames.len() > 1 {
@@ -2695,6 +2706,15 @@ mod tests {
             format!("function cd {{ :; }}; cd {w}; pnpm install"),
             format!("function cd {{ :; }}; pushd {w}; pnpm install"),
             format!("pushd() {{ :; }}; pushd {w}; pnpm install"),
+            format!("function cd() {{ :; }}; cd {w}; pnpm install"),
+            format!("{{ cd() {{ :; }} }}; cd {w}; pnpm install"),
+            format!("f() {{ cd() {{ :; }}; }}; f; cd {w}; pnpm install"),
+            format!("! function cd {{ :; }}; cd {w}; pnpm install"),
+            format!("f cd() {{ :; }}; cd {w}; pnpm install"),
+            format!("functions[cd]=':'; cd {w}; pnpm install"),
+            format!("autoload cd; cd {w}; pnpm install"),
+            format!("autoload -Uz popd; popd; pnpm install"),
+            format!("always cd {w}; pnpm install"),
             format!("disable cd; cd {w}; pnpm install"),
             format!("disable -r cd; cd {w} && pnpm install"),
             // zsh `always`: its block goes on with the group before it.
@@ -2717,6 +2737,9 @@ mod tests {
             format!("case x; echo in; git -C {u} reset --hard"),
             format!("function f g {{ cd {u}; }}; f; pnpm install"),
             format!("function f g h {{ cd {u}; }}; pnpm install"),
+            // An anonymous function after a `popd` or `pushd` of its own list doesn't hide it.
+            format!("pushd {u}; pushd {w}; popd; () {{ :; }}; pnpm install"),
+            format!("cd {u}; cd {w}; popd; () {{ :; }}; pnpm install"),
             // zsh's `-` precommand modifier before a plain command.
             format!("- cd {u}; pnpm install"),
         ] {
@@ -2748,6 +2771,9 @@ mod tests {
             "FOO=1 BAR=2 builtin cd backend && cargo test".to_string(),
             "noglob cd backend && cargo test".to_string(),
             "cd backend; cd() { :; }".to_string(),
+            "f() { :; }; () { :; }; cd backend && cargo test".to_string(),
+            "autoload zargs; cd backend && cargo test".to_string(),
+            "functions[g]=':'; cd backend && cargo test".to_string(),
             "noglob cd backend && cargo test".to_string(),
             "nocorrect cd backend && cargo test".to_string(),
             "time cd backend && cargo test".to_string(),
