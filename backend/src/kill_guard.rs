@@ -283,7 +283,8 @@ impl Dirs {
         // where it was, or where an earlier failed `cd` left it.
         // The path as written counts too: `nope/..` folds to a folder that is there, but the shell refuses it.
         let raw = self.written(dir);
-        if [to.as_ref(), raw.as_ref()].into_iter().flatten().any(|t| missing(t) && !self.touched.iter().any(|m| t.starts_with(m))) {
+        // So does one through a folder an earlier `rm` or `mv` of the command names and then up (`gone/..`).
+        if self.passes(dir) || [to.as_ref(), raw.as_ref()].into_iter().flatten().any(|t| missing(t) && !self.touched.iter().any(|m| t.starts_with(m))) {
             self.popped = true;
             for a in self.alts.iter().cloned().chain(self.cwd.clone()) {
                 if !alts.contains(&a) {
@@ -2301,6 +2302,8 @@ mod tests {
             // A cd that works after a failed one doesn't make `cd -` known.
             format!("cd {u}; cd {w}/nope; cd {w}; cd -; pnpm install"),
             // A path through a missing folder and back up is refused too.
+            format!("cd {u}; rm -rf {w}/real; cd {w}/real/..; pnpm install"),
+            format!("cd {u}; mv {w}/real {w}/r2; cd {w}/real/..; pnpm install"),
             format!("cd {u}; cd {w}/nope/..; pnpm install"),
             format!("cd {u}; cd {w}/nope.txt/..; pnpm install"),
             format!("cd {u}; cd {w}/nope/../real; pnpm install"),
