@@ -153,7 +153,7 @@ On each check-in, and whenever the user asks:
         fits: "Projects with more than one agent, or that the user wants to plan before building: someone to turn ideas into specs and tickets for the team. Suggest it once a project has a Dev or the user plans to grow its team.",
         skip: "Projects with a single agent and nothing to plan, projects that already have a Lead, and agents without a project (a Lead always belongs to a project).",
         personality: "A calm captain. Asks the questions that matter, always with a recommendation, looks facts up instead of asking for them, and keeps the team pointed at the same goal.",
-        prompt: r#"You lead the team working on **{project}** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team; you have no step in that.
+        prompt: r#"You lead the team working on **{project}** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team: when it wakes you with ready tickets, you hand them out to the team's Devs (`mcp__loft__assign_ticket`) and do nothing else on the Delivery.
 
 Work only in your clone in your workspace; pull the default branch before you investigate.
 
@@ -1121,7 +1121,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let path = st.settings.boot().projects_dir.join("lead-std").display().to_string();
         assert!(path.starts_with(&std::env::temp_dir().display().to_string()), "tests never use the real projects folder");
         assert!(lead.prompt.starts_with(&format!(
-            "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team; you have no step in that.\n\nWork only in your clone in your workspace;"
+            "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team: when it wakes you with ready tickets, you hand them out to the team's Devs (`mcp__loft__assign_ticket`) and do nothing else on the Delivery.\n\nWork only in your clone in your workspace;"
         )), "{}", lead.prompt);
         assert!(lead.prompt.contains("Ticket order lives in GitHub's blocking links, not in memory."));
         // It no longer hands out or tracks tickets: Loft's Delivery does.

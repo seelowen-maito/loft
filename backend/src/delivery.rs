@@ -278,7 +278,7 @@ fn asked(reply: &str) -> Option<String> {
 
 /// Marks `d` stalled with `reason`, remembering the state to go back to. Only a Delivery whose step an
 /// agent should be working on: never a paused one, nor one waiting for the user (`needs_human`). `who` is
-/// the agent whose run ended, and `ask` what that run asked the user. The team's Lead gets an FYI.
+/// the agent whose run ended, and `ask` what that run asked the user. The team's Lead is woken with it.
 fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>, who: Option<&str>, ask: Option<crate::db::StallAsk>) -> Option<Delivery> {
     // Already stalled: another ticket's step joins the ones that stall it.
     if d.state == "stalled" && !tickets.is_empty() {
@@ -308,8 +308,8 @@ fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>, who: O
     Some(d)
 }
 
-/// An FYI to the team's Lead that `d` stalled, naming the tickets and why: it can't resume it (only the user
-/// can), but it knows what's going on when the user asks. Not when the run that stalled it was the Lead's own.
+/// A needs-action wake to the team's Lead that `d` stalled, naming the tickets and why: it can't resume it (only
+/// the user can), but it answers the question or tells the user. Not when the run that stalled it was the Lead's own.
 fn tell_lead(state: &AppState, d: &Delivery, reason: &str, tickets: &[i64], who: Option<&str>) {
     let Some(lead) = with_role(state, d, "lead") else { return };
     if who == Some(lead.id.as_str()) {
@@ -324,11 +324,11 @@ fn tell_lead(state: &AppState, d: &Delivery, reason: &str, tickets: &[i64], who:
         format!(" {name} ended its run asking: \"{}\"", a.question)
     });
     let text = format!(
-        "[Loft Delivery: {}] The Delivery stalled{at}: {}.{asked} Only the user can resume it (Needs you → Resume); nothing for you to do.",
+        "[Loft Delivery: {}] The Delivery stalled{at}: {}.{asked} Only the user can resume it (Needs you → Resume): answer what the agent asked if you can, and tell the user what the Delivery waits on.",
         subject(d),
         stall_why(reason)
     );
-    crate::agents::fyi_from_loft(state, &lead, &text);
+    crate::agents::needs_action_from_loft(state, &lead, &text);
 }
 
 /// The id of a stalled Delivery's Needs you item: a new stall is a new item, pushed again.
@@ -950,7 +950,7 @@ fn lead_brief(state: &AppState, d: &Delivery, why: &str) -> String {
         "[Loft Delivery: {about}] This is not a message from the user. {why}\n\
          Tickets:\n{tickets}\n\
          Devs:\n{devs}\n\
-         - Hand out the ready tickets with `mcp__loft__assign_ticket` (ticket and the Dev's name). You may hand several ready tickets to different Devs at once; a blocked ticket is refused. A Dev whose ticket is in review can take the next one: Loft sends it any fix first, after it submits the ticket it's building. Loft wakes the Dev with its brief, takes each ticket through review and closes it, and wakes you again when a ticket closes.\n\
+         - Hand out the ready tickets with `mcp__loft__assign_ticket` (ticket and the Dev's name). You may hand several ready tickets to different Devs at once; a blocked ticket is refused. A Dev whose ticket is in review can take the next one: Loft sends it any fix first, after it submits the ticket it's building. Loft wakes the Dev with its brief, takes each ticket through review and closes it, and wakes you again when a ticket closes, when the Delivery stalls and when it's done.\n\
          - Hand out only what is ready now, and do nothing else on this Delivery: Loft coordinates it.",
         about = subject(d),
         tickets = tickets.join("\n"),
@@ -1952,6 +1952,7 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
             return Ok(format!("\n{} passed its reviews.{after}", tag(&d, t)));
         }
         let next = advance(state, &d.repo, d.spec).await;
+        tell_closed(state, &d.repo, d.spec, n);
         return Ok(format!("\n{} is done.{after}{next}", tag(&d, t)));
     }
     if d.standalone {
@@ -1987,7 +1988,22 @@ async fn finish(state: &AppState, d: &Delivery, n: i64) -> Result<String, String
     };
     unlabel_changes(state, d, n).await;
     let next = advance(state, &d.repo, d.spec).await;
+    tell_closed(state, &d.repo, d.spec, n);
     Ok(format!("\n{closed}{next}"))
+}
+
+/// Ticket #n closed: the Lead is woken with what closed and what's still open, unless `advance` just woke it
+/// with tickets to hand out. The caller holds the repo's publish lock.
+fn tell_closed(state: &AppState, repo: &str, spec: i64, n: i64) {
+    let Some(d) = state.db.get_delivery(repo, spec).ok().flatten() else { return };
+    let Some(lead) = lead_of(state, &d) else { return };
+    if d.state != "running" || !ready_tickets(&d).is_empty() {
+        return;
+    }
+    let open: Vec<String> = d.tickets.iter().filter(|t| t.state != "closed").map(|t| tag(&d, t)).collect();
+    let open = if open.is_empty() { "none".to_string() } else { open.join(", ") };
+    let closed = d.ticket(n).map_or_else(|| format!("#{n}"), |t| tag(&d, t));
+    wake_lead(state, &d, &lead, &format!("{closed} closed. Still open: {open}. Nothing is ready to hand out yet."));
 }
 
 /// Ticket #n passed: the PR no longer waits for changes on it, so `changes-requested` comes off, unless another
@@ -3530,7 +3546,7 @@ pub(crate) fn local_ready(state: &AppState, d: &Delivery) -> String {
 
 /// The Delivery is done: Loft marked its spec PR ready, or set a plan kept in Loft to ready. Only the first
 /// time (a retried ready call finds `done_at` set): Needs you gets its Delivery done item, and the agent that
-/// planned it, else the team's Lead, is woken once with a summary, in a run whose reply is an Unread reply.
+/// planned it and the team's Lead (once, when they're the same) are woken with a summary, in a run whose reply is an Unread reply.
 pub(crate) fn done(state: &AppState, repo: &str, spec: i64) {
     let mut first = false;
     let Some(d) = update(state, repo, spec, |d| {
@@ -3544,14 +3560,17 @@ pub(crate) fn done(state: &AppState, repo: &str, spec: i64) {
         return;
     }
     let planner = Some(d.planner.as_str()).filter(|p| !p.is_empty()).and_then(|p| state.db.get_agent(p).ok().flatten());
-    let (to, lead) = match planner {
-        Some(a) => (a, false),
-        None => match with_role(state, &d, "lead") {
-            Some(a) => (a, true),
-            None => return tracing::info!("delivery {repo}#{spec}: done, with nobody to tell but the user"),
-        },
-    };
-    crate::agents::wake_with_reply(state, &to.id, done_brief(state, &d, lead));
+    let lead = with_role(state, &d, "lead");
+    if planner.is_none() && lead.is_none() {
+        return tracing::info!("delivery {repo}#{spec}: done, with nobody to tell but the user");
+    }
+    let lead_is_planner = planner.as_ref().zip(lead.as_ref()).is_some_and(|(p, l)| p.id == l.id);
+    if let Some(p) = &planner {
+        crate::agents::wake_with_reply(state, &p.id, done_brief(state, &d, false));
+    }
+    if let Some(l) = lead.filter(|_| !lead_is_planner) {
+        crate::agents::wake_with_reply(state, &l.id, done_brief(state, &d, planner.is_none()));
+    }
 }
 
 /// The summary the done wake carries: the spec, its PR (or branch), and the tickets closed.
