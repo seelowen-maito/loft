@@ -284,6 +284,11 @@ impl Dirs {
     /// yet lands somewhere the guard can't tell.
     fn enter(&mut self, chdir: &[&str]) {
         for d in chdir {
+            // A variable or a substitution: where env goes is known only to the shell.
+            if folder_expands(d) {
+                self.lose();
+                continue;
+            }
             self.unknown |= self.passes(d);
             self.cwd = self.at(d);
             // env goes there for real: into a link that isn't there yet, the shell ends where it points.
@@ -476,11 +481,12 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             }
         }
         let moved = dirs.moved;
-        if matches!(name, "cd" | "pushd" | "popd") {
+        if matches!(name, "cd" | "chdir" | "pushd" | "popd") {
             dirs.moved = true;
         }
         let folders = match name {
-            "cd" => {
+            // zsh's other name for `cd`.
+            "cd" | "chdir" => {
                 let (physical, i) = dir_word(args);
                 match i.map(|i| (args[i].as_str(), live[i])) {
                     None => {
@@ -586,7 +592,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             }
             _ => {
                 // `env -C <folder> cmd` runs cmd there.
-                let (before, was_unknown) = (dirs.cwd.clone(), dirs.unknown);
+                let (before, was_unknown, was_alts) = (dirs.cwd.clone(), dirs.unknown, dirs.alts.clone());
                 dirs.enter(&chdir);
                 let mut folders = command_folders(name, args, live, &vars, dirs);
                 // Each other folder the shell may be in.
@@ -606,6 +612,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 }
                 dirs.cwd = before;
                 dirs.unknown = was_unknown;
+                dirs.alts = was_alts;
                 folders
             }
         };
@@ -692,6 +699,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
         "git" => git_changes(dirs, vars, args, live),
         "cargo" => match flags(args, &["--manifest-path"]) {
             (manifest, Some(s)) if CARGO_CHANGES.contains(&s) => match manifest {
+                Some(m) if folder_expands(m) => unknown_in(dirs, None),
                 Some(m) => dirs.at(m).and_then(|f| f.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(m).then(|| PathBuf::from(UNKNOWN))).collect(),
                 None => dirs.cwd.clone().into_iter().collect(),
             },
@@ -706,6 +714,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
             // Node folds `..` as text, the kernel after the links: both are asked about.
             let folders = |dir: Option<&str>| match dir {
                 None => dirs.cwd.clone().into_iter().collect::<Vec<_>>(),
+                Some(d) if folder_expands(d) => unknown_in(dirs, None),
                 Some(d) => [dirs.at_text(d), dirs.at(d)].into_iter().flatten().chain(dirs.passes(d).then(|| PathBuf::from(UNKNOWN))).collect(),
             };
             match flags(args, dir_flags) {
@@ -721,7 +730,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
             }
             // The folder of the project or workspace it names builds there too.
             let named = args.windows(2).filter(|w| matches!(w[0].as_str(), "-project" | "-workspace")).map(|w| w[1].as_str());
-            let named: Vec<PathBuf> = named.flat_map(|n| dirs.at(n).and_then(|p| p.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(n).then(|| PathBuf::from(UNKNOWN)))).collect();
+            let named: Vec<PathBuf> = named.flat_map(|n| if folder_expands(n) { unknown_in(dirs, None) } else { dirs.at(n).and_then(|p| p.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(n).then(|| PathBuf::from(UNKNOWN))).collect() }).collect();
             dirs.cwd.clone().into_iter().chain(named).collect()
         }
         _ => vec![],
@@ -841,6 +850,11 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         let a = a.as_str();
         let value = |o: &str| a.strip_prefix(o).and_then(|r| r.strip_prefix('='));
         let takes_value = matches!(a, "-C" | "--work-tree" | "--git-dir" | "-c" | "--namespace" | "--config-env" | "--super-prefix");
+        // A variable or a substitution in a folder option: the shell tells git where, the guard can't.
+        let dir_option = matches!(a, "-C" | "--work-tree" | "--git-dir");
+        if (dir_option && args.get(i).is_some_and(|(d, _)| folder_expands(d))) || ["--work-tree", "--git-dir"].iter().any(|o| value(o).is_some_and(folder_expands)) {
+            return unknown_in(&dirs, None);
+        }
         if hid(i - 1) || (takes_value && hid(i)) {
             let path = if takes_value && hid(i) { args.get(i).map(|w| w.0.as_str()) } else { value("--git-dir").or(value("--work-tree")) };
             return unknown_in(&dirs, path);
@@ -878,6 +892,10 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
             // `-c core.worktree=x` names the work tree as `--work-tree` does.
             "-c" => {
                 if let Some((_, v)) = args.get(i).and_then(|(w, _)| w.split_once('=')).filter(|(k, _)| k.eq_ignore_ascii_case("core.worktree")) {
+                    // A variable or a substitution, as in any folder option.
+                    if folder_expands(v) {
+                        return unknown_in(&dirs, None);
+                    }
                     tree = Some(dirs.at(v));
                 }
                 i += 1;
@@ -1045,6 +1063,13 @@ fn outermost_checkout(folder: &Path) -> PathBuf {
 /// A folder word with a variable, a command substitution or a backtick: where it goes is known only to the shell.
 fn expands(word: &str) -> bool {
     word.contains(['$', '`'])
+}
+
+/// `expands` for a folder option's value: `$HOME` and `${HOME}` at the start are the home folder, which the guard knows.
+/// `$PWD` and `$(pwd)` are not: a command can set `PWD`, redefine `pwd`, or run in another folder than the shell expands it in.
+fn folder_expands(word: &str) -> bool {
+    let rest = ["$HOME", "${HOME}"].iter().find_map(|h| word.strip_prefix(h).filter(|r| r.is_empty() || r.starts_with('/'))).unwrap_or(word);
+    expands(rest)
 }
 
 fn hides(word: &str, live: bool) -> bool {
@@ -2364,6 +2389,65 @@ mod tests {
         for cmd in ["cd -; git pull", "cd /nowhere/dev/loft/agent-local-storage/abc/loft && git pull", "cd loft && git pull"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
+    }
+
+    #[test]
+    fn a_folder_option_with_a_variable_asks_and_chdir_is_cd() {
+        const WORKSPACE: &str = "/nowhere/dev/loft/agent-local-storage/abc";
+        for cmd in [
+            "D=/nowhere/dev/loft; git -C \"$D\" reset --hard",
+            "D=/nowhere/dev/loft; git --git-dir=$D/.git --work-tree=$D reset --hard",
+            "D=/nowhere/dev/loft; git --git-dir $D/.git --work-tree $D reset --hard",
+            "for d in /nowhere/dev/loft; do git -C $d reset --hard; done",
+            "git -C $(git rev-parse --show-toplevel) reset --hard",
+            "D=/nowhere/dev/loft; pnpm -C $D install",
+            "D=/nowhere/dev/loft; pnpm --dir=$D install",
+            "pnpm -C $OLDPWD install",
+            "D=/nowhere/dev/loft; npm --prefix $D install",
+            "D=/nowhere/dev/loft; cargo --manifest-path $D/Cargo.toml build",
+            "D=/nowhere/dev/loft; xcodebuild -project $D/X.xcodeproj build",
+            "D=/nowhere/dev/loft; env -C $D pnpm install",
+            "D=/nowhere/dev/loft; git -c core.worktree=$D reset --hard",
+            "D=/nowhere/dev/loft; git -c core.worktree=$D checkout .",
+            "D=/nowhere/dev/loft; chdir $D && pnpm install",
+        ] {
+            for cwd in [CLONE, WORKSPACE] {
+                assert!(!asks_all(cmd, cwd).is_empty(), "should ask in {cwd}: {cmd}");
+            }
+        }
+        // `$PWD` and `$(pwd)` are variables like any other: they ask, and the plain forms run.
+        for cmd in [
+            "git -C \"$PWD\" status",
+            "git -C ${PWD} pull",
+            "git -C \"$(pwd)\" pull",
+            "pnpm --dir \"$PWD/frontend\" install",
+            "cargo build --manifest-path \"$PWD/backend/Cargo.toml\"",
+            // The command sets `PWD`, redefines `pwd`, or runs the option in another folder than the shell expands it in.
+            "PWD=/nowhere/dev/loft; git -C \"$PWD\" reset --hard",
+            "export PWD=/nowhere/dev/loft; git -C \"$PWD\" reset --hard",
+            "read PWD <<< /nowhere/dev/loft; git -C \"$PWD\" reset --hard",
+            "for PWD in /nowhere/dev/loft; do git -C \"$PWD\" reset --hard; done",
+            "pwd() { echo /nowhere/dev/loft; }; git -C \"$(pwd)\" reset --hard",
+            "alias pwd='echo /nowhere/dev/loft'; git -C \"$(pwd)\" reset --hard",
+            "env -C /nowhere/dev/loft git -C \"$PWD\" reset --hard",
+            "sh -c \"cd /nowhere/dev/loft && git -C $PWD reset --hard\"",
+            "eval \"cd /nowhere/dev/loft; git -C $PWD reset --hard\"",
+        ] {
+            assert!(!asks_all(cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in ["git -C . status", "git status", "pnpm --dir frontend install", "cargo build --manifest-path backend/Cargo.toml"] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+        // `chdir` goes where `cd` goes.
+        assert_eq!(asks("chdir /nowhere/dev/loft && git pull", CLONE), Some(PathBuf::from(USER)));
+        assert_eq!(asks("chdir loft && git pull", CLONE), None);
+        // Literal folders behave as before.
+        for cmd in ["git -C loft status", "git -C loft reset --hard", "pnpm -C . install", "cargo --manifest-path Cargo.toml build", "env -C . pnpm install"] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+        assert!(!asks_all("git -C /nowhere/dev/loft reset --hard", CLONE).is_empty());
+        // What env -C $D runs is that command's folder only.
+        assert_eq!(asks("env -C $D echo hi; git status", CLONE), None);
     }
 
     #[test]
