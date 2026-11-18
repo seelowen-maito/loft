@@ -250,6 +250,20 @@ impl Dirs {
         }
     }
 
+    /// A `cd` that may not run, or not in this shell (`Cmd::maybe`), left the shell in `places` too: they are seen by what
+    /// follows, as after a `cd` that fails.
+    fn may_stay(&mut self, places: Vec<PathBuf>) {
+        self.pending_chain = if self.goes_on { usize::MAX } else { self.chain };
+        for a in places {
+            if !self.pending.contains(&a) {
+                self.pending.push(a);
+            }
+        }
+        if self.pending.len() > 8 {
+            self.lose();
+        }
+    }
+
     fn cd(&mut self, to: Option<PathBuf>) {
         if !self.left.contains(&self.cwd) {
             self.left.push(self.cwd.clone());
@@ -484,6 +498,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         if matches!(name, "cd" | "chdir" | "pushd" | "popd") {
             dirs.moved = true;
         }
+        let maybe = cmds[i].maybe || cmds[i].piped;
+        let before: Vec<PathBuf> = dirs.alts.iter().cloned().chain(dirs.cwd.clone()).collect();
         let folders = match name {
             // zsh's other name for `cd`.
             "cd" | "chdir" => {
@@ -513,6 +529,9 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                     // where they start, and the checkout around stands for the rest.
                     Some((dir, true)) if hides(dir, true) => dirs.hide(dir),
                     Some((dir, _)) => dirs.move_to(dir, physical),
+                }
+                if maybe {
+                    dirs.may_stay(before);
                 }
                 continue;
             }
@@ -546,6 +565,9 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                         dirs.stack.push(from);
                         dirs.move_to(dir, physical);
                     }
+                }
+                if maybe {
+                    dirs.may_stay(before);
                 }
                 continue;
             }
@@ -1501,6 +1523,9 @@ struct Cmd {
     chain: usize,
     /// It is not the last command of its pipeline.
     piped: bool,
+    /// It may not run, or not in the shell the next command runs in: it follows `&&`, `||` or `|`, sits in an `if`, a loop
+    /// or a `case`, or is sent to the background with `&`. A `cd` of it may leave the shell where it was.
+    maybe: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1519,6 +1544,8 @@ struct Frame {
     place: usize,
     /// In a `case`: whether the next words are a pattern (up to its `)`).
     pattern: Option<bool>,
+    /// An `if`, a loop or a `case`: its commands may not run.
+    cond: bool,
 }
 
 #[derive(Default)]
@@ -1576,8 +1603,9 @@ impl Level {
     /// The command being lexed, started if need be.
     fn cmd(&mut self, p: &mut Parse) -> usize {
         *self.cur.get_or_insert_with(|| {
+            let maybe = self.open_list || self.frames.iter().any(|f| f.cond);
             self.open_list = false;
-            p.cmds.push(Cmd { scope: p.scope.clone(), chain: p.chain, ..Default::default() });
+            p.cmds.push(Cmd { scope: p.scope.clone(), chain: p.chain, maybe, ..Default::default() });
             p.cmds.len() - 1
         })
     }
@@ -1612,7 +1640,8 @@ impl Level {
         let opens_case = word == "in" && words.len() >= 2 && words[words.len() - 2] == "case" && command_position(&words[..words.len() - 2]);
         if first {
             match word.as_str() {
-                "{" | "while" | "until" | "if" | "for" | "select" => self.frames.push(Frame::default()),
+                "{" => self.frames.push(Frame::default()),
+                "while" | "until" | "if" | "for" | "select" => self.frames.push(Frame { cond: true, ..Default::default() }),
                 "}" | "done" | "fi" | "esac" if self.frames.len() > 1 => drop(self.frames.pop()),
                 _ => {}
             }
@@ -1631,7 +1660,7 @@ impl Level {
         }
         if opens_case {
             self.end(p);
-            self.frames.push(Frame { pattern: Some(true), ..Default::default() });
+            self.frames.push(Frame { pattern: Some(true), cond: true, ..Default::default() });
         }
     }
 
@@ -1832,6 +1861,11 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     l.separate(p);
                     l.open_list = true;
                 } else {
+                    // A command sent to the background runs in a subshell.
+                    l.end_word(p);
+                    if let Some(id) = l.cur {
+                        p.cmds[id].maybe = true;
+                    }
                     l.separate(p);
                     p.chain += 1;
                 }
@@ -2383,6 +2417,35 @@ mod tests {
         }
         for cmd in ["cd -; git pull", "cd /nowhere/dev/loft/agent-local-storage/abc/loft && git pull", "cd loft && git pull"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn a_cd_that_may_not_run_leaves_the_folder_before_it_as_a_place() {
+        let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
+        for cmd in [
+            format!("cd {u}; [ -d {w}/zzz ] && cd {w}; pnpm install"),
+            format!("cd {u}; false && cd {w}; pnpm install"),
+            format!("cd {u}; true || cd {w}; pnpm install"),
+            format!("cd {u}; if false; then cd {w}; fi; pnpm install"),
+            format!("cd {u}; while false; do cd {w}; done; pnpm install"),
+            format!("cd {u}; for x in; do cd {w}; done; pnpm install"),
+            format!("cd {u}; case $X in a) cd {w};; esac; pnpm install"),
+            format!("cd {u}; cd {w} | cat; pnpm install"),
+            format!("cd {u}; cd {w} &; pnpm install"),
+            format!("cd {u}; cd {w} & pnpm install"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in [
+            format!("cd {w} && pnpm install"),
+            "cd backend && cargo test".to_string(),
+            format!("cd {w}; pnpm install"),
+            format!("[ -d {w} ] && cd {w}; pnpm install"),
+            format!("if true; then cd {w}; pnpm install; fi"),
+            format!("(cd {u}; false && cd {w}); pnpm install"),
+        ] {
+            assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
         }
     }
 
