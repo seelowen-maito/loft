@@ -506,7 +506,7 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 return woke(w);
             }
             // The dashboard reads the message id off a queued result to show when it's delivered.
-            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref()) {
+            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref(), true) {
                 Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),
                 None => format!("Delivered. {} is reading it now.", to.name),
             })
@@ -1099,12 +1099,28 @@ mod tests {
     async fn a_message_with_substance_goes_through_even_with_thanks() {
         let (st, to) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Lead");
-        let texts = ["Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12", "Wait.", "OK, wait.", "Wait here.", "You wait", "Next.", "Great, next task", "Next task"];
+        let texts = ["#582 done: PR #588 ready, tests pass", "Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12", "Wait.", "OK, wait.", "Wait here.", "You wait", "Next.", "Great, next task", "Next task"];
         for text in texts {
             let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": "fyi" })).await;
             assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered"), "{text}: {r}");
         }
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), texts.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handed_over_ticket_asks_the_recipient_to_report_back_to_the_sender() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let line = format!("[When this work is done, or blocked, report back to Lead: call `mcp__loft__message_agent` with agent \"{}\", kind \"needs_action\" and ticket \"#12\", saying what you did and where it is.]", from.id);
+        message(&st, &from, json!({ "agent": to.id, "text": "Build #12", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        let p = &prompts(&st, &to)[0];
+        assert!(p.contains("Build #12") && p.contains(&line), "{p}");
+
+        // A message about no ticket hands nothing over.
+        message(&st, &from, json!({ "agent": to.id, "text": "Which branch?", "kind": "needs_action" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
+        assert!(!prompts(&st, &to)[1].contains("report back"), "{}", prompts(&st, &to)[1]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

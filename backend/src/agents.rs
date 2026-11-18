@@ -566,7 +566,8 @@ These rules are Loft's and apply to every message you send another agent with `m
 3. Send a verdict only to the agent that acts on it, not to everyone.
 4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
 5. Don't reply to an FYI.
-6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.";
+6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.
+7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
@@ -906,24 +907,32 @@ pub fn message_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str
 
 /// `message_from_agent`, with extra `meta` on the stored message (e.g. which task it is about).
 pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text: &str, meta: Value) {
-    message_on_ticket(state, from, to, text, meta, None);
+    message_on_ticket(state, from, to, text, meta, None, false);
 }
 
 /// `message_from_agent_with` about `ticket` (a `message_ticket_key`), if it names one: at a ticket boundary,
 /// the recipient's Fresh context setting applies before the run, as on a Delivery wake. A Lead builds the
 /// tickets itself when its team has no Dev. Returns the message's id when it waits for a run to end.
-pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>) -> Option<i64> {
+/// With `report_back`, an agent's needs-action message hands `ticket` over: the recipient is told to report back.
+pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>, report_back: bool) -> Option<i64> {
     let fresh = ticket.is_some_and(|t| ticket_boundary(state, &to.id, t, crate::delivery::fresh_context_applies(state, to)));
     if let Some(t) = ticket {
         meta["ticket"] = json!(t);
     }
     meta["from_agent"] = json!({ "id": from.id, "name": from.name });
     let msg = add_msg(state, &to.id, None, "user", "text", text, meta).map(|m| m.id);
-    let prompt = format!(
+    let mut prompt = format!(
         "[Message from agent {name} (id {id}), not from the user]\n{text}\n\n[Your replies in this chat are seen by the user, not by {name}. To answer {name}, call `mcp__loft__message_agent` with agent \"{id}\".]",
         name = from.name,
         id = from.id,
     );
+    if let Some(t) = ticket.filter(|_| report_back) {
+        prompt.push_str(&format!(
+            "\n[When this work is done, or blocked, report back to {name}: call `mcp__loft__message_agent` with agent \"{id}\", kind \"needs_action\" and ticket \"{t}\", saying what you did and where it is.]",
+            name = from.name,
+            id = from.id,
+        ));
+    }
     start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg, false);
     let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.contains(id)));
     if queued.is_some() {
@@ -2176,6 +2185,7 @@ pub(crate) mod tests {
                 "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
                 "5. Don't reply to an FYI.",
                 "6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.",
+                "7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.",
             ] {
                 assert!(section.contains(rule), "missing {rule}");
             }

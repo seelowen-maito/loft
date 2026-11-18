@@ -267,7 +267,7 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
             "[Verdict] {want} on {} at head {head}{about}.{comment}\nFix it, push, and tell {} the new head.",
             pr.url, me.name
         );
-        crate::agents::message_on_ticket(state, me, &opener, &text, json!({ "verdict": want }), ticket.as_deref());
+        crate::agents::message_on_ticket(state, me, &opener, &text, json!({ "verdict": want }), ticket.as_deref(), false);
     } else if let Some(lead) = lead {
         let ticket = ticket_of(state, &pr).await;
         let about = ticket.as_deref().map_or(String::new(), |t| format!(" (ticket {t})"));
@@ -275,7 +275,7 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
             "[Verdict] {}{about} is ready to merge: every verdict it needs has passed on its head {head} (the last was {want}, by {}).{comment}\nTell the user it's ready to merge.",
             pr.url, me.name
         );
-        crate::agents::message_on_ticket(state, me, &lead, &text, json!({ "verdict": want }), ticket.as_deref());
+        crate::agents::message_on_ticket(state, me, &lead, &text, json!({ "verdict": want }), ticket.as_deref(), false);
     }
     Ok(format!("{want} is on {slug}#{number}."))
 }
