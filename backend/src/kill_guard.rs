@@ -661,11 +661,23 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 folders
             }
         };
-        dirs.made = true;
+        dirs.made |= !makes_nothing(name, args);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
+}
+
+/// Whether a command (`git -C dir fetch`, `git commit -m x`) can't make a folder, a link or a `.git`: git's own history
+/// and remote commands, which don't write the work tree (`pull`, `checkout` do), without an option that runs a program.
+fn makes_nothing(name: &str, args: &[String]) -> bool {
+    let args = match args {
+        [c, _, rest @ ..] if name == "git" && c == "-C" => rest,
+        _ => args,
+    };
+    name == "git"
+        && args.first().is_some_and(|sub| matches!(sub.as_str(), "fetch" | "push" | "commit" | "add" | "status" | "log" | "diff" | "show"))
+        && !args.iter().any(|a| a.starts_with("--upload-pack") || a.starts_with("--receive-pack") || a.starts_with("--exec") || a == "-c" || a.starts_with("--config"))
 }
 
 /// Where cd's and pushd's folder is among `args`, past their options (`-L`, `-P`, `-q`, bundles like `-LP`, up to and
@@ -2786,6 +2798,47 @@ mod tests {
             "echo \"}\" && cargo test".to_string(),
         ] {
             assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn git_commands_that_make_nothing_dont_hide_the_folder_of_the_next() {
+        const WS: &str = "/nowhere/dev/loft/agent-local-storage/abc";
+        // The own clone, which isn't there for the guard to look at: an earlier fetch, commit or push can't have made it.
+        for cmd in [
+            "git -C ./loft fetch && git -C ./loft pull",
+            "git -C ./loft status; git -C ./loft log -1",
+            "git -C loft fetch && git -C loft pull",
+            "git -C loft commit -m x && git -C loft push",
+            "cd loft && git commit -m x && git push",
+            "cd loft/backend && git add -A && git commit -m x && git push",
+            "cd loft && git fetch && git pull",
+        ] {
+            assert_eq!(asks(cmd, WS), None, "should run: {cmd}");
+        }
+        assert_eq!(asks("cd backend && git commit -m x && git push", CLONE), None);
+        assert_eq!(asks("cd backend && git push", CLONE), None);
+        // The same aimed at the user's checkout.
+        for cmd in [
+            "git -C ./loft fetch && git -C ./loft pull",
+            "git -C ./loft status; git -C ./loft log -1; git -C ./loft push",
+            "git -C loft commit -m x && git -C loft push",
+            "cd loft && git commit -m x && git push",
+            "cd loft/backend && git add -A && git commit -m x && git push",
+        ] {
+            assert!(asks_all(cmd, "/nowhere/dev").contains(&PathBuf::from(USER)) || asks_all(cmd, "/nowhere/dev").iter().any(|f| f.starts_with(USER)), "should ask: {cmd}");
+        }
+        assert!(!asks_all("cd backend && git commit -m x && git push", USER).is_empty());
+        // What may make the folder (a pull writes the work tree, a clone, a mkdir, an option that runs a program) still hides it.
+        for cmd in [
+            "git pull && git -C ./loft push",
+            "git clone x loft && git -C ./loft push",
+            "mkdir loft && git -C ./loft push",
+            "git fetch --upload-pack=./mk && git -C ./loft push",
+            "git -c core.x=y commit -m x && git -C ./loft push",
+            "git checkout main && cd loft && git push",
+        ] {
+            assert!(!asks_all(cmd, WS).is_empty(), "should ask: {cmd}");
         }
     }
 
