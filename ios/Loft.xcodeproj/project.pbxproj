@@ -13,6 +13,7 @@
 		A10000000000000000000066 /* LoftMacWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* LoftMacWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A10000000000000000000061 /* LoftKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000071 /* LoftKit */; };
 		A10000000000000000000062 /* LoftKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000072 /* LoftKit */; };
+		A1000000000000000000F068 /* LoftKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000F078 /* LoftKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -65,7 +66,18 @@
 		A10000000000000000000016 /* LoftMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LoftMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000017 /* LoftMacUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LoftMacUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000018 /* LoftMac-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "LoftMac-Info.plist"; sourceTree = "<group>"; };
+		A1000000000000000000F029 /* Loft Focus.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Loft Focus.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A1000000000000000000F027 /* Exceptions for "LoftMac" folder in "LoftFocus" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Loft.icns,
+			);
+			target = A1000000000000000000F108 /* LoftFocus */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A10000000000000000000027 /* LoftWidgets */ = {
@@ -95,12 +107,20 @@
 		};
 		A10000000000000000000024 /* LoftMac */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A1000000000000000000F027 /* Exceptions for "LoftMac" folder in "LoftFocus" target */,
+			);
 			path = LoftMac;
 			sourceTree = "<group>";
 		};
 		A10000000000000000000025 /* LoftMacUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = LoftMacUITests;
+			sourceTree = "<group>";
+		};
+		A1000000000000000000F026 /* LoftFocus */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LoftFocus;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -184,6 +204,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1000000000000000000F038 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000000000000000000F068 /* LoftKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -195,6 +223,7 @@
 				A10000000000000000000023 /* LoftUITests */,
 				A10000000000000000000024 /* LoftMac */,
 				A10000000000000000000025 /* LoftMacUITests */,
+				A1000000000000000000F026 /* LoftFocus */,
 				A10000000000000000000027 /* LoftWidgets */,
 				A10000000000000000000028 /* LoftMacWidgets */,
 				A10000000000000000000004 /* Config */,
@@ -210,6 +239,7 @@
 				A10000000000000000000013 /* LoftUITests.xctest */,
 				A10000000000000000000016 /* LoftMac.app */,
 				A10000000000000000000017 /* LoftMacUITests.xctest */,
+				A1000000000000000000F029 /* Loft Focus.app */,
 				A10000000000000000000019 /* LoftWidgets.appex */,
 				A10000000000000000000020 /* LoftMacWidgets.appex */,
 			);
@@ -389,6 +419,30 @@
 			productReference = A10000000000000000000013 /* LoftUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A1000000000000000000F108 /* LoftFocus */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1000000000000000000F408 /* Build configuration list for PBXNativeTarget "LoftFocus" */;
+			buildPhases = (
+				A1000000000000000000F048 /* Sources */,
+				A1000000000000000000F038 /* Frameworks */,
+				A1000000000000000000F058 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A1000000000000000000F026 /* LoftFocus */,
+				A10000000000000000000024 /* LoftMac */,
+			);
+			name = LoftFocus;
+			packageProductDependencies = (
+				A1000000000000000000F078 /* LoftKit */,
+			);
+			productName = LoftFocus;
+			productReference = A1000000000000000000F029 /* Loft Focus.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -423,6 +477,9 @@
 					A10000000000000000000107 = {
 						CreatedOnToolsVersion = 16.0;
 					};
+					A1000000000000000000F108 = {
+						CreatedOnToolsVersion = 16.0;
+					};
 				};
 			};
 			buildConfigurationList = A10000000000000000000400 /* Build configuration list for PBXProject "Loft" */;
@@ -449,6 +506,7 @@
 				A10000000000000000000105 /* LoftMacUITests */,
 				A10000000000000000000106 /* LoftWidgets */,
 				A10000000000000000000107 /* LoftMacWidgets */,
+				A1000000000000000000F108 /* LoftFocus */,
 			);
 		};
 /* End PBXProject section */
@@ -503,6 +561,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1000000000000000000F058 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -549,6 +614,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A10000000000000000000043 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1000000000000000000F048 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -978,6 +1050,74 @@
 			};
 			name = Release;
 		};
+		A1000000000000000000F581 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = FocusIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Config/LoftFocus.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "$(LOFT_TEAM_ID)";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/LoftFocus-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Loft Focus";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(LOFT_BUNDLE_ID:default=com.example.loft).mac.focus";
+				PRODUCT_MODULE_NAME = LoftFocus;
+				PRODUCT_NAME = "Loft Focus";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "LOFT_FOCUS $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A1000000000000000000F582 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = FocusIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Config/LoftFocus.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "$(LOFT_TEAM_ID)";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/LoftFocus-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Loft Focus";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(LOFT_BUNDLE_ID:default=com.example.loft).mac.focus";
+				PRODUCT_MODULE_NAME = LoftFocus;
+				PRODUCT_NAME = "Loft Focus";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "LOFT_FOCUS $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1053,6 +1193,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		A1000000000000000000F408 /* Build configuration list for PBXNativeTarget "LoftFocus" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1000000000000000000F581 /* Debug */,
+				A1000000000000000000F582 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -1076,6 +1225,10 @@
 			productName = LoftKit;
 		};
 		A10000000000000000000074 /* LoftKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LoftKit;
+		};
+		A1000000000000000000F078 /* LoftKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = LoftKit;
 		};

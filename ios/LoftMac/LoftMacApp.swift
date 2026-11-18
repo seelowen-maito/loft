@@ -2,6 +2,8 @@ import CoreSpotlight
 import LoftKit
 import SwiftUI
 
+// Loft Focus (#609) compiles this folder too, with its own `@main`.
+#if !LOFT_FOCUS
 /// Loft for Mac (spec #382): the same client as the iPhone app, in Mac windows with a sidebar of sections.
 @main
 struct LoftMacApp: App {
@@ -125,6 +127,8 @@ struct LoftMacApp: App {
         }
     }
 }
+
+#endif
 
 /// Where the window is: the section, the agent whose chat is open, the issue pages open, and the New message picker.
 @MainActor

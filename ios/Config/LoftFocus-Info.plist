@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Loft on this Mac is plain http://localhost:7420; another Mac is reached over HTTPS (tailscale serve).
+	     Local networking only allows plain HTTP to localhost and .local hosts; it is not a general ATS exception. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Loft Focus listens when you dictate or talk to an agent.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Loft Focus turns what you say into text for your message.</string>
+</dict>
+</plist>

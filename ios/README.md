@@ -234,6 +234,14 @@ It's always signed with your team, even for Debug, because its entitlements need
   ```
 - *Update:* a TestFlight install updates from the TestFlight app (turn on Automatic Updates there). A local build updates by pulling and running it again. The backend updates on its own, so only the app's own changes need a new build.
 
+**Loft Focus**
+
+`LoftFocus` is a second Mac app (`Loft Focus.app`, bundle id `LOFT_BUNDLE_ID` + `.mac.focus`) for timed focus sessions. Its window has only the agents, the Issues board and a focus timer; it compiles the `LoftMac` folder too (`LOFT_FOCUS` leaves out the main app's `@main`), so those screens are the main app's own. It connects to the address saved in its own settings, else the one the main app saved in the shared Keychain group, else it asks.
+
+- *A session:* pick 25, 50 or 90 minutes or a custom length (remembered) and press Start focus. Every Dock app that isn't on the allow list is hidden, and any that comes forward is hidden again; the window and the Dock icon show the time left. When the time is up, or on End (or quitting), the apps it hid are shown again and a notification says so. Needs you notifications keep coming through. macOS doesn't let an app take other apps off the Dock, so it hides them; it doesn't touch the Dock or the system's Focus modes.
+- *Allow list:* Loft Focus › Settings › Allow List. It starts with Loft, Loft Focus, Xcode, Terminal, iTerm, VS Code, Cursor and Simulator. Add a running app from the menu, or Choose… any app.
+- *Run:* the **LoftFocus** scheme, like LoftMac (signed with `LOFT_TEAM_ID`, `Config/LoftFocus.entitlements`). The timer and allow-list rules are in LoftKit (`FocusSession.swift`) with unit tests (`swift test --filter Focus`). For screenshots, a Debug build run directly with `-ui-testing -render-focus <folder> [-appearance light]` draws the window idle and during a session (hiding nothing), the allow list and the Dock icon, then quits.
+
 **Widgets**
 
 Small and medium widgets for the Mac desktop and the iPhone home screen: Needs you (the count and the first items), who is working now, and the Usage week's spend. `LoftWidgets` (iPhone) and `LoftMacWidgets` (Mac) are two thin extensions around `LoftOverviewWidget` in LoftKit, embedded in the apps. A widget has no address field: it reads the Loft address from the Keychain group `<team>.<LOFT_BUNDLE_ID>.shared`, where the apps save it each time they connect. Until then it says "Not connected". A tap opens the app at `loft://needs-you`, `loft://agents` or `loft://agent/<id>`. They refresh about every 15 minutes. Add them from the desktop's or home screen's widget gallery (Edit Widgets); they need `LOFT_TEAM_ID` like the Mac app, since the Keychain group needs a provisioning profile.
