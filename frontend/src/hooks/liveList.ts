@@ -1,13 +1,13 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { onConnection, onServerEvent, type ServerEvent } from "../lib/events";
-import { errorText } from "../lib/useAction";
+import { onConnection, onServerEvent, type ServerEvent } from "../lib/events.ts";
+import { errorText } from "../lib/useAction.ts";
 
 /** A live list: null until its first load, `failed` with the reason when that load failed. */
 export type ListState<T> = { items: T[] | null; failed: string | null };
 
 /**
  * One shared copy of a list for every component that shows it: loaded once, kept current by `apply` on each server
- * event, and loaded again after a reconnect, as events sent while offline are lost. Events that arrive while it loads
+ * event, and loaded again after a reconnect or a `resync` event, as events sent while offline are lost. Events that arrive while it loads
  * are applied to what loads, as they are newer.
  */
 export function createLiveList<T>(load: () => Promise<T[]>, apply: (items: T[], e: ServerEvent) => T[]) {
@@ -59,6 +59,11 @@ export function createLiveList<T>(load: () => Promise<T[]>, apply: (items: T[], 
       return p;
     },
     event(e: ServerEvent) {
+      // The stream lagged and the backend dropped events: load again.
+      if (e.type === "resync") {
+        if (wanted) store.reload();
+        return;
+      }
       if (loading) queued.push(e);
       if (!state.items) return;
       const items = apply(state.items, e);

@@ -154,10 +154,15 @@ pub async fn restart(State(state): State<AppState>) -> ApiResult<Value> {
     Ok(Json(json!({ "ok": true })))
 }
 
+/// A lagged subscriber missed events: it gets a `Resync` to reload instead.
+fn lagged_to_resync(ev: Result<Event, tokio_stream::wrappers::errors::BroadcastStreamRecvError>) -> Option<Event> {
+    Some(ev.unwrap_or(Event::Resync))
+}
+
 pub async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let rx = state.events.subscribe();
-    let events = BroadcastStream::new(rx).filter_map(|ev: Result<Event, _>| {
-        let ev = ev.ok()?;
+    let events = BroadcastStream::new(rx).filter_map(|ev| {
+        let ev = lagged_to_resync(ev)?;
         Some(Ok(SseEvent::default().data(serde_json::to_string(&ev).ok()?)))
     });
     // An immediate first chunk makes proxies (e.g. Vite's) flush headers right away.
@@ -1079,6 +1084,19 @@ pub async fn open_editor(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[tokio::test]
+    async fn a_lagging_subscriber_gets_a_resync() {
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        let mut s = tokio_stream::wrappers::BroadcastStream::new(rx);
+        for i in 0..5 {
+            tx.send(crate::state::Event::AgentDeleted { agent_id: i.to_string() }).unwrap();
+        }
+        let first = tokio_stream::StreamExt::next(&mut s).await.unwrap();
+        assert!(matches!(super::lagged_to_resync(first), Some(crate::state::Event::Resync)));
+        let next = tokio_stream::StreamExt::next(&mut s).await.unwrap();
+        assert!(matches!(super::lagged_to_resync(next), Some(crate::state::Event::AgentDeleted { .. })), "then it goes on as normal");
+    }
+
     /// An agent PATCH of just its project, for other modules' tests.
     pub(crate) fn apply_project(st: &crate::state::AppState, a: &mut crate::db::Agent, project: &str) -> Result<(), super::ApiError> {
         apply_patch(st, a, &serde_json::json!({ "project": project }))
