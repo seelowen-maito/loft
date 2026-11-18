@@ -129,6 +129,9 @@ export default function AgentsPage() {
     useCallback(
       (e: ServerEvent) => {
         switch (e.type) {
+          case "resync":
+            loadMessages();
+            break;
           case "agent_deleted":
             if (e.agent_id === selectedId) navigate("/agents");
             break;
@@ -143,7 +146,7 @@ export default function AgentsPage() {
             break;
         }
       },
-      [selectedId, navigate],
+      [selectedId, navigate, loadMessages],
     ),
   );
 

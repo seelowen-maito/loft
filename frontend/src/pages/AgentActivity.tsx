@@ -184,6 +184,8 @@ export function AgentActivity() {
   useServerEvents(
     useCallback(
       (e: ServerEvent) => {
+        // The stream lagged and dropped events: load again.
+        if (e.type === "resync") load();
         if (e.type === "agent_updated") {
           setData((d) => d?.map((s) => (s.agent.id === e.agent.id ? { ...s, agent: { ...s.agent, ...e.agent } } : s)) ?? d);
         }
