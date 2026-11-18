@@ -128,7 +128,7 @@ struct Dirs {
     stack: Vec<Option<PathBuf>>,
     /// The folders this command's `cd`s left, each of which zsh's autopushd may have stacked.
     left: Vec<Option<PathBuf>>,
-    /// A `popd` or bare `pushd` ran: with autopushd `cd -` may go to a folder the guard's `old` doesn't hold.
+    /// A `popd`, a bare `pushd` or a `cd` that may fail ran: `cd -` may go to a folder the guard's `old` doesn't hold.
     popped: bool,
     /// The folders git doesn't look in or above for a repository, from a folder below one (GIT_CEILING_DIRECTORIES).
     ceiling: Vec<PathBuf>,
@@ -272,6 +272,7 @@ impl Dirs {
         // A folder that isn't there (and no `ln`, `mv`, ... of the command names) may be a `cd` that fails: the shell stays
         // where it was, or where an earlier failed `cd` left it.
         if to.as_ref().is_some_and(|t| missing(t) && !self.touched.iter().any(|m| t.starts_with(m))) {
+            self.popped = true;
             for a in self.alts.iter().cloned().chain(self.cwd.clone()) {
                 if !alts.contains(&a) {
                     alts.push(a);
@@ -2285,6 +2286,12 @@ mod tests {
             format!("cd /tmp; cd {u}; cd {w}/nope; cd -; cd -; pnpm install"),
             format!("cd {u}; cd {w}; popd; cd -; cd -; pnpm install"),
             format!("cd {u}; cd {w}; pushd; cd -; cd -; pnpm install"),
+            // A cd that works after a failed one doesn't make `cd -` known.
+            format!("cd {u}; cd {w}/nope; cd {w}; cd -; pnpm install"),
+            format!("cd {u}; cd {w}/nope; cd {w}; cd -; git reset --hard"),
+            format!("cd {u}; cd {w}/nope; cd; cd -; pnpm install"),
+            format!("cd {u}; cd {w}/nope.txt; cd {w}; cd -; pnpm install"),
+            format!("({u:?}; cd {u}; cd {w}/nope; cd {w}; cd -; pnpm install)").replacen(&format!("{u:?}; "), "", 1),
         ] {
             let asked = asks_all(&cmd, CLONE);
             assert!(asked.contains(&PathBuf::from(u)) || asked.iter().any(|f| f.as_os_str() == UNKNOWN), "should ask: {cmd}");
