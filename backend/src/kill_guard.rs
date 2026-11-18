@@ -1366,7 +1366,7 @@ fn assignment(w: &str) -> Option<&str> {
     (!k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some(k)
 }
 
-const KEYWORDS: &[&str] = &["!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "esac"];
+const KEYWORDS: &[&str] = &["!", "{", "}", "always", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "esac"];
 
 /// Whether the next word after `words` is in command position, where a keyword counts: past keywords and a
 /// `function NAME`.
@@ -1597,8 +1597,18 @@ impl Level {
                 _ => {}
             }
         }
+        // A `}` ends a group (zsh needs no `;` before it) and the command in it: what follows isn't in the list the
+        // group's last `cd` stopped, and `always { ... }` is a command of its own.
+        let closes = word == "}" && self.frames.len() > 1;
         words.push(word);
         p.cmds[id].live.push(live);
+        if closes {
+            if !first {
+                self.frames.pop();
+            }
+            p.chain += 1;
+            return self.end(p);
+        }
         if opens_case {
             self.end(p);
             self.frames.push(Frame { pattern: Some(true), ..Default::default() });
@@ -2586,6 +2596,9 @@ mod tests {
             format!("cd {pr}; cd {w}/nope | true && pnpm install"),
             format!("cd {pr}; cd {w}/nope |& cat && pnpm install"),
             format!("cd {pr}; eval 'true; true; cd {w}/nope'; pnpm install"),
+            // A `{ }` group holding the failed cd and a `&&`.
+            format!("cd {pr}; {{ cd {w}/nope && true }} | cat && pnpm install"),
+            format!("cd {pr}; {{ cd {w}/nope }} always {{ pnpm install }}"),
             // After `||` anywhere past the cd, the rest runs when it failed.
             format!("cd {pr}; cd {w}/nope || true && pnpm install"),
             format!("cd {pr}; cd {w}/nope && true || pnpm install"),
@@ -2605,7 +2618,7 @@ mod tests {
             assert_eq!(in_storage_at(&cmd, &ws).iter().filter(|f| **f != project).count(), 0, "should run: {cmd}");
         }
         // A folder the command makes and leaves again is no failed cd: these ran on main and still run.
-        for cmd in ["mkdir -p out && cd out && cd .. && git add -A", "cargo new foo && cd foo && cargo build && cd .. && git add -A", "mkdir -m 755 out && cd out && cd .. && git add -A", "cd backend && mkdir -p tmp && cd tmp && cd ../.. && git add -A"] {
+        for cmd in ["mkdir -p out && cd out && cd .. && git add -A", "cargo new foo && cd foo && cargo build && cd .. && git add -A", "{ cd backend && cargo test; }", "{ cd backend && cargo test }", "{ cd backend && cargo test; cd ..; }", "mkdir -m 755 out && cd out && cd .. && git add -A", "cd backend && mkdir -p tmp && cd tmp && cd ../.. && git add -A"] {
             assert_eq!(in_storage_at(cmd, &clone), Vec::<PathBuf>::new(), "should run: {cmd}");
             std::fs::create_dir_all(clone.join("backend")).unwrap();
             assert_eq!(in_storage_at(cmd, &clone.join("backend")), Vec::<PathBuf>::new(), "should run in backend/: {cmd}");
