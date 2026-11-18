@@ -846,6 +846,11 @@ fn flags<'a>(args: &'a [String], options: &[&str], subs: &[&str]) -> (Vec<&'a st
         if options.iter().any(|o| long(o)) {
             match a.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
                 Some(v) => values.push(v),
+                // npm ignores an ambiguous prefix (`--pre`): the next word may be a value or the subcommand, so it's both.
+                None if !options.contains(&name) => {
+                    values.extend(it.clone().next().map(String::as_str));
+                    after_option = true;
+                }
                 None => values.extend(it.next().map(String::as_str)),
             }
         } else if let Some(o) = options.iter().find(|o| short(o)) {
@@ -2996,6 +3001,10 @@ mod tests {
             "npm --prefi=/nowhere/dev/loft install",
             "npm -C . -C /nowhere/dev/loft install",
             "npm --prefix . -C /nowhere/dev/loft install",
+            "cd /nowhere/dev/loft && npm --pre install lodash",
+            "cd /nowhere/dev/loft && npm --pr ci",
+            "cd /nowhere/dev/loft && npm --pre install",
+            "cd /nowhere/dev/loft && cargo --m build",
             // A word that names an option, the command or a variable comes from an expansion.
             "K=--work-tree=/nowhere/dev/loft; git $K checkout .",
             "K=-c; git $K core.worktree=/nowhere/dev/loft checkout .",
