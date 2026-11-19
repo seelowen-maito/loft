@@ -1098,6 +1098,13 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                 }
             };
             crate::delivery::run_ended(&state, &agent_id, failed).await;
+            // Test browsers the run left open hold gigabytes of memory: stop them, and say so in the next run.
+            let closed = crate::processes::stop_test_browsers(&state.cfg.storage_dir, &agent_id).await;
+            if closed > 0
+                && let Ok(Some(a)) = state.db.get_agent(&agent_id)
+            {
+                fyi_from_loft(&state, &a, &format!("Loft closed {closed} test browser processes left from your last run. Close your browsers in your scripts (`try`/`finally` `browser.close()`)."));
+            }
             let (next, push) = {
                 let mut rt = state.rt.lock().unwrap();
                 let drew = rt.redrawing.remove(&agent_id);
