@@ -182,6 +182,8 @@ struct Dirs {
     posix: bool,
     /// How many function bodies were checked at a call (shared by every copy): a few are plenty, and it ends recursion.
     calls: std::rc::Rc<std::cell::Cell<usize>>,
+    /// Inside the passes `again` makes: a loop there isn't run again.
+    again: bool,
 }
 
 impl Dirs {
@@ -457,7 +459,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
 
 /// The loop keyword a command opens, after the words that may come before it (`{ for`, `then for`, `! while`).
 fn loop_word(c: &Cmd) -> Option<&str> {
-    let k = c.words.iter().zip(&c.quoted).position(|(w, &q)| q || !matches!(w.as_str(), "!" | "{" | "then" | "do" | "else" | "time" | "noglob" | "command" | "nocorrect" | "builtin"))?;
+    let k = c.words.iter().zip(&c.quoted).position(|(w, &q)| (q && w != "always") || !matches!(w.as_str(), "!" | "{" | "then" | "do" | "else" | "if" | "elif" | "always" | "coproc" | "time" | "noglob" | "command" | "nocorrect" | "builtin"))?;
     (!c.quoted[k]).then_some(c.words[k].as_str()).filter(|w| matches!(*w, "for" | "foreach" | "while" | "until" | "select" | "repeat"))
 }
 
@@ -470,6 +472,11 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
     let mut loops: Vec<(usize, usize)> = vec![];
     let mut open_ended: Vec<usize> = vec![];
     for i in range {
+        // A loop with no `done` ends at any command after its start (a `}` or `end` the guard doesn't pair): its next pass starts
+        // where the shell is then, three passes in all.
+        if let Some(&start) = open_ended.first().filter(|&&s| s < i && !dirs.again) {
+            again(text, cmds, start, end, dirs, depth, out);
+        }
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
             let inner = std::mem::replace(dirs, saved.pop().unwrap().1);
@@ -501,7 +508,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 // The condition of `while` and `until` runs after each pass too, and `repeat 2 cmd; …` has the body in its own command.
                 Some(d) => loops.push((i + d, if matches!(kw, "while" | "until" | "repeat") { i } else { i + 1 })),
                 // No `done` (`foreach … end`, `for d (1 2) { … }`, `repeat 2 { … }`): the rest is run once more.
-                None => open_ended.push(if kw == "repeat" { i } else { i + 1 }),
+                None => open_ended.push(i),
             }
         }
         // A function named like one of them, however it is written (`function cd`, `{ cd() { … } }`, `f cd()`), a
@@ -937,12 +944,20 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             }
         }
     }
-    if let Some(&start) = open_ended.first().filter(|_| dirs.calls.get() < MAX_CALLS) {
-        dirs.calls.set(dirs.calls.get() + 1);
-        run(text, cmds, start..end, dirs, depth, out);
+    if let Some(&start) = open_ended.first().filter(|_| !dirs.again) {
+        again(text, cmds, start, end, dirs, depth, out);
     }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
+}
+
+/// The commands `start..end` run again from `dirs` (a copy of it), three times over, as a loop with no `done` may.
+fn again(text: &str, cmds: &[Cmd], start: usize, end: usize, dirs: &Dirs, depth: usize, out: &mut Vec<Change>) {
+    let mut next = dirs.clone();
+    next.again = true;
+    for _ in 0..3 {
+        run(text, cmds, start..end, &mut next, depth, out);
+    }
 }
 
 /// The functions the command `i` defines (`f()`, `function f g`), each with the commands of its body when the guard holds
@@ -2344,6 +2359,8 @@ impl Level {
                 cmd.stdin += &word;
                 cmd.stdin.push('\n');
             }
+            // A quoted `]]` or `[[` isn't one that ends or opens a condition.
+            None if quoted && matches!(word.as_str(), "]]" | "[[") => self.command_word(p, id, format!("\\{word}"), live, quoted),
             None => self.command_word(p, id, word, live, quoted),
         }
     }
@@ -2609,6 +2626,11 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     if n == '$' && c.get(i) == Some(&'(') {
                         l.cmd(p);
                         i = lex(p, c, i + 1, Some(')'));
+                    }
+                    // `${x:-`cmd`}` too.
+                    if n == '`' {
+                        l.cmd(p);
+                        i = lex(p, c, i, Some('`'));
                     }
                 }
             }
@@ -3657,6 +3679,18 @@ mod tests {
             format!("foreach d (1 2)\npnpm install\ncd {u}\nend"),
             format!("for d (1 2) {{ pnpm install; cd {u} }}"),
             format!("repeat 2 {{ pnpm install; cd {u} }}"),
+            format!("repeat 2 {{ pnpm install; cd {u} }}; cd {CLONE}"),
+            format!("foreach d (1 2)\npnpm install\ncd {u}\nend; cd {CLONE}"),
+            format!("(for d (1 2) {{ pnpm install; cd {u} }}); cd {CLONE}"),
+            format!("while [[ -n x ]] {{ pnpm install; cd {u} }}; cd {CLONE}"),
+            format!("if for d (1 2) {{ pnpm install; cd {u} }}; then :; fi; cd {CLONE}"),
+            format!("always {{ for d in 1 2; do pnpm install; cd {u}; done }}; cd {CLONE}"),
+            format!("coproc {{ for d in 1 2; do pnpm install; cd {u}; done }}; cd {CLONE}"),
+            format!("cd {u}; echo ${{x:-`pnpm install`}}"),
+            format!("cd {u}; if [[ -n 1 ]] git commit -am ']]'"),
+            format!("alias -s t-x='cd {u}'; eval ./a.t-x; pnpm install"),
+            format!("alias -g -- --x='cd {u}'; echo --x; pnpm install"),
+            format!("(trap 'rm -rf src; ln -s {u} src' EXIT); cd src; pnpm install"),
             format!("{{ for d in 1 2; do pnpm install; cd {u}; done; }}"),
             format!("if true; then for d in 1 2; do pnpm install; cd {u}; done; fi"),
             format!("for a in 1; do for b in 2; do :; done; pnpm install; cd {u}; done"),
