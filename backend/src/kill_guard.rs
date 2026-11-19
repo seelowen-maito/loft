@@ -820,22 +820,40 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
 }
 
 /// The functions the command `i` defines (`f()`, `function f g`), each with the commands of its body when the guard holds
-/// it: an index range of `cmds` and whether a `}` that is no command ended it. The body is the `{` group that follows the
-/// names, in this command or the next.
+/// it: an index range of `cmds` and whether a `}` that is no command ended it. Only the words in command position define,
+/// as `command_position` reads them: keywords and `function NAME...`, repeated (`{ function f { function g {`); a
+/// `function` after an ordinary word is an argument. The body is the `{` group that follows the names, in this command or
+/// the next.
 fn definitions(cmds: &[Cmd], i: usize) -> Vec<(String, Option<(usize, usize, bool)>)> {
     let c = &cmds[i];
+    let len = c.words.len();
     let kw = |k: usize| !c.quoted[k] && KEYWORDS.contains(&c.words[k].as_str());
-    let (names, brace) = match c.words.iter().zip(&c.quoted).position(|(w, q)| w == "function" && !q) {
-        Some(f) => {
-            let end = (f + 1..c.words.len()).find(|&k| kw(k)).unwrap_or(c.words.len());
-            let open = (end < c.words.len() && c.words[end] == "{").then(|| (i, (0..end).filter(|&k| c.words[k] == "{" && !c.quoted[k]).count()));
-            (f + 1..end, open)
+    let group = |at: usize, n: usize| cmds.get(at).and_then(|c| c.groups.get(n)).filter(|&&(end, _)| end <= cmds.len()).map(|&(end, loose)| (at, end, loose));
+    // The group a `{` in the next command opens (`f()` newline `{`).
+    let next = || cmds.get(i + 1).filter(|n| n.words.first().is_some_and(|w| w == "{") && !n.quoted[0]).and_then(|_| group(i + 1, 0));
+    let (mut out, mut k, mut opens) = (vec![], 0, 0);
+    loop {
+        while k < len && kw(k) {
+            opens += (c.words[k] == "{") as usize;
+            k += 1;
         }
-        None => ((0..c.words.len()).rev().take_while(|&k| !kw(k)).last().unwrap_or(c.words.len())..c.words.len(), None)
-    };
-    let brace = brace.or_else(|| cmds.get(i + 1).filter(|n| n.words.first().is_some_and(|w| w == "{") && !n.quoted[0]).map(|_| (i + 1, 0)));
-    let body = brace.and_then(|(at, k)| cmds[at].groups.get(k)).filter(|&&(end, _)| end <= cmds.len()).map(|&(end, loose)| (brace.map_or(0, |b| b.0), end, loose));
-    names.map(|k| (c.words[k].clone(), body)).collect()
+        if k >= len {
+            break;
+        }
+        if c.words[k] == "function" && !c.quoted[k] {
+            let end = (k + 1..len).find(|&j| kw(j)).unwrap_or(len);
+            let body = if end < len && c.words[end] == "{" { group(i, opens) } else { next() };
+            out.extend((k + 1..end).map(|n| (c.words[n].clone(), body)));
+            k = end;
+            continue;
+        }
+        // `NAME()` or `NAME NAME()` after the keywords.
+        if c.defines {
+            out.extend((k..len).map(|n| (c.words[n].clone(), next())));
+        }
+        break;
+    }
+    out
 }
 
 fn mentions_cd_search(text: &str) -> bool {
@@ -3246,6 +3264,11 @@ mod tests {
             format!("zshexit() {{ pnpm install; }}; cd {u}"),
             format!("f() {{ pnpm install; }}; add-zsh-hook chpwd f; cd {u}"),
             format!("f() {{ pnpm install; }}; cd {u}; function {{ f }}"),
+            format!("f() {{ pnpm install; }}; cd {u}; f function f"),
+            format!("f() {{ pnpm install; }}; cd {u}; noglob f function f"),
+            format!("f() {{ pnpm install; }}; cd {u}; {{ f function f; }}"),
+            format!("f() {{ pnpm install; }}; cd {u}; if true; then f function f; fi"),
+            format!("{{ function f {{ function g {{ pnpm install; }}; }}; }}; f; cd {u}; g"),
             format!("f() {{ pnpm install; }}; g() {{ function h {{ f; }}; h; }}; cd {u}; g"),
             format!("f() {{ pnpm install; }}; cd {u}; f function"),
             format!("f() {{ pnpm install; }}; cd {u}; noglob f -- function"),
