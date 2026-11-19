@@ -19,6 +19,25 @@ final class AskQuestionTests: XCTestCase {
         XCTAssertEqual(AskQuestion.of(["command": "ls"]), [])
     }
 
+    func testNothingToSendWhenNoQuestionsParse() {
+        XCTAssertNil(AskQuestion.answers(AskQuestion.of(["questions": .array([["header": "no text"]])]), picks: [:]))
+    }
+
+    func testTheServersChatHintIsDroppedOnlyForQuestions() throws {
+        let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
+        var item = try XCTUnwrap(list.items.first { $0.id == "permission:p1" })
+        func ask(_ id: String, _ source: String) -> PermissionRequest {
+            PermissionRequest(id: id, agentId: "qa", source: source, toolName: "AskUserQuestion", input: nil, reason: nil, rule: nil,
+                              status: "pending", createdAt: Date())
+        }
+        let perms = [ask("p1", "prompt"), ask("q1", "questions")]
+        XCTAssertFalse(item.asksQuestions(perms), "the first ask (may it ask?) is an ordinary permission")
+        item = NeedsYouItem(id: "permission:q1", type: item.type, urgency: 3, agent: nil, taskId: nil, title: "", reason: "", text: "",
+                            createdAt: nil, ageSeconds: nil, links: nil, actions: [], project: nil, pr: nil)
+        XCTAssertTrue(item.asksQuestions(perms))
+        XCTAssertFalse(item.asksQuestions([]), "not loaded: the server's line stays")
+    }
+
     func testNothingToSendUntilEveryQuestionHasAnAnswer() {
         let qs = Array(AskQuestion.of(input).prefix(2))
         XCTAssertNil(AskQuestion.answers(qs, picks: [:]))

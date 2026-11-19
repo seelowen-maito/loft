@@ -854,6 +854,17 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         if ProcessInfo.processInfo.arguments.contains("-fixture-disk-low") {
             list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.diskLow.utf8)), at: 0)
         }
+        // `-fixture-questions`: the questions request's item, as the server words it.
+        if ProcessInfo.processInfo.arguments.contains("-fixture-questions"), var q = list.items.first(where: { $0.id == "permission:p1" }) {
+            q = NeedsYouItem(id: "permission:q1", type: q.type, urgency: 3, agent: .init(id: "qa", name: "QA Agent"), taskId: nil,
+                             title: "QA Agent has questions for you", reason: "Answer them in the chat.",
+                             text: "Which store should the backups go to?\nWhich regions?", createdAt: q.createdAt, ageSeconds: q.ageSeconds,
+                             links: [], actions: [
+                                NeedsYouAction(kind: "open", label: "Open chat", target: .init(screen: "chat", agentId: "qa")),
+                                NeedsYouAction(kind: "deny", label: "Skip", method: "POST", path: "/api/permissions/q1", body: ["decision": "deny"])],
+                             project: q.project, pr: nil)
+            list.items.insert(q, at: 0)
+        }
         // The demo (and the App Store shots) read like real work, not the redaction and line-limit tests' text.
         if scripted {
             for n in list.items.indices {

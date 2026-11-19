@@ -49,8 +49,9 @@ public struct AskQuestion: Equatable {
         }
     }
 
-    /// The `answers` to send, or nil until every question has one.
+    /// The `answers` to send, or nil until every question has one (and when there are none to answer).
     public static func answers(_ qs: [AskQuestion], picks: [Int: Pick]) -> [String: String]? {
+        if qs.isEmpty { return nil }
         var out: [String: String] = [:]
         for (i, q) in qs.enumerated() {
             let a = picks[i]?.answer ?? ""
