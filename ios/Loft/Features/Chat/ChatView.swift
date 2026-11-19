@@ -112,7 +112,9 @@ struct ChatView: View {
                             Task {
                                 loadingOlder = true
                                 try? await store.loadOlder(agentId)
-                                reveal()
+                                // Nothing new (or the fetch failed): no earlier page will be drawn to scroll back
+                                // from, and a kept item left set would pull you up later, once new messages arrive.
+                                if ChatItem.build(store.conversation(agentId)).count > all.count { reveal() }
                                 loadingOlder = false
                             }
                         } label: {
