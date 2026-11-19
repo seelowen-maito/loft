@@ -814,7 +814,7 @@ mod tests {
     async fn run(st: &AppState, a: &Agent, text: &str) -> String {
         let n = prompts(st, a).len();
         enqueue(st, &a.id, Some(text.into()), "user");
-        until("the run", 10, || !is_running(st, &a.id) && prompts(st, a).len() > n).await;
+        until("the run", 60, || !is_running(st, &a.id) && prompts(st, a).len() > n).await;
         prompts(st, a).pop().unwrap()
     }
 
@@ -875,10 +875,10 @@ mod tests {
         let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #12", "kind": "needs_action" })).await;
         assert!(said(&r).0.starts_with("Delivered."), "{r}");
         assert_eq!(queued(&st).await, json!([]));
-        until("the run", 10, || !is_running(&st, &to.id)).await;
+        until("the run", 60, || !is_running(&st, &to.id)).await;
 
         enqueue(&st, &to.id, Some("busy".into()), "user");
-        until("the run to start", 10, || is_running(&st, &to.id)).await;
+        until("the run to start", 60, || is_running(&st, &to.id)).await;
         let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #13", "kind": "needs_action" })).await;
         let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().rfind(|m| m.content == "Review PR #13").unwrap();
         assert_eq!(said(&r).0, format!("Queued: Worker is busy and will read it when its current run ends (message {}).", m.id));
@@ -889,7 +889,7 @@ mod tests {
 
         // The busy run ends: the next run takes the message.
         crate::agents::stop(&st, &to.id);
-        until("the next run to take it", 10, || prompts(&st, &to).iter().any(|p| p.contains("Review PR #13"))).await;
+        until("the next run to take it", 60, || prompts(&st, &to).iter().any(|p| p.contains("Review PR #13"))).await;
         assert_eq!(queued(&st).await, json!([]));
     }
 
@@ -1075,7 +1075,7 @@ mod tests {
         // The resumed claude has the prompt but no session; the fresh retry can't start.
         let n = prompts(&st, &to).len();
         enqueue(&st, &to.id, Some("session-gone".into()), "user");
-        until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
+        until("the run to fail", 60, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
         assert!(prompts(&st, &to)[n].contains("Merged #12"));
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
         let bin = st.settings.get().claude_bin;

@@ -2952,7 +2952,7 @@ esac
         // "follow up" arrives during the run; at the reply it must not sit behind the background task.
         enqueue(&st, &a.id, Some("linger".into()), "user");
         enqueue(&st, &a.id, Some("follow up".into()), "user");
-        until("the queue to drain", 10, || !is_running(&st, &a.id)).await;
+        until("the queue to drain", 60, || !is_running(&st, &a.id)).await;
         assert!(ws.join("terminated").exists());
         assert!(std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("follow up"));
     }
@@ -3286,8 +3286,10 @@ esac
         crate::api::send_message(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()), axum::Json(serde_json::from_value(json!({ "text": text })).unwrap()))
     }
 
+    /// Generous: a run spawns a process, which can take seconds while a build loads the machine. A run that
+    /// never ends (the fake claude's `busy` sleeps 600s) still fails it.
     async fn idle(st: &AppState, id: &str) {
-        until("the runs to end", 10, || !is_running(st, id)).await;
+        until("the runs to end", 60, || !is_running(st, id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3295,7 +3297,8 @@ esac
         let (st, a) = fake_claude_state();
         let _ = send(&st, &a.id, "leftover").await.ok().unwrap();
         // The leftover `sleep 20` keeps stdout open: the run ends on claude's exit, not on the pipe closing.
-        until("the run to end", 5, || !is_running(&st, &a.id)).await;
+        // Under 20s, with room for a loaded machine.
+        until("the run to end", 15, || !is_running(&st, &a.id)).await;
         let now = st.db.get_agent(&a.id).unwrap().unwrap();
         assert_eq!((now.status.as_str(), now.status_text.as_str()), ("error", "Last run failed"));
         assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
@@ -3418,7 +3421,7 @@ esac
 
         // Queued while the agent is busy: it runs next with trigger "user", but no message of the user's started it.
         message_from_agent(&st, &lead, &a, "busy");
-        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        until("the run to start", 60, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
         message_from_agent(&st, &lead, &a, "and this");
         stop(&st, &a.id);
         idle(&st, &a.id).await;
@@ -3531,11 +3534,11 @@ esac
         let (st, a) = fake_claude_state();
         let ws = workspace(&st, &a.id);
         let _ = redraw(&st, &a.id).await.ok().unwrap();
-        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
         let _ = send(&st, &a.id, "after").await.ok().unwrap();
         let mut events = st.events.subscribe();
         std::fs::write(ws.join("go"), "").unwrap();
-        until("the next run", 10, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("after")).await;
+        until("the next run", 60, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("after")).await;
         assert!(!redrawing(&st, &a.id).await);
         assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|ev| matches!(&ev, crate::state::Event::AgentUpdated { agent } if agent["id"] == a.id && agent["redrawing"] == false)));
         idle(&st, &a.id).await;
@@ -3609,7 +3612,7 @@ esac
         let (st, a) = fake_claude_state();
         let lead = crate::tasks::tests::agent(&st, "Lead");
         message_from_agent(&st, &lead, &a, "busy");
-        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        until("the run to start", 60, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
         message_from_agent(&st, &lead, &a, "from the lead");
         let _ = send(&st, &a.id, "from me").await.ok().unwrap();
         stop(&st, &a.id);
@@ -3857,7 +3860,7 @@ esac
         let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
         // My run is restarted with only an agent's message queued: that message runs next, as the agent's.
         let _ = send(&st, &a.id, "busy").await.ok().unwrap();
-        until("the run to start", 10, || running(&st, &a.id)).await;
+        until("the run to start", 60, || running(&st, &a.id)).await;
         message_from_agent(&st, &lead, &a, "ask");
         restart(&st, &a.id).await;
         idle(&st, &a.id).await;
@@ -3867,7 +3870,7 @@ esac
         // My message is queued: it still counts.
         let b = crate::tasks::tests::agent(&st, "Mine");
         message_from_agent(&st, &lead, &b, "busy");
-        until("the run to start", 10, || running(&st, &b.id)).await;
+        until("the run to start", 60, || running(&st, &b.id)).await;
         let _ = send(&st, &b.id, "hello").await.ok().unwrap();
         restart(&st, &b.id).await;
         idle(&st, &b.id).await;
@@ -3876,7 +3879,7 @@ esac
         // Mine and an agent's queued together: still counts.
         let c = crate::tasks::tests::agent(&st, "Mixed");
         message_from_agent(&st, &lead, &c, "busy");
-        until("the run to start", 10, || running(&st, &c.id)).await;
+        until("the run to start", 60, || running(&st, &c.id)).await;
         message_from_agent(&st, &lead, &c, "hello");
         let _ = send(&st, &c.id, "hello").await.ok().unwrap();
         restart(&st, &c.id).await;
