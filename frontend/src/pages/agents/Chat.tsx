@@ -1114,7 +1114,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
       {canReply && <div className="absolute -top-1 right-0"><ReplyButton onReply={() => onReply(m)} className="border border-line bg-ink-850 shadow" /></div>}
       <Sticker avatar={(replier ?? agent).avatar} lead={(replier ?? agent).role === "lead"} size={26} className="mt-0.5" />
       <div className="min-w-0 flex-1">
-      <div className={cx("prose-chat", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
+      <div className={cx("prose-chat min-w-0", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
         {m.meta?.mention_reply && (
           <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{replier?.name ?? m.meta.from_agent?.name} · answering your mention</div>
         )}
