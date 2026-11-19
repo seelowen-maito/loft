@@ -440,6 +440,8 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
     let mut pending_dotgit = false;
+    // What `trap` sets to run: the shell runs it later, in whatever folder it is in by then.
+    let mut traps: Vec<String> = vec![];
     for i in range {
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
@@ -462,15 +464,17 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             || all.iter().any(|w| w.strip_prefix("functions+=(").is_some_and(|r| r.trim_end_matches(')').split_whitespace().any(family)))
             || (all.iter().any(|w| w == "autoload") && all.iter().any(|n| family(n)));
         dirs.shadowed |= defines || all.iter().any(|w| w == "disable");
-        if !dirs.funcs.is_empty() && all.iter().any(|w| matches!(w.as_str(), "trap" | "add-zsh-hook") || w.contains("_functions")) {
-            // The shell runs a function by itself (`trap f EXIT`, `chpwd_functions=(f)`): where, the guard can't tell.
+        if all.iter().any(|w| w == "add-zsh-hook" || w.contains("_functions")) {
+            // The shell runs a function by itself (`chpwd_functions=(f)`): where, the guard can't tell.
             out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
         }
         let defining = cmds[i].defines || all.iter().zip(&cmds[i].quoted).any(|(w, q)| w == "function" && !q);
         if defining {
             for (n, body) in definitions(cmds, i) {
                 // `chpwd`, `precmd`, `TRAPEXIT`: the shell calls these by itself.
-                if matches!(n.as_str(), "chpwd" | "precmd" | "preexec" | "periodic" | "zshexit" | "zshaddhistory" | "command_not_found_handler") || n.starts_with("TRAP") {
+                // A name a wrapper, a modifier, a keyword or a builtin goes by: what a call runs isn't followed.
+                let wrapper = KEYWORDS.contains(&n.as_str()) || matches!(n.as_str(), "env" | "command" | "builtin" | "noglob" | "nocorrect" | "time" | "exec" | "coproc" | "repeat" | "sudo" | "doas" | "nohup" | "nice" | "timeout" | "caffeinate" | "xargs" | "watch" | "stdbuf" | "chronic" | "parallel" | "arch" | "script" | "eval" | "source" | "." | "-" | "function" | "then" | "do" | "in" | "trap");
+                if wrapper || matches!(n.as_str(), "chpwd" | "precmd" | "preexec" | "periodic" | "zshexit" | "zshaddhistory" | "command_not_found_handler") || n.starts_with("TRAP") {
                     out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
                 }
                 if !dirs.funcs.contains(&(n.clone(), body)) {
@@ -566,6 +570,9 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             continue;
         }
         let (args, live) = (args, &live[1..]);
+        if base(name) == "trap" {
+            traps.extend(args.iter().find(|a| !a.starts_with('-') && !a.is_empty()).cloned());
+        }
         // zsh's `=zsh` is the path of `zsh`.
         let name = base(name.trim_start_matches('='));
         let chdir = env_chdir(&all[..all.len() - words.len()]);
@@ -774,6 +781,27 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         };
         dirs.made |= !makes_nothing(all, words, live);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+    }
+    // A trap's handler runs in each folder the commands were in (the folder it ran in can be any of them), as a call to a
+    // function or as text.
+    let places: Vec<Option<PathBuf>> = std::iter::once(dirs.start.clone().map(Some).unwrap_or(None)).chain(dirs.left.clone()).chain(std::iter::once(dirs.cwd.clone())).chain(dirs.alts.iter().cloned().map(Some)).collect();
+    for h in traps {
+        for place in &places {
+            let mut at = Dirs { cwd: place.clone(), alts: vec![], ..dirs.clone() };
+            match dirs.funcs.iter().filter(|(n, _)| *n == h).collect::<Vec<_>>() {
+                f if f.is_empty() => changes(&h, &mut at, depth + 1, out),
+                f => {
+                    for (_, body) in f {
+                        let calls = dirs.calls.get() + 1;
+                        dirs.calls.set(calls);
+                        match body.filter(|&(_, _, loose)| calls <= MAX_CALLS && !(loose && dirs.posix)) {
+                            Some((a, b, _)) => run(text, cmds, a..b, &mut at, depth, out),
+                            None => out.extend(unknown_in(&at, None).into_iter().map(|folder| Change { folder, command: h.clone() })),
+                        }
+                    }
+                }
+            }
+        }
     }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
@@ -3201,6 +3229,16 @@ mod tests {
             format!("TRAPEXIT() {{ pnpm install; }}; cd {u}"),
             format!("f() {{ pnpm install; }}; chpwd_functions=(f); cd {u}"),
             format!("f() {{ pnpm install; }}; trap f EXIT; cd {u}"),
+            format!("trap 'pnpm install' EXIT; cd {u}"),
+            format!("f() {{ pnpm install; }}; trap f DEBUG; cd {u}; true"),
+            format!("nohup() {{ pnpm install }}; cd {u}; nohup true"),
+            format!("xargs() {{ pnpm install }}; cd {u}; echo | xargs true"),
+            format!("timeout() {{ pnpm install }}; cd {u}; timeout 5 true"),
+            format!("exec() {{ pnpm install }}; cd {u}; exec true"),
+            format!("\"then\"() {{ pnpm install }}; cd {u}; \"then\""),
+            format!("chpwd() {{ cd -q {u}; }}; cd /nowhere/other; pnpm install"),
+            format!("command_not_found_handler() {{ pnpm install; }}; cd {u}; nosuchcommand"),
+            format!("sh -c 'f() {{ echo a }}; pnpm install; }}; cd {u}; f'"),
             format!("bash -c 'f() {{ echo }}; pnpm install; }}; cd {u}; f'"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
@@ -3211,6 +3249,12 @@ mod tests {
             "function f { cargo test; }; cd backend; f",
             "f() { pnpm install; }; (cd ..; f)",
             "f() { pnpm install; }; g() { f; }; g",
+            "cleanup() { rm -f x; }; trap cleanup EXIT",
+            "trap 'rm -f tmp' EXIT; cd backend; cargo test",
+            "build() { pnpm build; }; build && git add -A",
+            "a() { b; }; b() { echo; }; a",
+            "f() { echo; }; f; f; f",
+            "f() { cd backend; }; f; cargo test",
         ] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
