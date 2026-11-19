@@ -417,6 +417,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     if depth > MAX_DEPTH {
         return;
     }
+    // The whole text, so a mention inside a `<(…)` or a subshell counts too.
+    dirs.cd_search |= mentions_cd_search(text);
     let cmds = parse(text);
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
@@ -443,16 +445,32 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             || all.iter().any(|w| w.strip_prefix("functions+=(").is_some_and(|r| r.trim_end_matches(')').split_whitespace().any(family)))
             || (all.iter().any(|w| w == "autoload") && all.iter().any(|n| family(n)));
         dirs.shadowed |= defines || all.iter().any(|w| w == "disable");
-        // `CDPATH=x`, `export CDPATH`, `setopt cdablevars`, `set -o auto_cd`: zsh ignores case and `_` in option names.
-        dirs.cd_search |= all.iter().any(|w| {
-            let w: String = w.chars().filter(|&c| c != '_').collect::<String>().to_lowercase();
-            w.starts_with("cdpath") || matches!(w.as_str(), "cdablevars" | "autocd")
-        });
-        // The text a `functions[f]='...'` gives is a body that runs when `f` is called: read as if run here.
-        for body in all.iter().filter_map(|w| w.strip_prefix("functions[").and_then(|r| r.split_once("]=")).map(|(_, b)| b)).filter(|b| !b.is_empty()) {
-            let mut inner = dirs.clone();
-            changes(body, &mut inner, depth + 1, out);
-            dirs.keep_made(&inner);
+        dirs.cd_search |= sets_cd_search(all);
+        // `functions` written any way but the literal `functions[name]='text'` (`functions+=(…)`, `functions[f]+=…`, `set -A
+        // functions …`, `${functions[cd]::=:}`, `functions -c f cd`): a `cd` may be shadowed and a body is unread.
+        if all.iter().any(|w| {
+            let w = w.trim_start_matches('$').trim_start_matches('{');
+            w.strip_prefix("functions").is_some_and(|r| r.is_empty() || r.starts_with(['+', '=', ':', '}', '(']) || (r.starts_with('[') && !r.split_once("]=").is_some_and(|(_, b)| !b.starts_with('='))))
+        }) {
+            dirs.shadowed = true;
+            dirs.lose();
+        }
+        // The text a `functions[f]='...'` gives is a body: it runs when `f` is called, or on its own (`TRAPDEBUG`), so it
+        // is read here as a command that may run.
+        let mut bodies: Vec<String> = all.iter().filter_map(|w| w.strip_prefix("functions[").and_then(|r| r.split_once(']')).and_then(|(_, b)| b.strip_prefix("+=").or_else(|| b.strip_prefix('='))).map(str::to_string)).collect();
+        // `functions+=(f 'body')`, `functions+=([f]='body')`.
+        for w in all.iter().filter_map(|w| w.strip_prefix("functions+=(").or_else(|| w.strip_prefix("functions=("))) {
+            // The lexer has dropped the quotes, so the element a body starts at isn't known: read each tail.
+            for c in parse(w.trim_end_matches(')')) {
+                bodies.extend((0..c.words.len()).map(|k| c.words[k..].join(" ").replacen("]=", " ", 1)));
+            }
+        }
+        for body in bodies.iter().filter(|b| !b.is_empty() && !b.starts_with('=')) {
+            let before: Vec<PathBuf> = dirs.alts.iter().cloned().chain(dirs.cwd.clone()).collect();
+            dirs.flush(usize::MAX);
+            changes(body, dirs, depth + 1, out);
+            dirs.flush(usize::MAX);
+            dirs.may_stay(before);
         }
         // `cd() { ... }` isn't a `cd`.
         if cmds[i].defines && defines {
@@ -704,6 +722,34 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
 /// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
 /// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
 /// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
+/// Whether a command makes a later `cd x` land somewhere else than `x`: it mentions `CDPATH`, `cdablevars` or `auto_cd`
+/// (zsh ignores case and `_` in option names; `no` before the name turns it off, so `unsetopt nocdablevars` counts), or
+/// it sets options or variables the guard can't read: `setopt -T`, `-m`, an expansion or brace in an option name, a
+/// variable named by an expansion (`export $K=x`, `read $K`).
+fn mentions_cd_search(text: &str) -> bool {
+    let plain: String = text.chars().filter(|c| !matches!(c, '_' | '-')).collect::<String>().to_lowercase();
+    ["cdpath", "cdablevars", "autocd"].iter().any(|n| plain.contains(n))
+}
+
+fn sets_cd_search(all: &[String]) -> bool {
+    if all.iter().any(|w| mentions_cd_search(w)) {
+        return true;
+    }
+    let expands = |w: &str| w.split('=').next().unwrap_or_default().contains(['$', '`', '{', '*', '?', '[']);
+    let Some(at) = all.iter().position(|w| matches!(w.as_str(), "setopt" | "unsetopt" | "set" | "emulate" | "zsh" | "sh" | "bash" | "export" | "typeset" | "declare" | "local" | "readonly" | "read" | "printf" | ":" | "integer" | "float")) else {
+        return false;
+    };
+    let args = &all[at + 1..];
+    let option_command = matches!(all[at].as_str(), "setopt" | "unsetopt" | "set" | "emulate" | "zsh");
+    args.iter().any(|w| {
+        let bundle = w.len() > 1 && w.starts_with(['-', '+']) && !w.starts_with("--") && w[1..].chars().all(|c| c.is_ascii_alphabetic());
+        (option_command && ((bundle && w.contains(['T', 'J', 'm'])) || (matches!(all[at].as_str(), "setopt" | "unsetopt" | "emulate") && expands(w))))
+            || (matches!(all[at].as_str(), "export" | "typeset" | "declare" | "local" | "readonly" | "read" | ":" | "integer" | "float") && expands(w))
+            || (all[at] == "printf" && args.iter().any(|a| a == "-v") && expands(w))
+            || (all[at] == "set" && args.iter().any(|a| a == "-A") && expands(w))
+    })
+}
+
 fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
     const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream", "--graph", "--name-only", "--force-with-lease", "-sb"];
     let [git, args @ ..] = words else { return false };
@@ -2753,6 +2799,35 @@ mod tests {
             format!("functions[f]='git -C {u} reset --hard'; f"),
             format!("functions[cd]='git -C {u} reset --hard'; cd"),
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
+            // Other ways to turn on cdablevars or set CDPATH, and to write `functions`.
+            format!("unsetopt nocdablevars; x={u}; cd x; pnpm install"),
+            format!("setopt -T; x={u}; cd x; pnpm install"),
+            format!("set -eT; x={u}; cd x; pnpm install"),
+            format!("setopt -m 'cd*'; x={u}; cd x; pnpm install"),
+            format!("options[cdablevars]=on; x={u}; cd x; pnpm install"),
+            format!("O=cdablevars; setopt $O; x={u}; cd x; pnpm install"),
+            format!("setopt cd{{able,}}vars; x={u}; cd x; pnpm install"),
+            format!("emulate zsh -T; x={u}; cd x; pnpm install"),
+            format!("zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("zsh --cd-able-vars -c 'x={u}; cd x; pnpm install'"),
+            format!(": ${{CDPATH:={u}}}; cd sub; pnpm install"),
+            format!("K=CDPATH; export $K={u}; cd sub; pnpm install"),
+            format!("K=CDPATH; read $K <<< {u}; cd sub; pnpm install"),
+            format!("K=CDPATH; printf -v $K %s {u}; cd sub; pnpm install"),
+            format!("K=cdpath; set -A $K {u}; cd sub; pnpm install"),
+            format!("export CD$K={u}; cd sub; pnpm install"),
+            format!("export {{CDPATH,X}}={u}; cd sub; pnpm install"),
+            format!("source <(echo CDPATH={u}); cd sub; pnpm install"),
+            format!("cd {u}; functions+=([cd]=:); cd {w}; pnpm install"),
+            format!("cd {u}; K=cd; functions+=($K :); cd {w}; pnpm install"),
+            format!("cd {u}; set -A functions cd :; cd {w}; pnpm install"),
+            format!("cd {u}; : ${{functions[cd]::=:}}; cd {w}; pnpm install"),
+            format!("cd {u}; f() {{ : }}; functions -c f cd; cd {w}; pnpm install"),
+            format!("functions+=(f 'git -C {u} reset --hard'); f"),
+            format!("functions[f]+='git -C {u} reset --hard'; f"),
+            format!("functions[f]='cd {u}'; f; pnpm install"),
+            format!("functions[TRAPDEBUG]='cd {u}'; pnpm install"),
+            format!("functions[f]='setopt cdablevars'; f; x={u}; cd x; pnpm install"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
@@ -2762,6 +2837,8 @@ mod tests {
             "cd -P backend && cargo test".to_string(),
             "export PATH=$PATH:/x; cd backend && cargo test".to_string(),
             "functions[f]='cargo test'; f".to_string(),
+            "export PATH=$HOME/bin:$PATH; set -e; cd backend && cargo test".to_string(),
+            "setopt extendedglob; cd backend && cargo test".to_string(),
         ] {
             assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
         }
