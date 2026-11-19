@@ -229,7 +229,7 @@ struct CollapsibleText: View {
                 .font(.caption.weight(.semibold))
             }
         }
-        .tint(linkColor ?? Theme.accent)
+        .tint(linkColor)
     }
 }
 
