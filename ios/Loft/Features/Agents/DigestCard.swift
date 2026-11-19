@@ -16,7 +16,8 @@ struct DigestCard: View {
         guard lastLooked > 0 else { return nil }
         let since = Date(timeIntervalSince1970: lastLooked)
         guard Date().timeIntervalSince(since) >= Digest.awayFor || Self.fixture else { return nil }
-        let d = Digest.build(since: since, activity: store.activity, pullRequests: store.pullRequests, agents: store.agents)
+        let d = Digest.build(since: since, activity: store.activity, pullRequests: store.pullRequests, agents: store.agents,
+                                 permissions: store.permissions)
         return d.lines.isEmpty ? nil : d
     }
 

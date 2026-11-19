@@ -62,7 +62,7 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func sessions(agentId: String) async throws -> PastSessions { PastSessions(sessions: [], current: nil) }
     func resumeSession(agentId: String, sessionId: String) async throws -> Agent { throw APIError.unsupported("Resume") }
     func permissions() async throws -> [PermissionRequest] { try check(); return [] }
-    func decidePermission(id: String, decision: String) async throws {}
+    func decidePermission(id: String, decision: String, answers: [String: String]?) async throws {}
     func pullRequests() async throws -> [PullRequest] { [] }
     /// Every spec's Delivery, and how many times the app fetched them.
     var deliveryList: [DeliverySummary] = []
