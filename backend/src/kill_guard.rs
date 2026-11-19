@@ -539,7 +539,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     dirs.may_stay(before);
                 }
                 // A `trap f EXIT` doesn't call `f` now.
-                dirs.made |= !(all.first().is_some_and(|w| w == "trap") && makes_nothing(all, all, &cmds[i].live));
+                dirs.made |= !(all.first().is_some_and(|w| w == "trap") && makes_nothing(text, all, all, &cmds[i].live));
             }
         }
         let words = match unwrap(all, &mut false) {
@@ -809,7 +809,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             }
         };
         // A definition runs nothing: its body does when called.
-        dirs.made |= defined.is_empty() && !makes_nothing(all, words, live);
+        dirs.made |= defined.is_empty() && !makes_nothing(text, all, words, live);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
     // A trap's handler runs in each folder the commands were in (the folder it ran in can be any of them), as a call to a
@@ -976,7 +976,7 @@ fn reads_state(all: &[String]) -> (bool, bool) {
 /// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
 /// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
 /// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
-fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
+fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool]) -> bool {
     const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream", "--graph", "--name-only", "--force-with-lease", "-sb"];
     // Only a group's opening (`{ rm x`) may come before the command, not an assignment or a wrapper.
     let bare = all[..all.len() - words.len()].iter().all(|w| matches!(w.as_str(), "{" | "(" | "then" | "do" | "else"));
@@ -984,8 +984,19 @@ fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
     if matches!(words.first().map(String::as_str), Some("rm")) && bare && !live.iter().any(|&l| l) && !words.iter().any(|w| w.contains(['$', '`'])) {
         return true;
     }
-    // `trap` only sets what runs later: at the end for a signal or EXIT, but before the next command for these.
-    if words.first().is_some_and(|w| w == "trap") && bare && !live.iter().any(|&l| l) && !words.iter().any(|w| w.contains(['$', '`']) || ["DEBUG", "ERR", "RETURN"].contains(&w.to_uppercase().as_str())) {
+    // `trap` only sets what runs later: at the end of the shell for EXIT or a signal that ends it. Any other name (`DEBUG`,
+    // `ERR`, `ZERR`, a number) runs before the next command, and so does one in a subshell, a background job or a
+    // pipeline part (it fires when that part ends): a line with `(` (but a function's `()`), `|` or a lone `&` isn't read.
+    let lone_and = text.match_indices('&').any(|(p, _)| !text[..p].ends_with('&') && !text[p + 1..].starts_with('&') && !text[..p].ends_with(['>', '<']) && !text[p + 1..].starts_with(['>', '<']));
+    if words.first().is_some_and(|w| w == "trap")
+        && bare
+        && !live.iter().any(|&l| l)
+        && !text.replace("()", "").contains(['(', '|'])
+        && !lone_and
+        && words.len() >= 3
+        && words[2..].iter().all(|w| matches!(w.as_str(), "EXIT" | "INT" | "TERM" | "HUP" | "QUIT"))
+        && !words.iter().any(|w| w.contains(['$', '`']))
+    {
         return true;
     }
     let [git, args @ ..] = words else { return false };
@@ -3398,6 +3409,19 @@ mod tests {
             "trap 'mkdir backend' DEBUG; cd backend; git add -A".to_string(),
             "f() { mkdir backend; }; trap f DEBUG; cd backend; git add -A".to_string(),
             "trap 'git clone x backend' ERR; cd backend; git add -A".to_string(),
+            "(trap 'ln -s /x backend' EXIT); cd backend; git add -A".to_string(),
+            "(rm -f x; trap 'ln -s /x backend' EXIT); cd backend; git add -A".to_string(),
+            "(trap 'ln -s /x backend' INT TERM EXIT); cd backend; git add -A".to_string(),
+            "{ trap 'ln -s /x backend' EXIT } & git status; cd backend; git add -A".to_string(),
+            "{ trap 'ln -s /x backend' EXIT } | git status; cd backend; git add -A".to_string(),
+            "zsh -c \"(trap 'ln -s /x backend' EXIT); cd backend; git add -A\"".to_string(),
+            "trap 'ln -s /x backend' ZERR; rm nope; cd backend; git add -A".to_string(),
+            "trap 'ln -s /x backend' SIGZERR; rm nope; cd backend; git add -A".to_string(),
+            "trap 'ln -s /x backend' SIGERR; rm nope; cd backend; git add -A".to_string(),
+            "trap 'ln -s /x backend' SIGDEBUG; cd backend; git add -A".to_string(),
+            "trap 'ln -s /x backend' 32; rm nope; cd backend; git add -A".to_string(),
+            "trap 'ln -s /x backend' 33; cd backend; git add -A".to_string(),
+            "trap 'git worktree add backend' 33; cd backend; git add -A".to_string(),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
