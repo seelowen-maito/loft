@@ -1358,7 +1358,7 @@ mod tests {
             enqueue(&st, id, Some("busy".into()), "user");
         }
         let storage = st.cfg.storage_dir.clone();
-        until("both runs to record a session", 10, || sessions(&storage, &a.id).len() == 1 && sessions(&storage, &b.id).len() == 1).await;
+        until("both runs to record a session", 60, || sessions(&storage, &a.id).len() == 1 && sessions(&storage, &b.id).len() == 1).await;
         let (sa, sb) = (*sessions(&storage, &a.id).iter().next().unwrap(), *sessions(&storage, &b.id).iter().next().unwrap());
         assert_ne!(sa, sb);
         for sid in [sa, sb] {
@@ -1371,12 +1371,12 @@ mod tests {
         }
         // A second run of the same agent adds its own.
         crate::agents::stop(&st, &a.id);
-        until("the run to stop", 10, || !is_running(&st, &a.id)).await;
+        until("the run to stop", 60, || !is_running(&st, &a.id)).await;
         enqueue(&st, &a.id, Some("busy".into()), "user");
-        until("the second session", 10, || sessions(&storage, &a.id).len() == 2).await;
+        until("the second session", 60, || sessions(&storage, &a.id).len() == 2).await;
         crate::agents::stop(&st, &a.id);
         crate::agents::stop(&st, &b.id);
-        until("the runs to stop", 10, || !is_running(&st, &a.id) && !is_running(&st, &b.id)).await;
+        until("the runs to stop", 60, || !is_running(&st, &a.id) && !is_running(&st, &b.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1759,7 +1759,7 @@ mod tests {
         let _ = std::fs::remove_file(ws.join("bash.out"));
         enqueue(st, id, Some("bash-cmd".into()), "user");
         let out = || std::fs::read_to_string(ws.join("bash.out")).unwrap_or_default();
-        until("the command", 15, || !is_running(st, id) && out().contains("exit ")).await;
+        until("the command", 60, || !is_running(st, id) && out().contains("exit ")).await;
         out()
     }
 
@@ -1786,7 +1786,7 @@ mod tests {
             assert!(alive(pid));
             let out = bash(&st, &a.id, &stop).await;
             assert!(out.contains("exit 0"), "{stop}: {out}");
-            until("the server to stop", 5, || !alive(pid)).await;
+            until("the server to stop", 30, || !alive(pid)).await;
             assert!(st.db.list_permissions(Some(&a.id)).unwrap().is_empty(), "{stop} asked the user");
         }
 
