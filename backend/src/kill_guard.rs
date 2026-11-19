@@ -737,10 +737,12 @@ fn reads_state(all: &[String]) -> (bool, bool) {
     for (i, w) in all.iter().enumerate() {
         let start = w.trim_start_matches(['$', '{', '"', '\'']);
         opaque |= ["options+=", "options=", "functions+=", "functions="].iter().any(|n| start.starts_with(n));
-        // A word that starts with `functions[` or `options[` names an element for a builtin or `(( … ))` to write; a read is
-        // written `$functions[…]`.
-        let unquoted = w.trim_start_matches(['"', '\'']);
-        opaque |= unquoted.starts_with("functions[") || unquoted.starts_with("options[");
+        // `functions[` or `options[` anywhere in a word may name an element something writes (`x=functions[cd]=0`,
+        // `(( 1,functions[cd]=0 ))`, `strftime -s 'functions[f]'`). A read has `$` or `{` before it (`$functions[f]`,
+        // `${options[errexit]}`), and a name that ends in the letters (`myfunctions[1]`, `.options[0]`) is another word.
+        for n in ["functions[", "options["] {
+            opaque |= w.match_indices(n).any(|(p, _)| !w[..p].ends_with(|c: char| c.is_alphanumeric() || matches!(c, '$' | '{' | '.' | '_')));
+        }
         // `${name=…}`, `${name:=…}`, `${name::=…}` with a name that isn't a plain identifier, the `(P)` flag, and an assignment
         // after a nested `}`.
         opaque |= w.split("${(").skip(1).any(|f| f.split(')').next().is_some_and(|f| f.contains(['P', 'e']))) || w.contains("}:=") || w.contains("}::=") || w.contains("}=");
@@ -2854,6 +2856,21 @@ mod tests {
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
             format!("functions[g]=':'; cd backend && cargo test"),
             format!("functions[f]='pnpm install'; cd {u}; f"),
+            format!("cd {u}; (( x=functions[cd]=0 )); cd {w}; pnpm install"),
+            format!("cd {u}; (( 1,functions[cd]=0 )); cd {w}; pnpm install"),
+            format!("cd {u}; x=$[functions[cd]=0]; cd {w}; pnpm install"),
+            format!("cd {u}; : $[functions[cd]=0]; cd {w}; pnpm install"),
+            format!("cd {u}; integer x=functions[cd]=0; cd {w}; pnpm install"),
+            format!("cd {u}; typeset -i x=functions[cd]=0; cd {w}; pnpm install"),
+            format!("cd {u}; float x='functions[cd]=0'; cd {w}; pnpm install"),
+            format!("cd {u}; integer x; x=functions[cd]=0; cd {w}; pnpm install"),
+            format!("cd {u}; let 'x = functions[cd] = 0'; cd {w}; pnpm install"),
+            format!("cd {u}; a=(1 2); : $a[functions[cd]=1]; cd {w}; pnpm install"),
+            format!("cd {u}; a=(1 2); a[functions[cd]=1]=x; cd {w}; pnpm install"),
+            format!("cd {u}; printf %d '0+(functions[cd]=0)' >/dev/null; cd {w}; pnpm install"),
+            format!("cd {u}; K='functions[cd]=0'; (( K )); cd {w}; pnpm install"),
+            format!("cd {u}; K='functions[cd]=0'; : $(( K )); cd {w}; pnpm install"),
+            format!("cd {u}; K='functions[cd]=0'; integer x=K; cd {w}; pnpm install"),
             format!("function f {{ setopt -T }}; f; x={u}; cd x; pnpm install"),
             format!("function f g {{ setopt -T }}; g; x={u}; cd x; pnpm install"),
             format!("function {{ setopt -T }}; x={u}; cd x; pnpm install"),
@@ -2995,6 +3012,7 @@ mod tests {
             "source ~/.zshrc; . ./env.sh; cd backend && cargo test".to_string(),
             "zsh -c 'cd backend && cargo test'".to_string(),
             "bash -n script; bash scripts/x.sh --verbose; sh -eu script".to_string(),
+            "jq '.options[0]=\"x\"' package.json; echo ${options[errexit]} $functions[f] myfunctions[1]".to_string(),
             "jq '.options[0]' package.json; : \"$x\"; set -o nounset; set -m".to_string(),
             ": ${FOO:=bar}; cargo test".to_string(),
             "x=${opt#--name=}; cargo test".to_string(),
