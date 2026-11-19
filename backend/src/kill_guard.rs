@@ -633,7 +633,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         if matches!(name.as_str(), "source" | ".") {
             let file = args.iter().find(|a| !a.starts_with('-') || a.len() == 1);
             let body = shell_script(cmds, i, &["-s".to_string()]).unwrap_or_default();
-            if !body.trim().is_empty() || file.is_none_or(|f| f.contains(['$', '`', '*', '?', '[', '{', '<', '=', '(']) || f == "-" || !f.contains('/') || f.contains("/dev/") || f.contains("/proc/") || f.contains("..") || text.matches(f.trim_start_matches("./")).count() > 1 || dirs.at_text(f).is_none_or(|p| dirs.touched.iter().any(|t| p.starts_with(t)) || std::fs::metadata(&p).is_ok_and(|m| !m.is_file()))) {
+            if !body.trim().is_empty() || file.is_none_or(|f| f.contains(['$', '`', '*', '?', '[', '{', '<', '=', '(']) || f == "-" || !f.contains('/') || f.contains("/dev/") || f.contains("/proc/") || f.contains("..") || written_elsewhere(cmds, i, f) || dirs.at_text(f).is_none_or(|p| dirs.touched.iter().any(|t| p.starts_with(t)) || std::fs::metadata(&p).is_ok_and(|m| !m.is_file()))) {
                 if !body.trim().is_empty() {
                     let mut inner = dirs.clone();
                     changes(&body, &mut inner, depth + 1, out);
@@ -2016,21 +2016,36 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
     Some(text)
 }
 
+/// Whether a command other than `cmds[i]` may write `file`: it is a redirect target, or a word of a command that isn't a test or
+/// a read (`[ -f ./env.sh ]`, `cat ./env.sh` don't write it).
+fn written_elsewhere(cmds: &[Cmd], i: usize, file: &str) -> bool {
+    let name = file.trim_start_matches("./");
+    cmds.iter().enumerate().any(|(j, c)| {
+        let reads = c.words.iter().find(|w| !KEYWORDS.contains(&w.as_str())).is_some_and(|w| matches!(base(w), "[" | "[[" | "test" | "cat" | "ls" | "stat" | "head" | "tail" | "grep" | "wc" | "file" | "diff" | "echo" | "source" | "." | "true" | ":"));
+        c.targets.iter().any(|t| t.trim_start_matches("./") == name) || (j != i && !reads && c.words.iter().any(|w| w.contains(name)))
+    })
+}
+
 /// A shell the guard reads.
 fn shell_name(name: &str) -> bool {
     matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
 }
 
-/// A shell the guard can't read: a bare program name (or an absolute path) ending in `sh` (csh, fish, oksh, rzsh, pwsh, ...) or
-/// another known one, with a version (`zsh-5.9`, `ksh93`), but not sh, bash, zsh, dash or ksh themselves, which it reads, nor `ssh`.
-/// A script (`./build.sh`, `scripts/test.sh`) or an everyday command that ends in `sh` (`hash`, `rehash`, `trash`) isn't one.
+/// A shell the guard can't read: a known one by its name under any path (`./tcsh`, `../bin/fish`), or any bare name or absolute path
+/// ending in `sh` (csh, fish, oksh, rzsh, pwsh, ...), with a version (`zsh-5.9`, `ksh93`), but not sh, bash, zsh, dash or ksh
+/// themselves, which it reads, nor `ssh`. A script (`./build.sh`, `scripts/test.sh`) or an everyday command that ends in `sh` (`hash`,
+/// `rehash`, `trash`) isn't one.
 fn unread_shell(name: &str) -> bool {
     let name = name.trim_start_matches('=');
     let whole = base(name).to_lowercase();
     let b = whole.trim_end_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | '-')).trim_end_matches(".exe");
+    if shell_name(&whole) || whole == "ssh" {
+        return false;
+    }
+    let listed = matches!(b, "csh" | "tcsh" | "fish" | "oksh" | "pdksh" | "mksh" | "lksh" | "posh" | "rbash" | "rzsh" | "yash" | "ash" | "hush" | "xonsh" | "pwsh" | "nsh" | "osh" | "ion" | "nu" | "rc" | "es" | "elvish" | "busybox" | "powershell");
     let script = (name.contains('/') && !name.starts_with('/')) || whole.ends_with(".sh");
     let everyday = matches!(b, "hash" | "rehash" | "trash" | "publish" | "mosh" | "refresh" | "flush" | "finish" | "push" | "stash" | "squash" | "crash" | "wash");
-    !shell_name(&whole) && whole != "ssh" && !script && !everyday && (b.ends_with("sh") || matches!(b, "ion" | "nu" | "rc" | "es" | "elvish" | "busybox" | "powershell"))
+    listed || (!script && !everyday && b.ends_with("sh"))
 }
 
 fn base(name: &str) -> &str {
@@ -3657,10 +3672,14 @@ mod tests {
             format!("SH -c 'cd {u}; pnpm install'"),
             format!("/bin/Bash -c 'cd {u}; pnpm install'"),
             format!("TCSH -c 'cd {u}; pnpm install'"),
+            format!("./tcsh -c 'cd {u}; pnpm install'"),
+            format!("../../../../bin/tcsh -c 'cd {u}; pnpm install'"),
+            format!("~/../../bin/tcsh -c 'cd {u}; pnpm install'"),
+            format!("node_modules/.bin/fish -c 'cd {u}; pnpm install'"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
-        for cmd in ["bashdb x; cargo test", "dashboard; cargo test", "zsh_prompt_test; cargo test", "ssh host ls", "source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test", "./build.sh; cargo test", "scripts/test.sh; cargo test", "hash -r; cargo test", "rehash; cargo test", "trash x; cargo test", "BASH -c 'cd backend; cargo test'"] {
+        for cmd in ["bashdb x; cargo test", "dashboard; cargo test", "zsh_prompt_test; cargo test", "ssh host ls", "source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test", "./build.sh; cargo test", "scripts/test.sh; cargo test", "hash -r; cargo test", "rehash; cargo test", "trash x; cargo test", "BASH -c 'cd backend; cargo test'", "[ -f ./env.sh ] && source ./env.sh; pnpm install", "[[ -f ./env.sh ]] && . ./env.sh; cat ./env.sh; pnpm install"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
     }
