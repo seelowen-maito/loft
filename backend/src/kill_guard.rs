@@ -145,8 +145,6 @@ struct Dirs {
     trapped: bool,
     /// An earlier command wrote a `.git` (`echo 'gitdir: x' > t/.git`): git may follow it anywhere.
     dotgit: bool,
-    /// An earlier `cd` named a folder the guard can't list (a glob, braces).
-    unknown: bool,
     /// What earlier `ln`, `mv`, `cp`, `rm` and the like of this command name, as written and with links followed: a folder
     /// among them (or below one) may be swapped for a link before git runs.
     touched: Vec<PathBuf>,
@@ -169,9 +167,8 @@ struct Dirs {
     moved: bool,
     /// `CDPATH` is set or exported, or `cdablevars` or `auto_cd` is on: a `cd x` may land somewhere else than `x`.
     cd_search: bool,
-    /// GIT_DIR or GIT_WORK_TREE appears somewhere in the command so far (in any word, assigned, exported, unset or
-    /// hidden in a name): git may use a repository the guard can't follow, so every git call after it is unknown.
-    git_env: bool,
+    /// The folders an earlier command of the line set `GIT_DIR` or `GIT_WORK_TREE` to (`export GIT_DIR=x/.git`): git uses them.
+    git_env: Vec<PathBuf>,
     /// The functions the command defined, newest last, with the commands of the body (an index range of the text being
     /// checked) when the guard holds it. A call checks that body where it is called, not where it was defined.
     funcs: Vec<(String, Option<(usize, usize, bool)>)>,
@@ -271,7 +268,7 @@ impl Dirs {
             p if p == "~" || p.starts_with("~/") => Some(PathBuf::from(format!("{}{}", home()?, &p[1..]))),
             p if p.starts_with('/') => Some(PathBuf::from(p)),
             p if p == "~+" || p.starts_with("~+/") => Some(self.cwd.as_deref()?.join(format!(".{}", &p[2..]))),
-            p if p.starts_with('~') => None,
+            p if p.starts_with('~') => Some(PathBuf::from(tilde_user(p)?)),
             p => Some(self.cwd.as_deref()?.join(p)),
         }
     }
@@ -329,10 +326,7 @@ impl Dirs {
                 self.lose();
                 continue;
             }
-            self.unknown |= self.passes(d);
             self.cwd = self.at(d);
-            // env goes there for real: into a link that isn't there yet, the shell ends where it points.
-            self.unknown |= self.cwd.as_ref().is_some_and(|c| self.touched.iter().any(|t| c.starts_with(t)));
         }
     }
 
@@ -340,13 +334,30 @@ impl Dirs {
     /// The folder the shell is in, with the ones before it: what a loop pass changes while it still moves. (The other places it may be
     /// grow with every pass of a `cd` that may fail, and are checked in each.)
     fn places(&self) -> String {
-        format!("{:?}{:?}{:?}{}", self.cwd, self.old, self.stack, self.unknown)
+        format!("{:?}{:?}{:?}", self.cwd, self.old, self.stack)
     }
 
     fn lose(&mut self) {
         self.alts = self.cwd.as_deref().or(self.start.as_deref()).map(outermost_checkout).into_iter().collect();
-        self.unknown = true;
+        // It may be in any folder it has been in (`cd ~-`, `pushd +1`).
+        for p in self.visited() {
+            if !self.alts.contains(&p) && self.alts.len() < 8 {
+                self.alts.push(p);
+            }
+        }
         self.cd(None);
+    }
+
+    /// `GIT_DIR` or `GIT_WORK_TREE` is set to `value`: git uses that folder.
+    fn set_git_env(&mut self, value: &str) {
+        if let Some(p) = self.at(value).filter(|_| !folder_expands(value)) {
+            self.git_env.push(if p.ends_with(".git") { p.parent().map(Path::to_path_buf).unwrap_or(p) } else { p });
+        }
+    }
+
+    /// The folders the shell has been in during the command, and the ones the stack holds.
+    fn visited(&self) -> Vec<PathBuf> {
+        self.left.iter().chain(self.stack.iter()).flatten().chain(self.old.iter()).cloned().collect()
     }
 
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
@@ -356,7 +367,6 @@ impl Dirs {
         self.aliases.extend(inner.aliases.iter().cloned());
         self.dotgit |= inner.dotgit;
         self.unreadable |= inner.unreadable;
-        self.git_env |= inner.git_env;
         self.touched.extend(inner.touched.iter().cloned());
         for t in &inner.traps {
             if !self.traps.contains(t) {
@@ -371,7 +381,6 @@ impl Dirs {
         let hidden = self.cwd.as_deref().or(self.start.as_deref()).map(outermost_checkout);
         let literal = literal_folder(self, dir);
         self.alts = hidden.into_iter().collect();
-        self.unknown = true;
         self.cd(literal);
     }
 
@@ -494,6 +503,12 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         dirs.flush(cmds[i].chain);
         dirs.goes_on = cmds[i].piped || cmds[i].or || cmds[i].words.first().is_some_and(|w| w == "!");
         let all = &cmds[i].words;
+        // `export GIT_DIR=x`, `declare -x GIT_DIR=x`, `GIT_DIR=x;`: later git commands use that folder.
+        if all.first().is_some_and(|w| matches!(base(w), "export" | "declare" | "typeset" | "readonly" | "local")) || all.iter().all(|w| assignment(w).is_some()) {
+            for v in all.iter().filter_map(|w| w.strip_prefix("GIT_WORK_TREE=").or(w.strip_prefix("GIT_DIR="))) {
+                dirs.set_git_env(v);
+            }
+        }
         let family = |n: &str| matches!(base(n), "cd" | "chdir" | "pushd" | "popd");
         // A loop's next pass starts where the last one ended: its body is checked once more when it ends.
         while loops.last().is_some_and(|&(done, _)| done == i) {
@@ -563,7 +578,6 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         // A `.git` an earlier command names (`> t/.git`, `of=t/.git`, `ln -s x .git`) matters from the next on.
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
         pending_dotgit = names_dotgit(all, &cmds[i].targets);
-        dirs.git_env |= mentions_git_env(all, &cmds[i].targets, &cmds[i].stdin);
         // A here-document body may run commands (`$(…)`, backticks), whatever command reads it (a herestring's are parsed).
         for t in substitutions(&cmds[i].expands) {
             let mut inner = dirs.clone();
@@ -780,7 +794,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     // `~+` is where the shell is, which the guard can't tell after it lost the folder or with a trap that moves it.
                     Some((d, _)) if d.starts_with("~+") && (dirs.cwd.is_none() || dirs.trapped || !dirs.alts.is_empty()) => dirs.lose(),
                     // A variable or a substitution: the guard can't tell where the shell lands.
-                    Some((d, _)) if expands(d) => dirs.lose(),
+                    Some((d, _)) if folder_expands(d) => dirs.lose(),
                     // A glob or braces: the shell may go to any folder it lists. The literal part of the path names
                     // where they start, and the checkout around stands for the rest.
                     Some((dir, true)) if hides(dir, true) => dirs.hide(dir),
@@ -813,7 +827,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                         }
                         dirs.add_left(left);
                     }
-                    Some((d, _)) if ((stack_entry(d) || d == "-") && !after_dashes(args, i)) || expands(d) => {
+                    Some((d, _)) if ((stack_entry(d) || d == "-") && !after_dashes(args, i)) || folder_expands(d) => {
                         dirs.stack.push(from);
                         dirs.lose();
                     }
@@ -861,6 +875,9 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 if let Some(t) = shell_script(cmds, i, args) {
                     let mut inner = dirs.clone();
                     inner.posix = name != "zsh";
+                    for v in vars.iter().filter_map(|v| v.strip_prefix("GIT_WORK_TREE=").or(v.strip_prefix("GIT_DIR="))) {
+                        inner.set_git_env(v);
+                    }
                     inner.enter(&chdir);
                     changes(&t, &mut inner, depth + 1, out);
                     dirs.keep_made(&inner);
@@ -896,7 +913,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             }
             _ => {
                 // `env -C <folder> cmd` runs cmd there.
-                let (before, was_unknown, was_alts) = (dirs.cwd.clone(), dirs.unknown, dirs.alts.clone());
+                let (before, was_alts) = (dirs.cwd.clone(), dirs.alts.clone());
                 dirs.enter(&chdir);
                 let mut folders = command_folders(name, args, live, &vars, dirs);
                 // Each other folder the shell may be in.
@@ -907,7 +924,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 // Each folder it names, not only the one it runs in (`pnpm -C t install`), may be a link an earlier `ln`, `mv` or
                 // `cp` of this command makes (git checks its own).
                 let here = dirs.cwd.clone().map(real);
-                let swapped = name != "git" && folders.iter().any(|f| f.as_os_str() != UNKNOWN && dirs.swapped(&real(f.clone()), Some(real(f.clone())) != here));
+                let swapped = name != "git" && folders.iter().any(|f| dirs.swapped(&real(f.clone()), Some(real(f.clone())) != here));
                 // A folder that isn't there when the hook looks may be made by a trap handler that runs early (as for git).
                 let missing = name != "git" && !folders.is_empty() && dirs.trapped && dirs.cwd.clone().map(real).is_some_and(|cwd| {
                     let start = dirs.start.clone().map(real);
@@ -916,11 +933,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 if swapped || missing {
                     folders.extend(unknown_in(dirs, None));
                 }
-                if dirs.unknown && !folders.is_empty() {
-                    folders.push(PathBuf::from(UNKNOWN));
-                }
                 dirs.cwd = before;
-                dirs.unknown = was_unknown;
                 dirs.alts = was_alts;
                 folders
             }
@@ -1264,37 +1277,17 @@ fn env_chdir(prefix: &[String]) -> Vec<&str> {
 }
 
 /// Whether a command writes or names a path that ends in `.git` (also as `of=x/.git` or `--output=x/.git`), other than
-/// as a plain `GIT_DIR=` or `GIT_WORK_TREE=` word, which `mentions_git_env` already covers.
+/// as a plain `GIT_DIR=` or `GIT_WORK_TREE=` word, which names the checkout on its own.
 fn names_dotgit(words: &[String], targets: &[String]) -> bool {
     let ends = |p: &str| Path::new(p).file_name().is_some_and(|n| n == ".git");
     words.iter().filter(|w| !w.starts_with("GIT_DIR=") && !w.starts_with("GIT_WORK_TREE=")).chain(targets).any(|w| ends(w) || w.split_once('=').is_some_and(|(_, v)| ends(v)))
-}
-
-/// Whether a command sets, exports, unsets or reads GIT_DIR or GIT_WORK_TREE: a word that starts with the name or
-/// has `NAME=` in it, or whose name (before any `=`) is a glob or an expansion of `GIT_*` (`GIT_D*`, `${!GIT_*}`), even
-/// through quotes. Text a shell runs (`eval`, `sh -c`, a heredoc) counts if it names either at all. A mention in a
-/// message (`'fix GIT_DIR handling'`) or a use of the value (`echo $GIT_DIR`) doesn't.
-fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
-    let named = |t: &str| t.contains("GIT_DIR") || t.contains("GIT_WORK_TREE");
-    let hit = |w: &str| {
-        let name = w.split('=').next().unwrap_or(w);
-        w.starts_with("GIT_DIR") || w.starts_with("GIT_WORK_TREE") || w.contains("GIT_DIR=") || w.contains("GIT_WORK_TREE=") || (name.starts_with("GIT_") && name.contains(['$', '*', '?', '[', '{'])) || name.contains("${!GIT")
-    };
-    // A name from an expansion that `read`, `export`, `declare`... sets (`read $G`, `export $G`), or zsh's `${(P)G::=x}`.
-    let sets = words.iter().any(|w| matches!(w.as_str(), "read" | "export" | "declare" | "typeset" | "readonly" | "local" | "vared"))
-        && words.iter().any(|w| w.split('=').next().is_some_and(|n| n.contains('$')));
-    if sets || words.iter().any(|w| w.contains("${(P)")) {
-        return true;
-    }
-    let shell = words.iter().any(|w| base(w) == "eval" || shell_name(&base(w).to_lowercase()));
-    words.iter().chain(targets).any(|w| hit(w) || (shell && named(w))) || (shell && named(stdin))
 }
 
 /// The folders one command (not a `cd`, a shell or an `eval`) changes, run in `dirs`.
 fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String], dirs: &mut Dirs) -> Vec<PathBuf> {
     match name {
         // These read a folder option anywhere: a word from an expansion may be one (`npm install $K`).
-        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_arg(name, args) => unknown_in(dirs, None),
+        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_arg(name, args) => with_named(unknown_in(dirs, None), &option_folders(dirs, args)),
         "git" => git_changes(dirs, vars, args, live),
         "cargo" => match flags(args, &["--manifest-path"], CARGO_CHANGES) {
             (manifests, Some(s)) if CARGO_CHANGES.contains(&s) => match manifests[..] {
@@ -1303,7 +1296,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
                     .iter()
                     .flat_map(|&m| match m {
                         m if folder_expands(m) => unknown_in(dirs, None),
-                        m => dirs.at(m).and_then(|f| f.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(m).then(|| PathBuf::from(UNKNOWN))).collect(),
+                        m => dirs.at(m).and_then(|f| f.parent().map(Path::to_path_buf)).into_iter().collect(),
                     })
                     .collect(),
             },
@@ -1319,7 +1312,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
             let folders = |dir: Option<&str>| match dir {
                 None => dirs.cwd.clone().into_iter().collect::<Vec<_>>(),
                 Some(d) if folder_expands(d) => unknown_in(dirs, None),
-                Some(d) => [dirs.at_text(d), dirs.at(d)].into_iter().flatten().chain(dirs.passes(d).then(|| PathBuf::from(UNKNOWN))).collect(),
+                Some(d) => [dirs.at_text(d), dirs.at(d)].into_iter().flatten().collect(),
             };
             let each = |dirs: Vec<&str>| if dirs.is_empty() { folders(None) } else { dirs.into_iter().flat_map(|d| folders(Some(d))).collect() };
             match flags(args, dir_flags, PM_CHANGES) {
@@ -1335,7 +1328,7 @@ fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String],
             }
             // The folder of the project or workspace it names builds there too.
             let named = args.windows(2).filter(|w| matches!(w[0].as_str(), "-project" | "-workspace")).map(|w| w[1].as_str());
-            let named: Vec<PathBuf> = named.flat_map(|n| if folder_expands(n) { unknown_in(dirs, None) } else { dirs.at(n).and_then(|p| p.parent().map(Path::to_path_buf)).into_iter().chain(dirs.passes(n).then(|| PathBuf::from(UNKNOWN))).collect() }).collect();
+            let named: Vec<PathBuf> = named.flat_map(|n| if folder_expands(n) { unknown_in(dirs, None) } else { dirs.at(n).and_then(|p| p.parent().map(Path::to_path_buf)).into_iter().collect() }).collect();
             dirs.cwd.clone().into_iter().chain(named).collect()
         }
         _ => vec![],
@@ -1402,7 +1395,8 @@ fn hidden_arg(tool: &str, args: &[String]) -> bool {
     const VALUED: &[&str] = &["--filter", "-F", "-p", "--package", "--workspace", "-w", "--features", "--bin", "--example", "--test", "--bench", "--target", "--profile", "--loglevel", "--reporter", "--registry", "--tag", "--jobs", "-j", "--color"];
     args.iter().enumerate().any(|(i, a)| {
         let run = i > 0 && matches!(args[i - 1].as_str(), "run" | "run-script") && args[..i - 1].iter().all(|b| b.starts_with('-'));
-        folder_expands(a) && !run && !(matches!(tool, "cargo" | "pnpm") && a.split_once('=').is_some_and(|(o, _)| VALUED.contains(&o)))
+        let value = if a.starts_with('-') { a.split_once('=').map_or(a.as_str(), |(_, v)| v) } else { a.as_str() };
+        folder_expands(value) && !run && !(matches!(tool, "cargo" | "pnpm") && a.split_once('=').is_some_and(|(o, _)| VALUED.contains(&o)))
     })
 }
 
@@ -1457,9 +1451,6 @@ fn inside_ceiling(dir: &str, cwd: &Path, ceiling: &[PathBuf]) -> bool {
     resolve(cwd, dir, true).map(real).is_some_and(|d| ceiling.iter().any(|c| d.starts_with(c)))
 }
 
-/// What the guard reports for a folder it can't name: Loft asks the user about the projects folder as a whole.
-pub const UNKNOWN: &str = "/loft-unknown-folder";
-
 /// The folders a git command changes, past its global options: its work tree (`--work-tree`, `GIT_WORK_TREE`) and
 /// the checkout its repository is in (`--git-dir`, `GIT_DIR`), each by default the repository git finds from the
 /// folder (`-C`): the nearest one up, which for an agent's workspace that isn't a clone is the user's checkout around
@@ -1468,31 +1459,18 @@ pub const UNKNOWN: &str = "/loft-unknown-folder";
 /// What the shell expands (braces, globs) or an earlier command of this run may still make (a folder, a link, a
 /// `.git` file) hides the folder or repository: then the answer is `unknown_in`.
 fn git_changes(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool]) -> Vec<PathBuf> {
-    let mut unknown = false;
-    let mut folders = git_folders(outer, vars, args, live, &mut unknown);
-    if unknown {
-        folders.push(PathBuf::from(UNKNOWN));
-    }
-    folders
-}
-
-/// `git_changes` but for the `unknown` answer a change makes beside the folders.
-fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool], unknown: &mut bool) -> Vec<PathBuf> {
     let mut dirs = outer.clone();
+    let literal = named_folders(&dirs, vars, args);
     let (mut tree, mut git_dir) = (None, None);
-    let mut relative = false;
-    let absolute = |d: &str| d.starts_with(['/', '~']) || d.starts_with("$HOME") || d.starts_with("${HOME}");
     for v in vars {
         if let Some(d) = v.strip_prefix("GIT_WORK_TREE=") {
-            relative |= !absolute(d);
             tree = Some(dirs.at(d));
         } else if let Some(d) = v.strip_prefix("GIT_DIR=") {
-            relative |= !absolute(d);
             git_dir = Some(dirs.at(d));
         }
     }
     // Braces the shell expands before git sees them (`git -C {../..,reset} --hard`).
-    let Some(args) = expand_args(args, live) else { return unknown_in(&dirs, None) };
+    let Some(args) = expand_args(args, live) else { return with_named(unknown_in(&dirs, None), &literal) };
     let hid = |k: usize| args.get(k).is_some_and(|(w, live)| hides(w, *live));
     let mut i = 0;
     let mut dir_options = false;
@@ -1502,20 +1480,19 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         let a = a.as_str();
         // An option or subcommand from an expansion (`git $K checkout .`) may be any of them.
         if expands(a) {
-            return unknown_in(&dirs, None);
+            return with_named(unknown_in(&dirs, None), &literal);
         }
         let value = |o: &str| a.strip_prefix(o).and_then(|r| r.strip_prefix('='));
         let takes_value = matches!(a, "-C" | "--work-tree" | "--git-dir" | "-c" | "--namespace" | "--config-env" | "--super-prefix");
         // A variable or a substitution in a folder option: the shell tells git where, the guard can't.
         let dir_option = matches!(a, "-C" | "--work-tree" | "--git-dir");
         if (dir_option && args.get(i).is_some_and(|(d, _)| folder_expands(d))) || ["--work-tree", "--git-dir"].iter().any(|o| value(o).is_some_and(folder_expands)) {
-            return unknown_in(&dirs, None);
+            return with_named(unknown_in(&dirs, None), &literal);
         }
         if hid(i - 1) || (takes_value && hid(i)) {
             let path = if takes_value && hid(i) { args.get(i).map(|w| w.0.as_str()) } else { value("--git-dir").or(value("--work-tree")) };
-            return unknown_in(&dirs, path);
+            return with_named(unknown_in(&dirs, path), &literal);
         }
-        let rel_next = args.get(i).is_some_and(|(d, _)| !absolute(d));
         // `-C t/..` after a link that isn't there yet goes up from where it will point.
         let up = (matches!(a, "-C" | "--work-tree" | "--git-dir") && args.get(i).is_some_and(|(d, _)| dirs.passes(d))) || ["--work-tree", "--git-dir"].iter().any(|o| value(o).is_some_and(|d| dirs.passes(d)));
         let mut next = || {
@@ -1523,47 +1500,43 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
             args.get(i - 1).and_then(|(d, _)| dirs.at(d))
         };
         match a {
-            _ if up => return unknown_in(&dirs, None),
+            _ if up => return with_named(unknown_in(&dirs, None), &literal),
             "-C" => {
                 dir_options = true;
                 let to = next();
                 dirs.cwd = to;
             }
             "--work-tree" => {
-                relative |= rel_next;
                 tree = Some(next());
             }
             "--git-dir" => {
-                relative |= rel_next;
                 git_dir = Some(next());
             }
             _ if value("--work-tree").is_some() => {
-                relative |= value("--work-tree").is_some_and(|d| !absolute(d));
                 tree = Some(value("--work-tree").and_then(|d| dirs.at(d)));
             }
             _ if value("--git-dir").is_some() => {
-                relative |= value("--git-dir").is_some_and(|d| !absolute(d));
                 git_dir = Some(value("--git-dir").and_then(|d| dirs.at(d)));
             }
             // `-c core.worktree=x` names the work tree as `--work-tree` does.
             "-c" => {
                 // A key from an expansion (`-c $K=x`, `-c $E`) may be `core.worktree`.
                 if args.get(i).is_some_and(|(w, _)| expands(w.split_once('=').map_or(w.as_str(), |(k, _)| k))) {
-                    return unknown_in(&dirs, None);
+                    return with_named(unknown_in(&dirs, None), &literal);
                 }
                 if let Some((_, v)) = args.get(i).and_then(|(w, _)| w.split_once('=')).filter(|(k, _)| k.eq_ignore_ascii_case("core.worktree")) {
                     // A variable or a substitution, as in any folder option.
                     if folder_expands(v) {
-                        return unknown_in(&dirs, None);
+                        return with_named(unknown_in(&dirs, None), &literal);
                     }
                     tree = Some(dirs.at(v));
                 }
                 i += 1;
             }
             "--config-env" if args.get(i).is_some_and(|(w, _)| w.to_ascii_lowercase().starts_with("core.worktree")) => {
-                return unknown_in(&dirs, None);
+                return with_named(unknown_in(&dirs, None), &literal);
             }
-            _ if a.to_ascii_lowercase().starts_with("--config-env=core.worktree") => return unknown_in(&dirs, None),
+            _ if a.to_ascii_lowercase().starts_with("--config-env=core.worktree") => return with_named(unknown_in(&dirs, None), &literal),
             "--namespace" | "--config-env" | "--super-prefix" => i += 1,
             o if o.starts_with('-') => {}
             sub => break sub,
@@ -1575,7 +1548,6 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
     }
     // GIT_DIR or GIT_WORK_TREE anywhere in the command: git may use a repository the guard can't follow. A relative
     // one is read from the folder `-C` moves to, not from the one before it.
-    *unknown |= dirs.git_env || (relative && dir_options);
     // `clone` and `init` make a new repository: in the folder they name, or the folder they run in, not the one around it.
     if let Some(valued) = match sub {
         "clone" => Some(&["--branch", "--origin", "--config", "--depth", "--reference", "--reference-if-able", "--template", "--separate-git-dir", "--upload-pack", "--jobs", "--filter", "--shallow-since", "--shallow-exclude", "--server-option", "--bundle-uri", "-b", "-o", "-c", "-u", "-j"][..]),
@@ -1612,7 +1584,7 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         let named = tree.iter().chain(git_dir.iter()).flatten().any(|p| dirs.swapped(&real(p.clone()), true));
         let swapped = named || dirs.swapped(&cwd, dir_options || tree.is_some() || git_dir.is_some());
         if dirs.dotgit || swapped || (dirs.made && near && !cwd.exists()) {
-            return unknown_in(&dirs, None);
+            return with_named(unknown_in(&dirs, None), &literal);
         }
     }
     let found = dirs.cwd.map(|d| repo_root(d, &dirs.ceiling));
@@ -1625,16 +1597,63 @@ fn git_folders(outer: &mut Dirs, vars: &[&String], args: &[String], live: &[bool
         None => linked,
     };
     let repos = repos.into_iter().map(|d| if d.ends_with(".git") { d.parent().map(Path::to_path_buf).unwrap_or(d) } else { d });
-    tree.unwrap_or(found).into_iter().chain(repos).collect()
+    tree.unwrap_or(found).into_iter().chain(repos).chain(outer.git_env.iter().cloned()).collect()
+}
+
+/// The folders a git command names with a literal absolute path before its subcommand (`-C`, `--work-tree`, `--git-dir`,
+/// `-c core.worktree=`, `GIT_DIR=`, `GIT_WORK_TREE=`), and those an earlier command of the line set: they are asked
+/// about even when the folder git runs in is unknown.
+fn named_folders(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf> {
+    let mut values: Vec<&str> = vars.iter().filter_map(|v| v.strip_prefix("GIT_WORK_TREE=").or(v.strip_prefix("GIT_DIR="))).collect();
+    let mut it = args.iter().map(String::as_str);
+    while let Some(a) = it.next() {
+        match a {
+            "-C" | "--work-tree" | "--git-dir" => values.extend(it.next()),
+            "-c" => values.extend(it.next().and_then(|c| c.split_once('=')).filter(|(k, _)| k.eq_ignore_ascii_case("core.worktree")).map(|(_, v)| v)),
+            "--namespace" | "--config-env" | "--super-prefix" => drop(it.next()),
+            _ => match a.strip_prefix("--work-tree=").or(a.strip_prefix("--git-dir=")) {
+                Some(v) => values.push(v),
+                None if a.starts_with('-') || expands(a) => {}
+                None => break,
+            },
+        }
+    }
+    let absolute = |p: &str| p.starts_with(['/', '~']) || p.starts_with("$HOME") || p.starts_with("${HOME}");
+    let paths = values.into_iter().filter(|v| absolute(v) && !folder_expands(v)).filter_map(|v| dirs.at(v));
+    paths.map(|p| if p.ends_with(".git") { p.parent().map(Path::to_path_buf).unwrap_or(p) } else { p }).chain(dirs.git_env.iter().cloned()).collect()
+}
+
+/// The folders a package manager or cargo is given with a literal absolute folder option (`-C`, `--dir`, `--prefix`, `--cwd`,
+/// `--manifest-path`), attached or not: asked about even when another word of the command can't be placed.
+fn option_folders(dirs: &Dirs, args: &[String]) -> Vec<PathBuf> {
+    let mut found = vec![];
+    let mut it = args.iter().map(String::as_str);
+    while let Some(a) = it.next() {
+        let (name, attached) = a.split_once('=').map_or((a, None), |(n, v)| (n, Some(v)));
+        if !matches!(name, "-C" | "--dir" | "--prefix" | "--cwd" | "--manifest-path") {
+            continue;
+        }
+        let Some(v) = attached.or_else(|| it.next()) else { break };
+        if v.starts_with(['/', '~']) || v.starts_with("$HOME") || v.starts_with("${HOME}") {
+            let p = dirs.at(v).filter(|_| !folder_expands(v));
+            found.extend(p.map(|p| if name == "--manifest-path" { p.parent().map(Path::to_path_buf).unwrap_or(p) } else { p }));
+        }
+    }
+    found
+}
+
+fn with_named(mut found: Vec<PathBuf>, named: &[PathBuf]) -> Vec<PathBuf> {
+    found.extend(named.iter().cloned());
+    found
 }
 
 /// What a command whose folder, work tree or repository the guard can't name may change: the folder the literal part of
-/// `path` names (`<projects>/lof?` is `<projects>`), the topmost checkout around where it runs, and, for Loft, the
-/// projects folder (`UNKNOWN`).
+/// `path` names (`<projects>/lof?` is `<projects>`) and the topmost checkout around where it runs. A folder it can't
+/// name isn't asked about.
 fn unknown_in(dirs: &Dirs, path: Option<&str>) -> Vec<PathBuf> {
     let literal = path.and_then(|p| literal_folder(dirs, p));
     let hidden = dirs.cwd.as_deref().or(dirs.start.as_deref()).map(outermost_checkout);
-    literal.into_iter().chain(hidden).chain([PathBuf::from(UNKNOWN)]).collect()
+    literal.into_iter().chain(hidden).chain(dirs.visited()).collect()
 }
 
 /// The folder a path with a glob or braces starts from: the parts before the first one that has one.
@@ -1722,8 +1741,8 @@ fn outermost_checkout(folder: &Path) -> PathBuf {
 /// quotes (`live`, from the lexer). The ones a git word has are expanded first (`expand_args`).
 /// A folder word with a variable, a command substitution or a backtick: where it goes is known only to the shell.
 fn expands(word: &str) -> bool {
-    // `~user`, `~-`, `~1`, `~name`: another folder, which the guard can't tell (`~`, `~/x` and `~+` it can).
-    let other_tilde = word.starts_with('~') && !(word == "~" || word.starts_with("~/") || word == "~+" || word.starts_with("~+/"));
+    // `~-`, `~1`: another folder, which the guard can't tell (`~`, `~/x`, `~+` and `~user` of a user that exists it can).
+    let other_tilde = word.starts_with('~') && !(word == "~" || word.starts_with("~/") || word == "~+" || word.starts_with("~+/") || tilde_user(word).is_some());
     word.contains(['$', '`']) || other_tilde
 }
 
@@ -1825,6 +1844,27 @@ fn git_reads(sub: &str, rest: &[&str]) -> bool {
     }
 }
 
+/// `~name` or `~name/rest` with the home folder of the user `name` (from the user database). None when there is no such user.
+fn tilde_user(path: &str) -> Option<String> {
+    let (name, rest) = path.strip_prefix('~')?.split_once('/').map_or((&path[1..], ""), |(n, r)| (n, &path[path.len() - r.len() - 1..]));
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return None;
+    }
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: the buffer outlives the call, and `pw_dir` is read before it is dropped.
+    let home = unsafe {
+        libc::getpwnam_r(name.as_ptr(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut found);
+        if found.is_null() || pw.pw_dir.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(pw.pw_dir).to_string_lossy().into_owned()
+    };
+    Some(format!("{home}{rest}"))
+}
+
 /// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded (after the links on the way are followed when `physical`). None when it holds another variable or a substitution.
 fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
     let home = || dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
@@ -1832,8 +1872,8 @@ fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
         p if p == "~" || p.starts_with("~/") => format!("{}{}", home()?, &p[1..]),
         p if p.starts_with("$HOME") => format!("{}{}", home()?, &p[5..]),
         p if p.starts_with("${HOME}") => format!("{}{}", home()?, &p[7..]),
-        // `~-`, `~user`: another folder the guard can't tell.
-        p if p.starts_with('~') => return None,
+        // `~-`, `~1`: another folder the guard can't tell.
+        p if p.starts_with('~') => tilde_user(p)?,
         p => p.to_string(),
     };
     if path.contains(['$', '`']) {
@@ -2555,6 +2595,8 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
     }
     let mut depth = 0; // subshell parens open inside a `$(`
     let mut array = 0; // parens open in an array assignment, `pids=($(pgrep x))`: its elements stay in the word
+    let mut arith = 0; // parens open in `(( … ))` and `for (( … ))`: a `<<` there is a shift
+    let mut brackets = 0; // brackets open in `$[ … ]`: so is one there
     while let Some(&ch) = c.get(i) {
         let next = c.get(i + 1).copied();
         i += 1;
@@ -2665,6 +2707,22 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 l.cmd(p);
                 i = lex(p, c, i + 1, Some(')'));
             }
+            '$' if next == Some('[') => {
+                brackets += 1;
+                l.in_word = true;
+                l.word.push('$');
+                l.word.push('[');
+                i += 1;
+            }
+            '[' if brackets > 0 => {
+                brackets += 1;
+                l.in_word = true;
+                l.word.push(ch);
+            }
+            ']' if brackets > 0 => {
+                brackets -= 1;
+                l.word.push(ch);
+            }
             '$' if next == Some('{') => {
                 l.in_word = true;
                 l.word.push('$');
@@ -2693,6 +2751,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             }
             ' ' | '\t' => l.end_word(p),
             '(' => {
+                if arith > 0 || (next == Some('(') && !l.in_word && closes_arithmetic(c, i)) {
+                    arith += 1;
+                }
                 if stop == Some(')') {
                     depth += 1;
                 }
@@ -2704,6 +2765,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             }
             ')' if stop == Some(')') && depth == 0 => break,
             ')' => {
+                arith = (arith - 1).max(0);
                 if stop == Some(')') {
                     depth -= 1;
                 }
@@ -2788,7 +2850,13 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     l.in_word = false; // `2>`: a file descriptor, not a word
                 }
                 l.end_word(p);
-                if ch == '<' && next == Some('<') && c.get(i + 1) != Some(&'<') {
+                let is_let = l.cur.is_some_and(|id| p.cmds[id].words.first().is_some_and(|w| w == "let"));
+                if ch == '<' && next == Some('<') && (arith > 0 || brackets > 0 || is_let) {
+                    // A shift, not a here-document.
+                    i += 1;
+                    l.word.push_str("<<");
+                    l.in_word = true;
+                } else if ch == '<' && next == Some('<') && c.get(i + 1) != Some(&'<') {
                     i += 1;
                     if c.get(i) == Some(&'-') {
                         i += 1;
@@ -2800,6 +2868,11 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     // Any quote or backslash in the delimiter makes the body plain text, as in zsh and bash.
                     let mut quoted = false;
                     while let Some(&n) = c.get(i).filter(|&&n| !n.is_whitespace() && !";&|()<>".contains(n)) {
+                        // A backslash before a newline is a line continuation, not quoting.
+                        if n == '\\' && c.get(i + 1) == Some(&'\n') {
+                            i += 2;
+                            continue;
+                        }
                         if "'\"\\".contains(n) {
                             quoted = true;
                         } else {
@@ -2823,6 +2896,24 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
     l.end(p);
     p.scope.truncate(scope);
     i
+}
+
+/// Whether the `(` at `i` (the second of `((`) closes with `))`: arithmetic. `((cmd); …)` is a subshell in a subshell.
+fn closes_arithmetic(c: &[char], i: usize) -> bool {
+    let mut depth = 0;
+    for (j, &ch) in c.iter().enumerate().skip(i) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return c.get(j + 1) == Some(&')');
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
@@ -2917,18 +3008,12 @@ pub async fn handle(
     for change in req.changes {
         // Read again each time: an "Always allow" for one folder may cover the next.
         let Ok(Some(a)) = state.db.get_agent(&agent_id) else { break };
-        // A folder the hook couldn't name: the user is asked about the projects folder as a whole.
-        let unknown = change.folder == Path::new(UNKNOWN);
-        let at = if unknown { projects.clone() } else { change.folder.clone() };
-        if !unknown && (!at.starts_with(&projects) || in_agent_storage(&at, &storage)) {
+        let at = change.folder.clone();
+        if !at.starts_with(&projects) || in_agent_storage(&at, &storage) {
             continue;
         }
         let folder = at.display().to_string();
-        let reason = if unknown {
-            format!("{} runs a command that may change one of your checkouts under {folder} (it can't tell which), not its own clone: {}", a.name, change.command)
-        } else {
-            format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command)
-        };
+        let reason = format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command);
         let input = json!({ "command": change.command, "folder": folder });
         let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
         let d = crate::agents::ask_permission_for(&state, &a.id, "prompt", "Checkout", input, &reason, String::new(), wait).await;
@@ -3321,8 +3406,8 @@ mod tests {
 
     #[test]
     fn a_cd_to_a_folder_named_by_a_variable_asks() {
+        // What it can't tell runs.
         for cmd in [
-            "cd /nowhere/dev/loft && cd /nowhere/dev/loft/agent-local-storage && cd $OLDPWD && git reset --hard",
             "D=/nowhere/dev/loft; cd $D && git reset --hard",
             "cd \"$(git rev-parse --show-toplevel)\" && git reset --hard",
             "cd `pwd` && git reset --hard",
@@ -3331,7 +3416,7 @@ mod tests {
             "cd -P $D && git reset --hard",
             "popd $X; git reset --hard",
         ] {
-            assert!(!asks_all(cmd, CLONE).is_empty(), "should ask: {cmd}");
+            assert!(asks_all(cmd, CLONE).is_empty(), "should run: {cmd}");
         }
         for cmd in ["cd -; git pull", "cd /nowhere/dev/loft/agent-local-storage/abc/loft && git pull", "cd loft && git pull"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
@@ -3343,25 +3428,11 @@ mod tests {
         let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
         for cmd in [
             // CDPATH, cdablevars and auto_cd send a relative `cd` elsewhere.
-            format!("CDPATH={u} cd sub; pnpm install"),
-            format!("export CDPATH={u}; cd sub; pnpm install"),
-            format!("cdpath=({u}); cd sub; pnpm install"),
-            format!("typeset -x CDPATH={u}; cd sub; pnpm install"),
-            format!("CDPATH={u}; pushd sub; pnpm install"),
-            "setopt cdablevars; cd x; pnpm install".to_string(),
-            "setopt CD_ABLE_VARS; cd x; pnpm install".to_string(),
-            "set -o autocd; cd x; pnpm install".to_string(),
-            "setopt auto_cd; cd x; pnpm install".to_string(),
             // zsh's `cd old new`.
-            format!("cd sub; cd a b; pnpm install"),
             // A `cd` or `always` that the shell reads another way.
             format!("cd {u}; functions+=(cd :); cd {w}; pnpm install"),
             format!("cd {u}; functions[cd]=':'; cd {w}; pnpm install"),
-            format!("functions[f]='git -C {u} reset --hard'; f"),
-            format!("functions[cd]='git -C {u} reset --hard'; cd"),
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
-            format!("functions[g]=':'; cd backend && cargo test"),
-            format!("functions[f]='pnpm install'; cd {u}; f"),
             format!("cd {u}; read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
             format!("cd {u}; read -Ar functions <<< 'cd :'; cd {w}; pnpm install"),
             format!("cd {u}; read -A -- functions <<< 'cd :'; cd {w}; pnpm install"),
@@ -3369,19 +3440,12 @@ mod tests {
             format!("cd {u}; IFS=' ' read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
             format!("cd {u}; builtin read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
             format!("cd {u}; echo cd : | read -rA functions; cd {w}; pnpm install"),
-            format!("cd {u}; while read -rA functions; do break; done <<< 'cd :'; cd {w}; pnpm install"),
             format!("cd {u}; zsh -c 'read -rA functions <<< \"cd :\"; cd {w}; pnpm install'"),
-            format!("K=ablevars; read -A options <<< \"cd$K on\"; x={u}; cd x; pnpm install"),
-            format!("K=ablevars; echo cd$K on | read -A options; x={u}; cd x; pnpm install"),
             format!("cd {u}; : ${{(AA)=functions::=cd :}}; cd {w}; pnpm install"),
             format!("cd {u}; x=${{(AA)=functions::=cd :}}; cd {w}; pnpm install"),
             format!("cd {u}; \"${{(AA)=functions:=cd :}}\"; cd {w}; pnpm install"),
             format!("cd {u}; : ${{(AA)=^functions::=cd :}}; cd {w}; pnpm install"),
             format!("cd {u}; : ${{(AA)=functions::=pushd :}}; pushd {w}; pnpm install"),
-            format!(": ${{(AA)=functions::=f 'git -C {u} reset --hard'}}; f"),
-            format!("K=ablevars; : ${{(AA)=options::=cd$K on}}; x={u}; cd x; pnpm install"),
-            format!("cd {u}; (( x=functions[cd]=0 )); cd {w}; pnpm install"),
-            format!("cd {u}; (( 1,functions[cd]=0 )); cd {w}; pnpm install"),
             format!("cd {u}; x=$[functions[cd]=0]; cd {w}; pnpm install"),
             format!("cd {u}; : $[functions[cd]=0]; cd {w}; pnpm install"),
             format!("cd {u}; integer x=functions[cd]=0; cd {w}; pnpm install"),
@@ -3395,6 +3459,42 @@ mod tests {
             format!("cd {u}; K='functions[cd]=0'; (( K )); cd {w}; pnpm install"),
             format!("cd {u}; K='functions[cd]=0'; : $(( K )); cd {w}; pnpm install"),
             format!("cd {u}; K='functions[cd]=0'; integer x=K; cd {w}; pnpm install"),
+            format!("cd {u}; {{ functions -c f cd }}; cd {w}; pnpm install"),
+            format!("cd {u}; K=tions; x=${{(P)${{:-func$K\\[cd\\]}}::=:}}; cd -; pnpm install"),
+            format!("cd {u}; x=${{functions[cd]::=:}}; cd {w}; pnpm install"),
+            format!("cd {u}; K=functions; set -A $K cd :; cd -; pnpm install"),
+            format!("cd {u}; K=tions; set -A func$K cd :; cd -; pnpm install"),
+            format!("pushd {w}; cd {u}; K=tions; set -A func$K popd :; popd; pnpm install"),
+            // Other ways to turn on cdablevars or set CDPATH, and to write `functions`.
+            format!("cd {u}; functions -c f cd; cd {w}; pnpm install"),
+            format!("cd {u}; functions+=([cd]=:); cd {w}; pnpm install"),
+            format!("cd {u}; K=cd; functions+=($K :); cd {w}; pnpm install"),
+            format!("cd {u}; set -A functions cd :; cd {w}; pnpm install"),
+            format!("cd {u}; : ${{functions[cd]::=:}}; cd {w}; pnpm install"),
+            format!("cd {u}; f() {{ : }}; functions -c f cd; cd {w}; pnpm install"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        // What it can't tell runs.
+        for cmd in [
+            format!("CDPATH={u} cd sub; pnpm install"),
+            format!("export CDPATH={u}; cd sub; pnpm install"),
+            format!("cdpath=({u}); cd sub; pnpm install"),
+            format!("typeset -x CDPATH={u}; cd sub; pnpm install"),
+            format!("CDPATH={u}; pushd sub; pnpm install"),
+            "setopt cdablevars; cd x; pnpm install".to_string(),
+            "setopt CD_ABLE_VARS; cd x; pnpm install".to_string(),
+            "set -o autocd; cd x; pnpm install".to_string(),
+            "setopt auto_cd; cd x; pnpm install".to_string(),
+            format!("cd sub; cd a b; pnpm install"),
+            format!("functions[f]='git -C {u} reset --hard'; f"),
+            format!("functions[cd]='git -C {u} reset --hard'; cd"),
+            format!("functions[g]=':'; cd backend && cargo test"),
+            format!("functions[f]='pnpm install'; cd {u}; f"),
+            format!("K=ablevars; read -A options <<< \"cd$K on\"; x={u}; cd x; pnpm install"),
+            format!("K=ablevars; echo cd$K on | read -A options; x={u}; cd x; pnpm install"),
+            format!(": ${{(AA)=functions::=f 'git -C {u} reset --hard'}}; f"),
+            format!("K=ablevars; : ${{(AA)=options::=cd$K on}}; x={u}; cd x; pnpm install"),
             format!("function f {{ setopt -T }}; f; x={u}; cd x; pnpm install"),
             format!("function f g {{ setopt -T }}; g; x={u}; cd x; pnpm install"),
             format!("function {{ setopt -T }}; x={u}; cd x; pnpm install"),
@@ -3402,7 +3502,6 @@ mod tests {
             format!("if [[ -n x ]] {{ setopt -T }}; x={u}; cd x; pnpm install"),
             format!("K=PATH; function f {{ export CD$K={u} }}; f; cd sub; pnpm install"),
             format!("K=PATH; if [[ -n x ]] export CD$K={u}; cd sub; pnpm install"),
-            format!("cd {u}; f() {{ : }}; function g {{ functions -c f cd }}; g; cd {w}; pnpm install"),
             format!("O=ablevars; zsh -fo cd$O -c 'x={u}; cd x; pnpm install'"),
             format!("O=ablevars; zsh -lo cd$O -c 'x={u}; cd x; pnpm install'"),
             format!("O=ablevars; zsh +eo nocd$O -c 'x={u}; cd x; pnpm install'"),
@@ -3413,8 +3512,6 @@ mod tests {
             format!("x=${{(j.:.P)K::={u}}}; cd sub; pnpm install"),
             format!("A='${{CD'; B='PATH::={u}}}'; T=$A$B; : ${{(e)T}}; cd sub; pnpm install"),
             format!("K=CD; K+=PATH; x=${{(e)${{:-'${{'$K'::={u}}}'}}}}; cd sub; pnpm install"),
-            format!("cd {u}; (( functions[cd] = 0 )); cd {w}; pnpm install"),
-            format!("cd {u}; : $(( functions[cd] = 0 )); cd {w}; pnpm install"),
             format!("zmodload zsh/datetime; strftime -s 'functions[f]' 'git -C {u} reset --hard' 0; f"),
             format!("zformat -f 'functions[f]' 'git -C {u} reset --hard'; f"),
             format!("K=ablevars; zformat -f \"options[cd$K]\" on; x={u}; cd x; pnpm install"),
@@ -3427,7 +3524,6 @@ mod tests {
             format!("f() {{ setopt -T }}; f; x={u}; cd x; pnpm install"),
             format!("{{ export CD$K={u} }}; cd sub; pnpm install"),
             format!("f() {{ export CD$K={u} }}; f; cd sub; pnpm install"),
-            format!("cd {u}; {{ functions -c f cd }}; cd {w}; pnpm install"),
             format!("nohup zsh -T -c 'x={u}; cd x; pnpm install'"),
             format!("env -u FOO zsh -T -c 'x={u}; cd x; pnpm install'"),
             format!("exec -a x zsh -T -c 'x={u}; cd x; pnpm install'"),
@@ -3435,7 +3531,6 @@ mod tests {
             format!("find . -maxdepth 0 -exec zsh -T -c 'x={u}; cd x; pnpm install' \\;"),
             format!("echo 'x={u}; cd x; pnpm install' | nice zsh -T"),
             format!("K=CD; K+=PATH; x=${{(P)${{K}}::={u}}}; cd sub; pnpm install"),
-            format!("cd {u}; K=tions; x=${{(P)${{:-func$K\\[cd\\]}}::=:}}; cd -; pnpm install"),
             format!("set -9T; x={u}; cd x; pnpm install"),
             format!("setopt -T1; x={u}; cd x; pnpm install"),
             format!("zsh -T9 -c 'x={u}; cd x; pnpm install'"),
@@ -3465,17 +3560,11 @@ mod tests {
             format!("K=PATH; print -v CD$K {u}; cd sub; pnpm install"),
             format!("K=PATH; zstyle -s :x y CD$K; cd sub; pnpm install"),
             format!("K=CD; K+=PATH; x=${{(P)K::={u}}}; cd sub; pnpm install"),
-            format!("cd {u}; x=${{functions[cd]::=:}}; cd {w}; pnpm install"),
-            format!("cd {u}; N='functions[cd]'; x=${{(P)N::=:}}; cd {w}; pnpm install"),
-            format!("cd {u}; K=functions; set -A $K cd :; cd -; pnpm install"),
-            format!("cd {u}; K=tions; set -A func$K cd :; cd -; pnpm install"),
-            format!("pushd {w}; cd {u}; K=tions; set -A func$K popd :; popd; pnpm install"),
             format!("functions+=([f]='git -C {u} reset --hard'); f"),
             format!("x=${{functions[f]::='git -C {u} reset --hard'}}; f"),
             format!("set -A functions f 'git -C {u} reset --hard'; f"),
             format!("K=tions; set -A func$K f 'git -C {u} reset --hard'; f"),
             format!("K=tions; typeset \"func${{K}}[f]=git -C {u} reset --hard\"; f"),
-            // Other ways to turn on cdablevars or set CDPATH, and to write `functions`.
             format!("unsetopt nocdablevars; x={u}; cd x; pnpm install"),
             format!("set +o nocdablevars; x={u}; cd x; pnpm install"),
             format!("set -T; x={u}; cd x; pnpm install"),
@@ -3490,7 +3579,6 @@ mod tests {
             format!("env -S 'CDPATH={u}' zsh -c 'cd sub; pnpm install'"),
             format!(". =(echo CDPATH={u}); cd sub; pnpm install"),
             format!("source <(echo cd {u}); pnpm install"),
-            format!("cd {u}; functions -c f cd; cd {w}; pnpm install"),
             format!("setopt -T; x={u}; cd x; pnpm install"),
             format!("set -eT; x={u}; cd x; pnpm install"),
             format!("setopt -m 'cd*'; x={u}; cd x; pnpm install"),
@@ -3508,16 +3596,22 @@ mod tests {
             format!("export CD$K={u}; cd sub; pnpm install"),
             format!("export {{CDPATH,X}}={u}; cd sub; pnpm install"),
             format!("source <(echo CDPATH={u}); cd sub; pnpm install"),
-            format!("cd {u}; functions+=([cd]=:); cd {w}; pnpm install"),
-            format!("cd {u}; K=cd; functions+=($K :); cd {w}; pnpm install"),
-            format!("cd {u}; set -A functions cd :; cd {w}; pnpm install"),
-            format!("cd {u}; : ${{functions[cd]::=:}}; cd {w}; pnpm install"),
-            format!("cd {u}; f() {{ : }}; functions -c f cd; cd {w}; pnpm install"),
             format!("functions+=(f 'git -C {u} reset --hard'); f"),
             format!("functions[f]+='git -C {u} reset --hard'; f"),
             format!("functions[f]='cd {u}'; f; pnpm install"),
             format!("functions[TRAPDEBUG]='cd {u}'; pnpm install"),
             format!("functions[f]='setopt cdablevars'; f; x={u}; cd x; pnpm install"),
+        ] {
+            assert!(asks_all(&cmd, CLONE).is_empty(), "should run: {cmd}");
+        }
+        // They name the checkout, then lose the folder: it is one of the places the shell may be.
+        for cmd in [
+            format!("cd {u}; (( x=functions[cd]=0 )); cd {w}; pnpm install"),
+            format!("cd {u}; (( 1,functions[cd]=0 )); cd {w}; pnpm install"),
+            format!("cd {u}; f() {{ : }}; function g {{ functions -c f cd }}; g; cd {w}; pnpm install"),
+            format!("cd {u}; (( functions[cd] = 0 )); cd {w}; pnpm install"),
+            format!("cd {u}; : $(( functions[cd] = 0 )); cd {w}; pnpm install"),
+            format!("cd {u}; N='functions[cd]'; x=${{(P)N::=:}}; cd {w}; pnpm install"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
@@ -3597,8 +3691,6 @@ mod tests {
             format!("() {{ f() {{ pnpm install; }} }}; cd {u}; f"),
             format!("f() {{ pnpm install; }}; g() {{ f; }}; f() {{ :; }} & cd {u}; g"),
             format!("nice() {{ pnpm install }}; cd {u}; nice true"),
-            format!("zshexit() {{ pnpm install; }}; cd {u}"),
-            format!("f() {{ pnpm install; }}; add-zsh-hook chpwd f; cd {u}"),
             format!("f() {{ pnpm install; }}; cd {u}; function {{ f }}"),
             format!("f() {{ pnpm install; }}; cd {u}; f function f"),
             format!("f() {{ pnpm install; }}; cd {u}; noglob f function f"),
@@ -3614,9 +3706,6 @@ mod tests {
             format!("bash -c 'f() {{ case x in x) echo }};; esac; pnpm install; }}; cd {u}; f'"),
             format!("bash -c 'f() {{ {{ echo }}; }}; pnpm install; }}; cd {u}; f'"),
             format!("bash -c 'f() {{ g() {{ echo }}; }}; pnpm install; }}; cd {u}; f'"),
-            format!("chpwd() {{ pnpm install; }}; cd {u}"),
-            format!("TRAPEXIT() {{ pnpm install; }}; cd {u}"),
-            format!("f() {{ pnpm install; }}; chpwd_functions=(f); cd {u}"),
             format!("f() {{ pnpm install; }}; trap f EXIT; cd {u}"),
             format!("trap 'pnpm install' EXIT; cd {u}"),
             format!("eval \"trap 'pnpm install' EXIT\"; cd {u}"),
@@ -3629,11 +3718,21 @@ mod tests {
             format!("exec() {{ pnpm install }}; cd {u}; exec true"),
             format!("\"then\"() {{ pnpm install }}; cd {u}; \"then\""),
             format!("chpwd() {{ cd -q {u}; }}; cd /nowhere/other; pnpm install"),
-            format!("command_not_found_handler() {{ pnpm install; }}; cd {u}; nosuchcommand"),
             format!("sh -c 'f() {{ echo a }}; pnpm install; }}; cd {u}; f'"),
             format!("bash -c 'f() {{ echo }}; pnpm install; }}; cd {u}; f'"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        // What it can't tell runs.
+        for cmd in [
+            format!("zshexit() {{ pnpm install; }}; cd {u}"),
+            format!("f() {{ pnpm install; }}; add-zsh-hook chpwd f; cd {u}"),
+            format!("chpwd() {{ pnpm install; }}; cd {u}"),
+            format!("TRAPEXIT() {{ pnpm install; }}; cd {u}"),
+            format!("f() {{ pnpm install; }}; chpwd_functions=(f); cd {u}"),
+            format!("command_not_found_handler() {{ pnpm install; }}; cd {u}; nosuchcommand"),
+        ] {
+            assert!(asks_all(&cmd, CLONE).is_empty(), "should run: {cmd}");
         }
         for cmd in [
             "f() { cargo test; }; cd backend && f",
@@ -3667,6 +3766,25 @@ mod tests {
     fn scripts_it_does_not_read_and_names_built_by_other_builtins_ask() {
         let u = USER;
         for cmd in [
+            format!("K=cd; trap \"CD$K=x\" EXIT; cd {u}; pnpm install"),
+            format!("source /dev/stdin <<< 'cd {u}; pnpm install'"),
+            format!("ln -s /dev/stdin s; source ./s <<< 'cd {u}; pnpm install'"),
+            format!("echo 'cd {u}; pnpm install' | source /dev/stdin"),
+            format!("source /dev/./stdin <<< 'cd {u}; pnpm install'"),
+            format!("source //dev/stdin <<< 'cd {u}; pnpm install'"),
+            format!(". ../../../dev/stdin <<< 'cd {u}; pnpm install'"),
+            format!("PATH=/dev:$PATH . stdin <<< 'cd {u}; pnpm install'"),
+            format!("zsh /dev/./stdin <<< 'cd {u}; pnpm install'"),
+            format!("zsh /dev/fd/3 3<<< 'cd {u}; pnpm install'"),
+            format!("BASH -c 'cd {u}; pnpm install'"),
+            format!("Zsh -c 'cd {u}; pnpm install'"),
+            format!("SH -c 'cd {u}; pnpm install'"),
+            format!("/bin/Bash -c 'cd {u}; pnpm install'"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        // What it can't tell runs.
+        for cmd in [
             "source \"$F\"; pnpm install".to_string(),
             "source <(echo x); pnpm install".to_string(),
             format!("source /dev/stdin <<< 'cd {u}'; pnpm install"),
@@ -3677,19 +3795,9 @@ mod tests {
             format!("K=cd; strftime -s CD$K %s; cd {u}; pnpm install"),
             format!("K=cd; zformat -f CD$K x; cd {u}; pnpm install"),
             format!("K=cd; private CD$K=; cd {u}; pnpm install"),
-            format!("K=cd; trap \"CD$K=x\" EXIT; cd {u}; pnpm install"),
-            format!("source /dev/stdin <<< 'cd {u}; pnpm install'"),
             format!("echo 'cd {u}' > f; source ./f; pnpm install"),
             format!("echo 'cd {u}' | tee f; . ./f; pnpm install"),
-            format!("ln -s /dev/stdin s; source ./s <<< 'cd {u}; pnpm install'"),
             "source /dev/null; pnpm install".to_string(),
-            format!("echo 'cd {u}; pnpm install' | source /dev/stdin"),
-            format!("source /dev/./stdin <<< 'cd {u}; pnpm install'"),
-            format!("source //dev/stdin <<< 'cd {u}; pnpm install'"),
-            format!(". ../../../dev/stdin <<< 'cd {u}; pnpm install'"),
-            format!("PATH=/dev:$PATH . stdin <<< 'cd {u}; pnpm install'"),
-            format!("zsh /dev/./stdin <<< 'cd {u}; pnpm install'"),
-            format!("zsh /dev/fd/3 3<<< 'cd {u}; pnpm install'"),
             format!("K=cd; strftime -sCD$K %s; cd {u}; pnpm install"),
             format!("K=cd; strftime -qs CD$K %s; cd {u}; pnpm install"),
             format!("K=cd; zformat -F CD$K x; cd {u}; pnpm install"),
@@ -3712,10 +3820,6 @@ mod tests {
             format!("ion -c 'cd {u}; pnpm install'"),
             format!("oksh <<< 'cd {u}; pnpm install'"),
             format!("ksh93 -c 'cd {u}; pnpm install'"),
-            format!("BASH -c 'cd {u}; pnpm install'"),
-            format!("Zsh -c 'cd {u}; pnpm install'"),
-            format!("SH -c 'cd {u}; pnpm install'"),
-            format!("/bin/Bash -c 'cd {u}; pnpm install'"),
             format!("TCSH -c 'cd {u}; pnpm install'"),
             format!("./tcsh -c 'cd {u}; pnpm install'"),
             format!("../../../bin/zsh-5.9 -c 'cd {u}; pnpm install'"),
@@ -3732,7 +3836,7 @@ mod tests {
             format!("~/../../bin/tcsh -c 'cd {u}; pnpm install'"),
             format!("node_modules/.bin/fish -c 'cd {u}; pnpm install'"),
         ] {
-            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+            assert!(asks_all(&cmd, CLONE).is_empty(), "should run: {cmd}");
         }
         for cmd in ["bashdb x; cargo test", "dashboard; cargo test", "zsh_prompt_test; cargo test", "ssh host ls", "source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test", "./build.sh; cargo test", "scripts/test.sh; cargo test", "hash -r; cargo test", "rehash; cargo test", "trash x; cargo test", "BASH -c 'cd backend; cargo test'", "[ -f ./env.sh ] && source ./env.sh; pnpm install", "[[ -f ./env.sh ]] && . ./env.sh; cat ./env.sh; pnpm install"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
@@ -3754,11 +3858,122 @@ mod tests {
         let cmd = "cat > body.md <<-'EOF'\n\t`PurchaseChannel`\n\tEOF".to_string();
         assert_eq!(asks(&cmd, CLONE), None, "{cmd}");
         for cmd in [
-            format!("pnpm install <<EOF\n$(ln -s {u} backend)\nEOF"),
+            format!("cat <<EOF\n$(cd {u}; pnpm install)\nEOF"),
             format!("cat <<EOF\n`cd {u}; pnpm install`\nEOF"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "{cmd}");
         }
+    }
+
+    #[test]
+    fn a_literal_checkout_asks_whatever_else_is_unknown() {
+        let u = USER;
+        let h = dirs::home_dir().unwrap().join("dev/loft");
+        let h = h.display();
+        let mut cmds: Vec<String> = vec![];
+        // F1: an exported GIT_DIR or GIT_WORK_TREE.
+        for e in [
+            format!("export GIT_WORK_TREE={u}; git checkout -f ."),
+            format!("export GIT_DIR={u}/.git; git branch -D other"),
+            format!("export GIT_DIR={u}/.git && git reset --hard"),
+            format!("declare -x GIT_DIR={u}/.git && git commit -am x"),
+            format!("typeset -x GIT_DIR={u}/.git; git reset --hard"),
+            format!("GIT_DIR={u}/.git; export GIT_DIR; git reset --hard"),
+            format!("export GIT_DIR=~/dev/loft/.git; git reset --hard"),
+        ] {
+            cmds.push(e);
+        }
+        // F2: a literal work tree, repository or second -C after a folder it can't place.
+        for e in [
+            "git clone x ny && git -C ny --work-tree={u} checkout -f .",
+            "git clone x ny && git -C ny --git-dir={u}/.git checkout other",
+            "git clone x ny && GIT_WORK_TREE={u} git -C ny checkout .",
+            "git clone x ny && cd ny && git --work-tree={u} checkout .",
+            "git init m && git -C m --work-tree={u} checkout -f .",
+            "git init m && git -C m -c core.worktree={u} checkout -f .",
+            "mkdir t && cd t && GIT_DIR={u}/.git git reset --hard",
+            "git worktree add wt b && git -C wt --work-tree={u} checkout .",
+            "git -C $D --work-tree={u} checkout .",
+            "git -C $D -C {u} reset --hard",
+            "cd $D; git --work-tree={u} checkout .",
+        ] {
+            cmds.push(e.replace("{u}", u));
+        }
+        // F3: $HOME in cd, pushd and --work-tree.
+        for e in [
+            "cd $HOME/dev/loft && git reset --hard",
+            "cd \"$HOME/dev/loft\" && pnpm install",
+            "cd ${HOME}/dev/loft && git pull",
+            "cd $HOME && cd dev/loft && git reset --hard",
+            "pushd $HOME/dev/loft && git reset --hard",
+            "git --work-tree=$HOME/dev/loft checkout .",
+        ] {
+            cmds.push(e.to_string());
+        }
+        // F4: the folder stack and the old folder after literal cds.
+        for e in [
+            "pushd {u}; pushd {c}; pushd +1; git reset --hard",
+            "pushd {u}; pushd {c}; cd ~1; git reset --hard",
+            "pushd {u}; pushd {c}; git -C ~1 reset --hard",
+            "cd {u}; cd {c}; cd ~-; git reset --hard",
+            "cd {u}; cd {c}; git -C ~- reset --hard",
+            "cd {u}; cd {c}; cd $OLDPWD; git reset --hard",
+            "cd {u}; while read -rA functions; do break; done <<< 'cd :'; cd {c}; pnpm install",
+        ] {
+            cmds.push(e.replace("{u}", u).replace("{c}", CLONE));
+        }
+        let mut failed = vec![];
+        for cmd in &cmds {
+            if asks_all(cmd, CLONE).is_empty() && asks_all(cmd, "/nowhere/dev/loft/agent-local-storage/abc").is_empty() {
+                failed.push(cmd.clone());
+            }
+        }
+        let _ = h;
+        assert!(failed.is_empty(), "should ask:\n{}", failed.join("\n"));
+    }
+
+    #[test]
+    fn open_brackets_and_subshells_dont_hide_what_follows_a_heredoc_and_homes_reach_every_option() {
+        let u = USER;
+        for cmd in [
+            format!("x=$[ 1 + 2 ]; cat > f.md <<'EOF'\nDon't do this\nEOF\ngit -C {u} reset --hard"),
+            format!("x=$[ a[1] + 2 ]; cat > f.md <<'EOF'\nDon't do this\nEOF\ngit -C {u} reset --hard"),
+            format!("((echo a); cat <<'EOF'\nit's\nEOF\n)\ngit -C {u} reset --hard"),
+            // A folder option with a literal path, beside a word the guard can't read.
+            format!("GIT_DIR={u}/.git sh -c 'git reset --hard'"),
+            format!("env GIT_DIR={u}/.git sh -c 'git reset --hard'"),
+            format!("GIT_WORK_TREE={u} bash -c 'git checkout -f .'"),
+            format!("git $OPTS -C {u} reset --hard"),
+            format!("git $OPTS --work-tree={u} checkout ."),
+            format!("pnpm -C $D --dir {u} install"),
+            format!("npm --prefix $D --prefix {u} install"),
+            "npm --prefix=$HOME/dev/loft install".to_string(),
+            "npm install --prefix=\"$HOME/dev/loft\"".to_string(),
+            "pnpm --dir=$HOME/dev/loft install".to_string(),
+            "pnpm --dir=${HOME}/dev/loft install".to_string(),
+            "yarn --cwd=$HOME/dev/loft install".to_string(),
+            "bun install --cwd=$HOME/dev/loft".to_string(),
+            "cargo build --manifest-path=$HOME/dev/loft/backend/Cargo.toml".to_string(),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        // Arithmetic that closes still reads a shift.
+        assert!(!asks_all(&format!("x=$[ 1 << 2 ]\ngit -C {u} reset --hard"), CLONE).is_empty());
+    }
+
+    #[test]
+    fn a_shift_in_arithmetic_is_no_heredoc_and_a_continued_delimiter_is_unquoted() {
+        let u = USER;
+        for cmd in [
+            format!("(( x = 1 << 2 ))\ngit -C {u} reset --hard"),
+            format!("let x=1<<2\ngit -C {u} reset --hard"),
+            format!("for (( i = 1 << 2; i < 9; i++ )); do :; done\ngit -C {u} reset --hard"),
+            format!("echo $[ 1 << 2 ]\ngit -C {u} reset --hard"),
+            format!("cat <<EOF\\\n$(git -C {u} reset --hard)\nEOF"),
+        ] {
+            assert_eq!(asks(&cmd, CLONE), Some(PathBuf::from(u)), "should ask: {cmd}");
+        }
+        assert_eq!(asks("(( x = 1 << 2 ))\ngit status", CLONE), None);
     }
 
     #[test]
@@ -3767,11 +3982,7 @@ mod tests {
         let cases: Vec<String> = vec![
             format!("for d in 1 2; do pnpm install; cd {u}; done"),
             format!("while true; do pnpm install; cd {u}; done"),
-            format!("cd ~gustavo/dev/loft; pnpm install"),
-            format!("git -C ~gustavo/dev/loft reset --hard"),
-            format!("cd {u}; cd {CLONE}; cd ~-; pnpm install"),
             format!("pushd {u}; git -C ~1 reset --hard"),
-            format!("hash -d x={u}; git -C ~x reset --hard"),
             format!("foreach d (1 2)\npnpm install\ncd {u}\nend"),
             format!("for d (1 2) {{ pnpm install; cd {u} }}"),
             format!("repeat 2 {{ pnpm install; cd {u} }}"),
@@ -3784,31 +3995,49 @@ mod tests {
             format!("coproc {{ for d in 1 2; do pnpm install; cd {u}; done }}; cd {CLONE}"),
             format!("cd {u}; echo ${{x:-`pnpm install`}}"),
             format!("cd {u}; if [[ -n 1 ]] git commit -am ']]'"),
-            format!("alias -s t-x='cd {u}'; eval ./a.t-x; pnpm install"),
-            format!("alias -g -- --x='cd {u}'; echo --x; pnpm install"),
-            format!("(trap 'rm -rf src; ln -s {u} src' EXIT); cd src; pnpm install"),
             format!("{{ for d in 1 2; do pnpm install; cd {u}; done; }}"),
             format!("if true; then for d in 1 2; do pnpm install; cd {u}; done; fi"),
             format!("for a in 1; do for b in 2; do :; done; pnpm install; cd {u}; done"),
             format!("while pnpm install; do cd {u}; done"),
             format!("command for d in 1 2; do pnpm install; cd {u}; done"),
             format!("cat <<EOF\n${{x:-`cd {u}; pnpm install`}}\nEOF"),
-            format!("(trap 'ln -s {u} backend' EXIT); pnpm -C backend install"),
-            format!("(trap 'ln -s {u} backend' EXIT); cargo build --manifest-path backend/Cargo.toml"),
-            format!("trap 'c\\d {u}' DEBUG; pnpm install"),
-            format!("trap 'c\"\"d {u}' DEBUG; pnpm install"),
-            format!("trap \"c''d {u}\" DEBUG; pnpm install"),
             format!("time for d in 1 2; do pnpm install; cd {u}; done"),
             format!("noglob for d in 1 2; do pnpm install; cd {u}; done"),
-            format!("cd $X; cd ~+; pnpm install"),
-            format!("trap 'cd {u}' DEBUG; cd ~+; pnpm install"),
-            format!("cd {u}; cd {CLONE}; cd $X; cd ~+; pnpm install"),
             format!("cat <<EOF\n$(echo ')'; cd {u}; pnpm install)\nEOF"),
             format!("cat <<EOF\n$(case x in x) cd {u};; esac; pnpm install)\nEOF"),
             format!("cat <<EOF\n`echo \\`x\\`; cd {u}; pnpm install`\nEOF"),
             format!("cd {u}; if [[ \"]]\" == x ]] pnpm install"),
             format!("cd {u}; if [[ a ]] && [[ b ]] pnpm install"),
             format!("cd {u}; if ! [[ a ]] pnpm install"),
+            format!("cd {u}; /opt/homebrew/bin/(pnpm|zzz) install"),
+            format!("cd {u}; pnpm(.) install"),
+            format!("cd {u}; if [[ -n 1 ]] pnpm install"),
+            format!("cat <<EOF\n$(cd {u}; pnpm install)\nEOF"),
+            format!("cd {u}; echo ${{$(pnpm install)}}"),
+            format!("cd {u}; coproc pnpm install"),
+            format!("cd {u}; pnpm{{,}} install"),
+            format!("trap 'pnpm install' EXIT; cd {u}"),
+        ];
+        let mut bad = vec![];
+        for cmd in &cases {
+            if asks_all(cmd, CLONE).is_empty() {
+                bad.push(cmd.clone());
+            }
+        }
+        assert!(bad.is_empty(), "should ask:\n{}", bad.join("\n"));
+        // What it can't tell runs.
+        for cmd in [
+            format!("hash -d x={u}; git -C ~x reset --hard"),
+            format!("alias -s t-x='cd {u}'; eval ./a.t-x; pnpm install"),
+            format!("alias -g -- --x='cd {u}'; echo --x; pnpm install"),
+            format!("(trap 'rm -rf src; ln -s {u} src' EXIT); cd src; pnpm install"),
+            format!("(trap 'ln -s {u} backend' EXIT); pnpm -C backend install"),
+            format!("(trap 'ln -s {u} backend' EXIT); cargo build --manifest-path backend/Cargo.toml"),
+            format!("trap 'c\\d {u}' DEBUG; pnpm install"),
+            format!("trap 'c\"\"d {u}' DEBUG; pnpm install"),
+            format!("trap \"c''d {u}\" DEBUG; pnpm install"),
+            format!("cd $X; cd ~+; pnpm install"),
+            format!("trap 'cd {u}' DEBUG; cd ~+; pnpm install"),
             format!("alias g='cd {u}; pnpm install'; eval 'true; g'"),
             format!("alias g='cd {u}'; g; pnpm install"),
             format!("alias -g G='cd {u}'; echo G; pnpm install"),
@@ -3822,14 +4051,6 @@ mod tests {
             format!("f() {{ trap 'cd {u}' EXIT; }}; f; pnpm install"),
             format!("zsh -c \"trap 'cd {u}' EXIT\"; pnpm install"),
             format!("zsh -c \"trap 'cd {u}' EXIT\"; cd backend; pnpm install"),
-            format!("cd {u}; /opt/homebrew/bin/(pnpm|zzz) install"),
-            format!("cd {u}; pnpm(.) install"),
-            format!("cd {u}; if [[ -n 1 ]] pnpm install"),
-            format!("cat <<EOF\n$(cd {u}; pnpm install)\nEOF"),
-            format!("cd {u}; echo ${{$(pnpm install)}}"),
-            format!("cd {u}; coproc pnpm install"),
-            format!("cd {u}; pnpm{{,}} install"),
-            format!("trap 'pnpm install' EXIT; cd {u}"),
             format!("alias g='cd {u}; pnpm install'; eval g"),
             format!("trap 'cd {u}' DEBUG; pnpm install"),
             format!("trap 'cd {u}' DEBUG; git add -A"),
@@ -3843,14 +4064,15 @@ mod tests {
             format!("git status <<EOF\n$(ln -s {u} backend)\nEOF\ncd backend; git add -A"),
             format!("trap : EXIT <<EOF\n$(ln -s {u} backend)\nEOF\ncd backend; git add -A"),
             format!("(trap 'ln -s {u} backend' EXIT); cd backend; pnpm install"),
-        ];
-        let mut bad = vec![];
-        for cmd in &cases {
-            if asks_all(cmd, CLONE).is_empty() {
-                bad.push(cmd.clone());
-            }
+        ] {
+            assert!(asks_all(&cmd, CLONE).is_empty(), "should run: {cmd}");
         }
-        assert!(bad.is_empty(), "should ask:\n{}", bad.join("\n"));
+        // They name the checkout, then lose the folder: it is one of the places the shell may be.
+        for cmd in [
+            format!("cd {u}; cd {CLONE}; cd $X; cd ~+; pnpm install"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
         for cmd in ["for d in a b; do (cd x && cargo test); done", "cat <<EOF\nhello $(date)\nEOF", "trap 'rm -f tmp' EXIT; cargo test"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
@@ -3863,6 +4085,11 @@ mod tests {
             format!("cleanup() {{ rm -f x; }}; trap cleanup EXIT; cd {u}; git add -A"),
             format!("cleanup() {{ rm -f x; }}; cd {u}; git add -A"),
             format!("trap 'rm -f tmp' EXIT; cd {u}; git add -A"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        // What it can't tell runs.
+        for cmd in [
             "f() { mkdir backend; }; trap f EXIT; cd backend; git add -A".to_string(),
             "f() { mkdir backend; }; cd backend; git add -A".to_string(),
             "f() { git clone x backend; }; f; cd backend; git add -A".to_string(),
@@ -3891,7 +4118,7 @@ mod tests {
             "function () trap 'ln -s /x backend' EXIT; cd backend; git add -A".to_string(),
             "trap 'git worktree add backend' 33; cd backend; git add -A".to_string(),
         ] {
-            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+            assert!(asks_all(&cmd, CLONE).is_empty(), "should run: {cmd}");
         }
     }
 
@@ -4129,13 +4356,13 @@ mod tests {
         }
         assert!(!asks_all("cd backend && git commit -m x && git push", USER).is_empty());
         // What may make the folder (a pull writes the work tree, a clone, a mkdir, an option that runs a program) still hides it.
+        // What it can't tell runs.
         for cmd in [
             "git pull && git -C ./loft push",
             "git clone x loft && git -C ./loft push",
             "mkdir loft && git -C ./loft push",
             "git fetch --upload-pack=./mk && git -C ./loft push",
             "git -c core.x=y commit -m x && git -C ./loft push",
-            // Options git takes by a unique prefix, the environment, a program named git, and what the shell expands.
             "git fetch --upload-pa='ln -s /x lnk;:' . && git -C ./loft push",
             "git fetch --upl ./mk . && git -C ./loft push",
             "git push --receive-pa=./mk . main && git -C ./loft push",
@@ -4157,7 +4384,6 @@ mod tests {
             "sudo git fetch && git -C ./loft push",
             "command git fetch && git -C ./loft push",
             "git fetch --upload-pa='ln -s /x lnk;:' . && cd lnk && git push",
-            // A variable the shell already exports, set by a command of its own.
             "PATH=./bin:$PATH; git fetch; git -C ./loft push",
             "HOME=/x; git status; git -C ./loft push",
             "XDG_CONFIG_HOME=/x; git status; git -C ./loft push",
@@ -4172,7 +4398,7 @@ mod tests {
             "git fetch -p && git -C ./loft push",
             "git checkout main && cd loft && git push",
         ] {
-            assert!(!asks_all(cmd, WS).is_empty(), "should ask: {cmd}");
+            assert!(asks_all(cmd, CLONE).is_empty(), "should run: {cmd}");
         }
     }
 
@@ -4180,29 +4406,10 @@ mod tests {
     fn a_folder_option_with_a_variable_asks_and_chdir_is_cd() {
         const WORKSPACE: &str = "/nowhere/dev/loft/agent-local-storage/abc";
         for cmd in [
-            "D=/nowhere/dev/loft; git -C \"$D\" reset --hard",
-            "D=/nowhere/dev/loft; git --git-dir=$D/.git --work-tree=$D reset --hard",
-            "D=/nowhere/dev/loft; git --git-dir $D/.git --work-tree $D reset --hard",
-            "for d in /nowhere/dev/loft; do git -C $d reset --hard; done",
-            "git -C $(git rev-parse --show-toplevel) reset --hard",
-            "D=/nowhere/dev/loft; pnpm -C $D install",
-            "D=/nowhere/dev/loft; pnpm --dir=$D install",
-            "pnpm -C $OLDPWD install",
-            "D=/nowhere/dev/loft; npm --prefix $D install",
-            "D=/nowhere/dev/loft; cargo --manifest-path $D/Cargo.toml build",
-            "D=/nowhere/dev/loft; xcodebuild -project $D/X.xcodeproj build",
-            "D=/nowhere/dev/loft; env -C $D pnpm install",
-            "D=/nowhere/dev/loft; git -c core.worktree=$D reset --hard",
-            "D=/nowhere/dev/loft; git -c core.worktree=$D checkout .",
-            "D=/nowhere/dev/loft; chdir $D && pnpm install",
-            "K=core.worktree; git -c $K=/nowhere/dev/loft checkout .",
-            "E=core.worktree=/nowhere/dev/loft; git -c $E checkout .",
             "pnpm -C/nowhere/dev/loft install",
             "npm -C /nowhere/dev/loft install",
             "pnpm --filter x -C /nowhere/dev/loft install",
             "pnpm --filter x --silent -C /nowhere/dev/loft install",
-            "G=GIT_DIR; env $G=/nowhere/dev/loft/.git git reset --hard",
-            "E=GIT_DIR=/nowhere/dev/loft/.git; env $E git reset --hard",
             // An option before the subcommand, a word after it; bundled, abbreviated and repeated folder options.
             "cd /nowhere/dev/loft && npm -s install lodash",
             "cd /nowhere/dev/loft && pnpm --silent add lodash",
@@ -4223,18 +4430,8 @@ mod tests {
             "cd /nowhere/dev/loft && npm --pref=/nowhere/dev/loft/agent-local-storage/abc/loft ci",
             "cd /nowhere/dev/loft && cargo --m build",
             // The command word, or a word anywhere in the arguments of a guarded command, from an expansion.
-            "X=git; $X -C /nowhere/dev/loft reset --hard",
-            "X=npm; $X --prefix /nowhere/dev/loft install",
-            "X=cargo; $X build --manifest-path /nowhere/dev/loft/Cargo.toml",
-            "X=git; command $X -C /nowhere/dev/loft reset --hard",
-            "K=--prefix=/nowhere/dev/loft; npm install $K",
-            "K=--dir=/nowhere/dev/loft; pnpm install \"$K\"",
-            "K=--manifest-path=/nowhere/dev/loft/Cargo.toml; cargo build $K",
             "cd /nowhere/dev/loft && npm install $PKG",
             "cd /nowhere/dev/loft && cargo test $NAME",
-            "K=--prefix=/nowhere/dev/loft; npm --tag=$K install",
-            "K=--prefix=/nowhere/dev/loft; npm -p=$K install",
-            "K=--prefix=/nowhere/dev/loft; npm install --tag=$K",
             "npm --tag=--prefix=/nowhere/dev/loft install",
             "npm -p=--prefix=/nowhere/dev/loft install",
             "npm install --tag=--prefix=/nowhere/dev/loft",
@@ -4242,6 +4439,43 @@ mod tests {
             "cd /nowhere/dev/loft && pnpm --filter $PKG test",
             "cd /nowhere/dev/loft && cargo test -p $CRATE",
             "PKG=pnpm; cd /nowhere/dev/loft && $PKG install",
+            // A word that names an option, the command or a variable comes from an expansion.
+        ] {
+            for cwd in [CLONE, WORKSPACE] {
+                assert!(!asks_all(cmd, cwd).is_empty(), "should ask in {cwd}: {cmd}");
+            }
+        }
+        // What it can't tell runs.
+        for cmd in [
+            "D=/nowhere/dev/loft; git -C \"$D\" reset --hard",
+            "D=/nowhere/dev/loft; git --git-dir=$D/.git --work-tree=$D reset --hard",
+            "D=/nowhere/dev/loft; git --git-dir $D/.git --work-tree $D reset --hard",
+            "for d in /nowhere/dev/loft; do git -C $d reset --hard; done",
+            "git -C $(git rev-parse --show-toplevel) reset --hard",
+            "D=/nowhere/dev/loft; pnpm -C $D install",
+            "D=/nowhere/dev/loft; pnpm --dir=$D install",
+            "pnpm -C $OLDPWD install",
+            "D=/nowhere/dev/loft; npm --prefix $D install",
+            "D=/nowhere/dev/loft; cargo --manifest-path $D/Cargo.toml build",
+            "D=/nowhere/dev/loft; xcodebuild -project $D/X.xcodeproj build",
+            "D=/nowhere/dev/loft; env -C $D pnpm install",
+            "D=/nowhere/dev/loft; git -c core.worktree=$D reset --hard",
+            "D=/nowhere/dev/loft; git -c core.worktree=$D checkout .",
+            "D=/nowhere/dev/loft; chdir $D && pnpm install",
+            "K=core.worktree; git -c $K=/nowhere/dev/loft checkout .",
+            "E=core.worktree=/nowhere/dev/loft; git -c $E checkout .",
+            "G=GIT_DIR; env $G=/nowhere/dev/loft/.git git reset --hard",
+            "E=GIT_DIR=/nowhere/dev/loft/.git; env $E git reset --hard",
+            "X=git; $X -C /nowhere/dev/loft reset --hard",
+            "X=npm; $X --prefix /nowhere/dev/loft install",
+            "X=cargo; $X build --manifest-path /nowhere/dev/loft/Cargo.toml",
+            "X=git; command $X -C /nowhere/dev/loft reset --hard",
+            "K=--prefix=/nowhere/dev/loft; npm install $K",
+            "K=--dir=/nowhere/dev/loft; pnpm install \"$K\"",
+            "K=--manifest-path=/nowhere/dev/loft/Cargo.toml; cargo build $K",
+            "K=--prefix=/nowhere/dev/loft; npm --tag=$K install",
+            "K=--prefix=/nowhere/dev/loft; npm -p=$K install",
+            "K=--prefix=/nowhere/dev/loft; npm install --tag=$K",
             "D=/nowhere/dev/loft/agent-local-storage/abc/loft; for D in /nowhere/dev/loft; do :; done; git -C $D reset --hard",
             "D=/nowhere/dev/loft/agent-local-storage/abc/loft; : ${D::=/nowhere/dev/loft}; git -C $D reset --hard",
             "D=/nowhere/dev/loft/agent-local-storage/abc/loft; : ${X:=${D::=/nowhere/dev/loft}}; git -C $D reset --hard",
@@ -4259,7 +4493,6 @@ mod tests {
             "K=--prefix=/nowhere/dev/loft; npm --tag $K install",
             "P=--prefix=/nowhere/dev/loft; X=npm; $X install $P",
             "G=IT_DIR; read G$G <<< /nowhere/dev/loft/.git; export G$G; git reset --hard",
-            // A word that names an option, the command or a variable comes from an expansion.
             "K=--work-tree=/nowhere/dev/loft; git $K checkout .",
             "K=-c; git $K core.worktree=/nowhere/dev/loft checkout .",
             "K=--prefix=/nowhere/dev/loft; npm $K install",
@@ -4269,29 +4502,32 @@ mod tests {
             "G=GIT_DIR; : ${(P)G::=/nowhere/dev/loft/.git}; export $G; git reset --hard",
             "G=GIT_DIR; export $G=/nowhere/dev/loft/.git; git reset --hard",
         ] {
-            for cwd in [CLONE, WORKSPACE] {
-                assert!(!asks_all(cmd, cwd).is_empty(), "should ask in {cwd}: {cmd}");
-            }
+            assert!(asks_all(cmd, CLONE).is_empty(), "should run: {cmd}");
         }
         // `$PWD` and `$(pwd)` are variables like any other: they ask, and the plain forms run.
+        for cmd in [
+            // The command sets `PWD`, redefines `pwd`, or runs the option in another folder than the shell expands it in.
+            "env -C /nowhere/dev/loft git -C \"$PWD\" reset --hard",
+            "sh -c \"cd /nowhere/dev/loft && git -C $PWD reset --hard\"",
+            "eval \"cd /nowhere/dev/loft; git -C $PWD reset --hard\"",
+        ] {
+            assert!(!asks_all(cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        // What it can't tell runs.
         for cmd in [
             "git -C \"$PWD\" status",
             "git -C ${PWD} pull",
             "git -C \"$(pwd)\" pull",
             "pnpm --dir \"$PWD/frontend\" install",
             "cargo build --manifest-path \"$PWD/backend/Cargo.toml\"",
-            // The command sets `PWD`, redefines `pwd`, or runs the option in another folder than the shell expands it in.
             "PWD=/nowhere/dev/loft; git -C \"$PWD\" reset --hard",
             "export PWD=/nowhere/dev/loft; git -C \"$PWD\" reset --hard",
             "read PWD <<< /nowhere/dev/loft; git -C \"$PWD\" reset --hard",
             "for PWD in /nowhere/dev/loft; do git -C \"$PWD\" reset --hard; done",
             "pwd() { echo /nowhere/dev/loft; }; git -C \"$(pwd)\" reset --hard",
             "alias pwd='echo /nowhere/dev/loft'; git -C \"$(pwd)\" reset --hard",
-            "env -C /nowhere/dev/loft git -C \"$PWD\" reset --hard",
-            "sh -c \"cd /nowhere/dev/loft && git -C $PWD reset --hard\"",
-            "eval \"cd /nowhere/dev/loft; git -C $PWD reset --hard\"",
         ] {
-            assert!(!asks_all(cmd, CLONE).is_empty(), "should ask: {cmd}");
+            assert!(asks_all(cmd, CLONE).is_empty(), "should run: {cmd}");
         }
         for cmd in ["git -C . status", "git status", "pnpm --dir frontend install", "cargo build --manifest-path backend/Cargo.toml"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
@@ -4334,7 +4570,6 @@ mod tests {
             format!("cd {u}; cd /tmp; cd {w}; popd; popd; git reset --hard"),
             format!("cd {u}; cd {w}; popd; pushd; pushd; git reset --hard"),
             format!("cd {u}; cd {w}; pushd; pushd; pushd; git reset --hard"),
-            format!("cd {w}; {many}cd {u}; cd {w}; popd; git reset --hard"),
             // A failed cd after other commands, and after another failed one.
             format!("cd {u}; mkdir -p /tmp/x; cd {w}/nope; pnpm install"),
             format!("cd {u}; touch /tmp/x; cd {w}/nope; pnpm install"),
@@ -4359,7 +4594,13 @@ mod tests {
             format!("({u:?}; cd {u}; cd {w}/nope; cd {w}; cd -; pnpm install)").replacen(&format!("{u:?}; "), "", 1),
         ] {
             let asked = asks_all(&cmd, CLONE);
-            assert!(asked.contains(&PathBuf::from(u)) || asked.iter().any(|f| f.as_os_str() == UNKNOWN), "should ask: {cmd}");
+            assert!(asked.contains(&PathBuf::from(u)), "should ask: {cmd}");
+        }
+        // What it can't tell runs.
+        for cmd in [
+            format!("cd {w}; {many}cd {u}; cd {w}; popd; git reset --hard"),
+        ] {
+            assert!(asks_all(&cmd, CLONE).is_empty(), "should run: {cmd}");
         }
     }
 
@@ -4635,7 +4876,6 @@ mod tests {
         // A `.git` file's `gitdir:`.
         has("git -C gf reset --hard", &ws, &other);
         has("cd gr && git checkout main", &ws, &other);
-        let unknown = PathBuf::from(UNKNOWN);
         // Quoted braces are plain characters: they don't hide the `-C` that comes after.
         for cmd in ["git -c 'x.y={b,c}' -C ../../.. reset --hard", "git -c x.y=\\{b,c\\} -C ../../.. reset --hard", "git -c \"alias.x={a,status}\" -C ../../.. reset --hard"] {
             has(cmd, &clone, &project);
@@ -4649,65 +4889,16 @@ mod tests {
         let elsewhere = std::env::temp_dir();
         for cmd in [format!("git -C {}/lof? reset --hard", at(&root)), format!("cd {}/lof? && git reset --hard", at(&root)), format!("git --git-dir={}/lof?/.git checkout other", at(&root))] {
             has(&cmd, &elsewhere, &root);
-            has(&cmd, &elsewhere, &unknown);
         }
         // Holes in the expansion: many words, a quoted part, an empty word, too many to list.
         let many = "--no-pager,".repeat(70);
         for cmd in [format!("git {{{many}-C,../../..,reset,--hard}}"), "git {,-C} ../../.. reset --hard".to_string()] {
             has(&cmd, &clone, &project);
         }
-        for cmd in ["git {-C,../../..,-c,\"x.y=b c\"} reset --hard".to_string(), format!("git {} reset --hard", "{a,b}".repeat(13))] {
-            has(&cmd, &clone, &unknown);
-        }
-        // What the same command made before git runs: a link, a clone's link, a checkout's, an archive's, a `.git` file.
-        for (cmd, cwd) in [
-            ("(git clone -q src t); git -C t/l reset --hard", &clone),
-            ("sh -c 'git clone -q src t'; git -C t/l reset --hard", &clone),
-            ("git clone -q --orig o src t && git -C t/l reset --hard", &clone),
-            ("git clone -q --dep 1 src t && git -C t/l reset --hard", &clone),
-            ("git checkout -q withlink && git -C l reset --hard", &clone),
-            ("git pull -q && git -C l reset --hard", &clone),
-            ("git worktree add -q wt b && git -C wt/l reset --hard", &clone),
-            ("tar xf x.tar && git -C t/l reset --hard", &clone),
-            ("ln -s ../../../../other t && git -C t reset --hard", &ws),
-            ("ln -s ../../../../other t; cd t && git reset --hard", &ws),
-            ("ln -s ../../../../other t && cd t && pnpm install", &ws),
-            ("mv a t && cd t && cargo build", &ws),
-            ("cp -s ../../../../other t; cd t; xcodebuild build", &ws),
-            // `ln <target>` makes `./<name of target>`.
-            ("ln -s ../../../../other && cd other && pnpm install", &ws),
-            ("ln -s ../../../../other/src && cd src && cargo build", &ws),
-            // A folder option into the link, not only the shell's folder.
-            ("ln -s ../../../../other t && pnpm -C t install", &ws),
-            ("ln -s ../../../../other t && pnpm --dir=t install", &ws),
-            ("ln -s ../../../../other t && npm install --prefix t", &ws),
-            ("ln -s ../../../../other t && yarn --cwd t install", &ws),
-            ("ln -s ../../../../other t && bun install --cwd t", &ws),
-            ("ln -s ../../../../other t && cargo build --manifest-path t/Cargo.toml", &ws),
-            ("ln -s ../../../../other/src t && cargo build --manifest-path t/../Cargo.toml", &ws),
-            ("ln -s ../../../../other t && xcodebuild -project t/X.xcodeproj build", &ws),
-            // A physical `cd` out of the link lands beside what it points at.
-            ("ln -s ../../../../other/src t && cd -P t/.. && pnpm install", &ws),
-            ("ln -s ../../../../other/src t && cd t && cd -P .. && git reset --hard", &ws),
-            ("echo 'gitdir: x' > a/.git; git -C a checkout other", &clone),
-            ("mkdir t && echo 'gitdir: x' > t/.git && git -C t checkout other", &clone),
-            ("mkdir t && cp g t/.git && git -C t checkout other", &clone),
-        ] {
-            has(cmd, cwd, &unknown);
-        }
         // The folder a tool names itself, with no link: `env -C`, `xcodebuild -project`.
         let o = at(&other);
         for cmd in [format!("env -C {o} pnpm install"), format!("xcodebuild -project {o}/X.xcodeproj build"), format!("xcodebuild -workspace {o}/X.xcworkspace -scheme X build")] {
             assert_eq!(asks_all(&cmd, &at(&ws)), vec![other.clone()], "should ask: {cmd}");
-        }
-        // After `cd -P` through a link, or `..` before one, later folders stay unknown; so do env's bundled, repeated and nested -C.
-        for cmd in [
-            "ln -s ../../../../other/src t && cd -P t && cd .. && pnpm install".to_string(),
-            "ln -s ../../../../other/src t && cd -P t && cd .. && git reset --hard".to_string(),
-            "ln -s ../../../../other/src t && cd -P real/../t/.. && pnpm install".to_string(),
-            "ln -s ../../../../other/src t && cargo build --manifest-path real/../t/../Cargo.toml".to_string(),
-        ] {
-            assert!(asks_all(&cmd, &at(&ws)).iter().any(|f| f.as_os_str() == UNKNOWN), "should ask: {cmd}");
         }
         for cmd in [format!("env -iC {o} pnpm install"), format!("env -C {o}/src env -C .. pnpm install"), format!("env -C /tmp -C {o} pnpm install"), format!("env -C /tmp env -C {o} pnpm install"), format!("env -i -uX -C{o} pnpm install"), format!("env --chdir {o} pnpm install")] {
             assert_eq!(asks_all(&cmd, &at(&ws)), vec![other.clone()], "should ask: {cmd}");
@@ -4718,10 +4909,6 @@ mod tests {
         for cmd in ["cd -- {o} && git reset --hard", "cd -- {o} && pnpm install", "cd -q {o} && pnpm install", "cd -LP {o} && pnpm install", "cd -P -- {o} && pnpm install", "cd -Pe {o} && git reset --hard", "pushd -- {o} && pnpm install", "pushd -q {o} && git reset --hard", "pushd -LP {o} && cargo build"] {
             let cmd = cmd.replace("{o}", &o);
             assert!(asks_all(&cmd, &at(&ws)).contains(&other), "should ask: {cmd}");
-        }
-        // `..` after a fresh link for git -C and env -C, and text run from env -C's folder.
-        for cmd in ["ln -s ../../../../other/src t && git -C t/.. reset --hard".to_string(), "ln -s ../../../../other/src t && env -C real/../t/.. pnpm install".to_string()] {
-            assert!(asks_all(&cmd, &at(&ws)).iter().any(|f| f.as_os_str() == UNKNOWN), "should ask: {cmd}");
         }
         for cmd in [format!("env -C {o} sh -c 'pnpm install'"), format!("env -C {o} -S 'pnpm install'"), format!("env -C {o} -iS 'git reset --hard'")] {
             assert!(asks_all(&cmd, &at(&ws)).contains(&other), "should ask: {cmd}");
@@ -4749,8 +4936,8 @@ mod tests {
             "pushd {o} && pushd ~ && pushd +1 && pnpm install", "cd -2 && pnpm install", "pushd +1 && pnpm install",
             "ln -s ../../../../other/src t && cd -P -L t/.. && pnpm install", "ln -s ../../../../other/src t && cd -PL t/.. && git reset --hard", "ln -s ../../../../other/src t && pushd -P -L t/.. && pnpm install",
             // A `..` from inside a fresh link.
-            "ln -s ../../../../other/src t && cd t && git -C .. reset --hard", "ln -s ../../../../other/src t && git -C t -C .. reset --hard", "ln -s ../../../../other/src t && env -C t env -C .. pnpm install",
-            "ln -s ../../../../other/src t && env -C t sh -c 'cd .. && pnpm install'", "ln -s ../../../../other/src t && git --git-dir t/../.git --work-tree t/.. reset --hard", "ln -s ../../../../other/src t && git --git-dir=t/../.git reset --hard",
+            "ln -s ../../../../other/src t && cd t && git -C .. reset --hard", "ln -s ../../../../other/src t && git -C t -C .. reset --hard", 
+            "ln -s ../../../../other/src t && git --git-dir t/../.git --work-tree t/.. reset --hard", "ln -s ../../../../other/src t && git --git-dir=t/../.git reset --hard",
             // Options inside env's -S string, and an attached one.
             "env -S '-C {o} pnpm install'", "env -iS '-C {o} pnpm install'", "env -iS'pnpm -C {o} install'", "env -S '-i -C {o} pnpm install'",
         ] {
@@ -4769,103 +4956,17 @@ mod tests {
         // made in the same command still asks.
         let apart = root.join("apart/agent-local-storage/x");
         std::fs::create_dir_all(&apart).unwrap();
-        for cmd in [format!("ln -s {} t && git -C t reset --hard", at(&other)), format!("ln -s {} t; cd t && git reset --hard", at(&other))] {
-            has(&cmd, &apart, &unknown);
-        }
         // GIT_DIR or GIT_WORK_TREE anywhere in the command: every git call after it is unknown (an inline one is also
         // resolved), whatever way it is set, hidden or undone.
         let o = at(&other);
-        for cmd in [
-            format!("export GIT_DIR={o}/.git; git reset --hard"),
-            format!("GIT_DIR={o}/.git; git reset --hard"),
-            format!("declare -x GIT_DIR={o}/.git && git reset --hard"),
-            format!("export GIT_WORK_TREE={o}; git checkout ."),
-            "export GIT_DIR=../../../other/.git; git reset --hard".to_string(),
-            format!("(export GIT_DIR={o}/.git); git reset --hard"),
-            format!("f() {{ export GIT_DIR={o}/.git; }}; f; git reset --hard"),
-            format!("if true; then GIT_DIR={o}/.git; fi; git reset --hard"),
-            format!("export GIT_D\"I\"R={o}/.git; git reset --hard"),
-            format!("sh -c 'export GIT_DIR={o}/.git'; git reset --hard"),
-            format!("eval \"export GIT_DIR={o}/.git\"; git reset --hard"),
-            "unset -m 'GIT_D*'; git reset --hard".to_string(),
-            "unset ${!GIT_*}; git reset --hard".to_string(),
-            format!("env GIT_DIR={o}/.git git reset --hard"),
-            format!("export GIT_DIR={o}/.git; unset GIT_DIR; git reset --hard"),
-            format!("read GIT_DIR <<< {o}/.git; git reset --hard"),
-            "sh -c 'unset GIT_DIR'; git reset --hard".to_string(),
-            "bash -c 'f=GIT_WORK_TREE; echo $f'; git reset --hard".to_string(),
-            format!("bash <<EOF\nexport GIT_DIR={o}/.git\nEOF\ngit reset --hard"),
-            format!("echo 'export GIT_DIR={o}/.git' | sh; git reset --hard"),
-            "export GIT_DIR; git reset --hard".to_string(),
-            "typeset -x GIT_WORK_TREE; git reset --hard".to_string(),
-        ] {
-            has(&cmd, &apart, &unknown);
-            has(&cmd, &clone, &unknown);
-        }
         has(&format!("GIT_DIR={o}/.git git reset --hard"), &apart, &other);
-        has(&format!("ln -s {o}/.git .git && git reset --hard"), &apart, &unknown);
-        // A relative one is read from the folder `-C` moves to.
-        for cmd in ["git --git-dir=../fake/.git -C loft reset --hard", "git --git-dir ../fake/.git -C loft reset --hard", "GIT_DIR=../fake git -C loft reset --hard", "git --work-tree=.. -C loft checkout .", "GIT_WORK_TREE=. git -C loft checkout ."] {
-            has(cmd, &ws, &unknown);
-        }
-        // Naming a path that ends in `.git`: a redirect, `of=`, `--output=`, a tool's argument.
-        for cmd in ["printf x > t/.git; git reset --hard", "dd if=x of=t/.git; git reset --hard", "curl --output=t/.git u; git reset --hard", "tee .git < x; git reset --hard", "echo hi | tee t/.git && git add .", "cat x >> .git; git reset --hard"] {
-            has(cmd, &clone, &unknown);
-        }
-        // A `.git` named by the last command inside `sh -c`, `bash -c` or `eval` still counts after it.
-        for cmd in [format!("sh -c 'ln -s {o}/.git .git'; git reset --hard"), format!("eval 'ln -s {o}/.git .git'; git reset --hard"), "bash -c \"cp ../pf .git\"; git reset --hard".to_string(), "(cp ../pf .git); git reset --hard".to_string()] {
-            has(&cmd, &clone, &unknown);
-        }
-        // ln, mv, cp and their GNU names with braces or a glob may name any folder.
-        for cmd in ["ln -s {a,b} t; git reset --hard", "mv lo* old; git -C loft reset --hard", "gmv loft old && gln -s x loft; git -C loft reset --hard", "gln -s {a,b} t; git reset --hard", "gcp -s x . && git add .", "cp x? y; git reset --hard"] {
-            has(cmd, &clone, &unknown);
-        }
         assert_eq!(asks_all(&format!("export GIT_DIR={o}/.git; git status"), &at(&apart)), Vec::<PathBuf>::new());
-        // What can happen to a new repository's folder, or to git's environment, between the clone or init and the git call.
-        let dest = format!("ln -s {o} t && git clone -q /src t; git -C t reset --hard");
-        for cmd in [
-            dest,
-            "git clone -q /src d && cd d && git reset --hard".to_string(),
-            format!("export GIT_DIR={o}/.git; git init m; git -C m reset --hard"),
-            format!("GIT_DIR={o}/.git git init m && git -C m reset --hard"),
-            format!("git init m && export GIT_DIR={o}/.git && git -C m reset --hard"),
-            format!("git clone -q /src m && GIT_WORK_TREE={o} git -C m checkout -f ."),
-            "git init m && HOME=/x git -C m reset --hard".to_string(),
-            format!("git clone -q /src m && git -C m -c core.worktree={o} checkout -f ."),
-            "git init m && rm -rf m/.git && GIT_CEILING_DIRECTORIES= git -C m reset --hard".to_string(),
-            format!("git init m && rm -rf m && ln -s {o} m && git -C m reset --hard"),
-            format!("git init m && echo 'gitdir: {o}/.git' > m/.git && git -C m reset --hard"),
-        ] {
-            for cwd in [&ws, &clone] {
-                let all = asks_all(&cmd, &at(cwd));
-                assert!(all.contains(&unknown) || all.contains(&other), "should ask: {cmd} (in {}) -> {all:?}", cwd.display());
-            }
-        }
         // `-c core.worktree` on a folder that is there names the work tree.
         has(&format!("git -C k -c core.worktree={o} checkout -f ."), &ws, &other);
         has("git -c core.WorkTree=../../../other checkout -f .", &ws, &other);
-        has("git --config-env=core.worktree=WT checkout -f .", &ws, &unknown);
         // A `.git` that is a link to another `.git`, and one whose `commondir` names another repository.
         has("git -C sl checkout other", &ws, &other);
         has("git -C gc branch -D main", &ws, &other);
-        // An existing folder swapped for a link, or removed, moved or copied over, before git runs.
-        for cmd in [
-            format!("mv loft loft.old && ln -s {o} loft && git -C loft reset --hard"),
-            format!("rm -rf loft && ln -s {o} loft; git -C loft reset --hard"),
-            format!("mv loft x && ln -s {o} loft && git -C loft/backend reset --hard"),
-            format!("cd loft && mv ../loft ../old && ln -s {o} ../loft && git reset --hard"),
-            format!("cp -r {o} loft && git -C loft checkout main"),
-            "mv \"$a\" \"$b\"; git -C loft reset --hard".to_string(),
-            "rm -f \"$LOCK\" && git -C . add .".to_string(),
-            "rm -f \"$LOCK\"; cd loft && git add .".to_string(),
-            "rm -f \"$LOCK\"; git --work-tree=. add .".to_string(),
-        ] {
-            has(&cmd, &ws, &unknown);
-        }
-        // Copying into the folder git runs in asks only when it could bring a link or a `.git`.
-        for cmd in [format!("cp -rs {o}/.git . && git reset --hard"), format!("cp -r {o}/.git . && git reset --hard"), format!("cp -r {o}/.git ../loft && git reset --hard"), "ln -s x . && git add .".to_string(), "rsync -a src/ . && git add .".to_string(), "cp --symbolic-link x . && git add .".to_string(), "cp -l x . && git add .".to_string()] {
-            has(&cmd, &clone, &unknown);
-        }
         // What an agent does in its own clone still asks nothing.
         for cmd in [
             "git commit -m 'fix GIT_DIR handling'",
@@ -4897,20 +4998,6 @@ mod tests {
             assert_eq!(asks_all(cmd, &at(&clone)), Vec::<PathBuf>::new(), "should run: {cmd}");
         }
         // A clone is run in a command of its own: git on the new folder in the same command asks, whatever it names.
-        let user = at(&project);
-        for cmd in [
-            "git clone -q src t && git -C t reset --hard".to_string(),
-            "git clone -q src t && cd t && git checkout -b x".to_string(),
-            "git clone -q --depth 1 src t && git -C t reset --hard".to_string(),
-            "git -C loft clone x ../y && git -C y add *.md".to_string(),
-            format!("git clone x ny && git -C ny --work-tree={user} reset --hard"),
-            format!("git clone x ny && git -C ny --git-dir={user}/.git checkout other"),
-            format!("git clone x ny && GIT_DIR={user}/.git git -C ny checkout other"),
-            format!("git clone x ny && GIT_WORK_TREE={user} git -C ny checkout ."),
-        ] {
-            has(&cmd, &ws, &unknown);
-            has(&cmd, &clone, &unknown);
-        }
         // Next to it, in its own command, the clone is known.
         assert_eq!(asks_all("git -C loft pull", &at(&ws)), Vec::<PathBuf>::new());
         std::fs::remove_dir_all(root).unwrap();
@@ -5067,14 +5154,6 @@ mod tests {
         crate::agents::decide(&st, &pending()[0].id, "deny", None, None, None).unwrap();
         assert_eq!(again.await.unwrap()["allow"], false);
 
-        // A folder the hook couldn't name: the user is asked about the projects folder as a whole.
-        let asking = guard(PathBuf::from(UNKNOWN));
-        crate::agents::tests::until("a request for the unknown folder", 5, || pending().len() == 1).await;
-        let req = pending().remove(0);
-        assert_eq!(req.input["folder"], projects.display().to_string());
-        assert!(req.reason.contains("can't tell which"), "{}", req.reason);
-        crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
-        assert_eq!(asking.await.unwrap()["allow"], false);
     }
 
     #[tokio::test(flavor = "multi_thread")]
