@@ -163,6 +163,8 @@ struct Dirs {
     shadowed: bool,
     /// The shell has `cd`'d (or `pushd`/`popd`'d) since the command began.
     moved: bool,
+    /// `CDPATH` is set or exported, or `cdablevars` or `auto_cd` is on: a `cd x` may land somewhere else than `x`.
+    cd_search: bool,
     /// GIT_DIR or GIT_WORK_TREE appears somewhere in the command so far (in any word, assigned, exported, unset or
     /// hidden in a name): git may use a repository the guard can't follow, so every git call after it is unknown.
     git_env: bool,
@@ -437,8 +439,21 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         let defines = (cmds[i].defines && all.iter().any(|n| family(n)))
             || all.iter().position(|f| f == "function").is_some_and(|f| all[f + 1..].iter().take_while(|n| !KEYWORDS.contains(&n.as_str())).any(|n| family(n)))
             || all.iter().any(|w| w.strip_prefix("functions[").is_some_and(|r| r.split(']').next().is_some_and(family)))
+            // `functions+=(cd :)`: the array holds pairs of a name and a body.
+            || all.iter().any(|w| w.strip_prefix("functions+=(").is_some_and(|r| r.trim_end_matches(')').split_whitespace().any(family)))
             || (all.iter().any(|w| w == "autoload") && all.iter().any(|n| family(n)));
         dirs.shadowed |= defines || all.iter().any(|w| w == "disable");
+        // `CDPATH=x`, `export CDPATH`, `setopt cdablevars`, `set -o auto_cd`: zsh ignores case and `_` in option names.
+        dirs.cd_search |= all.iter().any(|w| {
+            let w: String = w.chars().filter(|&c| c != '_').collect::<String>().to_lowercase();
+            w.starts_with("cdpath") || matches!(w.as_str(), "cdablevars" | "autocd")
+        });
+        // The text a `functions[f]='...'` gives is a body that runs when `f` is called: read as if run here.
+        for body in all.iter().filter_map(|w| w.strip_prefix("functions[").and_then(|r| r.split_once("]=")).map(|(_, b)| b)).filter(|b| !b.is_empty()) {
+            let mut inner = dirs.clone();
+            changes(body, &mut inner, depth + 1, out);
+            dirs.keep_made(&inner);
+        }
         // `cd() { ... }` isn't a `cd`.
         if cmds[i].defines && defines {
             continue;
@@ -531,11 +546,14 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             // zsh's other name for `cd`.
             "cd" | "chdir" => {
                 let (physical, i) = dir_word(args);
+                // zsh's `cd old new` swaps `old` for `new` in the path; CDPATH, cdablevars and auto_cd send `x` elsewhere.
+                let two_words = args.iter().filter(|a| !a.starts_with('-') && *a != "}").count() >= 2;
                 match i.map(|i| (args[i].as_str(), live[i])) {
                     None => {
                         dirs.alts.clear();
                         dirs.cd(dirs::home_dir());
                     }
+                    Some((d, _)) if d != "-" && (two_words || dirs.cd_search) => dirs.lose(),
                     Some(("-", _)) => {
                         // After a failed `cd` or a `popd` the folder `cd -` goes to may be any the command left.
                         let keep = !dirs.alts.is_empty() || dirs.popped;
@@ -568,6 +586,10 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 let left = dirs.left.clone();
                 dirs.popped = true;
                 match i.map(|i| (args[i].as_str(), live[i])) {
+                    Some((d, _)) if d != "-" && dirs.cd_search => {
+                        dirs.stack.push(from);
+                        dirs.lose();
+                    }
                     // `pushd` swaps the top two folders; `pushd +1` rotates the stack.
                     None => {
                         dirs.alts.clear();
@@ -1929,6 +1951,8 @@ impl Level {
     /// `;`, `&&`, `||`, `&` or a newline: the next command starts a new pipeline.
     fn separate(&mut self, p: &mut Parse) {
         self.end(p);
+        // `always` after a `;` is a command's name, not the keyword.
+        self.closed = None;
         self.case_pending = false;
         let f = self.frame();
         (f.pipe, f.place) = (None, 0);
@@ -2704,6 +2728,42 @@ mod tests {
         }
         for cmd in ["cd -; git pull", "cd /nowhere/dev/loft/agent-local-storage/abc/loft && git pull", "cd loft && git pull"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn a_cd_that_lands_somewhere_else_asks() {
+        let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
+        for cmd in [
+            // CDPATH, cdablevars and auto_cd send a relative `cd` elsewhere.
+            format!("CDPATH={u} cd sub; pnpm install"),
+            format!("export CDPATH={u}; cd sub; pnpm install"),
+            format!("cdpath=({u}); cd sub; pnpm install"),
+            format!("typeset -x CDPATH={u}; cd sub; pnpm install"),
+            format!("CDPATH={u}; pushd sub; pnpm install"),
+            "setopt cdablevars; cd x; pnpm install".to_string(),
+            "setopt CD_ABLE_VARS; cd x; pnpm install".to_string(),
+            "set -o autocd; cd x; pnpm install".to_string(),
+            "setopt auto_cd; cd x; pnpm install".to_string(),
+            // zsh's `cd old new`.
+            format!("cd {u}/a; cd a b; pnpm install"),
+            // A `cd` or `always` that the shell reads another way.
+            format!("cd {u}; functions+=(cd :); cd {w}; pnpm install"),
+            format!("cd {u}; functions[cd]=':'; cd {w}; pnpm install"),
+            format!("functions[f]='git -C {u} reset --hard'; f"),
+            format!("functions[cd]='git -C {u} reset --hard'; cd"),
+            format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in [
+            "cd backend && cargo test".to_string(),
+            format!("cd {w} && pnpm install"),
+            "cd -P backend && cargo test".to_string(),
+            "export PATH=$PATH:/x; cd backend && cargo test".to_string(),
+            "functions[f]='cargo test'; f".to_string(),
+        ] {
+            assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
         }
     }
 
