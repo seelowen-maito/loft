@@ -168,6 +168,16 @@ struct Dirs {
     /// GIT_DIR or GIT_WORK_TREE appears somewhere in the command so far (in any word, assigned, exported, unset or
     /// hidden in a name): git may use a repository the guard can't follow, so every git call after it is unknown.
     git_env: bool,
+    /// The functions the command defined, newest last, with the commands of the body (an index range of the text being
+    /// checked) when the guard holds it. A call checks that body where it is called, not where it was defined.
+    funcs: Vec<(String, Option<(usize, usize, bool)>)>,
+    /// What `trap` was set to run so far, by this text or one it ran (`eval`) or a subshell: the shell runs it later, in
+    /// whatever folder it is in by then, so every text that ends checks it again in the folders the line has been in.
+    traps: Vec<String>,
+    /// The text is for sh, bash, dash or ksh: a `}` is a command's argument unless it is in command position.
+    posix: bool,
+    /// How many function bodies were checked at a call (shared by every copy): a few are plenty, and it ends recursion.
+    calls: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 impl Dirs {
@@ -328,6 +338,11 @@ impl Dirs {
         self.unreadable |= inner.unreadable;
         self.git_env |= inner.git_env;
         self.touched.extend(inner.touched.iter().cloned());
+        for t in &inner.traps {
+            if !self.traps.contains(t) {
+                self.traps.push(t.clone());
+            }
+        }
         self.removed.extend(inner.removed.iter().cloned());
     }
 
@@ -420,10 +435,20 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     // The whole text, so a mention inside a `<(…)` or a subshell counts too.
     dirs.cd_search |= mentions_cd_search(text);
     let cmds = parse(text);
+    // A body is an index range of this text: the functions from outside it, or defined in it once it is done, have none.
+    let outer: Vec<_> = dirs.funcs.iter().map(|f| f.1).collect();
+    dirs.funcs.iter_mut().for_each(|f| f.1 = None);
+    run(text, &cmds, 0..cmds.len(), dirs, depth, out);
+    dirs.funcs.iter_mut().for_each(|f| f.1 = None);
+    dirs.funcs.iter_mut().zip(outer).for_each(|(f, r)| f.1 = r);
+}
+
+/// The commands `range` of `cmds` (the parse of `text`), run in order.
+fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
     let mut pending_dotgit = false;
-    for i in 0..cmds.len() {
+    for i in range {
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
             let inner = std::mem::replace(dirs, saved.pop().unwrap().1);
@@ -445,6 +470,26 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             || all.iter().any(|w| w.strip_prefix("functions+=(").is_some_and(|r| r.trim_end_matches(')').split_whitespace().any(family)))
             || (all.iter().any(|w| w == "autoload") && all.iter().any(|n| family(n)));
         dirs.shadowed |= defines || all.iter().any(|w| w == "disable");
+        if all.iter().any(|w| w == "add-zsh-hook" || w.contains("_functions")) {
+            // The shell runs a function by itself (`chpwd_functions=(f)`): where, the guard can't tell.
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
+        }
+        // `function` or `NAME()` in command position defines; a word `function` elsewhere (`f function`) is an argument.
+        let defs = if cmds[i].defines || all.iter().zip(&cmds[i].quoted).any(|(w, q)| w == "function" && !q) { definitions(cmds, i) } else { vec![] };
+        let defined: Vec<String> = defs.iter().map(|d| d.0.clone()).collect();
+        {
+            for (n, body) in defs {
+                // `chpwd`, `precmd`, `TRAPEXIT`: the shell calls these by itself.
+                // A name a wrapper, a modifier, a keyword or a builtin goes by: what a call runs isn't followed.
+                let wrapper = KEYWORDS.contains(&n.as_str()) || matches!(n.as_str(), "env" | "command" | "builtin" | "noglob" | "nocorrect" | "time" | "exec" | "coproc" | "repeat" | "sudo" | "doas" | "nohup" | "nice" | "timeout" | "caffeinate" | "xargs" | "watch" | "stdbuf" | "chronic" | "parallel" | "arch" | "script" | "eval" | "source" | "." | "-" | "function" | "then" | "do" | "in" | "trap");
+                if wrapper || matches!(n.as_str(), "chpwd" | "precmd" | "preexec" | "periodic" | "zshexit" | "zshaddhistory" | "command_not_found_handler") || n.starts_with("TRAP") {
+                    out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
+                }
+                if !dirs.funcs.contains(&(n.clone(), body)) {
+                    dirs.funcs.push((n, body));
+                }
+            }
+        }
         let (search, opaque) = reads_state(all);
         dirs.cd_search |= search;
         // Something the guard can't read changes `cd` or `functions` (a name built by an expansion, `functions+=(…)`,
@@ -463,6 +508,39 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
         pending_dotgit = names_dotgit(all, &cmds[i].targets);
         dirs.git_env |= mentions_git_env(all, &cmds[i].targets, &cmds[i].stdin);
+        // A function defined earlier runs where it is called, after any `cd` in between: each body of that name is checked
+        // here (a name may be defined twice, and which took effect isn't followed). The words a wrapper or keyword skips
+        // count too (`sudo() { … }; sudo true`). A body the guard doesn't hold (defined in text it has left, or not as a
+        // group), or a call past the limit, is unknown.
+        {
+            let skipped = match unwrap(all, &mut false) {
+                Run::Words(w) => all.len() - w.len(),
+                Run::Text(_, used) => used,
+            };
+            let before: Vec<PathBuf> = dirs.alts.iter().cloned().chain(dirs.cwd.clone()).collect();
+            let mut called = false;
+            for n in all.iter().take(skipped + 1).filter(|n| !defined.contains(n)) {
+                for (_, body) in dirs.funcs.clone().iter().filter(|(f, _)| f == n) {
+                    called = true;
+                    let calls = dirs.calls.get() + 1;
+                    dirs.calls.set(calls);
+                    match body.filter(|&(_, _, loose)| calls <= MAX_CALLS && !(loose && dirs.posix)) {
+                        Some((a, b, _)) => {
+                            dirs.flush(usize::MAX);
+                            run(text, cmds, a..b, dirs, depth, out);
+                            dirs.flush(usize::MAX);
+                        }
+                        None => out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") })),
+                    }
+                }
+            }
+            if called {
+                if cmds[i].maybe || cmds[i].piped {
+                    dirs.may_stay(before);
+                }
+                dirs.made = true;
+            }
+        }
         let words = match unwrap(all, &mut false) {
             Run::Words(words) => words,
             Run::Text(text, used) => {
@@ -500,6 +578,13 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             continue;
         }
         let (args, live) = (args, &live[1..]);
+        if base(name) == "trap" {
+            for h in args.iter().find(|a| !a.starts_with('-') && !a.is_empty()) {
+                if !dirs.traps.contains(h) {
+                    dirs.traps.push(h.clone());
+                }
+            }
+        }
         // zsh's `=zsh` is the path of `zsh`.
         let name = base(name.trim_start_matches('='));
         let chdir = env_chdir(&all[..all.len() - words.len()]);
@@ -659,8 +744,9 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 continue;
             }
             "sh" | "bash" | "zsh" | "dash" | "ksh" => {
-                if let Some(t) = shell_script(&cmds, i, args) {
+                if let Some(t) = shell_script(cmds, i, args) {
                     let mut inner = dirs.clone();
+                    inner.posix = name != "zsh";
                     inner.enter(&chdir);
                     changes(&t, &mut inner, depth + 1, out);
                     dirs.keep_made(&inner);
@@ -708,8 +794,66 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         dirs.made |= !makes_nothing(all, words, live);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
+    // A trap's handler runs in each folder the commands were in (the folder it ran in can be any of them), as a call to a
+    // function or as text.
+    let places: Vec<Option<PathBuf>> = std::iter::once(dirs.start.clone().map(Some).unwrap_or(None)).chain(dirs.left.clone()).chain(std::iter::once(dirs.cwd.clone())).chain(dirs.alts.iter().cloned().map(Some)).collect();
+    for h in dirs.traps.clone() {
+        for place in &places {
+            let mut at = Dirs { cwd: place.clone(), alts: vec![], traps: vec![], ..dirs.clone() };
+            match dirs.funcs.iter().filter(|(n, _)| *n == h).collect::<Vec<_>>() {
+                f if f.is_empty() => changes(&h, &mut at, depth + 1, out),
+                f => {
+                    for (_, body) in f {
+                        let calls = dirs.calls.get() + 1;
+                        dirs.calls.set(calls);
+                        match body.filter(|&(_, _, loose)| calls <= MAX_CALLS && !(loose && dirs.posix)) {
+                            Some((a, b, _)) => run(text, cmds, a..b, &mut at, depth, out),
+                            None => out.extend(unknown_in(&at, None).into_iter().map(|folder| Change { folder, command: h.clone() })),
+                        }
+                    }
+                }
+            }
+        }
+    }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
+}
+
+/// The functions the command `i` defines (`f()`, `function f g`), each with the commands of its body when the guard holds
+/// it: an index range of `cmds` and whether a `}` that is no command ended it. Only the words in command position define,
+/// as `command_position` reads them: keywords and `function NAME...`, repeated (`{ function f { function g {`); a
+/// `function` after an ordinary word is an argument. The body is the `{` group that follows the names, in this command or
+/// the next.
+fn definitions(cmds: &[Cmd], i: usize) -> Vec<(String, Option<(usize, usize, bool)>)> {
+    let c = &cmds[i];
+    let len = c.words.len();
+    let kw = |k: usize| !c.quoted[k] && KEYWORDS.contains(&c.words[k].as_str());
+    let group = |at: usize, n: usize| cmds.get(at).and_then(|c| c.groups.get(n)).filter(|&&(end, _)| end <= cmds.len()).map(|&(end, loose)| (at, end, loose));
+    // The group a `{` in the next command opens (`f()` newline `{`).
+    let next = || cmds.get(i + 1).filter(|n| n.words.first().is_some_and(|w| w == "{") && !n.quoted[0]).and_then(|_| group(i + 1, 0));
+    let (mut out, mut k, mut opens) = (vec![], 0, 0);
+    loop {
+        while k < len && kw(k) {
+            opens += (c.words[k] == "{") as usize;
+            k += 1;
+        }
+        if k >= len {
+            break;
+        }
+        if c.words[k] == "function" && !c.quoted[k] {
+            let end = (k + 1..len).find(|&j| kw(j)).unwrap_or(len);
+            let body = if end < len && c.words[end] == "{" { group(i, opens) } else { next() };
+            out.extend((k + 1..end).map(|n| (c.words[n].clone(), body)));
+            k = end;
+            continue;
+        }
+        // `NAME()` or `NAME NAME()` after the keywords.
+        if c.defines {
+            out.extend((k..len).map(|n| (c.words[n].clone(), next())));
+        }
+        break;
+    }
+    out
 }
 
 fn mentions_cd_search(text: &str) -> bool {
@@ -1498,6 +1642,9 @@ impl Found {
 /// Shell text nested deeper than this (`sh -c "eval '...'"`) isn't scanned.
 const MAX_DEPTH: usize = 8;
 
+/// Function bodies a command checks at their calls.
+const MAX_CALLS: usize = 32;
+
 /// `shell`: the text runs in a shell of its own, which has no `kill` function from Loft.
 fn scan(text: &str, depth: usize, shell: bool) -> Found {
     let mut f = Found::default();
@@ -1673,15 +1820,19 @@ const KEYWORDS: &[&str] = &["!", "{", "}", "always", "if", "then", "else", "elif
 /// `function NAME...`. A quoted word (`quoted` says which) is no keyword.
 fn command_position(words: &[String], quoted: &[bool]) -> bool {
     let keyword = |i: usize| !quoted.get(i).copied().unwrap_or(false) && (KEYWORDS.contains(&words[i].as_str()) || words[i] == "time");
-    let from = if words.first().is_some_and(|f| f == "function") && !quoted[0] {
-        let names = (1..words.len()).take_while(|&i| !keyword(i)).count();
+    // Keywords and `function NAME...`, in any order (`{ function f { function g {`).
+    let mut from = 0;
+    loop {
+        from += (from..words.len()).take_while(|&i| keyword(i)).count();
+        if !(words.get(from).is_some_and(|f| f == "function") && !quoted[from]) {
+            break;
+        }
+        let names = (from + 1..words.len()).take_while(|&i| !keyword(i)).count();
         if names == 0 {
             return false;
         }
-        1 + names
-    } else {
-        0
-    };
+        from += 1 + names;
+    }
     (from..words.len()).all(keyword)
 }
 
@@ -1834,6 +1985,9 @@ struct Cmd {
     or: bool,
     /// `NAME()` follows it: it is a function's name.
     defines: bool,
+    /// The `{` groups it opens, in order: the index of the command after the group's last (usize::MAX until it ends), and
+    /// whether a `}` that isn't in command position (`echo }`) ended it, which only zsh lets.
+    groups: Vec<(usize, bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1857,6 +2011,10 @@ struct Frame {
     /// The command that opened it, and whether `end` closes it (zsh `foreach`).
     start: usize,
     foreach: bool,
+    /// The `{ }` group it is: the command that opened it and its place in that command's `groups`.
+    group: Option<(usize, usize)>,
+    /// A `}` that is no command closed something inside it: where it ends is no longer known for bash.
+    loose: bool,
 }
 
 #[derive(Default)]
@@ -1982,7 +2140,9 @@ impl Level {
                     let cond = p.cmds[id].maybe || self.func_next || after.is_some_and(|a| a.1);
                     p.cmds[id].maybe = cond;
                     self.func_next = false;
-                    self.frames.push(Frame { cond, start: after.map_or(id, |a| a.0), ..Default::default() });
+                    p.cmds[id].groups.push((usize::MAX, false));
+                    let group = Some((id, p.cmds[id].groups.len() - 1));
+                    self.frames.push(Frame { cond, start: after.map_or(id, |a| a.0), group, ..Default::default() });
                 }
                 "while" | "until" | "if" | "for" | "select" => self.frames.push(cond),
                 "foreach" => self.frames.push(Frame { foreach: true, ..cond }),
@@ -1994,8 +2154,8 @@ impl Level {
                 "case" => self.case_pending = true,
                 "always" => self.always = closed,
                 "function" => self.func_next = true,
-                "}" | "done" | "fi" | "esac" if self.frames.len() > 1 => self.pop(),
-                "end" if self.frames.len() > 1 && self.frame().foreach => self.pop(),
+                "}" | "done" | "fi" | "esac" if self.frames.len() > 1 => self.pop(p, false),
+                "end" if self.frames.len() > 1 && self.frame().foreach => self.pop(p, false),
                 _ => {}
             }
         }
@@ -2011,7 +2171,9 @@ impl Level {
         p.cmds[id].quoted.push(quoted || (word_is_always && closed.is_none()));
         if closes {
             if !first {
-                self.pop();
+                // Every group open here may end elsewhere in bash: `echo }` is no close.
+                self.frames.iter_mut().for_each(|f| f.loose = true);
+                self.pop(p, true);
             }
             p.chain += 1;
             return self.end(p);
@@ -2024,8 +2186,12 @@ impl Level {
     }
 
     /// Closes the compound command open.
-    fn pop(&mut self) {
+    /// `loose`: a `}` that is no command ended it.
+    fn pop(&mut self, p: &mut Parse, loose: bool) {
         if let Some(f) = self.frames.pop() {
+            if let Some((c, k)) = f.group {
+                p.cmds[c].groups[k] = (p.cmds.len(), loose || f.loose);
+            }
             self.closed = Some((f.start, f.cond));
         }
     }
@@ -3056,6 +3222,102 @@ mod tests {
             "setopt extendedglob; cd backend && cargo test".to_string(),
         ] {
             assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn a_function_runs_where_it_is_called() {
+        let u = USER;
+        for cmd in [
+            format!("f() {{ pnpm install }}; cd {u}; f"),
+            format!("function f {{ git reset --hard; }}; cd {u}; f"),
+            format!("f() {{ pnpm install; }}; cd {u} && f"),
+            format!("f() {{ pnpm install; }}; g() {{ f; }}; cd {u}; g"),
+            format!("f() {{ pnpm install; }}; (cd {u}; f)"),
+            format!("f() {{ cd {u}; }}; f; pnpm install"),
+            format!("f() {{ pnpm install; }}; cd {u}; f | cat"),
+            // A body the guard doesn't hold, a recursion and a name that is built are unknown.
+            format!("f() cd {u}; f; pnpm install"),
+            format!("eval 'f() {{ pnpm install; }}'; cd {u}; f"),
+            format!("f() {{ pnpm install; }}; cd {u}; $NAME"),
+            format!("f() {{ f; }}; cd {u}; f"),
+            // A definition anywhere, the older one too, a name a wrapper or keyword skips, a hook, a `}` that bash reads as text.
+            format!("g() {{ f() {{ pnpm install; }}; }}; g; cd {u}; f"),
+            format!("if true; then f() {{ pnpm install; }}; fi; cd {u}; f"),
+            format!("{{ f() {{ pnpm install; }}; }}; cd {u}; f"),
+            format!("{{ function f {{ pnpm install; }}; }}; cd {u}; f"),
+            format!("for x in 1; do function f {{ pnpm install; }}; done; cd {u}; f"),
+            format!("! f() {{ pnpm install; }}; cd {u}; f"),
+            format!("f() {{ function g {{ :; }}; pnpm install; }}; cd {u}; f"),
+            format!("f() {{ pnpm install; }}; false && f() {{ :; }}; cd {u}; f"),
+            format!("f() {{ pnpm install; }}; f() {{ :; }} & cd {u}; f"),
+            format!("f() {{ pnpm install; }}; case a in b) f() {{ :; }};; esac; cd {u}; f"),
+            format!("sudo() {{ pnpm install }}; cd {u}; sudo true"),
+            format!("env() {{ pnpm install }}; cd {u}; env FOO=1 true"),
+            format!("command() {{ pnpm install }}; cd {u}; command true"),
+            format!("always() {{ pnpm install }}; cd {u}; always"),
+            format!("'fi'() {{ pnpm install }}; cd {u}; 'fi'"),
+            format!("if f() {{ pnpm install; }}; then cd {u}; f; fi"),
+            format!("() {{ f() {{ pnpm install; }} }}; cd {u}; f"),
+            format!("f() {{ pnpm install; }}; g() {{ f; }}; f() {{ :; }} & cd {u}; g"),
+            format!("nice() {{ pnpm install }}; cd {u}; nice true"),
+            format!("zshexit() {{ pnpm install; }}; cd {u}"),
+            format!("f() {{ pnpm install; }}; add-zsh-hook chpwd f; cd {u}"),
+            format!("f() {{ pnpm install; }}; cd {u}; function {{ f }}"),
+            format!("f() {{ pnpm install; }}; cd {u}; f function f"),
+            format!("f() {{ pnpm install; }}; cd {u}; noglob f function f"),
+            format!("f() {{ pnpm install; }}; cd {u}; {{ f function f; }}"),
+            format!("f() {{ pnpm install; }}; cd {u}; if true; then f function f; fi"),
+            format!("{{ function f {{ function g {{ pnpm install; }}; }}; }}; f; cd {u}; g"),
+            format!("f() {{ pnpm install; }}; g() {{ function h {{ f; }}; h; }}; cd {u}; g"),
+            format!("f() {{ pnpm install; }}; cd {u}; f function"),
+            format!("f() {{ pnpm install; }}; cd {u}; noglob f -- function"),
+            format!("function f {{ function g {{ :; }}; pnpm install; }}; cd {u}; f"),
+            format!("bash -c 'f() {{ if true; then echo }}; fi; pnpm install; }}; cd {u}; f'"),
+            format!("bash -c 'f() {{ for x in 1; do echo }}; done; pnpm install; }}; cd {u}; f'"),
+            format!("bash -c 'f() {{ case x in x) echo }};; esac; pnpm install; }}; cd {u}; f'"),
+            format!("bash -c 'f() {{ {{ echo }}; }}; pnpm install; }}; cd {u}; f'"),
+            format!("bash -c 'f() {{ g() {{ echo }}; }}; pnpm install; }}; cd {u}; f'"),
+            format!("chpwd() {{ pnpm install; }}; cd {u}"),
+            format!("TRAPEXIT() {{ pnpm install; }}; cd {u}"),
+            format!("f() {{ pnpm install; }}; chpwd_functions=(f); cd {u}"),
+            format!("f() {{ pnpm install; }}; trap f EXIT; cd {u}"),
+            format!("trap 'pnpm install' EXIT; cd {u}"),
+            format!("eval \"trap 'pnpm install' EXIT\"; cd {u}"),
+            format!("eval 'f() {{ pnpm install; }}; trap f EXIT'; cd {u}"),
+            format!("(trap 'pnpm install' EXIT); cd {u}"),
+            format!("f() {{ pnpm install; }}; trap f DEBUG; cd {u}; true"),
+            format!("nohup() {{ pnpm install }}; cd {u}; nohup true"),
+            format!("xargs() {{ pnpm install }}; cd {u}; echo | xargs true"),
+            format!("timeout() {{ pnpm install }}; cd {u}; timeout 5 true"),
+            format!("exec() {{ pnpm install }}; cd {u}; exec true"),
+            format!("\"then\"() {{ pnpm install }}; cd {u}; \"then\""),
+            format!("chpwd() {{ cd -q {u}; }}; cd /nowhere/other; pnpm install"),
+            format!("command_not_found_handler() {{ pnpm install; }}; cd {u}; nosuchcommand"),
+            format!("sh -c 'f() {{ echo a }}; pnpm install; }}; cd {u}; f'"),
+            format!("bash -c 'f() {{ echo }}; pnpm install; }}; cd {u}; f'"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in [
+            "f() { cargo test; }; cd backend && f",
+            "f() { echo hi; }; f; git status",
+            "function f { cargo test; }; cd backend; f",
+            "f() { pnpm install; }; (cd ..; f)",
+            "f() { pnpm install; }; g() { f; }; g",
+            "cleanup() { rm -f x; }; trap cleanup EXIT",
+            "echo function; cargo test",
+            "f() { echo function; }; f; cargo test",
+            "bash -c 'f() { echo hi; }; f; cargo test'",
+            "bash -c 'f() { if true; then echo hi; fi; }; f'",
+            "eval \"trap 'rm -f tmp' EXIT\"; cd backend; cargo test",
+            "trap 'rm -f tmp' EXIT; cd backend; cargo test",
+            "build() { pnpm build; }; build && git add -A",
+            "a() { b; }; b() { echo; }; a",
+            "f() { echo; }; f; f; f",
+            "f() { cd backend; }; f; cargo test",
+        ] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
     }
 
