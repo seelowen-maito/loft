@@ -737,13 +737,13 @@ fn reads_state(all: &[String]) -> (bool, bool) {
     for (i, w) in all.iter().enumerate() {
         let start = w.trim_start_matches(['$', '{', '"', '\'']);
         opaque |= ["options+=", "options=", "functions+=", "functions="].iter().any(|n| start.starts_with(n));
-        // `options[…]=`, `functions[…]+=`: a write, not a read (`${options[errexit]}`).
-        for n in ["options[", "functions["] {
-            opaque |= w.split(n).skip(1).any(|r| r.split_once(']').is_some_and(|(_, after)| ["=", "+=", ":=", "::="].iter().any(|o| after.starts_with(o))));
-        }
+        // A word that starts with `functions[` or `options[` names an element for a builtin or `(( … ))` to write; a read is
+        // written `$functions[…]`.
+        let unquoted = w.trim_start_matches(['"', '\'']);
+        opaque |= unquoted.starts_with("functions[") || unquoted.starts_with("options[");
         // `${name=…}`, `${name:=…}`, `${name::=…}` with a name that isn't a plain identifier, the `(P)` flag, and an assignment
         // after a nested `}`.
-        opaque |= w.contains("(P)") || w.contains("}:=") || w.contains("}::=") || w.contains("}=");
+        opaque |= w.split("${(").skip(1).any(|f| f.split(')').next().is_some_and(|f| f.contains(['P', 'e']))) || w.contains("}:=") || w.contains("}::=") || w.contains("}=");
         for part in w.split("${").skip(1) {
             let body = part.split('}').next().unwrap_or_default();
             let name = body.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(body.len());
@@ -759,15 +759,17 @@ fn reads_state(all: &[String]) -> (bool, bool) {
         if matches!(name, "zsh" | "bash" | "sh" | "ksh" | "dash") {
             let mut args = all[i + 1..].iter();
             while let Some(a) = args.next().filter(|a| a.starts_with(['-', '+'])) {
-                if matches!(a.as_str(), "-o" | "+o") {
-                    opaque |= args.next().is_none_or(|n| !safe_option(n));
-                } else if a.len() < 2 || !a[1..].chars().all(|c| "clexufison".contains(c)) {
+                if a.len() < 2 || !a[1..].chars().all(|c| "clexufison".contains(c)) {
                     opaque = true;
+                } else if a.contains('o') {
+                    // A bundle with an `o` (`-eo`, `-so`) takes the next word as an option name.
+                    opaque |= args.next().is_none_or(|n| !safe_option(n));
                 }
             }
         }
         // `functions` as the command (`functions -c f cd`) or the array being set (`set -A functions cd :`), not an argument.
-        let at_command = all[..i].iter().all(|b| assignment(b).is_some() || WRAPPERS.contains(&b.as_str()) || KEYWORDS.contains(&b.as_str()) || b.ends_with("()") || b.starts_with('-') || b.chars().all(|c| c.is_ascii_digit()));
+        let from = all[..i].iter().rposition(|b| matches!(b.as_str(), "]]" | "))")).map_or(0, |p| p + 1);
+        let at_command = all[from..i].iter().all(|b| b == "function" || all[..i].iter().any(|f| f == "function") || assignment(b).is_some() || WRAPPERS.contains(&b.as_str()) || KEYWORDS.contains(&b.as_str()) || b.ends_with("()") || b.starts_with('-') || b.chars().all(|c| c.is_ascii_digit()));
         opaque |= w == "functions" && (at_command || (i > 0 && all[i - 1] == "-A"));
         if !at_command {
             continue;
@@ -2852,6 +2854,29 @@ mod tests {
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
             format!("functions[g]=':'; cd backend && cargo test"),
             format!("functions[f]='pnpm install'; cd {u}; f"),
+            format!("function f {{ setopt -T }}; f; x={u}; cd x; pnpm install"),
+            format!("function f g {{ setopt -T }}; g; x={u}; cd x; pnpm install"),
+            format!("function {{ setopt -T }}; x={u}; cd x; pnpm install"),
+            format!("if [[ -n x ]] setopt -T; x={u}; cd x; pnpm install"),
+            format!("if [[ -n x ]] {{ setopt -T }}; x={u}; cd x; pnpm install"),
+            format!("K=PATH; function f {{ export CD$K={u} }}; f; cd sub; pnpm install"),
+            format!("K=PATH; if [[ -n x ]] export CD$K={u}; cd sub; pnpm install"),
+            format!("cd {u}; f() {{ : }}; function g {{ functions -c f cd }}; g; cd {w}; pnpm install"),
+            format!("O=ablevars; zsh -fo cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; zsh -lo cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; zsh +eo nocd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; nohup zsh -eo cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; echo 'x={u}; cd x; pnpm install' | zsh -so cd$O"),
+            format!("K=CD; K+=PATH; x=${{(@P)K::={u}}}; cd sub; pnpm install"),
+            format!("K=CD; K+=PATH; : ${{(P@)K::={u}}}; cd sub; pnpm install"),
+            format!("x=${{(j.:.P)K::={u}}}; cd sub; pnpm install"),
+            format!("A='${{CD'; B='PATH::={u}}}'; T=$A$B; : ${{(e)T}}; cd sub; pnpm install"),
+            format!("K=CD; K+=PATH; x=${{(e)${{:-'${{'$K'::={u}}}'}}}}; cd sub; pnpm install"),
+            format!("cd {u}; (( functions[cd] = 0 )); cd {w}; pnpm install"),
+            format!("cd {u}; : $(( functions[cd] = 0 )); cd {w}; pnpm install"),
+            format!("zmodload zsh/datetime; strftime -s 'functions[f]' 'git -C {u} reset --hard' 0; f"),
+            format!("zformat -f 'functions[f]' 'git -C {u} reset --hard'; f"),
+            format!("K=ablevars; zformat -f \"options[cd$K]\" on; x={u}; cd x; pnpm install"),
             format!("/bin/ZSH -T -c 'x={u}; cd x; pnpm install'"),
             format!("K=PATH; print -rv CD$K {u}; cd sub; pnpm install"),
             format!("K=PATH; print -vCD$K {u}; cd sub; pnpm install"),
@@ -2970,7 +2995,7 @@ mod tests {
             "source ~/.zshrc; . ./env.sh; cd backend && cargo test".to_string(),
             "zsh -c 'cd backend && cargo test'".to_string(),
             "bash -n script; bash scripts/x.sh --verbose; sh -eu script".to_string(),
-            "jq '.options[0]' package.json; echo functions[1]; : \"$x\"; set -o nounset; set -m".to_string(),
+            "jq '.options[0]' package.json; : \"$x\"; set -o nounset; set -m".to_string(),
             ": ${FOO:=bar}; cargo test".to_string(),
             "x=${opt#--name=}; cargo test".to_string(),
             "echo ${FOO:-a=b}; cargo test".to_string(),
