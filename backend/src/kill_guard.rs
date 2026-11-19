@@ -337,6 +337,12 @@ impl Dirs {
     }
 
     /// The shell is in a folder the guard can't tell (a stack entry: `cd +1`): the topmost checkout around stands for it.
+    /// The folder the shell is in, with the ones before it: what a loop pass changes while it still moves. (The other places it may be
+    /// grow with every pass of a `cd` that may fail, and are checked in each.)
+    fn places(&self) -> String {
+        format!("{:?}{:?}{:?}{}", self.cwd, self.old, self.stack, self.unknown)
+    }
+
     fn lose(&mut self) {
         self.alts = self.cwd.as_deref().or(self.start.as_deref()).map(outermost_checkout).into_iter().collect();
         self.unknown = true;
@@ -492,7 +498,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         // A loop's next pass starts where the last one ended: its body is checked once more when it ends.
         while loops.last().is_some_and(|&(done, _)| done == i) {
             let (done, start) = loops.pop().unwrap();
-            run(text, cmds, start..done, dirs, depth, out);
+            repeat(text, cmds, start..done, dirs, depth, out);
         }
         if let Some(kw) = loop_word(&cmds[i]) {
             let mut open = 0;
@@ -871,7 +877,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 continue;
             }
             // An alias this line defined, called by name or named in the text `eval` runs (`eval 'true; g'`).
-            n if dirs.aliases.iter().any(|a| a == n) || (n == "eval" && args.iter().any(|a| a.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|t| dirs.aliases.iter().any(|x| x == t)))) => {
+            n if dirs.aliases.iter().any(|a| a == n) || (n == "eval" && !dirs.aliases.is_empty()) => {
                 // An alias this line defined: what it runs isn't followed.
                 out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
                 dirs.made = true;
@@ -947,17 +953,36 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
     if let Some(&start) = open_ended.first().filter(|_| !dirs.again) {
         again(text, cmds, start, end, dirs, depth, out);
     }
+    // A subshell still open where the range ends (a loop body cut at its `done`) ends there too.
+    while let Some((_, outer)) = saved.pop() {
+        let inner = std::mem::replace(dirs, outer);
+        dirs.keep_made(&inner);
+    }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
 }
 
-/// The commands `start..end` run again from `dirs` (a copy of it), three times over, as a loop with no `done` may.
+/// The commands `start..end` run again from `dirs` (a copy of it), as a loop with no `done` may.
 fn again(text: &str, cmds: &[Cmd], start: usize, end: usize, dirs: &Dirs, depth: usize, out: &mut Vec<Change>) {
     let mut next = dirs.clone();
     next.again = true;
-    for _ in 0..3 {
-        run(text, cmds, start..end, &mut next, depth, out);
+    repeat(text, cmds, start..end, &mut next, depth, out);
+}
+
+/// `range` run again and again, from where each pass ended, until the places the shell may be in stop changing; a loop that
+/// still moves after a few passes may be anywhere (it asks).
+fn repeat(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
+    let mut last = dirs.places();
+    for _ in 0..8 {
+        run(text, cmds, range.clone(), dirs, depth, out);
+        let now = dirs.places();
+        if now == last {
+            return;
+        }
+        last = now;
     }
+    out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: "a loop".into() }));
+    dirs.lose();
 }
 
 /// The functions the command `i` defines (`f()`, `function f g`), each with the commands of its body when the guard holds
@@ -3735,6 +3760,10 @@ mod tests {
             format!("alias g='cd {u}; pnpm install'; eval 'true; g'"),
             format!("alias g='cd {u}'; g; pnpm install"),
             format!("alias -g G='cd {u}'; echo G; pnpm install"),
+            format!("alias -s t-x='cd {u}; pnpm install #'; cd {CLONE}; eval ./a.t-x"),
+            format!("alias -g -- --hard='cd {u}'; eval 'git status --hard'"),
+            "for i in 1 2 3 4 5 6 7; do pnpm install; cd ..; [[ -d dev ]] && cd dev/loft; done".to_string(),
+            format!("mkdir -p a; ln -s {u} a/a; for i in 1 2 3; do pnpm install; cd a; done"),
             format!("alias cd='cd {u}; cd'; cd x; pnpm install"),
             format!("trap 'cd {u}' INT; kill -INT $$; pnpm install"),
             format!("trap 'cd {u}' TERM; kill $$; pnpm install"),
