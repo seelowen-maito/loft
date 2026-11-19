@@ -59,12 +59,32 @@ final class TalkRecipientTests: XCTestCase {
         XCTAssertEqual(s.recipientNote, "Didn't catch who: still to Loft Lead.")
     }
 
-    /// Only a name: nothing to send, so Talk stays open on the new agent and says to go on.
-    func testOnlyANameSwitchesAndAsksForTheMessage() async throws {
-        let s = try await say("Send this to Loft Dev", then: .idle)
+    /// Only a name: nothing to send yet, so Talk listens again, and what's said next goes to the new agent.
+    func testOnlyANameSwitchesAndListensForTheMessage() async throws {
+        let api = MockAPI()
+        api.agentList = [agent("lead", "Loft Lead", role: "lead"), agent("dev", "Loft Dev", role: "dev")]
+        let store = LoftStore(api: api, cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("t-\(UUID()).json")))
+        // Connected, so a "send" goes out.
+        store.activate()
+        defer { store.deactivate() }
+        for _ in 0..<100 where store.connection != .connected { try await Task.sleep(for: .milliseconds(20)) }
+        let owner = AudioSessionOwner(AudioSessionOwnerTests.FakeSession(), attempts: 1, retryWait: .milliseconds(1), linger: .milliseconds(1), settle: .milliseconds(1))
+        let s = VoiceSession(store: store, speaker: Speaker(audio: owner), audio: owner, engine: MicrophoneTests.FakeEngine())
+        s.picksRecipient = true
+        var said = ["Send this to Loft Dev.", "The build is red."]
+        s.prepareRecognizer = { SayingRecognizer(said.removeFirst()) }
+        addTeardownBlock { s.discard() }
+        await s.start(agentId: "lead")
+
+        await s.finish(.review)
+        XCTAssertEqual(s.phase, .listening)
         XCTAssertEqual(s.agentId, "dev")
         XCTAssertEqual(s.raw, "")
         XCTAssertEqual(s.recipientNote, "Switched to Loft Dev: say the message.")
+
+        await s.finish(.send)
+        XCTAssertEqual(api.sent.map(\.agentId), ["dev"])
+        XCTAssertEqual(api.sent.map(\.text), ["The build is red."])
     }
 
     func testNoNameChangesNothing() async throws {
