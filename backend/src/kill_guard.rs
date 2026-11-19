@@ -726,25 +726,31 @@ fn mentions_cd_search(text: &str) -> bool {
     ["cdpath", "cdablevars", "autocd"].iter().any(|n| plain.contains(n))
 }
 
-/// What a command does to how a later `cd` resolves, read by its shape: `(search, opaque)`. `search`: it mentions `CDPATH`,
-/// `cdablevars` or `auto_cd`, or it sets options the guard doesn't know to be harmless (`set -T`, `setopt -m`, a shell run
-/// with an option beyond `-c -l -e -u -x -f -i -s`, a name with an expansion). `opaque`: it writes `functions` or
-/// `options` in a way the guard can't read, or sets a variable whose name an expansion builds (it may be `functions`).
+/// What a command does to how a later `cd` resolves, read by allow lists: `(search, opaque)`. `search`: it mentions
+/// `CDPATH`, `cdablevars` or `auto_cd`. `opaque` (the command asks, and `cd` may be shadowed): it sets options beyond a
+/// short safe list, starts a shell with options beyond `-c -e -u -x -l`, writes a variable in a way the guard doesn't read
+/// (`${x::=…}`, `(P)`, `read`, `print -v`, `set -A`, a name an expansion builds), or writes `functions` or `options`.
 fn reads_state(all: &[String]) -> (bool, bool) {
     const WRAPPERS: &[&str] = &["env", "command", "builtin", "noglob", "nocorrect", "time", "exec", "!"];
+    const SAFE_OPTIONS: &[&str] = &["extendedglob", "nullglob", "globdots", "pipefail", "autopushd", "pushdsilent", "pushdignoredups", "errexit", "nounset", "xtrace"];
     let literal = |w: &str| !w.contains(['$', '`', '{', '}', '*', '?', '[', '(', '<', '=']);
-    let name_expands = |w: &String| w.split('=').next().unwrap_or_default().contains(['$', '`', '{', '*', '?', '[']);
-    let (mut search, mut opaque) = (all.iter().any(|w| mentions_cd_search(w)), false);
+    let plain_name = |w: &str| w.split('=').next().unwrap_or_default().chars().all(|c| c.is_alphanumeric() || c == '_');
+    // `NO_`, `_` and case don't matter in a zsh option name.
+    let safe_option = |w: &str| {
+        let n = w.replace('_', "").to_lowercase();
+        literal(w) && SAFE_OPTIONS.contains(&n.strip_prefix("no").unwrap_or(&n))
+    };
+    let (search, mut opaque) = (all.iter().any(|w| mentions_cd_search(w)), false);
     for (i, w) in all.iter().enumerate() {
-        let quoted_start = w.trim_start_matches(['$', '{', '"', '\'']);
-        // `options[…]`, `functions[…]` in any word but a literal `functions[name]=text`, and the array forms.
-        let literal_function = w.strip_prefix("functions[").and_then(|r| r.split_once("]=")).is_some_and(|(_, b)| !b.starts_with('='));
-        opaque |= (w.contains("options[") || w.contains("functions[")) && !literal_function;
-        opaque |= ["options+=", "options=", "functions+=", "functions="].iter().any(|n| quoted_start.starts_with(n));
-        // `${name=…}`, `${name:=…}`, `${name::=…}` with a name that isn't a plain one.
+        let start = w.trim_start_matches(['$', '{', '"', '\'']);
+        // A literal `functions[name]=text` is read (its text is run as a command that may run); any other write is opaque.
+        let literal_function = w.strip_prefix("functions[").and_then(|r| r.split_once("]=")).is_some_and(|(n, b)| !n.contains(['$', '`', '{', '[', '(']) && !b.starts_with('='));
+        opaque |= w.contains("options[") || (w.contains("functions[") && !literal_function) || ["options+=", "options=", "functions+=", "functions="].iter().any(|n| start.starts_with(n));
+        // `${name=…}`, `${name:=…}`, `${name::=…}`, and the `(P)` flag.
+        opaque |= w.contains("(P)");
         for part in w.split("${").skip(1) {
             let body = part.split('}').next().unwrap_or_default();
-            opaque |= body.find('=').is_some_and(|p| !body[..p].trim_end_matches(':').chars().all(|c| c.is_alphanumeric() || c == '_'));
+            opaque |= body.contains(":=") || body.find('=').is_some_and(|p| body[..p].ends_with(|c: char| c.is_alphanumeric() || matches!(c, '_' | ']')));
         }
         // `functions` as the command (`functions -c f cd`) or the array being set (`set -A functions cd :`), not an argument.
         let at_command = all[..i].iter().all(|b| assignment(b).is_some() || WRAPPERS.contains(&b.as_str()) || b.starts_with('-'));
@@ -754,15 +760,16 @@ fn reads_state(all: &[String]) -> (bool, bool) {
         }
         let args = &all[i + 1..];
         match base(w.trim_start_matches('=')) {
-            // Every option word is made of known letters and every other word is literal.
-            "set" | "setopt" | "unsetopt" | "emulate" | "shopt" => {
-                search |= args.iter().any(|a| !literal(a) || (a.starts_with(['-', '+']) && (a.len() < 2 || !a[1..].chars().all(|c| "eufxovn".contains(c)))));
-                opaque |= base(w) == "set" && args.iter().any(|a| a == "-A") && args.iter().any(name_expands);
+            "set" => {
+                // Letter bundles of `e u x v` (and `o` with a safe name), and safe option names.
+                opaque |= args.iter().any(|a| if a.starts_with(['-', '+']) { a.len() < 2 || !a[1..].chars().all(|c| "euxvo".contains(c)) } else { !safe_option(a) });
             }
-            "zsh" | "bash" | "sh" | "ksh" | "dash" => search |= args.iter().any(|a| a.starts_with(['-', '+']) && !matches!(a.as_str(), "-c" | "-l" | "-e" | "-u" | "-x" | "-f" | "-i" | "-s")),
-            "export" | "typeset" | "declare" | "local" | "readonly" | "read" | "integer" | "float" | ":" => opaque |= args.iter().any(name_expands),
-            "printf" | "print" => opaque |= args.iter().any(|a| a == "-v") && args.iter().any(name_expands),
-            "zstyle" => opaque |= args.iter().any(|a| a.contains(['$', '`'])),
+            "setopt" | "unsetopt" => opaque |= args.iter().any(|a| !safe_option(a)),
+            "emulate" | "shopt" | "read" => opaque = true,
+            "zsh" | "bash" | "sh" | "ksh" | "dash" => opaque |= args.iter().any(|a| a.starts_with(['-', '+']) && !matches!(a.as_str(), "-c" | "-e" | "-u" | "-x" | "-l")),
+            "export" | "typeset" | "declare" | "local" | "readonly" | "integer" | "float" | ":" => opaque |= args.iter().any(|a| !a.starts_with('-') && !plain_name(a)),
+            "printf" | "print" => opaque |= args.iter().any(|a| a == "-v"),
+            "zstyle" => opaque |= args.iter().any(|a| matches!(a.as_str(), "-s" | "-a" | "-b" | "-g" | "-e")),
             _ => {}
         }
     }
@@ -2912,12 +2919,15 @@ mod tests {
             format!("cd {w} && pnpm install"),
             "cd -P backend && cargo test".to_string(),
             "export PATH=$PATH:/x; cd backend && cargo test".to_string(),
-            "functions[f]='cargo test'; f".to_string(),
             "cd functions && cargo test".to_string(),
             "ls functions; cd src && cargo test".to_string(),
             "pnpm -C functions install".to_string(),
             "cd src; cargo test -- functions".to_string(),
             "set -eu; cd src && cargo test".to_string(),
+            "set -euo pipefail; cd backend && cargo test".to_string(),
+            "set +e; setopt extendedglob nullglob autopushd; cd backend && cargo test".to_string(),
+            "source ~/.zshrc; . ./env.sh; cd backend && cargo test".to_string(),
+            "zsh -c 'cd backend && cargo test'".to_string(),
             "export PATH=$HOME/bin:$PATH; set -e; cd backend && cargo test".to_string(),
             "setopt extendedglob; cd backend && cargo test".to_string(),
         ] {
