@@ -986,8 +986,8 @@ fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool]) ->
     }
     // `trap` only sets what runs later: at the end of the shell for EXIT or a signal that ends it. Any other name (`DEBUG`,
     // `ERR`, `ZERR`, a number) runs before the next command, and so does one in a subshell, a background job or a
-    // pipeline part (it fires when that part ends): a line with `(` (but a named function's `()`), `|` or any `&` that isn't `&&` isn't read.
-    let lone_and = text.match_indices('&').any(|(p, _)| !text[..p].ends_with('&') && !text[p + 1..].starts_with('&'));
+    // pipeline part (it fires when that part ends): a line with `(` (but a named function's `()`), `|` or any `&` that isn't `&&` (or follows a backslash) isn't read.
+    let lone_and = text.match_indices('&').any(|(p, _)| !text[..p].ends_with('&') && !text[p + 1..].starts_with('&')) || text.contains("\\&");
     // A `()` after a name defines a function; any other (`() cmd`, `function () cmd`) is an anonymous function that runs now.
     let anonymous = text.match_indices("()").any(|(p, _)| {
         let name = text[..p].trim_end_matches([' ', '\t']).rsplit(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))).next().unwrap_or_default();
@@ -3430,6 +3430,8 @@ mod tests {
             "{ trap 'ln -s /x backend' EXIT; } &</dev/null; git status; cd backend; git add -A".to_string(),
             "{ rm -f x; trap 'ln -s /x backend' EXIT; } &<x; git status; cd backend; git reset --hard".to_string(),
             "{ trap 'ln -s /x backend' EXIT; } &<&-; git status; cd backend; git add -A".to_string(),
+            "{ trap 'ln -s /x backend' EXIT; } >\\&& git status; cd backend; git add -A".to_string(),
+            "{ trap 'ln -s /x backend' EXIT; } >x\\&&\ngit status; cd backend; git add -A".to_string(),
             "() trap 'ln -s /x backend' EXIT; cd backend; git add -A".to_string(),
             "() trap 'ln -s /x backend' EXIT\ncd backend; git add -A".to_string(),
             "function () trap 'ln -s /x backend' EXIT; cd backend; git add -A".to_string(),
