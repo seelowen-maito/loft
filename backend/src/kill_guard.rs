@@ -139,6 +139,10 @@ struct Dirs {
     alts: Vec<PathBuf>,
     /// A command ran before this one: it may have made a folder, a link or a `.git` that isn't there yet.
     made: bool,
+    /// The names `alias` defined in the command: `eval NAME` runs what they hold.
+    aliases: Vec<String>,
+    /// A `trap` that may run before a later command was set (see `makes_nothing`): its handler may make a folder.
+    trapped: bool,
     /// An earlier command wrote a `.git` (`echo 'gitdir: x' > t/.git`): git may follow it anywhere.
     dotgit: bool,
     /// An earlier `cd` named a folder the guard can't list (a glob, braces).
@@ -178,6 +182,8 @@ struct Dirs {
     posix: bool,
     /// How many function bodies were checked at a call (shared by every copy): a few are plenty, and it ends recursion.
     calls: std::rc::Rc<std::cell::Cell<usize>>,
+    /// Inside the passes `again` makes: a loop there isn't run again.
+    again: bool,
 }
 
 impl Dirs {
@@ -193,6 +199,10 @@ impl Dirs {
     }
 
     fn resolve(&self, path: &str, physical: bool) -> Option<PathBuf> {
+        // `~+` is the current folder.
+        if let Some(rest) = path.strip_prefix("~+").filter(|r| r.is_empty() || r.starts_with('/')) {
+            return resolve(self.cwd.as_deref()?, &format!(".{rest}"), physical);
+        }
         let absolute = path.starts_with(['/', '~']) || path.starts_with("$HOME") || path.starts_with("${HOME}");
         resolve(if absolute { Path::new("/") } else { self.cwd.as_deref()? }, path, physical)
     }
@@ -260,6 +270,8 @@ impl Dirs {
         match path {
             p if p == "~" || p.starts_with("~/") => Some(PathBuf::from(format!("{}{}", home()?, &p[1..]))),
             p if p.starts_with('/') => Some(PathBuf::from(p)),
+            p if p == "~+" || p.starts_with("~+/") => Some(self.cwd.as_deref()?.join(format!(".{}", &p[2..]))),
+            p if p.starts_with('~') => None,
             p => Some(self.cwd.as_deref()?.join(p)),
         }
     }
@@ -325,6 +337,12 @@ impl Dirs {
     }
 
     /// The shell is in a folder the guard can't tell (a stack entry: `cd +1`): the topmost checkout around stands for it.
+    /// The folder the shell is in, with the ones before it: what a loop pass changes while it still moves. (The other places it may be
+    /// grow with every pass of a `cd` that may fail, and are checked in each.)
+    fn places(&self) -> String {
+        format!("{:?}{:?}{:?}{}", self.cwd, self.old, self.stack, self.unknown)
+    }
+
     fn lose(&mut self) {
         self.alts = self.cwd.as_deref().or(self.start.as_deref()).map(outermost_checkout).into_iter().collect();
         self.unknown = true;
@@ -334,6 +352,8 @@ impl Dirs {
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
     fn keep_made(&mut self, inner: &Dirs) {
         self.made |= inner.made;
+        self.trapped |= inner.trapped;
+        self.aliases.extend(inner.aliases.iter().cloned());
         self.dotgit |= inner.dotgit;
         self.unreadable |= inner.unreadable;
         self.git_env |= inner.git_env;
@@ -443,12 +463,26 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     dirs.funcs.iter_mut().zip(outer).for_each(|(f, r)| f.1 = r);
 }
 
+/// The loop keyword a command opens, after the words that may come before it (`{ for`, `then for`, `! while`).
+fn loop_word(c: &Cmd) -> Option<&str> {
+    let k = c.words.iter().zip(&c.quoted).position(|(w, &q)| (q && w != "always") || !matches!(w.as_str(), "!" | "{" | "then" | "do" | "else" | "if" | "elif" | "always" | "coproc" | "time" | "noglob" | "command" | "nocorrect" | "builtin"))?;
+    (!c.quoted[k]).then_some(c.words[k].as_str()).filter(|w| matches!(*w, "for" | "foreach" | "while" | "until" | "select" | "repeat"))
+}
+
 /// The commands `range` of `cmds` (the parse of `text`), run in order.
 fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
     let mut pending_dotgit = false;
+    let end = range.end;
+    let mut loops: Vec<(usize, usize)> = vec![];
+    let mut open_ended: Vec<usize> = vec![];
     for i in range {
+        // A loop with no `done` ends at any command after its start (a `}` or `end` the guard doesn't pair): its next pass starts
+        // where the shell is then, three passes in all.
+        if let Some(&start) = open_ended.first().filter(|&&s| s < i && !dirs.again) {
+            again(text, cmds, start, end, dirs, depth, out);
+        }
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
             let inner = std::mem::replace(dirs, saved.pop().unwrap().1);
@@ -461,6 +495,28 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         dirs.goes_on = cmds[i].piped || cmds[i].or || cmds[i].words.first().is_some_and(|w| w == "!");
         let all = &cmds[i].words;
         let family = |n: &str| matches!(base(n), "cd" | "chdir" | "pushd" | "popd");
+        // A loop's next pass starts where the last one ended: its body is checked once more when it ends.
+        while loops.last().is_some_and(|&(done, _)| done == i) {
+            let (done, start) = loops.pop().unwrap();
+            repeat(text, cmds, start..done, dirs, depth, out);
+        }
+        if let Some(kw) = loop_word(&cmds[i]) {
+            let mut open = 0;
+            let done = cmds[i..end].iter().position(|c| {
+                match (loop_word(c), c.words.first().map(String::as_str)) {
+                    (Some(_), _) => open += 1,
+                    (_, Some("done")) => open -= 1,
+                    _ => {}
+                }
+                open == 0
+            });
+            match done.filter(|&d| d > 0) {
+                // The condition of `while` and `until` runs after each pass too, and `repeat 2 cmd; …` has the body in its own command.
+                Some(d) => loops.push((i + d, if matches!(kw, "while" | "until" | "repeat") { i } else { i + 1 })),
+                // No `done` (`foreach … end`, `for d (1 2) { … }`, `repeat 2 { … }`): the rest is run once more.
+                None => open_ended.push(i),
+            }
+        }
         // A function named like one of them, however it is written (`function cd`, `{ cd() { … } }`, `f cd()`), a
         // `functions[cd]=…`, an `autoload cd`, or `disable`, anywhere in the command.
         let defines = (cmds[i].defines && all.iter().any(|n| family(n)))
@@ -508,6 +564,12 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
         pending_dotgit = names_dotgit(all, &cmds[i].targets);
         dirs.git_env |= mentions_git_env(all, &cmds[i].targets, &cmds[i].stdin);
+        // A here-document body may run commands (`$(…)`, backticks), whatever command reads it (a herestring's are parsed).
+        for t in substitutions(&cmds[i].stdin) {
+            let mut inner = dirs.clone();
+            changes(&t, &mut inner, depth + 1, out);
+            dirs.keep_made(&inner);
+        }
         // A function defined earlier runs where it is called, after any `cd` in between: each body of that name is checked
         // here (a name may be defined twice, and which took effect isn't followed). The words a wrapper or keyword skips
         // count too (`sudo() { … }; sudo true`). A body the guard doesn't hold (defined in text it has left, or not as a
@@ -539,7 +601,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     dirs.may_stay(before);
                 }
                 // A `trap f EXIT` doesn't call `f` now.
-                dirs.made |= !(all.first().is_some_and(|w| w == "trap") && makes_nothing(text, all, all, &cmds[i].live));
+                dirs.made |= !(all.first().is_some_and(|w| w == "trap") && makes_nothing(text, all, all, &cmds[i].live, true));
             }
         }
         let words = match unwrap(all, &mut false) {
@@ -600,8 +662,32 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             dirs.made = true;
             continue;
         }
+        // Braces or a glob in the command word (`pnpm{,} install`, `/bin/p*`): what runs is unknown.
+        if live.first().copied().unwrap_or(false) && !matches!(name.as_str(), "[" | "[[") {
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+            dirs.made = true;
+            continue;
+        }
         let (args, live) = (args, &live[1..]);
+        if base(name) == "alias" {
+            dirs.aliases.extend(args.iter().filter_map(|a| a.split_once('=').map(|(n, _)| n.to_string())));
+            // Any later word may be the alias (`g`, a global alias, one named `cd`): what runs after is unknown.
+            if !dirs.aliases.is_empty() {
+                dirs.lose();
+            }
+        }
         if base(name) == "trap" {
+            dirs.trapped |= !makes_nothing(text, all, words, live, true);
+            // A handler that runs early and changes folder moves the shell before each later command.
+            let handler = args.iter().find(|a| !a.starts_with('-') && !a.is_empty());
+            if !trap_defers(text, words, true) && handler.is_some_and(|h| h.replace(['\\', '"', '\''], "").split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| matches!(w, "cd" | "pushd" | "popd" | "chdir" | "ln" | "mv" | "cp" | "rsync" | "install" | "ditto")) || dirs.funcs.iter().any(|(f, _)| f == h)) {
+                dirs.lose();
+            }
+            // A handler that makes a link (`ln -s x backend`) at the end of a subshell: the folders the line names after it may be swapped.
+            if !trap_defers(text, words, true) && handler.is_some_and(|h| h.replace(['\\', '"', '\''], "").split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| matches!(w, "ln" | "mv" | "cp" | "rsync" | "install" | "ditto"))) {
+                dirs.unreadable = true;
+                dirs.moved = true;
+            }
             for h in args.iter().find(|a| !a.starts_with('-') && !a.is_empty()) {
                 if !dirs.traps.contains(h) {
                     dirs.traps.push(h.clone());
@@ -691,6 +777,8 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     }
                     // zsh's `cd -2`, `cd +1`: a folder of the stack, which the guard doesn't follow. After `--` it's a folder.
                     Some((d, _)) if stack_entry(d) && !after_dashes(args, i) => dirs.lose(),
+                    // `~+` is where the shell is, which the guard can't tell after it lost the folder or with a trap that moves it.
+                    Some((d, _)) if d.starts_with("~+") && (dirs.cwd.is_none() || dirs.trapped || !dirs.alts.is_empty()) => dirs.lose(),
                     // A variable or a substitution: the guard can't tell where the shell lands.
                     Some((d, _)) if expands(d) => dirs.lose(),
                     // A glob or braces: the shell may go to any folder it lists. The literal part of the path names
@@ -776,11 +864,22 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     inner.enter(&chdir);
                     changes(&t, &mut inner, depth + 1, out);
                     dirs.keep_made(&inner);
+                    // A trap of that shell runs when it ends, before what follows (`zsh -c "trap … EXIT"; cd backend; …`).
+                    if t.split_whitespace().any(|w| w == "trap") {
+                        dirs.lose();
+                    }
                     // A script from stdin the guard can't see (`curl … | sh`, `zsh /dev/stdin`) may end anywhere.
                     if t.trim().is_empty() {
                         dirs.lose();
                     }
                 }
+                dirs.made = true;
+                continue;
+            }
+            // An alias this line defined, called by name or named in the text `eval` runs (`eval 'true; g'`).
+            n if dirs.aliases.iter().any(|a| a == n) || (n == "eval" && !dirs.aliases.is_empty()) => {
+                // An alias this line defined: what it runs isn't followed.
+                out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
                 dirs.made = true;
                 continue;
             }
@@ -809,7 +908,12 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 // `cp` of this command makes (git checks its own).
                 let here = dirs.cwd.clone().map(real);
                 let swapped = name != "git" && folders.iter().any(|f| f.as_os_str() != UNKNOWN && dirs.swapped(&real(f.clone()), Some(real(f.clone())) != here));
-                if swapped {
+                // A folder that isn't there when the hook looks may be made by a trap handler that runs early (as for git).
+                let missing = name != "git" && !folders.is_empty() && dirs.trapped && dirs.cwd.clone().map(real).is_some_and(|cwd| {
+                    let start = dirs.start.clone().map(real);
+                    start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd, &dirs.storage) || start.is_some_and(|s| cwd.starts_with(s))) && !cwd.exists()
+                });
+                if swapped || missing {
                     folders.extend(unknown_in(dirs, None));
                 }
                 if dirs.unknown && !folders.is_empty() {
@@ -822,7 +926,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             }
         };
         // A definition runs nothing: its body does when called.
-        dirs.made |= defined.is_empty() && !makes_nothing(text, all, words, live);
+        dirs.made |= defined.is_empty() && !makes_nothing(text, all, words, live, true);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
     // A trap's handler runs in each folder the commands were in (the folder it ran in can be any of them), as a call to a
@@ -846,8 +950,39 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             }
         }
     }
+    if let Some(&start) = open_ended.first().filter(|_| !dirs.again) {
+        again(text, cmds, start, end, dirs, depth, out);
+    }
+    // A subshell still open where the range ends (a loop body cut at its `done`) ends there too.
+    while let Some((_, outer)) = saved.pop() {
+        let inner = std::mem::replace(dirs, outer);
+        dirs.keep_made(&inner);
+    }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
+}
+
+/// The commands `start..end` run again from `dirs` (a copy of it), as a loop with no `done` may.
+fn again(text: &str, cmds: &[Cmd], start: usize, end: usize, dirs: &Dirs, depth: usize, out: &mut Vec<Change>) {
+    let mut next = dirs.clone();
+    next.again = true;
+    repeat(text, cmds, start..end, &mut next, depth, out);
+}
+
+/// `range` run again and again, from where each pass ended, until the places the shell may be in stop changing; a loop that
+/// still moves after a few passes may be anywhere (it asks).
+fn repeat(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
+    let mut last = dirs.places();
+    for _ in 0..8 {
+        run(text, cmds, range.clone(), dirs, depth, out);
+        let now = dirs.places();
+        if now == last {
+            return;
+        }
+        last = now;
+    }
+    out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: "a loop".into() }));
+    dirs.lose();
 }
 
 /// The functions the command `i` defines (`f()`, `function f g`), each with the commands of its body when the guard holds
@@ -985,11 +1120,71 @@ fn reads_state(all: &[String]) -> (bool, bool) {
     (search, opaque)
 }
 
+/// The texts `$( … )` and `` ` … ` `` in `s` run (a here-document body), each as written between its brackets.
+fn substitutions(s: &str) -> Vec<String> {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] == '$' && c.get(i + 1) == Some(&'(') {
+            // To the end of the body: a `)` in a quote, a pattern or after a backslash can't end it early.
+            out.push(c[i + 2..].iter().collect());
+            i += 2;
+        } else if c[i] == '`' {
+            out.push(c[i + 1..].iter().collect());
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The text of each `name() { … }` body in `text`, to the `}` that balances its first `{` (or the end).
+fn function_bodies(text: &str) -> impl Iterator<Item = &str> {
+    text.match_indices("()").filter_map(move |(p, _)| {
+        let rest = &text[p + 2..];
+        let open = rest.find('{')?;
+        let mut depth = 0;
+        let end = rest[open..].char_indices().find_map(|(k, c)| {
+            depth += (c == '{') as i32 - (c == '}') as i32;
+            (depth == 0).then_some(open + k)
+        });
+        Some(&rest[open..end.unwrap_or(rest.len())])
+    })
+}
+
+/// Whether the `trap` in `words` runs its handler only when the shell ends, so that it can't change what a later command
+/// of the line does. At the end of the shell for EXIT or a signal that ends it; any other name (`DEBUG`, `ERR`, `ZERR`, a
+/// number) runs before the next command, and so does one in a subshell, a background job or a pipeline part (it fires
+/// when that part ends): a line with `(` (but a named function's `()`), `|` or any `&` that isn't `&&` (or follows a
+/// backslash) isn't read.
+fn trap_defers(text: &str, words: &[String], top: bool) -> bool {
+    let lone_and = text.match_indices('&').any(|(p, _)| !text[..p].ends_with('&') && !text[p + 1..].starts_with('&')) || text.contains("\\&");
+    // A `()` after a name defines a function; any other (`() cmd`, `function () cmd`) is an anonymous function that runs now.
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':');
+    let anonymous = text.match_indices("()").any(|(p, _)| {
+        let before = text[..p].trim_end_matches([' ', '\t']);
+        before.rsplit(|c: char| !name_char(c)).next().is_none_or(|n| n.is_empty() || n == "function") || !before.ends_with(name_char)
+    });
+    // Only EXIT of the shell the line runs in, not in a function, a subshell, another shell's `-c` (`top`) or with a `kill`: a signal
+    // handler runs when the signal comes, a function's or subshell's EXIT when it ends, and the line goes on.
+    !anonymous
+        && top
+        && !function_bodies(text).any(|b| b.contains("trap"))
+        && !text.split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "function" | "kill" | "pkill" | "killall"))
+        && !text.replace("()", "").contains(['(', '|'])
+        && !lone_and
+        && words.len() >= 3
+        && words[2..].iter().all(|w| w == "EXIT")
+        && !words.iter().any(|w| w.contains(['$', '`']))
+}
+
 /// Whether a command (`git -C dir fetch`, `git commit -m x`) can't make a folder, a link or a `.git`: git's own history
 /// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
 /// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
 /// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
-fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool]) -> bool {
+fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool], top: bool) -> bool {
     const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream", "--graph", "--name-only", "--force-with-lease", "-sb"];
     // Only a group's opening (`{ rm x`) may come before the command, not an assignment or a wrapper.
     let bare = all[..all.len() - words.len()].iter().all(|w| matches!(w.as_str(), "{" | "(" | "then" | "do" | "else"));
@@ -997,25 +1192,7 @@ fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool]) ->
     if matches!(words.first().map(String::as_str), Some("rm")) && bare && !live.iter().any(|&l| l) && !words.iter().any(|w| w.contains(['$', '`'])) {
         return true;
     }
-    // `trap` only sets what runs later: at the end of the shell for EXIT or a signal that ends it. Any other name (`DEBUG`,
-    // `ERR`, `ZERR`, a number) runs before the next command, and so does one in a subshell, a background job or a
-    // pipeline part (it fires when that part ends): a line with `(` (but a named function's `()`), `|` or any `&` that isn't `&&` (or follows a backslash) isn't read.
-    let lone_and = text.match_indices('&').any(|(p, _)| !text[..p].ends_with('&') && !text[p + 1..].starts_with('&')) || text.contains("\\&");
-    // A `()` after a name defines a function; any other (`() cmd`, `function () cmd`) is an anonymous function that runs now.
-    let anonymous = text.match_indices("()").any(|(p, _)| {
-        let name = text[..p].trim_end_matches([' ', '\t']).rsplit(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))).next().unwrap_or_default();
-        name.is_empty() || name == "function" || !text[..p].trim_end_matches([' ', '\t']).ends_with(|c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
-    });
-    if words.first().is_some_and(|w| w == "trap")
-        && bare
-        && !live.iter().any(|&l| l)
-        && !anonymous
-        && !text.replace("()", "").contains(['(', '|'])
-        && !lone_and
-        && words.len() >= 3
-        && words[2..].iter().all(|w| matches!(w.as_str(), "EXIT" | "INT" | "TERM" | "HUP" | "QUIT"))
-        && !words.iter().any(|w| w.contains(['$', '`']))
-    {
+    if words.first().is_some_and(|w| w == "trap") && bare && !live.iter().any(|&l| l) && trap_defers(text, words, top) {
         return true;
     }
     let [git, args @ ..] = words else { return false };
@@ -1545,7 +1722,9 @@ fn outermost_checkout(folder: &Path) -> PathBuf {
 /// quotes (`live`, from the lexer). The ones a git word has are expanded first (`expand_args`).
 /// A folder word with a variable, a command substitution or a backtick: where it goes is known only to the shell.
 fn expands(word: &str) -> bool {
-    word.contains(['$', '`'])
+    // `~user`, `~-`, `~1`, `~name`: another folder, which the guard can't tell (`~`, `~/x` and `~+` it can).
+    let other_tilde = word.starts_with('~') && !(word == "~" || word.starts_with("~/") || word == "~+" || word.starts_with("~+/"));
+    word.contains(['$', '`']) || other_tilde
 }
 
 /// `expands` for a folder option's value: `$HOME` and `${HOME}` at the start are the home folder, which the guard knows.
@@ -1653,6 +1832,8 @@ fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
         p if p == "~" || p.starts_with("~/") => format!("{}{}", home()?, &p[1..]),
         p if p.starts_with("$HOME") => format!("{}{}", home()?, &p[5..]),
         p if p.starts_with("${HOME}") => format!("{}{}", home()?, &p[7..]),
+        // `~-`, `~user`: another folder the guard can't tell.
+        p if p.starts_with('~') => return None,
         p => p.to_string(),
     };
     if path.contains(['$', '`']) {
@@ -1992,6 +2173,17 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             // `PATH=/bin xargs kill` finds the real kill.
             *bypass |= sets_path(w);
             i += 1;
+            // zsh's short `if [[ … ]] cmd`: the condition is not the command.
+            // The command follows the last `]]` (`[[ a ]] && [[ b ]] cmd`, a quoted `]]`, `if ! [[ … ]] cmd`).
+            let j = i + words[i..].iter().take_while(|c| *c == "!").count();
+            if matches!(w.as_str(), "if" | "elif" | "while" | "until") && words.get(j).is_some_and(|c| c == "[[") {
+                i = words[j..].iter().rposition(|c| c == "]]").map_or(words.len(), |e| j + e + 1);
+            }
+            continue;
+        }
+        // `[[ a ]] cmd` after `&&`: the condition of zsh's short `if`, not the command.
+        if w == "[[" && words[i..].iter().rposition(|c| c == "]]").is_some_and(|e| i + e + 1 < words.len()) {
+            i += words[i..].iter().rposition(|c| c == "]]").unwrap_or_default() + 1;
             continue;
         }
         if w == "function" {
@@ -2020,7 +2212,7 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             "arch" => &["-arch", "-e", "-d"],
             "watch" => &["-n", "--interval"],
             "script" => &["-t", "-T", "-E", "-I", "-O", "-B"],
-            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" | "noglob" | "nocorrect" | "-" => &[],
+            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" | "noglob" | "nocorrect" | "coproc" | "-" => &[],
             _ => return Run::Words(rest(i)),
         };
         *bypass |= matches!(name, "sudo" | "doas" | "command" | "builtin");
@@ -2215,6 +2407,8 @@ impl Level {
                 cmd.stdin += &word;
                 cmd.stdin.push('\n');
             }
+            // A quoted `]]` or `[[` isn't one that ends or opens a condition.
+            None if quoted && matches!(word.as_str(), "]]" | "[[") => self.command_word(p, id, format!("\\{word}"), live, quoted),
             None => self.command_word(p, id, word, live, quoted),
         }
     }
@@ -2361,6 +2555,21 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
         let next = c.get(i + 1).copied();
         i += 1;
         let opens_array = ch == '(' && l.in_word && l.word.ends_with('=') && assignment(&l.word).is_some();
+        // `(` inside a word (`bin/(pnpm|zzz)`, `pnpm(.)`) is a zsh glob, kept in the word up to its `)`; `f()` is a function.
+        if ch == '(' && l.in_word && array == 0 && !opens_array && next != Some(')') && l.frame().pattern != Some(true) && !l.word.ends_with(['$', '=', '<', '>']) {
+            let mut open = 1;
+            l.word.push(ch);
+            while let Some(&n) = c.get(i) {
+                i += 1;
+                l.word.push(n);
+                open += (n == '(') as i32 - (n == ')') as i32;
+                if open == 0 {
+                    break;
+                }
+            }
+            l.live = true;
+            continue;
+        }
         // A `#` that starts an element comments out the rest of the line.
         if array > 0 && ch == '#' && i >= 2 && matches!(c[i - 2], ' ' | '\t' | '\n' | '(') {
             while c.get(i).is_some_and(|&n| n != '\n') {
@@ -2460,6 +2669,16 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     l.word.push(n);
                     if n == '}' {
                         break;
+                    }
+                    // `${$(cmd)}` runs cmd.
+                    if n == '$' && c.get(i) == Some(&'(') {
+                        l.cmd(p);
+                        i = lex(p, c, i + 1, Some(')'));
+                    }
+                    // `${x:-`cmd`}` too.
+                    if n == '`' {
+                        l.cmd(p);
+                        i = lex(p, c, i, Some('`'));
                     }
                 }
             }
@@ -3504,6 +3723,101 @@ mod tests {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
         for cmd in ["bashdb x; cargo test", "dashboard; cargo test", "zsh_prompt_test; cargo test", "ssh host ls", "source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test", "./build.sh; cargo test", "scripts/test.sh; cargo test", "hash -r; cargo test", "rehash; cargo test", "trash x; cargo test", "BASH -c 'cd backend; cargo test'", "[ -f ./env.sh ] && source ./env.sh; pnpm install", "[[ -f ./env.sh ]] && . ./env.sh; cat ./env.sh; pnpm install"] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn loops_heredocs_traps_and_other_forms_it_misread_ask() {
+        let u = USER;
+        let cases: Vec<String> = vec![
+            format!("for d in 1 2; do pnpm install; cd {u}; done"),
+            format!("while true; do pnpm install; cd {u}; done"),
+            format!("cd ~gustavo/dev/loft; pnpm install"),
+            format!("git -C ~gustavo/dev/loft reset --hard"),
+            format!("cd {u}; cd {CLONE}; cd ~-; pnpm install"),
+            format!("pushd {u}; git -C ~1 reset --hard"),
+            format!("hash -d x={u}; git -C ~x reset --hard"),
+            format!("foreach d (1 2)\npnpm install\ncd {u}\nend"),
+            format!("for d (1 2) {{ pnpm install; cd {u} }}"),
+            format!("repeat 2 {{ pnpm install; cd {u} }}"),
+            format!("repeat 2 {{ pnpm install; cd {u} }}; cd {CLONE}"),
+            format!("foreach d (1 2)\npnpm install\ncd {u}\nend; cd {CLONE}"),
+            format!("(for d (1 2) {{ pnpm install; cd {u} }}); cd {CLONE}"),
+            format!("while [[ -n x ]] {{ pnpm install; cd {u} }}; cd {CLONE}"),
+            format!("if for d (1 2) {{ pnpm install; cd {u} }}; then :; fi; cd {CLONE}"),
+            format!("always {{ for d in 1 2; do pnpm install; cd {u}; done }}; cd {CLONE}"),
+            format!("coproc {{ for d in 1 2; do pnpm install; cd {u}; done }}; cd {CLONE}"),
+            format!("cd {u}; echo ${{x:-`pnpm install`}}"),
+            format!("cd {u}; if [[ -n 1 ]] git commit -am ']]'"),
+            format!("alias -s t-x='cd {u}'; eval ./a.t-x; pnpm install"),
+            format!("alias -g -- --x='cd {u}'; echo --x; pnpm install"),
+            format!("(trap 'rm -rf src; ln -s {u} src' EXIT); cd src; pnpm install"),
+            format!("{{ for d in 1 2; do pnpm install; cd {u}; done; }}"),
+            format!("if true; then for d in 1 2; do pnpm install; cd {u}; done; fi"),
+            format!("for a in 1; do for b in 2; do :; done; pnpm install; cd {u}; done"),
+            format!("while pnpm install; do cd {u}; done"),
+            format!("command for d in 1 2; do pnpm install; cd {u}; done"),
+            format!("cat <<EOF\n${{x:-`cd {u}; pnpm install`}}\nEOF"),
+            format!("(trap 'ln -s {u} backend' EXIT); pnpm -C backend install"),
+            format!("(trap 'ln -s {u} backend' EXIT); cargo build --manifest-path backend/Cargo.toml"),
+            format!("trap 'c\\d {u}' DEBUG; pnpm install"),
+            format!("trap 'c\"\"d {u}' DEBUG; pnpm install"),
+            format!("trap \"c''d {u}\" DEBUG; pnpm install"),
+            format!("time for d in 1 2; do pnpm install; cd {u}; done"),
+            format!("noglob for d in 1 2; do pnpm install; cd {u}; done"),
+            format!("cd $X; cd ~+; pnpm install"),
+            format!("trap 'cd {u}' DEBUG; cd ~+; pnpm install"),
+            format!("cd {u}; cd {CLONE}; cd $X; cd ~+; pnpm install"),
+            format!("cat <<EOF\n$(echo ')'; cd {u}; pnpm install)\nEOF"),
+            format!("cat <<EOF\n$(case x in x) cd {u};; esac; pnpm install)\nEOF"),
+            format!("cat <<EOF\n`echo \\`x\\`; cd {u}; pnpm install`\nEOF"),
+            format!("cd {u}; if [[ \"]]\" == x ]] pnpm install"),
+            format!("cd {u}; if [[ a ]] && [[ b ]] pnpm install"),
+            format!("cd {u}; if ! [[ a ]] pnpm install"),
+            format!("alias g='cd {u}; pnpm install'; eval 'true; g'"),
+            format!("alias g='cd {u}'; g; pnpm install"),
+            format!("alias -g G='cd {u}'; echo G; pnpm install"),
+            format!("alias -s t-x='cd {u}; pnpm install #'; cd {CLONE}; eval ./a.t-x"),
+            format!("alias -g -- --hard='cd {u}'; eval 'git status --hard'"),
+            "for i in 1 2 3 4 5 6 7; do pnpm install; cd ..; [[ -d dev ]] && cd dev/loft; done".to_string(),
+            format!("mkdir -p a; ln -s {u} a/a; for i in 1 2 3; do pnpm install; cd a; done"),
+            format!("alias cd='cd {u}; cd'; cd x; pnpm install"),
+            format!("trap 'cd {u}' INT; kill -INT $$; pnpm install"),
+            format!("trap 'cd {u}' TERM; kill $$; pnpm install"),
+            format!("f() {{ trap 'cd {u}' EXIT; }}; f; pnpm install"),
+            format!("zsh -c \"trap 'cd {u}' EXIT\"; pnpm install"),
+            format!("zsh -c \"trap 'cd {u}' EXIT\"; cd backend; pnpm install"),
+            format!("cd {u}; /opt/homebrew/bin/(pnpm|zzz) install"),
+            format!("cd {u}; pnpm(.) install"),
+            format!("cd {u}; if [[ -n 1 ]] pnpm install"),
+            format!("cat <<EOF\n$(cd {u}; pnpm install)\nEOF"),
+            format!("cd {u}; echo ${{$(pnpm install)}}"),
+            format!("cd {u}; coproc pnpm install"),
+            format!("cd {u}; pnpm{{,}} install"),
+            format!("trap 'pnpm install' EXIT; cd {u}"),
+            format!("alias g='cd {u}; pnpm install'; eval g"),
+            format!("trap 'cd {u}' DEBUG; pnpm install"),
+            format!("trap 'cd {u}' DEBUG; git add -A"),
+            format!("trap 'cd {u}' ZERR; git log nope; git add -A"),
+            format!("trap 'cd {u}' SIGZERR; git log nope; git add -A"),
+            format!("trap 'cd {u}' SIGERR; git log nope; git add -A"),
+            format!("trap 'cd {u}' 32; git log nope; git add -A"),
+            format!("trap 'cd {u}' 33; git add -A"),
+            format!("rm -rf ~+/src; (trap 'ln -s {u} src' EXIT); cd src; git add -A"),
+            format!("rm -f x <<EOF\n$(ln -s {u} backend)\nEOF\ncd backend; git add -A"),
+            format!("git status <<EOF\n$(ln -s {u} backend)\nEOF\ncd backend; git add -A"),
+            format!("trap : EXIT <<EOF\n$(ln -s {u} backend)\nEOF\ncd backend; git add -A"),
+            format!("(trap 'ln -s {u} backend' EXIT); cd backend; pnpm install"),
+        ];
+        let mut bad = vec![];
+        for cmd in &cases {
+            if asks_all(cmd, CLONE).is_empty() {
+                bad.push(cmd.clone());
+            }
+        }
+        assert!(bad.is_empty(), "should ask:\n{}", bad.join("\n"));
+        for cmd in ["for d in a b; do (cd x && cargo test); done", "cat <<EOF\nhello $(date)\nEOF", "trap 'rm -f tmp' EXIT; cargo test"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
     }
