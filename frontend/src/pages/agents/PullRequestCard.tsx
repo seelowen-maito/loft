@@ -9,11 +9,11 @@ import { ActionButton } from "../../components/ActionButton";
 import { Callout } from "../../components/Callout";
 import { relTime } from "../../lib/time";
 import { verdicts } from "../../lib/verdicts";
+import { mergeability, type MergeIcon, type Tone } from "../../lib/mergeability";
 import { useAction } from "../../lib/useAction";
 
 const METHOD_LABEL: Record<string, string> = { squash: "Squash and merge", merge: "Create merge commit", rebase: "Rebase and merge" };
 
-type Tone = "good" | "warn" | "bad" | "muted" | "merged";
 const TONE: Record<Tone, string> = {
   good: "text-good",
   warn: "text-warn",
@@ -22,37 +22,17 @@ const TONE: Record<Tone, string> = {
   merged: "text-merged",
 };
 
-/** What the merge box says, in GitHub's own terms; `after` is the open PR this one is stacked on. */
-export function mergeability(pr: PullRequest, after?: number | null): { tone: Tone; icon: React.ReactNode; label: string; detail?: string; canMerge: boolean } {
-  if (pr.state === "merged")
-    return {
-      tone: "merged",
-      icon: <GitMerge className="size-4" />,
-      label: "Merged",
-      detail: [pr.merged_by && `by ${pr.merged_by}`, pr.merged_at && relTime(pr.merged_at)].filter(Boolean).join(" · "),
-      canMerge: false,
-    };
-  if (pr.state === "closed")
-    return { tone: "bad", icon: <GitPullRequestClosed className="size-4" />, label: "Closed without merging", canMerge: false };
-  if (pr.draft)
-    return { tone: "muted", icon: <GitPullRequestDraft className="size-4" />, label: "Draft", detail: "Mark it ready for review on GitHub before merging.", canMerge: false };
-  if (pr.mergeable === false || pr.mergeable_state === "dirty")
-    return { tone: "bad", icon: <AlertTriangle className="size-4" />, label: "Has merge conflicts", detail: `Conflicts with ${pr.base_ref || "the base branch"} must be resolved first.`, canMerge: false };
-  if (pr.mergeable === null || pr.mergeable_state === "unknown" || pr.mergeable_state === "")
-    return { tone: "muted", icon: <Loader2 className="size-4 animate-spin" />, label: "Checking mergeability…", canMerge: false };
-  if (after)
-    return { tone: "muted", icon: <GitPullRequest className="size-4" />, label: `After #${after}`, detail: `Stacked on #${after}: merge that one first.`, canMerge: false };
-  switch (pr.mergeable_state) {
-    case "blocked":
-      return { tone: "warn", icon: <ShieldAlert className="size-4" />, label: "Blocked by branch protection", detail: "Required reviews or checks haven't passed yet.", canMerge: true };
-    case "behind":
-      return { tone: "warn", icon: <AlertTriangle className="size-4" />, label: "Branch is behind base", detail: `No conflicts, but ${pr.head_ref} is behind ${pr.base_ref}.`, canMerge: true };
-    case "unstable":
-      return { tone: "warn", icon: <AlertTriangle className="size-4" />, label: "No conflicts, but some checks failed", canMerge: true };
-    default:
-      return { tone: "good", icon: <Check className="size-4" />, label: "Ready to merge", detail: "No conflicts with the base branch.", canMerge: true };
-  }
-}
+const ICON: Record<MergeIcon, React.ReactNode> = {
+  merged: <GitMerge className="size-4" />,
+  closed: <GitPullRequestClosed className="size-4" />,
+  draft: <GitPullRequestDraft className="size-4" />,
+  conflict: <AlertTriangle className="size-4" />,
+  checking: <Loader2 className="size-4 animate-spin" />,
+  stacked: <GitPullRequest className="size-4" />,
+  blocked: <ShieldAlert className="size-4" />,
+  warn: <AlertTriangle className="size-4" />,
+  ready: <Check className="size-4" />,
+};
 
 export function Checks({ checks }: { checks: PullRequest["checks"] }) {
   if (!checks || !checks.total) return null;
@@ -181,8 +161,8 @@ export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number
 
       {/* merge box */}
       <div className="flex flex-wrap items-center gap-3 border-t border-line bg-ink-950/50 px-4 py-3">
-        <div className={cx("flex min-w-0 flex-1 items-start gap-2", TONE[m.tone])}>
-          <span className="mt-px">{m.icon}</span>
+        <div className={cx("flex min-w-0 flex-1 basis-48 items-start gap-2", TONE[m.tone])}>
+          <span className="mt-px">{ICON[m.icon]}</span>
           <div className="min-w-0">
             <div className="text-[13px]">{m.label}</div>
             {m.detail && <div className="text-[11.5px] text-fg-3">{m.detail}</div>}
@@ -216,10 +196,10 @@ export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number
             </ActionButton>
           </div>
         ) : (
-          <div className="flex items-center">
+          <div className="flex min-w-0 max-w-full items-center">
             {methods.length > 1 && (
               <select
-                className="h-[30px] rounded-l-full border border-r-0 border-line-strong bg-ink-800 pl-3 pr-1 text-[12px] text-fg-2 outline-none disabled:opacity-40"
+                className="h-[30px] min-w-0 rounded-l-full border border-r-0 border-line-strong bg-ink-800 pl-3 pr-1 text-[12px] text-fg-2 outline-none disabled:opacity-40"
                 value={method}
                 onChange={(e) => setMethod(e.target.value)}
                 disabled={!m.canMerge}
@@ -232,7 +212,7 @@ export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number
             )}
             <button
               className={cx(
-                "inline-flex h-[30px] items-center gap-1.5 bg-accent px-3.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3",
+                "inline-flex h-[30px] shrink-0 items-center gap-1.5 bg-accent px-3.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3",
                 methods.length > 1 ? "rounded-r-full" : "rounded-full",
               )}
               onClick={() => setConfirming(true)}

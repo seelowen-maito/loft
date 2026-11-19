@@ -2,10 +2,11 @@ import { createContext, useContext, useMemo, useState } from "react";
 import { ChevronRight, GitMerge, GitPullRequest } from "lucide-react";
 import { api, type PullRequest } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { mergeOrder, namedPrs, type MergeRow } from "../../lib/prRefs";
+import { mergeOrder, namedPrs, refLabel, type MergeRow } from "../../lib/prRefs";
+import { isOpen, mergeability } from "../../lib/mergeability";
 import { useAction } from "../../lib/useAction";
 import { ActionButton } from "../../components/ActionButton";
-import { Checks, PullRequestCard, StateBadge, Verdicts, mergeability, useCatchUp } from "./PullRequestCard";
+import { Checks, PullRequestCard, StateBadge, Verdicts, useCatchUp } from "./PullRequestCard";
 
 /** Every tracked pull request, live, for the messages that name them. */
 export const PrsContext = createContext<PullRequest[]>([]);
@@ -14,11 +15,11 @@ export const PrsContext = createContext<PullRequest[]>([]);
 export function MessagePrs({ text, project, className }: { text: string; project: string; className?: string }) {
   const all = useContext(PrsContext);
   const prs = useMemo(() => namedPrs(text, project.trim(), all), [text, project, all]);
-  return prs.length ? <div className={className}><TaggedPrs prs={prs} /></div> : null;
+  return prs.length ? <div className={className}><TaggedPrs prs={prs} project={project.trim()} /></div> : null;
 }
 
 /** The pull requests a message names: one PR's full card, or several as one merge-order card. */
-export function TaggedPrs({ prs }: { prs: PullRequest[] }) {
+export function TaggedPrs({ prs, project }: { prs: PullRequest[]; project: string }) {
   if (!prs.length) return null;
   if (prs.length === 1) return <PullRequestCard pr={prs[0]} />;
   return (
@@ -28,14 +29,14 @@ export function TaggedPrs({ prs }: { prs: PullRequest[] }) {
         <span className="font-mono text-[11px] font-normal text-fg-3">{prs.length}</span>
       </div>
       <div className="divide-y divide-line border-t border-line">
-        {mergeOrder(prs).map((r) => <Row key={r.pr.id} row={r} />)}
+        {mergeOrder(prs).map((r) => <Row key={r.pr.id} row={r} label={refLabel(r.pr, prs, project)} />)}
       </div>
     </div>
   );
 }
 
 /** One PR of the merge order: number, title, status and Merge; it opens to the full card. */
-function Row({ row: { pr, after } }: { row: MergeRow }) {
+function Row({ row: { pr, after }, label }: { row: MergeRow; label: string }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const merging = useAction();
@@ -55,18 +56,18 @@ function Row({ row: { pr, after } }: { row: MergeRow }) {
           className="flex w-full min-w-0 items-center gap-2 text-left"
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
-          aria-label={`${open ? "Hide" : "Show"} pull request #${pr.number}`}
+          aria-label={`${open ? "Hide" : "Show"} pull request ${label}`}
         >
           <ChevronRight className={cx("size-3.5 shrink-0 text-fg-3 transition", open && "rotate-90")} />
           <span className="shrink-0"><StateBadge pr={pr} /></span>
-          <span className="shrink-0 font-mono text-[11px] text-fg-3">#{pr.number}</span>
+          <span className="shrink-0 font-mono text-[11px] text-fg-3">{label}</span>
           <span className="min-w-0 truncate text-[13px]">{pr.title || `Pull request #${pr.number}`}</span>
         </button>
         <div className="mt-1.5 flex flex-wrap items-center gap-2.5 pl-[22px]">
           {after && <span className="font-mono text-[11px] text-fg-3">after #{after}</span>}
-          {pr.state === "open" && <Checks checks={pr.checks} />}
-          {pr.state === "open" && <Verdicts labels={pr.labels} />}
-          {pr.state === "open" && (confirming ? (
+          {isOpen(pr) && <Checks checks={pr.checks} />}
+          {isOpen(pr) && <Verdicts labels={pr.labels} />}
+          {isOpen(pr) && (confirming ? (
             <span className="ml-auto flex items-center gap-1.5">
               <button className="btn-ghost" onClick={() => setConfirming(false)} disabled={merging.busy}>Cancel</button>
               <ActionButton
@@ -75,6 +76,7 @@ function Row({ row: { pr, after } }: { row: MergeRow }) {
                 onClick={merge}
                 pending={merging.busy}
                 pendingLabel="Merging…"
+                aria-label={`Confirm ${method} of ${label}`}
                 icon={<GitMerge className="size-3.5" />}
               >
                 Confirm {method}
@@ -86,6 +88,7 @@ function Row({ row: { pr, after } }: { row: MergeRow }) {
               onClick={() => setConfirming(true)}
               disabled={!m.canMerge}
               title={m.canMerge ? undefined : m.label}
+              aria-label={`Merge ${label}`}
             >
               <GitMerge className="size-3.5" /> Merge
             </button>

@@ -1,4 +1,5 @@
 import type { PullRequest } from "./api";
+import { isOpen } from "./mergeability.ts";
 
 /** A pull request a message names: by `#N`, `owner/repo#N` or its GitHub link. */
 type Ref = { slug: string | null; number: number };
@@ -43,10 +44,16 @@ export type MergeRow = { pr: PullRequest; after: number | null };
  * A PR whose base branch is another listed open PR's head is stacked on it and waits for it.
  */
 export function mergeOrder(prs: PullRequest[]): MergeRow[] {
-  const open = (p: PullRequest) => p.state === "open" || p.state === "";
   const rows = prs.map((pr) => {
-    const base = open(pr) ? prs.find((o) => o !== pr && open(o) && o.slug === pr.slug && !!o.head_ref && o.head_ref === pr.base_ref) : undefined;
+    const base = isOpen(pr) ? prs.find((o) => o !== pr && isOpen(o) && o.slug === pr.slug && !!o.head_ref && o.head_ref === pr.base_ref) : undefined;
     return { pr, after: base?.number ?? null };
   });
-  return [...rows.filter((r) => open(r.pr)), ...rows.filter((r) => !open(r.pr))];
+  return [...rows.filter((r) => isOpen(r.pr)), ...rows.filter((r) => !isOpen(r.pr))];
+}
+
+/** How a row names its PR: `#N` in the agent's project (or, without one, the first named PR's repo), else `owner/repo#N`. */
+export function refLabel(pr: PullRequest, prs: PullRequest[], project: string): string {
+  const repo = (p: PullRequest) => p.slug.split("/").pop() ?? "";
+  const home = project || (prs[0] ? repo(prs[0]) : "");
+  return repo(pr) === home ? `#${pr.number}` : `${pr.slug}#${pr.number}`;
 }
