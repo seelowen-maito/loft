@@ -445,27 +445,19 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             || all.iter().any(|w| w.strip_prefix("functions+=(").is_some_and(|r| r.trim_end_matches(')').split_whitespace().any(family)))
             || (all.iter().any(|w| w == "autoload") && all.iter().any(|n| family(n)));
         dirs.shadowed |= defines || all.iter().any(|w| w == "disable");
-        dirs.cd_search |= sets_cd_search(all);
-        // `functions` written any way but the literal `functions[name]='text'` (`functions+=(…)`, `functions[f]+=…`, `set -A
-        // functions …`, `${functions[cd]::=:}`, `functions -c f cd`): a `cd` may be shadowed and a body is unread.
-        if all.iter().any(|w| {
-            let w = w.trim_start_matches('$').trim_start_matches('{');
-            w.strip_prefix("functions").is_some_and(|r| r.is_empty() || r.starts_with(['+', '=', ':', '}', '(']) || (r.starts_with('[') && !r.split_once("]=").is_some_and(|(_, b)| !b.starts_with('='))))
-        }) {
+        let (search, opaque) = reads_state(all);
+        dirs.cd_search |= search;
+        // Something the guard can't read changes `cd` or `functions` (a name built by an expansion, `functions+=(…)`,
+        // `${functions[cd]::=:}`): a `cd` may be shadowed and a body may run anything, so it asks outright.
+        if opaque {
+            dirs.cd_search = true;
             dirs.shadowed = true;
             dirs.lose();
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
         }
-        // The text a `functions[f]='...'` gives is a body: it runs when `f` is called, or on its own (`TRAPDEBUG`), so it
-        // is read here as a command that may run.
-        let mut bodies: Vec<String> = all.iter().filter_map(|w| w.strip_prefix("functions[").and_then(|r| r.split_once(']')).and_then(|(_, b)| b.strip_prefix("+=").or_else(|| b.strip_prefix('='))).map(str::to_string)).collect();
-        // `functions+=(f 'body')`, `functions+=([f]='body')`.
-        for w in all.iter().filter_map(|w| w.strip_prefix("functions+=(").or_else(|| w.strip_prefix("functions=("))) {
-            // The lexer has dropped the quotes, so the element a body starts at isn't known: read each tail.
-            for c in parse(w.trim_end_matches(')')) {
-                bodies.extend((0..c.words.len()).map(|k| c.words[k..].join(" ").replacen("]=", " ", 1)));
-            }
-        }
-        for body in bodies.iter().filter(|b| !b.is_empty() && !b.starts_with('=')) {
+        // The text a literal `functions[f]='...'` gives is a body: it runs when `f` is called, or on its own (`TRAPDEBUG`),
+        // so it is read here as a command that may run.
+        for body in all.iter().filter_map(|w| w.strip_prefix("functions[").and_then(|r| r.split_once("]=")).map(|(_, b)| b)).filter(|b| !b.is_empty() && !b.starts_with('=')) {
             let before: Vec<PathBuf> = dirs.alts.iter().cloned().chain(dirs.cwd.clone()).collect();
             dirs.flush(usize::MAX);
             changes(body, dirs, depth + 1, out);
@@ -517,7 +509,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             continue;
         }
         let (args, live) = (args, &live[1..]);
-        let name = base(name);
+        // zsh's `=zsh` is the path of `zsh`.
+        let name = base(name.trim_start_matches('='));
         let chdir = env_chdir(&all[..all.len() - words.len()]);
         // GNU coreutils under their Homebrew names (`gmv`, `gln`, `gcp`).
         let tool = name.strip_prefix('g').filter(|n| matches!(*n, "ln" | "mv" | "cp" | "rm" | "install")).unwrap_or(name);
@@ -581,7 +574,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                         dirs.alts.clear();
                         dirs.cd(dirs::home_dir());
                     }
-                    Some((d, _)) if d != "-" && (two_words || dirs.cd_search) => dirs.lose(),
+                    Some((d, _)) if (d != "-" && two_words) || dirs.cd_search || dirs.shadowed => dirs.lose(),
                     Some(("-", _)) => {
                         // After a failed `cd` or a `popd` the folder `cd -` goes to may be any the command left.
                         let keep = !dirs.alts.is_empty() || dirs.popped;
@@ -656,7 +649,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 let left = dirs.left.clone();
                 dirs.popped = true;
                 match dirs.stack.pop() {
-                    _ if !plain => dirs.lose(),
+                    _ if !plain || dirs.cd_search || dirs.shadowed => dirs.lose(),
                     // The folder pushed was one the guard lost.
                     Some(None) => dirs.lose(),
                     Some(to) => {
@@ -728,38 +721,58 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     dirs.dotgit |= pending_dotgit;
 }
 
-/// Whether a command (`git -C dir fetch`, `git commit -m x`) can't make a folder, a link or a `.git`: git's own history
-/// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
-/// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
-/// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
-/// Whether a command makes a later `cd x` land somewhere else than `x`: it mentions `CDPATH`, `cdablevars` or `auto_cd`
-/// (zsh ignores case and `_` in option names; `no` before the name turns it off, so `unsetopt nocdablevars` counts), or
-/// it sets options or variables the guard can't read: `setopt -T`, `-m`, an expansion or brace in an option name, a
-/// variable named by an expansion (`export $K=x`, `read $K`).
 fn mentions_cd_search(text: &str) -> bool {
     let plain: String = text.chars().filter(|c| !matches!(c, '_' | '-')).collect::<String>().to_lowercase();
     ["cdpath", "cdablevars", "autocd"].iter().any(|n| plain.contains(n))
 }
 
-fn sets_cd_search(all: &[String]) -> bool {
-    if all.iter().any(|w| mentions_cd_search(w)) {
-        return true;
+/// What a command does to how a later `cd` resolves, read by its shape: `(search, opaque)`. `search`: it mentions `CDPATH`,
+/// `cdablevars` or `auto_cd`, or it sets options the guard doesn't know to be harmless (`set -T`, `setopt -m`, a shell run
+/// with an option beyond `-c -l -e -u -x -f -i -s`, a name with an expansion). `opaque`: it writes `functions` or
+/// `options` in a way the guard can't read, or sets a variable whose name an expansion builds (it may be `functions`).
+fn reads_state(all: &[String]) -> (bool, bool) {
+    const WRAPPERS: &[&str] = &["env", "command", "builtin", "noglob", "nocorrect", "time", "exec", "!"];
+    let literal = |w: &str| !w.contains(['$', '`', '{', '}', '*', '?', '[', '(', '<', '=']);
+    let name_expands = |w: &String| w.split('=').next().unwrap_or_default().contains(['$', '`', '{', '*', '?', '[']);
+    let (mut search, mut opaque) = (all.iter().any(|w| mentions_cd_search(w)), false);
+    for (i, w) in all.iter().enumerate() {
+        let quoted_start = w.trim_start_matches(['$', '{', '"', '\'']);
+        // `options[…]`, `functions[…]` in any word but a literal `functions[name]=text`, and the array forms.
+        let literal_function = w.strip_prefix("functions[").and_then(|r| r.split_once("]=")).is_some_and(|(_, b)| !b.starts_with('='));
+        opaque |= (w.contains("options[") || w.contains("functions[")) && !literal_function;
+        opaque |= ["options+=", "options=", "functions+=", "functions="].iter().any(|n| quoted_start.starts_with(n));
+        // `${name=…}`, `${name:=…}`, `${name::=…}` with a name that isn't a plain one.
+        for part in w.split("${").skip(1) {
+            let body = part.split('}').next().unwrap_or_default();
+            opaque |= body.find('=').is_some_and(|p| !body[..p].trim_end_matches(':').chars().all(|c| c.is_alphanumeric() || c == '_'));
+        }
+        // `functions` as the command (`functions -c f cd`) or the array being set (`set -A functions cd :`), not an argument.
+        let at_command = all[..i].iter().all(|b| assignment(b).is_some() || WRAPPERS.contains(&b.as_str()) || b.starts_with('-'));
+        opaque |= w == "functions" && (at_command || (i > 0 && all[i - 1] == "-A"));
+        if !at_command {
+            continue;
+        }
+        let args = &all[i + 1..];
+        match base(w.trim_start_matches('=')) {
+            // Every option word is made of known letters and every other word is literal.
+            "set" | "setopt" | "unsetopt" | "emulate" | "shopt" => {
+                search |= args.iter().any(|a| !literal(a) || (a.starts_with(['-', '+']) && (a.len() < 2 || !a[1..].chars().all(|c| "eufxovn".contains(c)))));
+                opaque |= base(w) == "set" && args.iter().any(|a| a == "-A") && args.iter().any(name_expands);
+            }
+            "zsh" | "bash" | "sh" | "ksh" | "dash" => search |= args.iter().any(|a| a.starts_with(['-', '+']) && !matches!(a.as_str(), "-c" | "-l" | "-e" | "-u" | "-x" | "-f" | "-i" | "-s")),
+            "export" | "typeset" | "declare" | "local" | "readonly" | "read" | "integer" | "float" | ":" => opaque |= args.iter().any(name_expands),
+            "printf" | "print" => opaque |= args.iter().any(|a| a == "-v") && args.iter().any(name_expands),
+            "zstyle" => opaque |= args.iter().any(|a| a.contains(['$', '`'])),
+            _ => {}
+        }
     }
-    let expands = |w: &str| w.split('=').next().unwrap_or_default().contains(['$', '`', '{', '*', '?', '[']);
-    let Some(at) = all.iter().position(|w| matches!(w.as_str(), "setopt" | "unsetopt" | "set" | "emulate" | "zsh" | "sh" | "bash" | "export" | "typeset" | "declare" | "local" | "readonly" | "read" | "printf" | ":" | "integer" | "float")) else {
-        return false;
-    };
-    let args = &all[at + 1..];
-    let option_command = matches!(all[at].as_str(), "setopt" | "unsetopt" | "set" | "emulate" | "zsh");
-    args.iter().any(|w| {
-        let bundle = w.len() > 1 && w.starts_with(['-', '+']) && !w.starts_with("--") && w[1..].chars().all(|c| c.is_ascii_alphabetic());
-        (option_command && ((bundle && w.contains(['T', 'J', 'm'])) || (matches!(all[at].as_str(), "setopt" | "unsetopt" | "emulate") && expands(w))))
-            || (matches!(all[at].as_str(), "export" | "typeset" | "declare" | "local" | "readonly" | "read" | ":" | "integer" | "float") && expands(w))
-            || (all[at] == "printf" && args.iter().any(|a| a == "-v") && expands(w))
-            || (all[at] == "set" && args.iter().any(|a| a == "-A") && expands(w))
-    })
+    (search, opaque)
 }
 
+/// Whether a command (`git -C dir fetch`, `git commit -m x`) can't make a folder, a link or a `.git`: git's own history
+/// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
+/// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
+/// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
 fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
     const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream", "--graph", "--name-only", "--force-with-lease", "-sb"];
     let [git, args @ ..] = words else { return false };
@@ -2809,6 +2822,45 @@ mod tests {
             format!("functions[f]='git -C {u} reset --hard'; f"),
             format!("functions[cd]='git -C {u} reset --hard'; cd"),
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
+            format!("set -9T; x={u}; cd x; pnpm install"),
+            format!("setopt -T1; x={u}; cd x; pnpm install"),
+            format!("zsh -T9 -c 'x={u}; cd x; pnpm install'"),
+            format!("F=T; set -$F; x={u}; cd x; pnpm install"),
+            format!("set -${{:-T}}; x={u}; cd x; pnpm install"),
+            format!("F=-T; set $F; x={u}; cd x; pnpm install"),
+            format!("set -{{T,e}}; x={u}; cd x; pnpm install"),
+            format!("O=ablevars; set -o cd$O; x={u}; cd x; pnpm install"),
+            format!("set -o cd{{able,}}vars; x={u}; cd x; pnpm install"),
+            format!("set -o $(printf 'cd%s' ablevars); x={u}; cd x; pnpm install"),
+            format!("O=ablevars; set +o nocd$O; x={u}; cd x; pnpm install"),
+            format!("O=cd; O+=ablevars; set -o $O; x={u}; cd x; pnpm install"),
+            format!("/bin/zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("/bin/zsh -fT -c 'x={u}; cd x; pnpm install'"),
+            format!("=zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("env /bin/zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("F=T; zsh -$F -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; zsh -o cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; zsh --cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("echo 'x={u}; cd x; pnpm install' | /bin/zsh -T9"),
+            format!("K=ablevars; options+=(cd$K on); x={u}; cd x; pnpm install"),
+            format!("K=ablevars; x=${{options[cd$K]::=on}}; cd x; pnpm install"),
+            format!("K=cd; K+=ablevars; options+=($K on); x={u}; cd x; pnpm install"),
+            format!("X=able_vars; bash -O cd$X -c 'x={u}; cd x; pnpm install'"),
+            format!("bash -c 'X=able_vars; shopt -s cd$X; x={u}; cd x; pnpm install'"),
+            format!("bash -c 'shopt -s cd{{able,}}_vars; x={u}; cd x; pnpm install'"),
+            format!("K=PATH; print -v CD$K {u}; cd sub; pnpm install"),
+            format!("K=PATH; zstyle -s :x y CD$K; cd sub; pnpm install"),
+            format!("K=CD; K+=PATH; x=${{(P)K::={u}}}; cd sub; pnpm install"),
+            format!("cd {u}; x=${{functions[cd]::=:}}; cd {w}; pnpm install"),
+            format!("cd {u}; N='functions[cd]'; x=${{(P)N::=:}}; cd {w}; pnpm install"),
+            format!("cd {u}; K=functions; set -A $K cd :; cd -; pnpm install"),
+            format!("cd {u}; K=tions; set -A func$K cd :; cd -; pnpm install"),
+            format!("pushd {w}; cd {u}; K=tions; set -A func$K popd :; popd; pnpm install"),
+            format!("functions+=([f]='git -C {u} reset --hard'); f"),
+            format!("x=${{functions[f]::='git -C {u} reset --hard'}}; f"),
+            format!("set -A functions f 'git -C {u} reset --hard'; f"),
+            format!("K=tions; set -A func$K f 'git -C {u} reset --hard'; f"),
+            format!("K=tions; typeset \"func${{K}}[f]=git -C {u} reset --hard\"; f"),
             // Other ways to turn on cdablevars or set CDPATH, and to write `functions`.
             format!("unsetopt nocdablevars; x={u}; cd x; pnpm install"),
             format!("set +o nocdablevars; x={u}; cd x; pnpm install"),
@@ -2861,6 +2913,11 @@ mod tests {
             "cd -P backend && cargo test".to_string(),
             "export PATH=$PATH:/x; cd backend && cargo test".to_string(),
             "functions[f]='cargo test'; f".to_string(),
+            "cd functions && cargo test".to_string(),
+            "ls functions; cd src && cargo test".to_string(),
+            "pnpm -C functions install".to_string(),
+            "cd src; cargo test -- functions".to_string(),
+            "set -eu; cd src && cargo test".to_string(),
             "export PATH=$HOME/bin:$PATH; set -e; cd backend && cargo test".to_string(),
             "setopt extendedglob; cd backend && cargo test".to_string(),
         ] {
