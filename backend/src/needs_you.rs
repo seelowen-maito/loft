@@ -905,6 +905,26 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         });
     }
 
+    // The old storage folder came back in the checkout after the move (storage.rs), with files: Loft doesn't use it.
+    if let Some(old) = crate::storage::reappeared(&state.cfg.root, &state.cfg.storage_dir) {
+        items.push(Item {
+            kind: "old_workspaces_reappeared",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("An old workspaces folder reappeared", MAX_TITLE),
+            reason: text("Loft doesn't use it; the agents work in their real workspaces.", MAX_REASON),
+            text: text(&format!("{} reappeared inside your checkout; look at it and delete it. Loft keeps the agents' workspaces in {} (docs/adr/0005).", old.display(), state.cfg.storage_dir.display()), MAX_TEXT),
+            created_at: Utc::now().to_rfc3339(),
+            links: vec![],
+            actions: vec![],
+            push: ("An old workspaces folder reappeared".to_string(), String::new()),
+            project: None,
+            pr: None,
+            id: "old_workspaces_reappeared".to_string(),
+        });
+    }
+
     let dismissed: HashSet<String> = state.db.dismissed_needs_you().map_err(e)?.into_iter().collect();
     items.retain(|i| !dismissed.contains(&i.id));
     // Most urgent first; within the same urgency, the longest waiting first.
@@ -1480,6 +1500,19 @@ mod tests {
         st.rt.lock().unwrap().workspaces_not_moved = Some("/x/agent-local-storage already holds files".into());
         let text = shown(&st);
         assert!(text.len() == 1 && text[0].starts_with("/x/agent-local-storage already holds files."), "{text:?}");
+    }
+
+    #[test]
+    fn an_old_workspaces_folder_in_the_checkout_is_shown_until_it_is_deleted() {
+        let st = crate::tasks::tests::state();
+        let shown = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "old_workspaces_reappeared").map(|i| i.text).collect::<Vec<_>>();
+        assert!(shown(&st).is_empty());
+        let old = st.cfg.root.join(crate::storage::NAME);
+        std::fs::create_dir_all(old.join("agent-2")).unwrap();
+        let text = shown(&st);
+        assert!(text.len() == 1 && text[0].starts_with(&format!("{} reappeared inside your checkout; look at it and delete it.", old.display())), "{text:?}");
+        std::fs::remove_dir_all(&old).unwrap();
+        assert!(shown(&st).is_empty());
     }
 
     #[tokio::test]
