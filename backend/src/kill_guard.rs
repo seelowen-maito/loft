@@ -489,6 +489,10 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 changes(&text, &mut inner, depth + 1, out);
                 dirs.keep_made(&inner);
                 dirs.made = true;
+                // The words after the `-S` text run too, with an environment the guard doesn't follow (`CDPATH=x`).
+                if all.len() > used + 1 && all[..used].iter().any(|w| w.starts_with("-S") || w == "--split-string") {
+                    out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
+                }
                 continue;
             }
         };
@@ -500,6 +504,12 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             dirs.made |= all.iter().any(|w| assignment(w).is_some());
             continue;
         };
+        // `source <(…)` and `. =(…)` run text the command makes.
+        if matches!(name.as_str(), "source" | ".") && (text.contains("<(") || text.contains("=(")) {
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+            dirs.made = true;
+            continue;
+        }
         // A command word from an expansion (`$X -C d reset`, `env $NAME=x cmd`, `env $ASSIGNMENT cmd`): what runs is unknown.
         if expands(name) {
             out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
@@ -2792,7 +2802,7 @@ mod tests {
             "set -o autocd; cd x; pnpm install".to_string(),
             "setopt auto_cd; cd x; pnpm install".to_string(),
             // zsh's `cd old new`.
-            format!("cd {u}/a; cd a b; pnpm install"),
+            format!("cd sub; cd a b; pnpm install"),
             // A `cd` or `always` that the shell reads another way.
             format!("cd {u}; functions+=(cd :); cd {w}; pnpm install"),
             format!("cd {u}; functions[cd]=':'; cd {w}; pnpm install"),
@@ -2801,6 +2811,20 @@ mod tests {
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
             // Other ways to turn on cdablevars or set CDPATH, and to write `functions`.
             format!("unsetopt nocdablevars; x={u}; cd x; pnpm install"),
+            format!("set +o nocdablevars; x={u}; cd x; pnpm install"),
+            format!("set -T; x={u}; cd x; pnpm install"),
+            format!("set -ocdablevars; x={u}; cd x; pnpm install"),
+            format!("setopt -m '*vars'; x={u}; cd x; pnpm install"),
+            format!("options+=(cdablevars on); x={u}; cd x; pnpm install"),
+            format!("emulate zsh +o nocdablevars; x={u}; cd x; pnpm install"),
+            format!("zsh +o nocdablevars -c 'x={u}; cd x; pnpm install'"),
+            format!("zsh -fT -c 'x={u}; cd x; pnpm install'"),
+            format!("K=CDPATH; typeset -g $K={u}; cd sub; pnpm install"),
+            format!("export {{CD,}}PATH={u}; cd sub; pnpm install"),
+            format!("env -S 'CDPATH={u}' zsh -c 'cd sub; pnpm install'"),
+            format!(". =(echo CDPATH={u}); cd sub; pnpm install"),
+            format!("source <(echo cd {u}); pnpm install"),
+            format!("cd {u}; functions -c f cd; cd {w}; pnpm install"),
             format!("setopt -T; x={u}; cd x; pnpm install"),
             format!("set -eT; x={u}; cd x; pnpm install"),
             format!("setopt -m 'cd*'; x={u}; cd x; pnpm install"),
