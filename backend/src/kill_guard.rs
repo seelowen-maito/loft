@@ -457,7 +457,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
 
 /// The loop keyword a command opens, after the words that may come before it (`{ for`, `then for`, `! while`).
 fn loop_word(c: &Cmd) -> Option<&str> {
-    let k = c.words.iter().zip(&c.quoted).position(|(w, &q)| q || !matches!(w.as_str(), "!" | "{" | "then" | "do" | "else"))?;
+    let k = c.words.iter().zip(&c.quoted).position(|(w, &q)| q || !matches!(w.as_str(), "!" | "{" | "then" | "do" | "else" | "time" | "noglob" | "command" | "nocorrect" | "builtin"))?;
     (!c.quoted[k]).then_some(c.words[k].as_str()).filter(|w| matches!(*w, "for" | "foreach" | "while" | "until" | "select" | "repeat"))
 }
 
@@ -756,6 +756,8 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     }
                     // zsh's `cd -2`, `cd +1`: a folder of the stack, which the guard doesn't follow. After `--` it's a folder.
                     Some((d, _)) if stack_entry(d) && !after_dashes(args, i) => dirs.lose(),
+                    // `~+` is where the shell is, which the guard can't tell after it lost the folder or with a trap that moves it.
+                    Some((d, _)) if d.starts_with("~+") && (dirs.cwd.is_none() || dirs.trapped || !dirs.alts.is_empty()) => dirs.lose(),
                     // A variable or a substitution: the guard can't tell where the shell lands.
                     Some((d, _)) if expands(d) => dirs.lose(),
                     // A glob or braces: the shell may go to any folder it lists. The literal part of the path names
@@ -3635,6 +3637,11 @@ mod tests {
             format!("if true; then for d in 1 2; do pnpm install; cd {u}; done; fi"),
             format!("for a in 1; do for b in 2; do :; done; pnpm install; cd {u}; done"),
             format!("while pnpm install; do cd {u}; done"),
+            format!("time for d in 1 2; do pnpm install; cd {u}; done"),
+            format!("noglob for d in 1 2; do pnpm install; cd {u}; done"),
+            format!("cd $X; cd ~+; pnpm install"),
+            format!("trap 'cd {u}' DEBUG; cd ~+; pnpm install"),
+            format!("cd {u}; cd {CLONE}; cd $X; cd ~+; pnpm install"),
             format!("cat <<EOF\n$(echo ')'; cd {u}; pnpm install)\nEOF"),
             format!("cat <<EOF\n$(case x in x) cd {u};; esac; pnpm install)\nEOF"),
             format!("cat <<EOF\n`echo \\`x\\`; cd {u}; pnpm install`\nEOF"),
