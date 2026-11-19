@@ -746,6 +746,8 @@ fn reads_state(all: &[String]) -> (bool, bool) {
         // `${name=…}`, `${name:=…}`, `${name::=…}` with a name that isn't a plain identifier, the `(P)` flag, and an assignment
         // after a nested `}`.
         opaque |= w.split("${(").skip(1).any(|f| f.split(')').next().is_some_and(|f| f.contains(['P', 'e']))) || w.contains("}:=") || w.contains("}::=") || w.contains("}=");
+        // `${(AA)=functions::=cd :}` sets a whole array.
+        opaque |= w.contains("${") && ["functions", "options"].iter().any(|n| ["=", ":=", "::="].iter().any(|o| w.contains(&format!("{n}{o}"))));
         for part in w.split("${").skip(1) {
             let body = part.split('}').next().unwrap_or_default();
             let name = body.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(body.len());
@@ -2856,6 +2858,13 @@ mod tests {
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
             format!("functions[g]=':'; cd backend && cargo test"),
             format!("functions[f]='pnpm install'; cd {u}; f"),
+            format!("cd {u}; : ${{(AA)=functions::=cd :}}; cd {w}; pnpm install"),
+            format!("cd {u}; x=${{(AA)=functions::=cd :}}; cd {w}; pnpm install"),
+            format!("cd {u}; \"${{(AA)=functions:=cd :}}\"; cd {w}; pnpm install"),
+            format!("cd {u}; : ${{(AA)=^functions::=cd :}}; cd {w}; pnpm install"),
+            format!("cd {u}; : ${{(AA)=functions::=pushd :}}; pushd {w}; pnpm install"),
+            format!(": ${{(AA)=functions::=f 'git -C {u} reset --hard'}}; f"),
+            format!("K=ablevars; : ${{(AA)=options::=cd$K on}}; x={u}; cd x; pnpm install"),
             format!("cd {u}; (( x=functions[cd]=0 )); cd {w}; pnpm install"),
             format!("cd {u}; (( 1,functions[cd]=0 )); cd {w}; pnpm install"),
             format!("cd {u}; x=$[functions[cd]=0]; cd {w}; pnpm install"),
@@ -3012,6 +3021,7 @@ mod tests {
             "source ~/.zshrc; . ./env.sh; cd backend && cargo test".to_string(),
             "zsh -c 'cd backend && cargo test'".to_string(),
             "bash -n script; bash scripts/x.sh --verbose; sh -eu script".to_string(),
+            ": ${(AA)=aliases::=a b}; : ${FOO::=bar}; cargo test".to_string(),
             "jq '.options[0]=\"x\"' package.json; echo ${options[errexit]} $functions[f] myfunctions[1]".to_string(),
             "jq '.options[0]' package.json; : \"$x\"; set -o nounset; set -m".to_string(),
             ": ${FOO:=bar}; cargo test".to_string(),
