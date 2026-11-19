@@ -64,6 +64,12 @@ public struct NeedsYouItem: Codable, Hashable, Identifiable {
     public var canDismiss: Bool { actions.contains { $0.kind == "dismiss" } }
     /// The Done check: takes the item off the list (the `dismiss` action).
     public var doneAction: NeedsYouAction? { actions.first { $0.kind == "dismiss" && $0.isRequest } }
+
+    /// An agent's questions (a `questions` request): the iPhone answers them on the card, so the server's
+    /// "Answer them in the chat." isn't shown.
+    public func asksQuestions(_ permissions: [PermissionRequest]) -> Bool {
+        permissions.contains { "permission:\($0.id)" == id && $0.isQuestions }
+    }
 }
 
 /// The seen mark (POST /api/needs-you/seen), shared with the web: opening the list marks what it shows.

@@ -617,6 +617,7 @@ You are **{name}** ({role}), an autonomous agent living inside Loft — the user
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review while that clone exists; if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first and carry on. Never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
 - Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first, in a command of its own: run git on the new clone in the next command, not in the same one (`git clone x t && git -C t …` asks the user, because the guard can't know yet what the clone brought).
 - Write git commands with the literal absolute path: no shell variables, `cd` chains or `$(…)` in them.
+- Name the program you run literally (a path or a command name), never a variable like `$BIN` or `$A` as the command: the checkout guard asks for those.
 - Before each new branch, `git fetch origin` and create it from the remote: `git switch -c <branch> origin/<base>`, where `<base>` is the branch named in the ticket's `## Branch` section, or otherwise the default branch (`origin/HEAD`, whether it's `main` or `master`). Before each build or review round, `git fetch origin` and `git pull --ff-only` on your branch. Never build a ticket on a local default branch you haven't fetched.
 - Before you submit a ticket, mark a PR ready or start a review round, `git fetch origin` and `git merge origin/<base>` into your branch (merge, not rebase, so nobody force-pushes), resolve any conflicts, re-run the tests, then push. Loft refuses a submission whose branch is behind its base.
 - If your clone's `origin` isn't the project's GitHub remote (`git remote get-url origin`), `git remote set-url origin <the project's GitHub URL>` before fetching.
@@ -1097,6 +1098,13 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                 }
             };
             crate::delivery::run_ended(&state, &agent_id, failed).await;
+            // Test browsers the run left open hold gigabytes of memory: stop them, and say so in the next run.
+            let closed = crate::processes::stop_test_browsers(&state.cfg.storage_dir, &agent_id).await;
+            if closed > 0
+                && let Ok(Some(a)) = state.db.get_agent(&agent_id)
+            {
+                fyi_from_loft(&state, &a, &format!("Loft closed {closed} test browser{} left from your last run. Close your browsers in your scripts (`try`/`finally` `browser.close()`).", if closed == 1 { "" } else { "s" }));
+            }
             let (next, push) = {
                 let mut rt = state.rt.lock().unwrap();
                 let drew = rt.redrawing.remove(&agent_id);
@@ -2181,6 +2189,7 @@ pub(crate) mod tests {
         let p = system_prompt(&st, &a);
         assert!(p.contains(&format!("Run git only inside your clone (`git -C {}/<repo>`), never from the workspace root", workspace(&st, &a.id).display())), "{p}");
         assert!(p.contains("Write git commands with the literal absolute path: no shell variables, `cd` chains or `$(…)` in them."), "{p}");
+        assert!(p.contains("Name the program you run literally (a path or a command name), never a variable like `$BIN` or `$A` as the command"), "{p}");
     }
 
     #[test]
@@ -2952,7 +2961,7 @@ esac
         // "follow up" arrives during the run; at the reply it must not sit behind the background task.
         enqueue(&st, &a.id, Some("linger".into()), "user");
         enqueue(&st, &a.id, Some("follow up".into()), "user");
-        until("the queue to drain", 10, || !is_running(&st, &a.id)).await;
+        until("the queue to drain", 60, || !is_running(&st, &a.id)).await;
         assert!(ws.join("terminated").exists());
         assert!(std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("follow up"));
     }
@@ -3286,8 +3295,10 @@ esac
         crate::api::send_message(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()), axum::Json(serde_json::from_value(json!({ "text": text })).unwrap()))
     }
 
+    /// Generous: a run spawns a process, which can take seconds while a build loads the machine. A run that
+    /// never ends (the fake claude's `busy` sleeps 600s) still fails it.
     async fn idle(st: &AppState, id: &str) {
-        until("the runs to end", 10, || !is_running(st, id)).await;
+        until("the runs to end", 60, || !is_running(st, id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3295,7 +3306,8 @@ esac
         let (st, a) = fake_claude_state();
         let _ = send(&st, &a.id, "leftover").await.ok().unwrap();
         // The leftover `sleep 20` keeps stdout open: the run ends on claude's exit, not on the pipe closing.
-        until("the run to end", 5, || !is_running(&st, &a.id)).await;
+        // Under 20s, with room for a loaded machine.
+        until("the run to end", 15, || !is_running(&st, &a.id)).await;
         let now = st.db.get_agent(&a.id).unwrap().unwrap();
         assert_eq!((now.status.as_str(), now.status_text.as_str()), ("error", "Last run failed"));
         assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
@@ -3418,7 +3430,7 @@ esac
 
         // Queued while the agent is busy: it runs next with trigger "user", but no message of the user's started it.
         message_from_agent(&st, &lead, &a, "busy");
-        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        until("the run to start", 60, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
         message_from_agent(&st, &lead, &a, "and this");
         stop(&st, &a.id);
         idle(&st, &a.id).await;
@@ -3531,11 +3543,11 @@ esac
         let (st, a) = fake_claude_state();
         let ws = workspace(&st, &a.id);
         let _ = redraw(&st, &a.id).await.ok().unwrap();
-        until("the avatar run", 10, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
         let _ = send(&st, &a.id, "after").await.ok().unwrap();
         let mut events = st.events.subscribe();
         std::fs::write(ws.join("go"), "").unwrap();
-        until("the next run", 10, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("after")).await;
+        until("the next run", 60, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("after")).await;
         assert!(!redrawing(&st, &a.id).await);
         assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|ev| matches!(&ev, crate::state::Event::AgentUpdated { agent } if agent["id"] == a.id && agent["redrawing"] == false)));
         idle(&st, &a.id).await;
@@ -3609,7 +3621,7 @@ esac
         let (st, a) = fake_claude_state();
         let lead = crate::tasks::tests::agent(&st, "Lead");
         message_from_agent(&st, &lead, &a, "busy");
-        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        until("the run to start", 60, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
         message_from_agent(&st, &lead, &a, "from the lead");
         let _ = send(&st, &a.id, "from me").await.ok().unwrap();
         stop(&st, &a.id);
@@ -3857,7 +3869,7 @@ esac
         let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
         // My run is restarted with only an agent's message queued: that message runs next, as the agent's.
         let _ = send(&st, &a.id, "busy").await.ok().unwrap();
-        until("the run to start", 10, || running(&st, &a.id)).await;
+        until("the run to start", 60, || running(&st, &a.id)).await;
         message_from_agent(&st, &lead, &a, "ask");
         restart(&st, &a.id).await;
         idle(&st, &a.id).await;
@@ -3867,7 +3879,7 @@ esac
         // My message is queued: it still counts.
         let b = crate::tasks::tests::agent(&st, "Mine");
         message_from_agent(&st, &lead, &b, "busy");
-        until("the run to start", 10, || running(&st, &b.id)).await;
+        until("the run to start", 60, || running(&st, &b.id)).await;
         let _ = send(&st, &b.id, "hello").await.ok().unwrap();
         restart(&st, &b.id).await;
         idle(&st, &b.id).await;
@@ -3876,7 +3888,7 @@ esac
         // Mine and an agent's queued together: still counts.
         let c = crate::tasks::tests::agent(&st, "Mixed");
         message_from_agent(&st, &lead, &c, "busy");
-        until("the run to start", 10, || running(&st, &c.id)).await;
+        until("the run to start", 60, || running(&st, &c.id)).await;
         message_from_agent(&st, &lead, &c, "hello");
         let _ = send(&st, &c.id, "hello").await.ok().unwrap();
         restart(&st, &c.id).await;

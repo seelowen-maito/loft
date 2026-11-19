@@ -35,8 +35,9 @@ struct LoftApp: App {
         }
         if ProcessInfo.processInfo.arguments.contains("-ui-onboarding") { return nil }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
-            // Each UI test starts from nothing, not from the last test's cached state.
-            SnapshotStore.standard.clear()
+            // Each UI test starts from nothing, not from the last test's cached state (`-keep-cache`: a relaunch
+            // that opens on what the last launch cached, as a cold start does).
+            if !args.contains("-keep-cache") { SnapshotStore.standard.clear() }
             return FixtureAPI.fromLaunchArguments()
         }
         #endif

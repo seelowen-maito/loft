@@ -25,7 +25,10 @@ public struct Digest: Equatable {
     /// Away at least this long before the card shows.
     public static let awayFor: TimeInterval = 30 * 60
 
-    public static func build(since: Date, activity: [ActivityItem], pullRequests: [PullRequest], agents: [Agent]) -> Digest {
+    /// `permissions` decides what an `approval.required` says: waiting only while that agent's ask is still pending,
+    /// otherwise what became of its latest ask.
+    public static func build(since: Date, activity: [ActivityItem], pullRequests: [PullRequest], agents: [Agent],
+                             permissions: [PermissionRequest]) -> Digest {
         let names = Dictionary(agents.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
         var facts: [String: [(rank: Int, text: String)]] = [:]
         func add(_ agent: String?, _ rank: Int, _ text: String) {
@@ -38,7 +41,10 @@ public struct Digest: Equatable {
             let detail = names[a.agentId ?? ""].map { n in a.summary.hasPrefix(n) ? String(a.summary.dropFirst(n.count)).trimmingCharacters(in: .whitespaces) : a.summary } ?? a.summary
             switch a.type {
             case "agent.failed": add(a.agentId, 0, "Run failed\(detail.isEmpty ? "" : ": \(Self.afterColon(detail))")")
-            case "approval.required": add(a.agentId, 1, "Waiting for your approval")
+            case "approval.required":
+                let asks = permissions.filter { $0.agentId == a.agentId }
+                if asks.contains(where: \.isPending) { add(a.agentId, 1, "Waiting for your approval") }
+                else if let resolved = Self.resolved(asks.max { $0.createdAt < $1.createdAt }?.status) { add(a.agentId, 3, resolved) }
             case "task.failed": add(a.agentId, 0, "Issue failed: \(Self.quoted(detail))")
             case "task.blocked": add(a.agentId, 1, "Issue blocked: \(Self.quoted(detail))")
             case "task.completed": add(a.agentId, 3, "Finished \(Self.quoted(detail))")
@@ -55,6 +61,16 @@ public struct Digest: Equatable {
         }
         .sorted { ($0.needsYou ? 0 : 1, $0.agentName) < ($1.needsYou ? 0 : 1, $1.agentName) }
         return Digest(since: since, lines: lines)
+    }
+
+    /// What became of an ask that no longer waits for you.
+    private static func resolved(_ status: String?) -> String? {
+        switch status {
+        case "expired": "Approval expired"
+        case "denied": "Approval denied"
+        case "allowed_once", "allowed_always": "Approval allowed"
+        default: nil
+        }
     }
 
     /// “Title” from an activity summary like "finished task “Title”".

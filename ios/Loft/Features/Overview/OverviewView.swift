@@ -480,6 +480,8 @@ struct ApprovalCard: View {
     /// The on-device model's plain sentence, once asked for; "" when it had none.
     @State private var explanation: String?
     @State private var explaining = false
+    /// A `questions` request's picks, by question index.
+    @State private var picks: [Int: AskQuestion.Pick] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -491,12 +493,14 @@ struct ApprovalCard: View {
                     RelativeTime(date: request.createdAt).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Text(request.summary)
-                .font(.footnote.monospaced())
-                .lineLimit(4)
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            if !request.isQuestions {
+                Text(request.summary)
+                    .font(.footnote.monospaced())
+                    .lineLimit(4)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
             if let reason = request.reason, !reason.isEmpty {
                 Text(reason).font(.footnote).foregroundStyle(.secondary)
             }
@@ -518,12 +522,19 @@ struct ApprovalCard: View {
                 .accessibilityIdentifier("permissionRisks")
             }
             if request.isQuestions {
-                // The options and the answers need the web chat; here the agent can only be told the user skipped.
-                Text("Open the chat in Loft on the web to answer.").font(.footnote).foregroundStyle(.secondary)
-                Button(role: .destructive) { decide("deny") } label: { Text("Skip").frame(maxWidth: .infinity) }
-                    .buttonStyle(.bordered)
-                    .disabled(busy || !store.canWrite)
-                    .controlSize(.small)
+                let qs = AskQuestion.of(request.input)
+                ForEach(Array(qs.enumerated()), id: \.offset) { i, q in questionView(i, q) }
+                let answers = AskQuestion.answers(qs, picks: picks)
+                AdaptiveStack {
+                    Button(role: .destructive) { decide("deny") } label: { Text("Skip").frame(maxWidth: .infinity) }
+                        .buttonStyle(.bordered)
+                    Button { decide("allow_once", answers: answers) } label: { Text("Send answers").frame(maxWidth: .infinity) }
+                        .buttonStyle(.accent)
+                        .disabled(answers == nil)
+                        .accessibilityIdentifier("sendAnswers")
+                }
+                .disabled(busy || !store.canWrite)
+                .controlSize(.small)
             } else {
                 explainer
                 AdaptiveStack {
@@ -560,6 +571,46 @@ struct ApprovalCard: View {
         // (permissionRisks, permissionExplain, permissionExplanation).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("approvalCard")
+    }
+
+    /// One question: its options as toggles, then "Something else" to type an answer.
+    private func questionView(_ i: Int, _ q: AskQuestion) -> some View {
+        let pick = picks[i] ?? AskQuestion.Pick()
+        return VStack(alignment: .leading, spacing: 6) {
+            if let h = q.header, !h.isEmpty {
+                Text(h.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            Text(q.question).font(.subheadline)
+            ForEach(q.options, id: \.label) { o in
+                let on = pick.chosen.contains(o.label)
+                Button { picks[i] = pick.toggling(o.label, multi: q.multiSelect) } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: on ? (q.multiSelect ? "checkmark.square.fill" : "largecircle.fill.circle")
+                                             : (q.multiSelect ? "square" : "circle"))
+                            .foregroundStyle(on ? Theme.accent : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(o.label).foregroundStyle(.primary)
+                            if let d = o.description, !d.isEmpty { Text(d).font(.caption).foregroundStyle(.secondary) }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .font(.footnote)
+                    .padding(.vertical, 8).padding(.horizontal, 10)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .background(on ? Theme.accent.opacity(0.12) : Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+            TextField(q.multiSelect ? "Something else, too…" : "Something else…",
+                      text: Binding(get: { pick.other }, set: { picks[i] = (picks[i] ?? AskQuestion.Pick()).typing($0, multi: q.multiSelect) }))
+                .font(.footnote)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Something else for: \(q.question)")
+            if q.multiSelect { Text("Pick any that apply.").font(.caption).foregroundStyle(.secondary) }
+        }
+        .disabled(busy)
     }
 
     private func riskLabels(_ risks: [PermissionRisk]) -> some View {
@@ -605,10 +656,10 @@ struct ApprovalCard: View {
         }
     }
 
-    private func decide(_ d: String) {
+    private func decide(_ d: String, answers: [String: String]? = nil) {
         busy = true
         Task {
-            do { try await store.decide(request, decision: d) } catch { self.error = APIError.from(error) }
+            do { try await store.decide(request, decision: d, answers: answers) } catch { self.error = APIError.from(error) }
             busy = false
         }
     }

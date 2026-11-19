@@ -16,6 +16,7 @@ import { useNow } from "../../lib/useNow";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
 import { PullRequestCard } from "./PullRequestCard";
+import { MessagePrs, PrsContext } from "./TaggedPrs";
 import { GrillBar } from "./GrillBar";
 import { SubagentBar } from "./SubagentBar";
 import { GrillRound } from "./GrillRound";
@@ -50,6 +51,8 @@ import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
 import { QuoteBlock, QuoteChip, ReplyButton, useLongPress } from "./Quote";
+import { AnswerCard } from "./AnswerCard";
+import { answerCard } from "../../lib/answerCard";
 import { QUOTE_GONE_NOTE, jumpStep, messageAnchor, quotable, quoteGone, quoteOf, replyOf } from "../../lib/reply";
 
 type Item =
@@ -121,6 +124,7 @@ export function Chat({
   /** The messages are still on their way: an empty chat isn't a new one yet. */
   loading?: boolean;
   perms: Map<string, PermissionRequest>;
+  /** Every tracked pull request: the tool calls that opened this agent's, and the ones its messages name. */
   prs: PullRequest[];
   /** The agent's open interview, if any. */
   grill: GrillSession | null;
@@ -403,6 +407,13 @@ export function Chat({
     setPickingTask(false);
   }, [agent.id]);
 
+  // The agent's latest message asks something, and no permission, AskUserQuestion or grill card waits on you instead.
+  // Gone once you've sent anything: the message you sent is the last word (`answered` covers until it arrives).
+  const [answered, setAnswered] = useState<number | null>(null);
+  const waitingOnYou = [...perms.values()].some((p) => p.agent_id === agent.id && p.status === "pending") || (!!grill && (grill.state === "active" || grill.state === "paused"));
+  const asked = useMemo(() => answerCard(messages, waitingOnYou), [messages, waitingOnYou]);
+  const card = asked && asked.message.id !== answered ? asked : null;
+
   // `pick`: the command picked from the menu, which runs mid-message (see `picked`).
   const send = async (t = text, pick: CommandWord | null = picked): Promise<void> => {
     const v = t.trim();
@@ -432,6 +443,7 @@ export function Chat({
   const sendText = async (v: string, imgs: string[]) => {
     try {
       await api.send(agent.id, v, imgs, taskId ?? undefined, reply?.id);
+      if (card) setAnswered(card.message.id);
     } catch (e) {
       if (quoteGone(errorText(e))) setReply(null);
       throw e;
@@ -577,13 +589,14 @@ export function Chat({
               </button>
             </div>
           )}
+          <PrsContext.Provider value={prs}>
           {visible.map((it) => {
             if (it.t === "tool") {
               const cards = prsByTool.get(it.use.meta?.id) ?? [];
               return (
                 <Fragment key={it.use.id}>
                   <ToolRow use={it.use} result={it.result} />
-                  {cards.map((pr) => <PullRequestCard key={pr.id} pr={pr} />)}
+                  {cards.map((pr) => <div key={pr.id} className="pl-9"><PullRequestCard pr={pr} /></div>)}
                 </Fragment>
               );
             }
@@ -596,6 +609,7 @@ export function Chat({
             const session = it.m.meta?.grill?.role === "round" ? grill : null;
             return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={session} onClearWith={clearWith} onReply={onReply} onJump={onJump} />;
           })}
+          </PrsContext.Provider>
           {loading && items.length === 0 && <ChatLoading agent={agent} />}
           {!loading && (items.length === 0 || fresh) && (
             <div className="flex flex-col items-center py-16 text-center">
@@ -673,6 +687,21 @@ export function Chat({
           )}
           <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
+          {card && (
+            <AnswerCard
+              card={card}
+              agentName={agent.name}
+              busy={sending.busy}
+              onAnswer={(a) =>
+                act(sending, async () => {
+                  stick.current = true;
+                  await api.send(agent.id, a);
+                  setAnswered(card.message.id);
+                })
+              }
+              onReply={() => onReply(card.message)}
+            />
+          )}
           {pickingTask && (
             <TaskPicker
               agents={agents}
@@ -871,9 +900,9 @@ function MessageTasks({ m }: { m: Message }) {
   );
 }
 
-/** Chips for the specs, issues and pull requests a message tags with `#`: kind and title, opening the item. */
+/** Chips for the specs and issues a message tags with `#`: kind and title, opening the item. Its PRs get cards (MessagePrs). */
 function MessageTags({ m }: { m: Message }) {
-  const tags: { tag: string; kind: "spec" | "issue" | "pr"; title: string; url?: string | null; task_id?: string }[] = m.meta?.tags ?? [];
+  const tags: { tag: string; kind: "spec" | "issue"; title: string; url?: string | null; task_id?: string }[] = (m.meta?.tags ?? []).filter((t: { kind: string }) => t.kind !== "pr");
   if (!tags.length) return null;
   const cls = "chip max-w-full gap-1.5 text-[12px] hover:bg-white/[0.08]";
   return (
@@ -1062,6 +1091,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
         )}
         <MessageTasks m={m} />
         <MessageTags m={m} />
+        <MessagePrs text={m.content ?? ""} project={agent.project} className="w-full max-w-[80%]" />
         {m.meta?.mentions?.length > 0 && (
           <div className="font-mono text-[10.5px] text-fg-3">→ {m.meta.mentions_only ? "sent to" : "also sent to"} {m.meta.mentions.map((x: { name: string }) => x.name).join(", ")}</div>
         )}
@@ -1083,11 +1113,14 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     <div id={messageAnchor(m.id)} className="group relative flex gap-3 pt-1" {...press}>
       {canReply && <div className="absolute -top-1 right-0"><ReplyButton onReply={() => onReply(m)} className="border border-line bg-ink-850 shadow" /></div>}
       <Sticker avatar={(replier ?? agent).avatar} lead={(replier ?? agent).role === "lead"} size={26} className="mt-0.5" />
-      <div className={cx("prose-chat min-w-0 flex-1", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
+      <div className="min-w-0 flex-1">
+      <div className={cx("prose-chat min-w-0", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
         {m.meta?.mention_reply && (
           <div className="mb-1 font-mono text-[10.5px] uppercase tracking-wider text-fg-3">{replier?.name ?? m.meta.from_agent?.name} · answering your mention</div>
         )}
         <Markdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{m.content}</Markdown>
+      </div>
+      <MessagePrs text={m.content ?? ""} project={agent.project} className="mt-2" />
       </div>
     </div>
   );

@@ -106,6 +106,53 @@ final class LoftUITests: XCTestCase {
         XCTAssertTrue(allow.disappears(timeout: 5), "and goes once approved")
     }
 
+    /// After a cold launch, a chat longer than a page opens on its newest messages: Needs you › Open chat shows the
+    /// approval card it was opened for (#625). The cached chat is there before the first layout, as on a real phone.
+    func testColdLaunchOpensTheChatOnItsNewestMessages() {
+        var app = launch(["-fixture-long-chat", "-fixture-risky-permission"])
+        app.tabBars.buttons["Agents"].tap()
+        openAgent("Backend Agent", app)
+        app.buttons["chatWithAgent"].tap()
+        XCTAssertTrue(text(containing: "Step 75 of", app).appears(timeout: 5))
+        sleep(3)  // the store saves its cache two seconds after a change
+        app.terminate()
+
+        app = launch(["-fixture-long-chat", "-fixture-risky-permission", "-keep-cache"])
+        app.buttons["needsYouSeeAll"].tap()
+        let item = any("needsYou-permission", app)
+        XCTAssertTrue(item.appears(timeout: 5))
+        item.buttons["Open chat"].tap()
+        let card = app.otherElements.matching(identifier: "approvalCard").firstMatch
+        XCTAssertTrue(card.appears(timeout: 5))
+        XCTAssertTrue(wait { card.isHittable }, "the approval card is in view, not 150 messages below")
+        XCTAssertFalse(app.buttons["Load earlier messages"].isHittable, "not on the oldest loaded messages")
+    }
+
+    /// Load earlier keeps your place: the item at the top stays put, both when the earlier messages are already
+    /// cached and when they come from the server (#630). The fixture's first page is the newest 100 of 150.
+    func testLoadEarlierKeepsYourPlace() {
+        let app = launch(["-fixture-long-chat"])
+        app.tabBars.buttons["Agents"].tap()
+        openAgent("Backend Agent", app)
+        app.buttons["chatWithAgent"].tap()
+        XCTAssertTrue(text(containing: "Step 75 of", app).appears(timeout: 5))
+        let load = app.buttons["Load earlier messages"]
+        // Each tap: the item at the top before it, and one that only the newly drawn page has.
+        for (path, top, new) in [("cached", "Step 46 of", "Step 26 of"), ("server", "Step 26 of", "Step 1 of")] {
+            for _ in 0..<30 where !load.isHittable { app.swipeDown(velocity: .fast) }
+            XCTAssertTrue(load.isHittable, path)
+            let item = text(containing: top, app)
+            XCTAssertTrue(item.exists, path)
+            let before = item.frame.minY
+            load.tap()
+            XCTAssertTrue(text(containing: new, app).appears(timeout: 5), "\(path): the earlier page is drawn")
+            sleep(1)  // the scroll back to the kept item
+            // The old top item lands at the top of the view, where the button (and on the server path the row of
+            // tool calls) was: it moves up by about that much, not by the height of the page drawn above it.
+            XCTAssertEqual(item.frame.minY, before, accuracy: 80, "\(path): \(top) stays where it was")
+        }
+    }
+
     private func wait(_ done: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(5)
         while !done(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }

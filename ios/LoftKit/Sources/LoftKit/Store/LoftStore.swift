@@ -958,8 +958,9 @@ public final class LoftStore {
         return api
     }
 
-    public func decide(_ p: PermissionRequest, decision: String) async throws {
-        try await requireWrite().decidePermission(id: p.id, decision: decision)
+    /// `answers` answers a `questions` request (sent with `allow_once`).
+    public func decide(_ p: PermissionRequest, decision: String, answers: [String: String]? = nil) async throws {
+        try await requireWrite().decidePermission(id: p.id, decision: decision, answers: answers)
         // The server emits the updated request; mark it locally only once it confirmed.
         if let i = permissions.firstIndex(where: { $0.id == p.id }), permissions[i].isPending {
             permissions[i].status = decision == "deny" ? "denied" : (decision == "allow_always" ? "allowed_always" : "allowed_once")
