@@ -219,6 +219,13 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
             Check space
           </Link>
         </div>
+        {s && (
+          <p className="text-[12.5px] text-fg-2">
+            {s.sccache.installed
+              ? `Rust build cache (sccache, shared by agents): ${fmtBytes(s.sccache.bytes)} of ${fmtBytes(s.sccache.limit_bytes)}`
+              : "Rust build cache: sccache isn't installed. Install it with brew install sccache and agents share compiled Rust dependencies."}
+          </p>
+        )}
         {err && <Callout tone="bad" icon={<TriangleAlert />}>{err}</Callout>}
         {last?.at && (
           <p className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-fg-2">
