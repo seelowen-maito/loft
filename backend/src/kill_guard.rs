@@ -139,6 +139,10 @@ struct Dirs {
     alts: Vec<PathBuf>,
     /// A command ran before this one: it may have made a folder, a link or a `.git` that isn't there yet.
     made: bool,
+    /// The names `alias` defined in the command: `eval NAME` runs what they hold.
+    aliases: Vec<String>,
+    /// A `trap` that may run before a later command was set (see `makes_nothing`): its handler may make a folder.
+    trapped: bool,
     /// An earlier command wrote a `.git` (`echo 'gitdir: x' > t/.git`): git may follow it anywhere.
     dotgit: bool,
     /// An earlier `cd` named a folder the guard can't list (a glob, braces).
@@ -193,6 +197,10 @@ impl Dirs {
     }
 
     fn resolve(&self, path: &str, physical: bool) -> Option<PathBuf> {
+        // `~+` is the current folder.
+        if let Some(rest) = path.strip_prefix("~+").filter(|r| r.is_empty() || r.starts_with('/')) {
+            return resolve(self.cwd.as_deref()?, &format!(".{rest}"), physical);
+        }
         let absolute = path.starts_with(['/', '~']) || path.starts_with("$HOME") || path.starts_with("${HOME}");
         resolve(if absolute { Path::new("/") } else { self.cwd.as_deref()? }, path, physical)
     }
@@ -260,6 +268,8 @@ impl Dirs {
         match path {
             p if p == "~" || p.starts_with("~/") => Some(PathBuf::from(format!("{}{}", home()?, &p[1..]))),
             p if p.starts_with('/') => Some(PathBuf::from(p)),
+            p if p == "~+" || p.starts_with("~+/") => Some(self.cwd.as_deref()?.join(format!(".{}", &p[2..]))),
+            p if p.starts_with('~') => None,
             p => Some(self.cwd.as_deref()?.join(p)),
         }
     }
@@ -334,6 +344,8 @@ impl Dirs {
     /// What a subshell (or a shell run by `sh -c`) made stays made when it ends.
     fn keep_made(&mut self, inner: &Dirs) {
         self.made |= inner.made;
+        self.trapped |= inner.trapped;
+        self.aliases.extend(inner.aliases.iter().cloned());
         self.dotgit |= inner.dotgit;
         self.unreadable |= inner.unreadable;
         self.git_env |= inner.git_env;
@@ -448,6 +460,8 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
     let mut pending_dotgit = false;
+    let end = range.end;
+    let mut loops: Vec<(usize, usize)> = vec![];
     for i in range {
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
@@ -461,6 +475,25 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         dirs.goes_on = cmds[i].piped || cmds[i].or || cmds[i].words.first().is_some_and(|w| w == "!");
         let all = &cmds[i].words;
         let family = |n: &str| matches!(base(n), "cd" | "chdir" | "pushd" | "popd");
+        // A loop's next pass starts where the last one ended: its body is checked once more when it ends.
+        while loops.last().is_some_and(|&(done, _)| done == i) {
+            let (done, start) = loops.pop().unwrap();
+            run(text, cmds, start..done, dirs, depth, out);
+        }
+        if all.first().zip(cmds[i].quoted.first()).is_some_and(|(w, &q)| !q && matches!(w.as_str(), "for" | "foreach" | "while" | "until" | "select" | "repeat")) {
+            let mut open = 0;
+            let done = cmds[i..end].iter().position(|c| {
+                match c.words.first().map(String::as_str) {
+                    Some("for" | "foreach" | "while" | "until" | "select" | "repeat") => open += 1,
+                    Some("done") => open -= 1,
+                    _ => {}
+                }
+                open == 0
+            });
+            if let Some(d) = done.filter(|&d| d > 0) {
+                loops.push((i + d, i + 1));
+            }
+        }
         // A function named like one of them, however it is written (`function cd`, `{ cd() { … } }`, `f cd()`), a
         // `functions[cd]=…`, an `autoload cd`, or `disable`, anywhere in the command.
         let defines = (cmds[i].defines && all.iter().any(|n| family(n)))
@@ -508,6 +541,12 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
         pending_dotgit = names_dotgit(all, &cmds[i].targets);
         dirs.git_env |= mentions_git_env(all, &cmds[i].targets, &cmds[i].stdin);
+        // A here-document body may run commands (`$(…)`, backticks), whatever command reads it (a herestring's are parsed).
+        for t in substitutions(&cmds[i].stdin) {
+            let mut inner = dirs.clone();
+            changes(&t, &mut inner, depth + 1, out);
+            dirs.keep_made(&inner);
+        }
         // A function defined earlier runs where it is called, after any `cd` in between: each body of that name is checked
         // here (a name may be defined twice, and which took effect isn't followed). The words a wrapper or keyword skips
         // count too (`sudo() { … }; sudo true`). A body the guard doesn't hold (defined in text it has left, or not as a
@@ -590,8 +629,23 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             dirs.made = true;
             continue;
         }
+        // Braces or a glob in the command word (`pnpm{,} install`, `/bin/p*`): what runs is unknown.
+        if live.first().copied().unwrap_or(false) && !matches!(name.as_str(), "[" | "[[") {
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+            dirs.made = true;
+            continue;
+        }
         let (args, live) = (args, &live[1..]);
+        if base(name) == "alias" {
+            dirs.aliases.extend(args.iter().filter_map(|a| a.split_once('=').map(|(n, _)| n.to_string())));
+        }
         if base(name) == "trap" {
+            dirs.trapped |= !makes_nothing(text, all, words, live);
+            // A handler that runs early and changes folder moves the shell before each later command.
+            let handler = args.iter().find(|a| !a.starts_with('-') && !a.is_empty());
+            if !trap_defers(text, words) && handler.is_some_and(|h| h.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| matches!(w, "cd" | "pushd" | "popd" | "chdir")) || dirs.funcs.iter().any(|(f, _)| f == h)) {
+                dirs.lose();
+            }
             for h in args.iter().find(|a| !a.starts_with('-') && !a.is_empty()) {
                 if !dirs.traps.contains(h) {
                     dirs.traps.push(h.clone());
@@ -771,6 +825,12 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 dirs.made = true;
                 continue;
             }
+            "eval" if args.first().is_some_and(|a| dirs.aliases.contains(a)) => {
+                // An alias this line defined: what it runs isn't followed.
+                out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+                dirs.made = true;
+                continue;
+            }
             "eval" => {
                 // The text numbers its lists from zero: what is pending before and after it is seen by what follows.
                 dirs.flush(usize::MAX);
@@ -796,7 +856,12 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 // `cp` of this command makes (git checks its own).
                 let here = dirs.cwd.clone().map(real);
                 let swapped = name != "git" && folders.iter().any(|f| f.as_os_str() != UNKNOWN && dirs.swapped(&real(f.clone()), Some(real(f.clone())) != here));
-                if swapped {
+                // A folder that isn't there when the hook looks may be made by a trap handler that runs early (as for git).
+                let missing = name != "git" && !folders.is_empty() && dirs.trapped && dirs.cwd.clone().map(real).is_some_and(|cwd| {
+                    let start = dirs.start.clone().map(real);
+                    start.as_ref().is_none_or(|s| cwd != *s) && (in_agent_storage(&cwd, &dirs.storage) || start.is_some_and(|s| cwd.starts_with(s))) && !cwd.exists()
+                });
+                if swapped || missing {
                     folders.extend(unknown_in(dirs, None));
                 }
                 if dirs.unknown && !folders.is_empty() {
@@ -972,6 +1037,52 @@ fn reads_state(all: &[String]) -> (bool, bool) {
     (search, opaque)
 }
 
+/// The texts `$( … )` and `` ` … ` `` in `s` run (a here-document body), each as written between its brackets.
+fn substitutions(s: &str) -> Vec<String> {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] == '$' && c.get(i + 1) == Some(&'(') {
+            let (mut depth, mut j) = (1, i + 2);
+            while j < c.len() && depth > 0 {
+                depth += (c[j] == '(') as i32 - (c[j] == ')') as i32;
+                j += 1;
+            }
+            out.push(c[i + 2..j.saturating_sub(1).max(i + 2)].iter().collect());
+            i += 2;
+        } else if c[i] == '`' {
+            let end = c[i + 1..].iter().position(|&x| x == '`').map_or(c.len(), |e| i + 1 + e);
+            out.push(c[i + 1..end].iter().collect());
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Whether the `trap` in `words` runs its handler only when the shell ends, so that it can't change what a later command
+/// of the line does. At the end of the shell for EXIT or a signal that ends it; any other name (`DEBUG`, `ERR`, `ZERR`, a
+/// number) runs before the next command, and so does one in a subshell, a background job or a pipeline part (it fires
+/// when that part ends): a line with `(` (but a named function's `()`), `|` or any `&` that isn't `&&` (or follows a
+/// backslash) isn't read.
+fn trap_defers(text: &str, words: &[String]) -> bool {
+    let lone_and = text.match_indices('&').any(|(p, _)| !text[..p].ends_with('&') && !text[p + 1..].starts_with('&')) || text.contains("\\&");
+    // A `()` after a name defines a function; any other (`() cmd`, `function () cmd`) is an anonymous function that runs now.
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':');
+    let anonymous = text.match_indices("()").any(|(p, _)| {
+        let before = text[..p].trim_end_matches([' ', '\t']);
+        before.rsplit(|c: char| !name_char(c)).next().is_none_or(|n| n.is_empty() || n == "function") || !before.ends_with(name_char)
+    });
+    !anonymous
+        && !text.replace("()", "").contains(['(', '|'])
+        && !lone_and
+        && words.len() >= 3
+        && words[2..].iter().all(|w| matches!(w.as_str(), "EXIT" | "INT" | "TERM" | "HUP" | "QUIT"))
+        && !words.iter().any(|w| w.contains(['$', '`']))
+}
+
 /// Whether a command (`git -C dir fetch`, `git commit -m x`) can't make a folder, a link or a `.git`: git's own history
 /// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
 /// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
@@ -984,25 +1095,7 @@ fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool]) ->
     if matches!(words.first().map(String::as_str), Some("rm")) && bare && !live.iter().any(|&l| l) && !words.iter().any(|w| w.contains(['$', '`'])) {
         return true;
     }
-    // `trap` only sets what runs later: at the end of the shell for EXIT or a signal that ends it. Any other name (`DEBUG`,
-    // `ERR`, `ZERR`, a number) runs before the next command, and so does one in a subshell, a background job or a
-    // pipeline part (it fires when that part ends): a line with `(` (but a named function's `()`), `|` or any `&` that isn't `&&` (or follows a backslash) isn't read.
-    let lone_and = text.match_indices('&').any(|(p, _)| !text[..p].ends_with('&') && !text[p + 1..].starts_with('&')) || text.contains("\\&");
-    // A `()` after a name defines a function; any other (`() cmd`, `function () cmd`) is an anonymous function that runs now.
-    let anonymous = text.match_indices("()").any(|(p, _)| {
-        let name = text[..p].trim_end_matches([' ', '\t']).rsplit(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))).next().unwrap_or_default();
-        name.is_empty() || name == "function" || !text[..p].trim_end_matches([' ', '\t']).ends_with(|c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
-    });
-    if words.first().is_some_and(|w| w == "trap")
-        && bare
-        && !live.iter().any(|&l| l)
-        && !anonymous
-        && !text.replace("()", "").contains(['(', '|'])
-        && !lone_and
-        && words.len() >= 3
-        && words[2..].iter().all(|w| matches!(w.as_str(), "EXIT" | "INT" | "TERM" | "HUP" | "QUIT"))
-        && !words.iter().any(|w| w.contains(['$', '`']))
-    {
+    if words.first().is_some_and(|w| w == "trap") && bare && !live.iter().any(|&l| l) && trap_defers(text, words) {
         return true;
     }
     let [git, args @ ..] = words else { return false };
@@ -1640,6 +1733,8 @@ fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
         p if p == "~" || p.starts_with("~/") => format!("{}{}", home()?, &p[1..]),
         p if p.starts_with("$HOME") => format!("{}{}", home()?, &p[5..]),
         p if p.starts_with("${HOME}") => format!("{}{}", home()?, &p[7..]),
+        // `~-`, `~user`: another folder the guard can't tell.
+        p if p.starts_with('~') => return None,
         p => p.to_string(),
     };
     if path.contains(['$', '`']) {
@@ -1939,6 +2034,10 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             // `PATH=/bin xargs kill` finds the real kill.
             *bypass |= sets_path(w);
             i += 1;
+            // zsh's short `if [[ … ]] cmd`: the condition is not the command.
+            if matches!(w.as_str(), "if" | "elif" | "while" | "until") && words.get(i).is_some_and(|c| c == "[[") {
+                i = words[i..].iter().position(|c| c == "]]").map_or(words.len(), |e| i + e + 1);
+            }
             continue;
         }
         if w == "function" {
@@ -1967,7 +2066,7 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             "arch" => &["-arch", "-e", "-d"],
             "watch" => &["-n", "--interval"],
             "script" => &["-t", "-T", "-E", "-I", "-O", "-B"],
-            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" | "noglob" | "nocorrect" | "-" => &[],
+            "command" | "builtin" | "nohup" | "time" | "chronic" | "repeat" | "noglob" | "nocorrect" | "coproc" | "-" => &[],
             _ => return Run::Words(rest(i)),
         };
         *bypass |= matches!(name, "sudo" | "doas" | "command" | "builtin");
@@ -2407,6 +2506,11 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     l.word.push(n);
                     if n == '}' {
                         break;
+                    }
+                    // `${$(cmd)}` runs cmd.
+                    if n == '$' && c.get(i) == Some(&'(') {
+                        l.cmd(p);
+                        i = lex(p, c, i + 1, Some(')'));
                     }
                 }
             }
@@ -3398,6 +3502,44 @@ mod tests {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
         for cmd in ["source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test"] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn loops_heredocs_traps_and_other_forms_it_misread_ask() {
+        let u = USER;
+        let cases: Vec<String> = vec![
+            format!("for d in 1 2; do pnpm install; cd {u}; done"),
+            format!("while true; do pnpm install; cd {u}; done"),
+            format!("cd {u}; if [[ -n 1 ]] pnpm install"),
+            format!("cat <<EOF\n$(cd {u}; pnpm install)\nEOF"),
+            format!("cd {u}; echo ${{$(pnpm install)}}"),
+            format!("cd {u}; coproc pnpm install"),
+            format!("cd {u}; pnpm{{,}} install"),
+            format!("trap 'pnpm install' EXIT; cd {u}"),
+            format!("alias g='cd {u}; pnpm install'; eval g"),
+            format!("trap 'cd {u}' DEBUG; pnpm install"),
+            format!("trap 'cd {u}' DEBUG; git add -A"),
+            format!("trap 'cd {u}' ZERR; git log nope; git add -A"),
+            format!("trap 'cd {u}' SIGZERR; git log nope; git add -A"),
+            format!("trap 'cd {u}' SIGERR; git log nope; git add -A"),
+            format!("trap 'cd {u}' 32; git log nope; git add -A"),
+            format!("trap 'cd {u}' 33; git add -A"),
+            format!("rm -rf ~+/src; (trap 'ln -s {u} src' EXIT); cd src; git add -A"),
+            format!("rm -f x <<EOF\n$(ln -s {u} backend)\nEOF\ncd backend; git add -A"),
+            format!("git status <<EOF\n$(ln -s {u} backend)\nEOF\ncd backend; git add -A"),
+            format!("trap : EXIT <<EOF\n$(ln -s {u} backend)\nEOF\ncd backend; git add -A"),
+            format!("(trap 'ln -s {u} backend' EXIT); cd backend; pnpm install"),
+        ];
+        let mut bad = vec![];
+        for cmd in &cases {
+            if asks_all(cmd, CLONE).is_empty() {
+                bad.push(cmd.clone());
+            }
+        }
+        assert!(bad.is_empty(), "should ask:\n{}", bad.join("\n"));
+        for cmd in ["for d in a b; do (cd x && cargo test); done", "cat <<EOF\nhello $(date)\nEOF", "trap 'rm -f tmp' EXIT; cargo test"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
     }
