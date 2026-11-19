@@ -211,13 +211,15 @@ struct StaleBanner: View {
 struct CollapsibleText: View {
     let text: String
     var lineLimit = 12
+    /// Links drawn in this colour and underlined, for text on a coloured bubble where the accent wouldn't show.
+    var linkColor: Color?
     @State private var expanded = false
 
     private var isLong: Bool { text.count > 700 || text.filter { $0 == "\n" }.count > lineLimit }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(Markdown.render(text))
+            Text(Markdown.render(text, underlineLinks: linkColor != nil))
                 .lineLimit(expanded || !isLong ? nil : lineLimit)
                 .textSelection(.enabled)
             if isLong {
@@ -227,13 +229,18 @@ struct CollapsibleText: View {
                 .font(.caption.weight(.semibold))
             }
         }
+        .tint(linkColor ?? Theme.accent)
     }
 }
 
 enum Markdown {
-    static func render(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+    static func render(_ s: String, underlineLinks: Bool = false) -> AttributedString {
+        var a = (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(s)
+        if underlineLinks {
+            for run in a.runs where run.link != nil { a[run.range].underlineStyle = .single }
+        }
+        return a
     }
 }
 
