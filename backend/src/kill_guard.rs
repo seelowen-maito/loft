@@ -787,6 +787,8 @@ fn reads_state(all: &[String]) -> (bool, bool) {
             }
             "setopt" | "unsetopt" => opaque |= args.iter().any(|a| !safe_option(a)),
             "emulate" | "shopt" => opaque = true,
+            // `read -rA functions` fills the whole array.
+            "read" if args.iter().any(|a| matches!(a.as_str(), "functions" | "options")) => opaque = true,
             "export" | "typeset" | "declare" | "local" | "readonly" | "integer" | "float" | "read" => opaque |= args.iter().any(|a| !a.starts_with('-') && !plain_name(a)),
             // `-v name`, bundled (`-rv name`) or not, or glued (`-vname`).
             "printf" | "print" => {
@@ -2858,6 +2860,17 @@ mod tests {
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
             format!("functions[g]=':'; cd backend && cargo test"),
             format!("functions[f]='pnpm install'; cd {u}; f"),
+            format!("cd {u}; read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; read -Ar functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; read -A -- functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; read -rAu0 functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; IFS=' ' read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; builtin read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; echo cd : | read -rA functions; cd {w}; pnpm install"),
+            format!("cd {u}; while read -rA functions; do break; done <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; zsh -c 'read -rA functions <<< \"cd :\"; cd {w}; pnpm install'"),
+            format!("K=ablevars; read -A options <<< \"cd$K on\"; x={u}; cd x; pnpm install"),
+            format!("K=ablevars; echo cd$K on | read -A options; x={u}; cd x; pnpm install"),
             format!("cd {u}; : ${{(AA)=functions::=cd :}}; cd {w}; pnpm install"),
             format!("cd {u}; x=${{(AA)=functions::=cd :}}; cd {w}; pnpm install"),
             format!("cd {u}; \"${{(AA)=functions:=cd :}}\"; cd {w}; pnpm install"),
@@ -3022,6 +3035,7 @@ mod tests {
             "zsh -c 'cd backend && cargo test'".to_string(),
             "bash -n script; bash scripts/x.sh --verbose; sh -eu script".to_string(),
             ": ${(AA)=aliases::=a b}; : ${FOO::=bar}; cargo test".to_string(),
+            "read -r functions_list; read -rA parts; read -r options_json".to_string(),
             "jq '.options[0]=\"x\"' package.json; echo ${options[errexit]} $functions[f] myfunctions[1]".to_string(),
             "jq '.options[0]' package.json; : \"$x\"; set -o nounset; set -m".to_string(),
             ": ${FOO:=bar}; cargo test".to_string(),
