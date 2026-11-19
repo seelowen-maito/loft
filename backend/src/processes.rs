@@ -153,6 +153,12 @@ fn is_helper(comm: &str) -> bool {
     comm.contains(".app/") && HELPERS.contains(&comm.rsplit('/').next().unwrap_or_default())
 }
 
+/// Whether `comm`, a process's executable path, is a test browser: one of Playwright's (in its cache,
+/// `ms-playwright`) or any Chrome for Testing, with their helpers. Never the user's own Google Chrome.
+fn is_test_browser(comm: &str) -> bool {
+    comm.contains("/ms-playwright/") || comm.rsplit('/').next().unwrap_or_default().starts_with("Google Chrome for Testing")
+}
+
 /// A process an agent left alive, for Clean to list.
 #[derive(Debug, PartialEq)]
 pub struct Live {
@@ -278,14 +284,20 @@ pub async fn pruner(storage: PathBuf) {
 
 /// Stops every process the agent owns, when it is deleted (see [`stop`]). Its session records go now.
 pub async fn stop_all(storage: &Path, agent_id: &str) {
-    stop(storage, agent_id, || true).await;
+    stop(storage, agent_id, || true, |_| true).await;
     let _ = tokio::fs::remove_dir_all(sessions_dir(storage, agent_id)).await;
 }
 
-/// Stops every process the agent owns (see [`Owners`]): SIGTERM, then SIGKILL for any still there after a grace period. Returns
+/// Stops the test browsers the agent left running (see [`is_test_browser`]), when its run ends: a script that
+/// never closed its browser, crashed or timed out. Its detached servers keep running. Returns how many processes.
+pub async fn stop_test_browsers(storage: &Path, agent_id: &str) -> usize {
+    stop(storage, agent_id, || true, |p| p.browser).await.len()
+}
+
+/// Stops every process the agent owns (see [`Owners`]) that `only` picks: SIGTERM, then SIGKILL for any still there after a grace period. Returns
 /// each one's PID and command. `proceed` is asked again right before the first signal, and nothing is stopped
 /// when it says no.
-async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static) -> Vec<(i32, String)> {
+async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static, only: fn(&Proc) -> bool) -> Vec<(i32, String)> {
     let (storage, id) = (storage.to_path_buf(), agent_id.to_string());
     let targets = tokio::task::spawn_blocking(move || {
         if !proceed() {
@@ -295,7 +307,7 @@ async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + S
         let me = std::process::id() as i32;
         let targets: Vec<(i32, i32, String)> = table()
             .into_iter()
-            .filter(|p| p.pid != me && !p.helper && owners.of(p) == Some(&id))
+            .filter(|p| p.pid != me && !p.helper && only(p) && owners.of(p) == Some(&id))
             .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.command)))
             .collect();
         for (pid, _, _) in &targets {
@@ -336,7 +348,7 @@ pub async fn stop_idle(state: &AppState) -> Vec<crate::sweep::Line> {
         // Asked again right before the signals, so a run that just started keeps its processes.
         let (st, agent) = (state.clone(), a.clone());
         let still_idle = move || st.db.get_agent(&agent.id).ok().flatten().is_some_and(|a| crate::agents::idle(&st, &a, std::time::SystemTime::now()));
-        for (pid, command) in stop(&state.cfg.storage_dir, &a.id, still_idle).await {
+        for (pid, command) in stop(&state.cfg.storage_dir, &a.id, still_idle, |_| true).await {
             let (path, rel) = (PathBuf::from(format!("pid {pid}")), clip(&command, 200));
             lines.push(crate::sweep::Line { agent: a.id.clone(), path, rel, bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() });
         }
@@ -382,7 +394,7 @@ pub async fn stop_left_running(State(state): State<AppState>, UrlPath(id): UrlPa
     if !not_running() {
         return Err(crate::api::ApiError(axum::http::StatusCode::CONFLICT, "the agent is working".into()));
     }
-    let stopped = stop(&state.cfg.storage_dir, &id, not_running).await;
+    let stopped = stop(&state.cfg.storage_dir, &id, not_running, |_| true).await;
     let lines: Vec<crate::sweep::Line> = stopped
         .iter()
         .map(|(pid, command)| crate::sweep::Line { agent: id.clone(), path: PathBuf::from(format!("pid {pid}")), rel: clip(command, 200), bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() })
@@ -404,6 +416,8 @@ struct Proc {
     command: String,
     /// One of Xcode's helpers, by its executable.
     helper: bool,
+    /// A test browser, by its executable (see [`is_test_browser`]).
+    browser: bool,
     /// It has a terminal: the user's shell, or something run in it.
     tty: bool,
     /// It, or a process it runs under, is Loft or a GUI app: never an agent's by its working folder.
@@ -425,7 +439,7 @@ fn table() -> Vec<Proc> {
         return vec![];
     };
     // The executable on its own: `command` mixes it with arguments the agent chooses.
-    let (mut helpers, mut apps) = (HashSet::new(), HashSet::new());
+    let (mut helpers, mut apps, mut browsers) = (HashSet::new(), HashSet::new(), HashSet::new());
     if let Ok(o) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,comm="]).output() {
         for l in String::from_utf8_lossy(&o.stdout).lines() {
             let (pid, comm) = field(l);
@@ -435,6 +449,9 @@ fn table() -> Vec<Proc> {
             }
             if is_gui_app(comm) {
                 apps.insert(pid);
+            }
+            if is_test_browser(comm) {
+                browsers.insert(pid);
             }
         }
     }
@@ -449,7 +466,7 @@ fn table() -> Vec<Proc> {
             let (tty, command) = field(rest);
             let pid: i32 = pid.parse().ok()?;
             let tty = !matches!(tty, "??" | "?" | "-");
-            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), tty, under_app: false, sessions_above: vec![] })
+            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), browser: browsers.contains(&pid), tty, under_app: false, sessions_above: vec![] })
         })
         .collect();
     mark_under_app(&mut procs, &apps, session_of);
@@ -1158,7 +1175,7 @@ mod tests {
         assert!(is_gui_app(&format!("{home}/Applications/RustRover.app/Contents/MacOS/fsnotifier")));
         assert!(!is_gui_app(&format!("{home}/Documents/Applications/Fake.app/Contents/MacOS/x")), "only ~/Applications itself");
 
-        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false, sessions_above: vec![] };
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, browser: false, tty: false, under_app: false, sessions_above: vec![] };
         // Loft 100 runs git 101; VS Code 200 runs its extension host 201, which runs a language server 202; a
         // daemon 300 runs under launchd and has a child 301.
         let mut procs = vec![p(100, 1), p(101, 100), p(200, 1), p(201, 200), p(202, 201), p(300, 1), p(301, 300)];
@@ -1170,7 +1187,7 @@ mod tests {
     #[test]
     fn a_child_that_left_an_agent_s_session_is_the_agent_s() {
         use super::mark_under_app;
-        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false, sessions_above: vec![] };
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, browser: false, tty: false, under_app: false, sessions_above: vec![] };
         // Loft 100 runs claude 110, whose Bash shell 120 (session 120, recorded) runs a dev server 121; the dev server
         // starts a worker 130 in a session of its own (node `detached`), and the worker runs 131. Loft's git 101 is
         // in Loft's session.
@@ -1234,15 +1251,68 @@ mod tests {
         assert!(outside.alive(), "it stopped a process outside the workspace");
     }
 
+    #[test]
+    fn a_test_browser_is_playwright_s_or_chrome_for_testing_never_the_user_s_chrome() {
+        let cache = "/Users/u/Library/Caches/ms-playwright";
+        let cft = "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing";
+        assert!(is_test_browser(&format!("{cache}/chromium-1234/chrome-mac-arm64/{cft}")));
+        assert!(is_test_browser(&format!("{cache}/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell")));
+        let helper = "Google Chrome for Testing Helper (Renderer).app/Contents/MacOS/Google Chrome for Testing Helper (Renderer)";
+        assert!(is_test_browser(&format!("/Users/u/.cache/puppeteer/chrome/mac_arm-131/Frameworks/{helper}")));
+        assert!(!is_test_browser("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
+        assert!(!is_test_browser("/Applications/Google Chrome.app/Contents/Frameworks/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)"));
+        assert!(!is_test_browser("/usr/local/bin/node"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_s_end_stops_only_its_test_browsers_and_the_next_run_hears_of_it() {
+        let (st, a) = fake_claude_state();
+        let b = crate::tasks::tests::agent(&st, "Other");
+        let root = st.cfg.root.as_path().to_path_buf();
+        let link = |rel: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink("/bin/sleep", &path).unwrap();
+            path
+        };
+        let cft = link("ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing");
+        let shell = link("ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell");
+        let chrome = link("Google Chrome.app/Contents/MacOS/Google Chrome");
+        // The agent's: two test browsers its scripts left open, and a `nohup` dev server.
+        let (browser, headless, server) = (Sleeper::start_as(&cft, true), Sleeper::start_as(&shell, true), Sleeper::start(true));
+        for p in [&browser, &headless, &server] {
+            record(&st.cfg.storage_dir, &a.id, p.pid() as u32).unwrap();
+        }
+        // The user's own Chrome, and another agent's test browser in a run still going.
+        let users = Sleeper::start_as(&chrome, true);
+        let others = Sleeper::start_as(&cft, true);
+        record(&st.cfg.storage_dir, &b.id, others.pid() as u32).unwrap();
+        st.rt.lock().unwrap().running.insert(b.id.clone(), Arc::new(tokio::sync::Notify::new()));
+
+        enqueue(&st, &a.id, Some("hello".into()), "user");
+        until("the run to end", 30, || !is_running(&st, &a.id)).await;
+        until("its test browsers to stop", 5, || !browser.alive() && !headless.alive()).await;
+        assert!(server.alive(), "it stopped the dev server");
+        assert!(users.alive(), "it stopped the user's Chrome");
+        assert!(others.alive(), "it stopped another agent's browser");
+
+        enqueue(&st, &a.id, Some("again".into()), "user");
+        until("the next run to end", 30, || !is_running(&st, &a.id)).await;
+        let prompts = std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap();
+        let second = prompts.split("\n---\n").nth(1).unwrap();
+        assert!(second.contains("Loft closed 2 test browser processes left from your last run"), "{second}");
+        st.rt.lock().unwrap().running.remove(&b.id);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn stop_leaves_the_processes_when_the_agent_is_no_longer_idle_by_then() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Builder");
         let server = Sleeper::start(true);
         record(&st.cfg.storage_dir, &a.id, server.pid() as u32).unwrap();
-        assert!(stop(&st.cfg.storage_dir, &a.id, || false).await.is_empty());
+        assert!(stop(&st.cfg.storage_dir, &a.id, || false, |_| true).await.is_empty());
         assert!(server.alive());
-        assert_eq!(stop(&st.cfg.storage_dir, &a.id, || true).await.len(), 1);
+        assert_eq!(stop(&st.cfg.storage_dir, &a.id, || true, |_| true).await.len(), 1);
         until("the server stops", 5, || !server.alive()).await;
     }
 
