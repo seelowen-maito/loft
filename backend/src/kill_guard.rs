@@ -1991,11 +1991,12 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
     Some(text)
 }
 
-/// A shell the guard can't read: not sh, bash, zsh, dash or ksh, but one of the others or a versioned or restricted one (`zsh-5.9`, `rbash`, `ksh93`).
+/// A shell the guard can't read: any name ending in `sh` (csh, fish, oksh, rzsh, pwsh, ...) or another known one, with a version
+/// (`zsh-5.9`, `ksh93`), but not sh, bash, zsh, dash or ksh themselves, which it reads, nor `ssh`.
 fn unread_shell(name: &str) -> bool {
-    let b = base(name.trim_start_matches('=')).to_lowercase();
-    let known = matches!(b.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh");
-    !known && (matches!(b.as_str(), "csh" | "tcsh" | "fish" | "ash" | "mksh" | "yash" | "pdksh" | "rc" | "es" | "xonsh" | "nu" | "pwsh" | "powershell" | "elvish" | "rbash" | "busybox") || ["zsh", "bash", "ksh", "dash", "tcsh"].iter().any(|s| b.starts_with(s)))
+    let whole = base(name.trim_start_matches('=')).to_lowercase();
+    let b = whole.trim_end_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | '-')).trim_end_matches(".exe");
+    !matches!(whole.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh" | "ssh") && (b.ends_with("sh") || matches!(b, "ion" | "nu" | "rc" | "es" | "elvish" | "busybox" | "powershell"))
 }
 
 fn base(name: &str) -> &str {
@@ -3601,11 +3602,17 @@ mod tests {
             format!("powershell -c 'cd {u}; pnpm install'"),
             format!("zsh-5.9 -c 'cd {u}; pnpm install'"),
             format!("rbash -c 'cd {u}; pnpm install'"),
+            format!("oksh -c 'cd {u}; pnpm install'"),
+            format!("posh -c 'cd {u}; pnpm install'"),
+            format!("osh -c 'cd {u}; pnpm install'"),
+            format!("rzsh -c 'cd {u}; pnpm install'"),
+            format!("ion -c 'cd {u}; pnpm install'"),
+            format!("oksh <<< 'cd {u}; pnpm install'"),
             format!("ksh93 -c 'cd {u}; pnpm install'"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
-        for cmd in ["source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test"] {
+        for cmd in ["bashdb x; cargo test", "dashboard; cargo test", "zsh_prompt_test; cargo test", "ssh host ls", "source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
     }
