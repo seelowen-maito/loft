@@ -572,14 +572,24 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             dirs.made = true;
             continue;
         }
-        // A literal file is the agent's own; one from stdin or an expansion isn't read: the shell may end anywhere (`source /dev/stdin <<< 'cd x'`).
-        if matches!(name.as_str(), "source" | ".") && args.iter().find(|a| !a.starts_with('-') || a.len() == 1).is_none_or(|f| f.contains(['$', '`', '*', '?', '[', '{', '<', '=']) || matches!(f.as_str(), "-" | "/dev/stdin") || f.starts_with("/dev/fd/") || f.starts_with("/proc/")) {
-            dirs.lose();
-            dirs.made = true;
-            continue;
+        // A literal file is the agent's own. Stdin (any spelling: a heredoc, a pipe, `/dev/./stdin`), a name searched in PATH or an expansion
+        // isn't: the text it is given is read like a shell's, and the shell may end anywhere (`source /dev/stdin <<< 'cd x'`).
+        if matches!(name.as_str(), "source" | ".") {
+            let file = args.iter().find(|a| !a.starts_with('-') || a.len() == 1);
+            let text = shell_script(cmds, i, &["-s".to_string()]).unwrap_or_default();
+            if !text.trim().is_empty() || file.is_none_or(|f| f.contains(['$', '`', '*', '?', '[', '{', '<', '=', '(']) || f == "-" || !f.contains('/') || f.contains("/dev/") || f.contains("/proc/") || f.contains("..")) {
+                if !text.trim().is_empty() {
+                    let mut inner = dirs.clone();
+                    changes(&text, &mut inner, depth + 1, out);
+                    dirs.keep_made(&inner);
+                }
+                dirs.lose();
+                dirs.made = true;
+                continue;
+            }
         }
-        // A shell the guard doesn't read (`tcsh -c 'cd x; …'`): what it runs is unknown.
-        if matches!(base(name).to_lowercase().as_str(), "csh" | "tcsh" | "fish" | "ash" | "mksh" | "yash" | "pdksh" | "rc" | "es" | "xonsh" | "nu" | "pwsh" | "elvish") && args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c')) {
+        // A shell the guard doesn't read (`tcsh -c 'cd x; …'`, `tcsh <<< 'cd x'`, `fish --command`): what it runs is unknown, whatever its flags.
+        if unread_shell(name) {
             out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
             dirs.made = true;
             continue;
@@ -954,7 +964,7 @@ fn reads_state(all: &[String]) -> (bool, bool) {
             // `read -rA functions` fills the whole array.
             "read" if args.iter().any(|a| matches!(a.as_str(), "functions" | "options")) => opaque = true,
             // The name these write is a word an expansion may build (`strftime -s CD$K`, `zformat -f CD$K`).
-            "strftime" | "zformat" => opaque |= args.iter().enumerate().any(|(k, a)| matches!(a.as_str(), "-s" | "-f") && args.get(k + 1).is_none_or(|n| !plain(n))),
+            "strftime" | "zformat" => opaque |= args.iter().any(|a| a.contains(['$', '`'])),
             "private" => opaque |= args.iter().any(|a| !a.starts_with('-') && !plain_name(a)),
             "export" | "typeset" | "declare" | "local" | "readonly" | "integer" | "float" | "read" => opaque |= args.iter().any(|a| !a.starts_with('-') && !plain_name(a)),
             // `-v name`, bundled (`-rv name`) or not, or glued (`-vname`).
@@ -1828,7 +1838,7 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
         }
     }
     // `zsh /dev/stdin` reads the script from stdin like `-s`.
-    stdin |= rest.first().is_some_and(|f| matches!(f.as_str(), "-" | "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0"));
+    stdin |= rest.first().is_some_and(|f| f == "-" || f.contains("/dev/") || f.contains("/proc/"));
     if !rest.is_empty() && !stdin {
         return None;
     }
@@ -1845,6 +1855,13 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
         }
     }
     Some(text)
+}
+
+/// A shell the guard can't read: not sh, bash, zsh, dash or ksh, but one of the others or a versioned or restricted one (`zsh-5.9`, `rbash`, `ksh93`).
+fn unread_shell(name: &str) -> bool {
+    let b = base(name.trim_start_matches('=')).to_lowercase();
+    let known = matches!(b.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh");
+    !known && (matches!(b.as_str(), "csh" | "tcsh" | "fish" | "ash" | "mksh" | "yash" | "pdksh" | "rc" | "es" | "xonsh" | "nu" | "pwsh" | "powershell" | "elvish" | "rbash" | "busybox") || ["zsh", "bash", "ksh", "dash", "tcsh"].iter().any(|s| b.starts_with(s)))
 }
 
 fn base(name: &str) -> &str {
@@ -3394,6 +3411,30 @@ mod tests {
             format!("K=cd; zformat -f CD$K x; cd {u}; pnpm install"),
             format!("K=cd; private CD$K=; cd {u}; pnpm install"),
             format!("K=cd; trap \"CD$K=x\" EXIT; cd {u}; pnpm install"),
+            format!("source /dev/stdin <<< 'cd {u}; pnpm install'"),
+            format!("echo 'cd {u}; pnpm install' | source /dev/stdin"),
+            format!("source /dev/./stdin <<< 'cd {u}; pnpm install'"),
+            format!("source //dev/stdin <<< 'cd {u}; pnpm install'"),
+            format!(". ../../../dev/stdin <<< 'cd {u}; pnpm install'"),
+            format!("PATH=/dev:$PATH . stdin <<< 'cd {u}; pnpm install'"),
+            format!("zsh /dev/./stdin <<< 'cd {u}; pnpm install'"),
+            format!("zsh /dev/fd/3 3<<< 'cd {u}; pnpm install'"),
+            format!("K=cd; strftime -sCD$K %s; cd {u}; pnpm install"),
+            format!("K=cd; strftime -qs CD$K %s; cd {u}; pnpm install"),
+            format!("K=cd; zformat -F CD$K x; cd {u}; pnpm install"),
+            format!("K=cd; zformat -a cd$K x; cd {u}; pnpm install"),
+            format!("=tcsh -c 'cd {u}; pnpm install'"),
+            format!("tcsh <<< 'cd {u}; pnpm install'"),
+            format!("echo 'cd {u}; pnpm install' | tcsh"),
+            format!("fish --command 'cd {u}; pnpm install'"),
+            format!("fish -C 'cd {u}; pnpm install'"),
+            format!("pwsh -Command 'cd {u}; pnpm install'"),
+            format!("nu --commands 'cd {u}; pnpm install'"),
+            format!("busybox sh -c 'cd {u}; pnpm install'"),
+            format!("powershell -c 'cd {u}; pnpm install'"),
+            format!("zsh-5.9 -c 'cd {u}; pnpm install'"),
+            format!("rbash -c 'cd {u}; pnpm install'"),
+            format!("ksh93 -c 'cd {u}; pnpm install'"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
