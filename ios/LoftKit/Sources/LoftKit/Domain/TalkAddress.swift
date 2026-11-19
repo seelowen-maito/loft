@@ -15,8 +15,9 @@ public enum TalkAddress {
 
     /// The words that address a message to someone ("send this to …").
     private static let leads: [[String]] = [["send", "this", "to"], ["this", "is", "for"]]
-    /// Words that, right after a name the message starts with, show it's said to that agent ("Dev can you …").
-    private static let asks: Set<String> = ["can", "could", "would", "will", "please"]
+    /// Words that, followed by "you" right after a name the message starts with, show it's said to that agent
+    /// ("Dev can you …"). On their own they also start plain statements ("Loft will need a restart").
+    private static let asks: Set<String> = ["can", "could", "would", "will"]
 
     public static func read(_ text: String, agents: [Agent]) -> Reading {
         let words = text.split(whereSeparator: \.isWhitespace)
@@ -41,9 +42,14 @@ public enum TalkAddress {
         // "<agent>, …" or "<agent> can you …"
         guard let longest = longest(norm, at: 0, names) else { return .none }
         let end = longest.length
-        guard end < words.count, words[end - 1].last.map({ ",:".contains($0) }) == true || asks.contains(norm[end]) else { return .none }
+        guard end < words.count, words[end - 1].last.map({ ",:".contains($0) }) == true || asksAt(norm, end) else { return .none }
         guard longest.ids.count == 1 else { return .unclear }
         return .agent(id: longest.ids[0], text: rest(words[end...]))
+    }
+
+    /// "can you", "will you" … or "please" at `i`.
+    private static func asksAt(_ norm: [String], _ i: Int) -> Bool {
+        norm[i] == "please" || (asks.contains(norm[i]) && i + 1 < norm.count && norm[i + 1] == "you")
     }
 
     private static let trim = CharacterSet(charactersIn: " ,;:-–—")

@@ -11,6 +11,7 @@ final class TalkAddressTests: XCTestCase {
     }
 
     private lazy var agents = [
+        agent("loft", "Loft"),
         agent("loft-lead", "Loft Lead", role: "lead", group: "Loft"),
         agent("loft-dev", "Loft Dev", role: "dev", group: "Loft"),
         agent("mobile", "Loft mobile dev", role: "dev", group: "Loft"),
@@ -34,6 +35,8 @@ final class TalkAddressTests: XCTestCase {
     func testStartingWithANamePicksIt() {
         XCTAssertEqual(read("Loft Dev, can you look at the logs?"), .agent(id: "loft-dev", text: "Can you look at the logs?"))
         XCTAssertEqual(read("QA can you run the suite"), .agent(id: "qa", text: "Can you run the suite"))
+        XCTAssertEqual(read("Loft will you restart"), .agent(id: "loft", text: "Will you restart"))
+        XCTAssertEqual(read("QA please run the suite"), .agent(id: "qa", text: "Please run the suite"))
     }
 
     func testTheLongestNameWins() {
@@ -56,6 +59,10 @@ final class TalkAddressTests: XCTestCase {
         XCTAssertEqual(read(""), .none)
         // A name that's only part of the sentence, not who it's said to.
         XCTAssertEqual(read("QA found two bugs in the login."), .none)
+        // "will", "can", "would" also start plain statements: only a question ("… can you") or "please" addresses.
+        XCTAssertEqual(read("Loft will need a restart after this update."), .none)
+        XCTAssertEqual(read("Loft can crash when the disk is full."), .none)
+        XCTAssertEqual(read("QA would be faster with more runners."), .none)
         XCTAssertEqual(read("Please send this to the customer and then tell me what they said about it."), .none)
     }
 }
