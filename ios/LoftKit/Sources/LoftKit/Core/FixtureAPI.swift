@@ -267,6 +267,16 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             // The Orchestrator's last word is a question: suggested replies show under it.
             msgs["orch"]?.append(m(20, "orch", "assistant", "text", "Tests are green on the settings PR. Should I merge it now or wait for QA?", 1))
         }
+        if args.contains("-fixture-long-chat") {
+            // The Backend Agent's chat is longer than a page: "Load earlier messages" is far above its newest reply
+            // (and, with `-fixture-risky-permission`, the approval card in its chat).
+            msgs["be"] = (1...150).map { (i: Int) -> ChatMessage in
+                let reply = i % 2 == 0
+                let text = !reply ? "Carry on with the next step."
+                    : "Step \(i / 2) of the settings screen is done." + String(repeating: "\n\n- Built the **row** and its `toggle`, with a test for each state it can be in.", count: i % 7)
+                return m(Int64(1000 + i), "be", reply ? "assistant" : "user", "text", text, Double(300 - i))
+            }
+        }
         if args.contains("-fixture-run-silent") {
             // Nothing new in the chat either: the last message is older than the silence.
             msgs["orch"] = msgs["orch"]?.map { var m = $0; m.createdAt = m.createdAt.addingTimeInterval(-25 * 60); return m }
