@@ -2977,12 +2977,13 @@ pub(crate) mod tests {
         let (_a, _m) = planned(&st, &fake, "dl-hand", vec![ticket("API", &["octo/ext-hand#9"])]).await;
         crate::delivery::retry(&st, slug).await;
         assert_eq!(delivery(&st, slug).tickets[0].waiting_on, ["octo/ext-hand#9"], "still open");
-        read_issue(&fake, "octo/ext-hand", 9, "closed");
         // Another repo's lock is held by a step: its Delivery is left for the poll.
         let busy = st.publish_locks.of(slug).lock_owned().await;
         crate::delivery::blocker_closed(&st, "octo/ext-hand", 9, "octo/elsewhere").await;
         drop(busy);
         assert_eq!(delivery(&st, slug).tickets[0].waiting_on, ["octo/ext-hand#9"]);
+        // GitHub says closed only now: the mirror sync publishing started can run late, and would clear it above.
+        read_issue(&fake, "octo/ext-hand", 9, "closed");
         crate::delivery::retry(&st, slug).await;
         assert!(delivery(&st, slug).tickets[0].waiting_on.is_empty());
     }

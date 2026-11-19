@@ -11,6 +11,9 @@ struct ChatView: View {
     @State private var loading = true
     @State private var loadError: APIError?
     @State private var loadingOlder = false
+    /// The item that was at the top when you tapped "Load earlier messages": it goes back to the top once the
+    /// earlier ones are drawn above it.
+    @State private var keepTop: String?
     /// How many of the latest chat items are drawn; "Load earlier messages" shows more.
     @State private var shown = Self.page
     private static let page = 60
@@ -99,16 +102,19 @@ struct ChatView: View {
                     if all.count > shown || store.historyHasMore[agentId] == true {
                         Button {
                             // Keep your place: the item at the top stays at the top once the earlier ones are in.
-                            let keep = items.first?.id
+                            // Not a row of tool calls: one cut by the page boundary takes a new id once the
+                            // earlier calls in its run arrive.
                             func reveal() {
+                                keepTop = items.first { if case .tools = $0 { false } else { true } }?.id
                                 shown += Self.page
-                                if let keep { DispatchQueue.main.async { proxy.scrollTo(keep, anchor: .top) } }
                             }
                             if all.count > shown { reveal(); return }
                             Task {
                                 loadingOlder = true
                                 try? await store.loadOlder(agentId)
-                                reveal()
+                                // Nothing new (or the fetch failed): no earlier page will be drawn to scroll back
+                                // from, and a kept item left set would pull you up later, once new messages arrive.
+                                if ChatItem.build(store.conversation(agentId)).count > all.count { reveal() }
                                 loadingOlder = false
                             }
                         } label: {
@@ -131,6 +137,7 @@ struct ChatView: View {
                                          // The original may be loaded but not drawn yet: draw down to it first.
                                          let key = ChatItem.key(message: id)
                                          guard let i = all.firstIndex(where: { $0.id == key }) else { return }
+                                         keepTop = nil
                                          shown = max(shown, all.count - i)
                                          DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
                                      })
@@ -157,12 +164,22 @@ struct ChatView: View {
                 .padding(.horizontal, Theme.gutter)
                 .padding(.vertical, 12)
             }
+            // Open on the newest messages. On a cold launch the cached chat is there before the first layout, and a
+            // scrollTo then lands nowhere (#625).
+            .defaultScrollAnchor(.bottom)
             // Jump to the bottom once it has messages; new ones scroll it down below.
             .task(id: !items.isEmpty) {
                 guard !items.isEmpty else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
             .scrollDismissesKeyboard(.interactively)
+            // Scroll back to the kept item once the earlier page is in the view, not right after the tap: after a
+            // server fetch a scroll queued then runs before the new page is laid out, and you land on its top (#630).
+            .onChange(of: items.first?.id) {
+                guard let keep = keepTop else { return }
+                keepTop = nil
+                DispatchQueue.main.async { proxy.scrollTo(keep, anchor: .top) }
+            }
             .onChange(of: items.last?.id) { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: store.pending(for: agentId).count) { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             // The questions card replaces the permission card: keep it in view.
@@ -918,7 +935,7 @@ private struct MessageBubble: View {
                         QuoteBlock(quote: q) { jump(q.id) }
                     }
                     if message.videos.isEmpty && message.photos.isEmpty || !message.displayContent.isEmpty {
-                        CollapsibleText(text: message.displayContent)
+                        CollapsibleText(text: message.displayContent, linkColor: isUser ? Theme.onAccent : nil)
                             .font(.body)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
