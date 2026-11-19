@@ -157,6 +157,9 @@ struct ChatView: View {
                 .padding(.horizontal, Theme.gutter)
                 .padding(.vertical, 12)
             }
+            // Open on the newest messages. On a cold launch the cached chat is there before the first layout, and a
+            // scrollTo then lands nowhere (#625).
+            .defaultScrollAnchor(.bottom)
             // Jump to the bottom once it has messages; new ones scroll it down below.
             .task(id: !items.isEmpty) {
                 guard !items.isEmpty else { return }
