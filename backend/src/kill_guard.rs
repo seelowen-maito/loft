@@ -565,7 +565,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         pending_dotgit = names_dotgit(all, &cmds[i].targets);
         dirs.git_env |= mentions_git_env(all, &cmds[i].targets, &cmds[i].stdin);
         // A here-document body may run commands (`$(…)`, backticks), whatever command reads it (a herestring's are parsed).
-        for t in substitutions(&cmds[i].stdin) {
+        for t in substitutions(&cmds[i].expands) {
             let mut inner = dirs.clone();
             changes(&t, &mut inner, depth + 1, out);
             dirs.keep_made(&inner);
@@ -2268,6 +2268,8 @@ struct Cmd {
     pipes: Vec<(usize, usize)>,
     /// Its heredoc bodies and herestrings.
     stdin: String,
+    /// The part of `stdin` a shell expands: herestrings and unquoted here-document bodies.
+    expands: String,
     /// The subshells it runs in (`( )`, `$( )`, backticks), outermost first, by number: a `cd` there stays there.
     scope: Vec<usize>,
     /// Its `&&` list: the commands joined by `&&` or `|` since the last `;`, newline, `||` or `&`. The ones after a `cd` in
@@ -2354,7 +2356,7 @@ struct Level {
     redirect: Option<Redirect>,
     frames: Vec<Frame>,
     /// Heredocs started on this line: their delimiter and command.
-    heredocs: Vec<(String, usize)>,
+    heredocs: Vec<(String, usize, bool)>,
     /// A `&&`, `||` or `|` ended the line so far: a newline continues the list.
     open_list: bool,
     /// The word has a quoted or escaped part: it is never a keyword.
@@ -2406,6 +2408,8 @@ impl Level {
             Some(Redirect::Here) => {
                 cmd.stdin += &word;
                 cmd.stdin.push('\n');
+                cmd.expands += &word;
+                cmd.expands.push('\n');
             }
             // A quoted `]]` or `[[` isn't one that ends or opens a condition.
             None if quoted && matches!(word.as_str(), "]]" | "[[") => self.command_word(p, id, format!("\\{word}"), live, quoted),
@@ -2793,14 +2797,18 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                         i += 1;
                     }
                     let mut delimiter = String::new();
+                    // Any quote or backslash in the delimiter makes the body plain text, as in zsh and bash.
+                    let mut quoted = false;
                     while let Some(&n) = c.get(i).filter(|&&n| !n.is_whitespace() && !";&|()<>".contains(n)) {
-                        if !"'\"\\".contains(n) {
+                        if "'\"\\".contains(n) {
+                            quoted = true;
+                        } else {
                             delimiter.push(n);
                         }
                         i += 1;
                     }
                     let id = l.cmd(p);
-                    l.heredocs.push((delimiter, id));
+                    l.heredocs.push((delimiter, id, quoted));
                 } else {
                     i = redirect(&mut l, c, i, ch);
                 }
@@ -2867,8 +2875,8 @@ fn redirect(l: &mut Level, c: &[char], mut i: usize, ch: char) -> usize {
 }
 
 /// Reads the bodies of the heredocs started on the line that ended just before `i` into their commands' stdin.
-fn read_heredocs(p: &mut Parse, c: &[char], mut i: usize, heredocs: &mut Vec<(String, usize)>) -> usize {
-    for (delimiter, id) in heredocs.drain(..) {
+fn read_heredocs(p: &mut Parse, c: &[char], mut i: usize, heredocs: &mut Vec<(String, usize, bool)>) -> usize {
+    for (delimiter, id, quoted) in heredocs.drain(..) {
         while i < c.len() {
             let end = c[i..].iter().position(|&n| n == '\n').map_or(c.len(), |p| i + p);
             let line: String = c[i..end].iter().collect();
@@ -2878,6 +2886,10 @@ fn read_heredocs(p: &mut Parse, c: &[char], mut i: usize, heredocs: &mut Vec<(St
             }
             p.cmds[id].stdin += &line;
             p.cmds[id].stdin.push('\n');
+            if !quoted {
+                p.cmds[id].expands += &line;
+                p.cmds[id].expands.push('\n');
+            }
         }
     }
     i.min(c.len())
@@ -3724,6 +3736,28 @@ mod tests {
         }
         for cmd in ["bashdb x; cargo test", "dashboard; cargo test", "zsh_prompt_test; cargo test", "ssh host ls", "source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test", "./build.sh; cargo test", "scripts/test.sh; cargo test", "hash -r; cargo test", "rehash; cargo test", "trash x; cargo test", "BASH -c 'cd backend; cargo test'", "[ -f ./env.sh ] && source ./env.sh; pnpm install", "[[ -f ./env.sh ]] && . ./env.sh; cat ./env.sh; pnpm install"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn quoted_heredoc_bodies_are_plain_text() {
+        let u = USER;
+        for d in ["'EOF'", "\"EOF\"", "\\EOF", "E'O'F"] {
+            for cmd in [
+                format!("cat > body.md <<{d}\nsends `PurchaseChannel` to `?channel=` and $(rm -rf x)\nEOF"),
+                format!("git commit -F - <<{d}\n`ln -s {u} backend`\nEOF"),
+                format!("gh pr create --body-file - <<{d}\n$(ln -s {u} backend)\nEOF"),
+            ] {
+                assert_eq!(asks(&cmd, CLONE), None, "{cmd}");
+            }
+        }
+        let cmd = "cat > body.md <<-'EOF'\n\t`PurchaseChannel`\n\tEOF".to_string();
+        assert_eq!(asks(&cmd, CLONE), None, "{cmd}");
+        for cmd in [
+            format!("pnpm install <<EOF\n$(ln -s {u} backend)\nEOF"),
+            format!("cat <<EOF\n`cd {u}; pnpm install`\nEOF"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "{cmd}");
         }
     }
 
