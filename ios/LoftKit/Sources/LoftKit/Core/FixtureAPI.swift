@@ -256,6 +256,15 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             perms.append(PermissionRequest(id: "p2", agentId: "be", source: "prompt", toolName: "Bash", input: ["command": "git push origin main"],
                                            reason: "Ship the settings endpoints", rule: "Bash(git push *)", status: "pending", createdAt: ago(2)))
         }
+        if args.contains("-fixture-questions") {
+            // AskUserQuestion, once allowed: the questions themselves, one single-choice and one multi-choice.
+            perms.append(PermissionRequest(id: "q1", agentId: "qa", source: "questions", toolName: "AskUserQuestion", input: ["questions": .array([
+                ["question": "Which store should the backups go to?", "header": "Store", "multiSelect": false, "options": .array([
+                    ["label": "B2", "description": "Backblaze, cheapest per GB"], ["label": "S3", "description": "AWS, what prod uses"]])],
+                ["question": "Which regions?", "header": "Regions", "multiSelect": true, "options": .array([
+                    ["label": "EU"], ["label": "US"], ["label": "Asia"]])],
+            ])], reason: nil, rule: nil, status: "pending", createdAt: ago(1)))
+        }
         if args.contains("-fixture-kill-permission") {
             // A kill with a program to name (Always allow offered), and one with none (Allow once and Deny only).
             perms.append(PermissionRequest(id: "k1", agentId: "be", source: "prompt", toolName: "Kill", input: ["command": "pkill -x Loft"],
@@ -1026,7 +1035,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
     public func permissions() async throws -> [PermissionRequest] { try check(); return locked { perms } }
 
-    public func decidePermission(id: String, decision: String) async throws {
+    public func decidePermission(id: String, decision: String, answers: [String: String]?) async throws {
         try check()
         locked { if let i = perms.firstIndex(where: { $0.id == id }) { perms[i].status = decision == "deny" ? "denied" : "allowed_once" } }
     }
