@@ -167,9 +167,6 @@ struct Dirs {
     moved: bool,
     /// `CDPATH` is set or exported, or `cdablevars` or `auto_cd` is on: a `cd x` may land somewhere else than `x`.
     cd_search: bool,
-    /// GIT_DIR or GIT_WORK_TREE appears somewhere in the command so far (in any word, assigned, exported, unset or
-    /// hidden in a name): git may use a repository the guard can't follow, so every git call after it is unknown.
-    git_env: bool,
     /// The functions the command defined, newest last, with the commands of the body (an index range of the text being
     /// checked) when the guard holds it. A call checks that body where it is called, not where it was defined.
     funcs: Vec<(String, Option<(usize, usize, bool)>)>,
@@ -269,7 +266,7 @@ impl Dirs {
             p if p == "~" || p.starts_with("~/") => Some(PathBuf::from(format!("{}{}", home()?, &p[1..]))),
             p if p.starts_with('/') => Some(PathBuf::from(p)),
             p if p == "~+" || p.starts_with("~+/") => Some(self.cwd.as_deref()?.join(format!(".{}", &p[2..]))),
-            p if p.starts_with('~') => None,
+            p if p.starts_with('~') => Some(PathBuf::from(tilde_user(p)?)),
             p => Some(self.cwd.as_deref()?.join(p)),
         }
     }
@@ -350,7 +347,6 @@ impl Dirs {
         self.aliases.extend(inner.aliases.iter().cloned());
         self.dotgit |= inner.dotgit;
         self.unreadable |= inner.unreadable;
-        self.git_env |= inner.git_env;
         self.touched.extend(inner.touched.iter().cloned());
         for t in &inner.traps {
             if !self.traps.contains(t) {
@@ -556,7 +552,6 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         // A `.git` an earlier command names (`> t/.git`, `of=t/.git`, `ln -s x .git`) matters from the next on.
         dirs.dotgit |= std::mem::take(&mut pending_dotgit);
         pending_dotgit = names_dotgit(all, &cmds[i].targets);
-        dirs.git_env |= mentions_git_env(all, &cmds[i].targets, &cmds[i].stdin);
         // A here-document body may run commands (`$(…)`, backticks), whatever command reads it (a herestring's are parsed).
         for t in substitutions(&cmds[i].expands) {
             let mut inner = dirs.clone();
@@ -1253,30 +1248,10 @@ fn env_chdir(prefix: &[String]) -> Vec<&str> {
 }
 
 /// Whether a command writes or names a path that ends in `.git` (also as `of=x/.git` or `--output=x/.git`), other than
-/// as a plain `GIT_DIR=` or `GIT_WORK_TREE=` word, which `mentions_git_env` already covers.
+/// as a plain `GIT_DIR=` or `GIT_WORK_TREE=` word, which names the checkout on its own.
 fn names_dotgit(words: &[String], targets: &[String]) -> bool {
     let ends = |p: &str| Path::new(p).file_name().is_some_and(|n| n == ".git");
     words.iter().filter(|w| !w.starts_with("GIT_DIR=") && !w.starts_with("GIT_WORK_TREE=")).chain(targets).any(|w| ends(w) || w.split_once('=').is_some_and(|(_, v)| ends(v)))
-}
-
-/// Whether a command sets, exports, unsets or reads GIT_DIR or GIT_WORK_TREE: a word that starts with the name or
-/// has `NAME=` in it, or whose name (before any `=`) is a glob or an expansion of `GIT_*` (`GIT_D*`, `${!GIT_*}`), even
-/// through quotes. Text a shell runs (`eval`, `sh -c`, a heredoc) counts if it names either at all. A mention in a
-/// message (`'fix GIT_DIR handling'`) or a use of the value (`echo $GIT_DIR`) doesn't.
-fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
-    let named = |t: &str| t.contains("GIT_DIR") || t.contains("GIT_WORK_TREE");
-    let hit = |w: &str| {
-        let name = w.split('=').next().unwrap_or(w);
-        w.starts_with("GIT_DIR") || w.starts_with("GIT_WORK_TREE") || w.contains("GIT_DIR=") || w.contains("GIT_WORK_TREE=") || (name.starts_with("GIT_") && name.contains(['$', '*', '?', '[', '{'])) || name.contains("${!GIT")
-    };
-    // A name from an expansion that `read`, `export`, `declare`... sets (`read $G`, `export $G`), or zsh's `${(P)G::=x}`.
-    let sets = words.iter().any(|w| matches!(w.as_str(), "read" | "export" | "declare" | "typeset" | "readonly" | "local" | "vared"))
-        && words.iter().any(|w| w.split('=').next().is_some_and(|n| n.contains('$')));
-    if sets || words.iter().any(|w| w.contains("${(P)")) {
-        return true;
-    }
-    let shell = words.iter().any(|w| base(w) == "eval" || shell_name(&base(w).to_lowercase()));
-    words.iter().chain(targets).any(|w| hit(w) || (shell && named(w))) || (shell && named(stdin))
 }
 
 /// The folders one command (not a `cd`, a shell or an `eval`) changes, run in `dirs`.
@@ -1688,8 +1663,8 @@ fn outermost_checkout(folder: &Path) -> PathBuf {
 /// quotes (`live`, from the lexer). The ones a git word has are expanded first (`expand_args`).
 /// A folder word with a variable, a command substitution or a backtick: where it goes is known only to the shell.
 fn expands(word: &str) -> bool {
-    // `~user`, `~-`, `~1`, `~name`: another folder, which the guard can't tell (`~`, `~/x` and `~+` it can).
-    let other_tilde = word.starts_with('~') && !(word == "~" || word.starts_with("~/") || word == "~+" || word.starts_with("~+/"));
+    // `~-`, `~1`: another folder, which the guard can't tell (`~`, `~/x`, `~+` and `~user` of a user that exists it can).
+    let other_tilde = word.starts_with('~') && !(word == "~" || word.starts_with("~/") || word == "~+" || word.starts_with("~+/") || tilde_user(word).is_some());
     word.contains(['$', '`']) || other_tilde
 }
 
@@ -1791,6 +1766,27 @@ fn git_reads(sub: &str, rest: &[&str]) -> bool {
     }
 }
 
+/// `~name` or `~name/rest` with the home folder of the user `name` (from the user database). None when there is no such user.
+fn tilde_user(path: &str) -> Option<String> {
+    let (name, rest) = path.strip_prefix('~')?.split_once('/').map_or((&path[1..], ""), |(n, r)| (n, &path[path.len() - r.len() - 1..]));
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return None;
+    }
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: the buffer outlives the call, and `pw_dir` is read before it is dropped.
+    let home = unsafe {
+        libc::getpwnam_r(name.as_ptr(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut found);
+        if found.is_null() || pw.pw_dir.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(pw.pw_dir).to_string_lossy().into_owned()
+    };
+    Some(format!("{home}{rest}"))
+}
+
 /// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded (after the links on the way are followed when `physical`). None when it holds another variable or a substitution.
 fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
     let home = || dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
@@ -1798,8 +1794,8 @@ fn resolve(cwd: &Path, path: &str, physical: bool) -> Option<PathBuf> {
         p if p == "~" || p.starts_with("~/") => format!("{}{}", home()?, &p[1..]),
         p if p.starts_with("$HOME") => format!("{}{}", home()?, &p[5..]),
         p if p.starts_with("${HOME}") => format!("{}{}", home()?, &p[7..]),
-        // `~-`, `~user`: another folder the guard can't tell.
-        p if p.starts_with('~') => return None,
+        // `~-`, `~1`: another folder the guard can't tell.
+        p if p.starts_with('~') => tilde_user(p)?,
         p => p.to_string(),
     };
     if path.contains(['$', '`']) {
@@ -3830,8 +3826,6 @@ mod tests {
         assert!(bad.is_empty(), "should ask:\n{}", bad.join("\n"));
         // What it can't tell runs.
         for cmd in [
-            format!("cd ~gustavo/dev/loft; pnpm install"),
-            format!("git -C ~gustavo/dev/loft reset --hard"),
             format!("cd {u}; cd {CLONE}; cd ~-; pnpm install"),
             format!("hash -d x={u}; git -C ~x reset --hard"),
             format!("alias -s t-x='cd {u}'; eval ./a.t-x; pnpm install"),
