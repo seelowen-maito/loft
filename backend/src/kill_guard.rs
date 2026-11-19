@@ -2521,6 +2521,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
     }
     let mut depth = 0; // subshell parens open inside a `$(`
     let mut array = 0; // parens open in an array assignment, `pids=($(pgrep x))`: its elements stay in the word
+    let mut arith = 0; // parens open in `(( … ))` and `for (( … ))`, and brackets in `$[ … ]`: a `<<` there is a shift
     while let Some(&ch) = c.get(i) {
         let next = c.get(i + 1).copied();
         i += 1;
@@ -2631,6 +2632,17 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 l.cmd(p);
                 i = lex(p, c, i + 1, Some(')'));
             }
+            '$' if next == Some('[') => {
+                arith += 1;
+                l.in_word = true;
+                l.word.push('$');
+                l.word.push('[');
+                i += 1;
+            }
+            ']' if arith > 0 && l.word.contains("$[") => {
+                arith -= 1;
+                l.word.push(ch);
+            }
             '$' if next == Some('{') => {
                 l.in_word = true;
                 l.word.push('$');
@@ -2659,6 +2671,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             }
             ' ' | '\t' => l.end_word(p),
             '(' => {
+                if arith > 0 || (next == Some('(') && !l.in_word) {
+                    arith += 1;
+                }
                 if stop == Some(')') {
                     depth += 1;
                 }
@@ -2670,6 +2685,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             }
             ')' if stop == Some(')') && depth == 0 => break,
             ')' => {
+                arith = (arith - 1).max(0);
                 if stop == Some(')') {
                     depth -= 1;
                 }
@@ -2754,7 +2770,13 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     l.in_word = false; // `2>`: a file descriptor, not a word
                 }
                 l.end_word(p);
-                if ch == '<' && next == Some('<') && c.get(i + 1) != Some(&'<') {
+                let is_let = l.cur.is_some_and(|id| p.cmds[id].words.first().is_some_and(|w| w == "let"));
+                if ch == '<' && next == Some('<') && (arith > 0 || is_let) {
+                    // A shift, not a here-document.
+                    i += 1;
+                    l.word.push_str("<<");
+                    l.in_word = true;
+                } else if ch == '<' && next == Some('<') && c.get(i + 1) != Some(&'<') {
                     i += 1;
                     if c.get(i) == Some(&'-') {
                         i += 1;
@@ -2766,6 +2788,11 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     // Any quote or backslash in the delimiter makes the body plain text, as in zsh and bash.
                     let mut quoted = false;
                     while let Some(&n) = c.get(i).filter(|&&n| !n.is_whitespace() && !";&|()<>".contains(n)) {
+                        // A backslash before a newline is a line continuation, not quoting.
+                        if n == '\\' && c.get(i + 1) == Some(&'\n') {
+                            i += 2;
+                            continue;
+                        }
                         if "'\"\\".contains(n) {
                             quoted = true;
                         } else {
@@ -3735,6 +3762,21 @@ mod tests {
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "{cmd}");
         }
+    }
+
+    #[test]
+    fn a_shift_in_arithmetic_is_no_heredoc_and_a_continued_delimiter_is_unquoted() {
+        let u = USER;
+        for cmd in [
+            format!("(( x = 1 << 2 ))\ngit -C {u} reset --hard"),
+            format!("let x=1<<2\ngit -C {u} reset --hard"),
+            format!("for (( i = 1 << 2; i < 9; i++ )); do :; done\ngit -C {u} reset --hard"),
+            format!("echo $[ 1 << 2 ]\ngit -C {u} reset --hard"),
+            format!("cat <<EOF\\\n$(git -C {u} reset --hard)\nEOF"),
+        ] {
+            assert_eq!(asks(&cmd, CLONE), Some(PathBuf::from(u)), "should ask: {cmd}");
+        }
+        assert_eq!(asks("(( x = 1 << 2 ))\ngit status", CLONE), None);
     }
 
     #[test]
