@@ -50,6 +50,8 @@ import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
 import { QuoteBlock, QuoteChip, ReplyButton, useLongPress } from "./Quote";
+import { AnswerCard } from "./AnswerCard";
+import { answerCard } from "../../lib/answerCard";
 import { QUOTE_GONE_NOTE, jumpStep, messageAnchor, quotable, quoteGone, quoteOf, replyOf } from "../../lib/reply";
 
 type Item =
@@ -403,6 +405,13 @@ export function Chat({
     setPickingTask(false);
   }, [agent.id]);
 
+  // The agent's latest message asks something, and no permission, AskUserQuestion or grill card waits on you instead.
+  // Gone once you've sent anything: the message you sent is the last word (`answered` covers until it arrives).
+  const [answered, setAnswered] = useState<number | null>(null);
+  const waitingOnYou = [...perms.values()].some((p) => p.agent_id === agent.id && p.status === "pending") || (!!grill && (grill.state === "active" || grill.state === "paused"));
+  const asked = useMemo(() => answerCard(messages, waitingOnYou), [messages, waitingOnYou]);
+  const card = asked && asked.message.id !== answered ? asked : null;
+
   // `pick`: the command picked from the menu, which runs mid-message (see `picked`).
   const send = async (t = text, pick: CommandWord | null = picked): Promise<void> => {
     const v = t.trim();
@@ -432,6 +441,7 @@ export function Chat({
   const sendText = async (v: string, imgs: string[]) => {
     try {
       await api.send(agent.id, v, imgs, taskId ?? undefined, reply?.id);
+      if (card) setAnswered(card.message.id);
     } catch (e) {
       if (quoteGone(errorText(e))) setReply(null);
       throw e;
@@ -673,6 +683,21 @@ export function Chat({
           )}
           <SubagentBar agent={agent} />
           {grill && (grill.state === "active" || grill.state === "paused") && <GrillBar session={grill} />}
+          {card && (
+            <AnswerCard
+              card={card}
+              agentName={agent.name}
+              busy={sending.busy}
+              onAnswer={(a) =>
+                act(sending, async () => {
+                  stick.current = true;
+                  await api.send(agent.id, a);
+                  setAnswered(card.message.id);
+                })
+              }
+              onReply={() => onReply(card.message)}
+            />
+          )}
           {pickingTask && (
             <TaskPicker
               agents={agents}
