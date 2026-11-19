@@ -289,15 +289,18 @@ pub async fn stop_all(storage: &Path, agent_id: &str) {
 }
 
 /// Stops the test browsers the agent left running (see [`is_test_browser`]), when its run ends: a script that
-/// never closed its browser, crashed or timed out. Its detached servers keep running. Returns how many processes.
+/// never closed its browser, crashed or timed out. Its detached servers keep running. Returns how many browsers:
+/// the stopped processes not run by another one stopped (a browser's renderers and GPU process are its own).
 pub async fn stop_test_browsers(storage: &Path, agent_id: &str) -> usize {
-    stop(storage, agent_id, || true, |p| p.browser).await.len()
+    let stopped = stop(storage, agent_id, || true, |p| p.browser).await;
+    let pids: HashSet<i32> = stopped.iter().map(|(pid, _, _)| *pid).collect();
+    stopped.iter().filter(|(_, ppid, _)| !pids.contains(ppid)).count()
 }
 
 /// Stops every process the agent owns (see [`Owners`]) that `only` picks: SIGTERM, then SIGKILL for any still there after a grace period. Returns
-/// each one's PID and command. `proceed` is asked again right before the first signal, and nothing is stopped
+/// each one's PID, parent's PID and command. `proceed` is asked again right before the first signal, and nothing is stopped
 /// when it says no.
-async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static, only: fn(&Proc) -> bool) -> Vec<(i32, String)> {
+async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static, only: fn(&Proc) -> bool) -> Vec<(i32, i32, String)> {
     let (storage, id) = (storage.to_path_buf(), agent_id.to_string());
     let targets = tokio::task::spawn_blocking(move || {
         if !proceed() {
@@ -305,24 +308,24 @@ async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + S
         }
         let owners = Owners::load(&storage, std::slice::from_ref(&id));
         let me = std::process::id() as i32;
-        let targets: Vec<(i32, i32, String)> = table()
+        let targets: Vec<(i32, i32, i32, String)> = table()
             .into_iter()
             .filter(|p| p.pid != me && !p.helper && only(p) && owners.of(p) == Some(&id))
-            .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.command)))
+            .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.ppid, p.command)))
             .collect();
-        for (pid, _, _) in &targets {
+        for (pid, _, _, _) in &targets {
             unsafe { libc::kill(*pid, libc::SIGTERM) };
         }
         targets
     })
     .await
     .unwrap_or_default();
-    let stopped = targets.iter().map(|(pid, _, command)| (*pid, command.clone())).collect();
+    let stopped = targets.iter().map(|(pid, _, ppid, command)| (*pid, *ppid, command.clone())).collect();
     if !targets.is_empty() {
         tokio::spawn(async move {
             tokio::time::sleep(STOP_GRACE).await;
             // Only a process still in the session: the PID may belong to another one by now.
-            for (pid, sid, _) in targets {
+            for (pid, sid, _, _) in targets {
                 if session_of(pid) == Some(sid) {
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
@@ -348,7 +351,7 @@ pub async fn stop_idle(state: &AppState) -> Vec<crate::sweep::Line> {
         // Asked again right before the signals, so a run that just started keeps its processes.
         let (st, agent) = (state.clone(), a.clone());
         let still_idle = move || st.db.get_agent(&agent.id).ok().flatten().is_some_and(|a| crate::agents::idle(&st, &a, std::time::SystemTime::now()));
-        for (pid, command) in stop(&state.cfg.storage_dir, &a.id, still_idle, |_| true).await {
+        for (pid, _, command) in stop(&state.cfg.storage_dir, &a.id, still_idle, |_| true).await {
             let (path, rel) = (PathBuf::from(format!("pid {pid}")), clip(&command, 200));
             lines.push(crate::sweep::Line { agent: a.id.clone(), path, rel, bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() });
         }
@@ -397,7 +400,7 @@ pub async fn stop_left_running(State(state): State<AppState>, UrlPath(id): UrlPa
     let stopped = stop(&state.cfg.storage_dir, &id, not_running, |_| true).await;
     let lines: Vec<crate::sweep::Line> = stopped
         .iter()
-        .map(|(pid, command)| crate::sweep::Line { agent: id.clone(), path: PathBuf::from(format!("pid {pid}")), rel: clip(command, 200), bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() })
+        .map(|(pid, _, command)| crate::sweep::Line { agent: id.clone(), path: PathBuf::from(format!("pid {pid}")), rel: clip(command, 200), bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() })
         .collect();
     if !lines.is_empty() {
         crate::sweep::record(&state, "Stopped processes", lines).await;
@@ -1278,8 +1281,21 @@ mod tests {
         let cft = link("ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing");
         let shell = link("ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell");
         let chrome = link("Google Chrome.app/Contents/MacOS/Google Chrome");
-        // The agent's: two test browsers its scripts left open, and a `nohup` dev server.
-        let (browser, headless, server) = (Sleeper::start_as(&cft, true), Sleeper::start_as(&shell, true), Sleeper::start(true));
+        // A Chrome for Testing that runs a renderer helper: `sh` under the browser's name, starting a `sleep` under
+        // the helper's.
+        let sh = root.join("ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/sh");
+        std::os::unix::fs::symlink("/bin/sh", &sh).unwrap();
+        let renderer = link("ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing Helper (Renderer)");
+        let mut cmd = std::process::Command::new(&sh);
+        cmd.arg0(&cft).arg("-c").arg("\"$0\" 60 & wait").arg(&renderer);
+        unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+        let child = cmd.spawn().unwrap();
+        let pid = child.id() as i32;
+        let browser = Sleeper(Some(std::sync::Mutex::new(child)), pid);
+        until("the renderer to start", 5, || table().iter().any(|p| p.ppid == browser.pid() && p.browser)).await;
+        let helper = table().into_iter().find(|p| p.ppid == browser.pid()).unwrap().pid;
+        // The agent's: two test browsers its scripts left open (one with its renderer), and a `nohup` dev server.
+        let (headless, server) = (Sleeper::start_as(&shell, true), Sleeper::start(true));
         for p in [&browser, &headless, &server] {
             record(&st.cfg.storage_dir, &a.id, p.pid() as u32).unwrap();
         }
@@ -1291,7 +1307,7 @@ mod tests {
 
         enqueue(&st, &a.id, Some("hello".into()), "user");
         until("the run to end", 30, || !is_running(&st, &a.id)).await;
-        until("its test browsers to stop", 5, || !browser.alive() && !headless.alive()).await;
+        until("its test browsers to stop", 5, || !browser.alive() && !headless.alive() && !alive(helper)).await;
         assert!(server.alive(), "it stopped the dev server");
         assert!(users.alive(), "it stopped the user's Chrome");
         assert!(others.alive(), "it stopped another agent's browser");
@@ -1300,7 +1316,7 @@ mod tests {
         until("the next run to end", 30, || !is_running(&st, &a.id)).await;
         let prompts = std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap();
         let second = prompts.split("\n---\n").nth(1).unwrap();
-        assert!(second.contains("Loft closed 2 test browser processes left from your last run"), "{second}");
+        assert!(second.contains("Loft closed 2 test browsers left from your last run"), "{second}");
         st.rt.lock().unwrap().running.remove(&b.id);
     }
 

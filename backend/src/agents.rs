@@ -1103,7 +1103,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             if closed > 0
                 && let Ok(Some(a)) = state.db.get_agent(&agent_id)
             {
-                fyi_from_loft(&state, &a, &format!("Loft closed {closed} test browser processes left from your last run. Close your browsers in your scripts (`try`/`finally` `browser.close()`)."));
+                fyi_from_loft(&state, &a, &format!("Loft closed {closed} test browser{} left from your last run. Close your browsers in your scripts (`try`/`finally` `browser.close()`).", if closed == 1 { "" } else { "s" }));
             }
             let (next, push) = {
                 let mut rt = state.rt.lock().unwrap();
