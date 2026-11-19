@@ -166,7 +166,7 @@ struct NeedsYouRow: View {
             }
             if let s = assist?.summary {
                 Label(s, systemImage: "sparkles").font(.footnote).accessibilityLabel("Summary: \(s)")
-            } else {
+            } else if !item.asksQuestions(store.permissions) {
                 Text(item.reason).font(.footnote).foregroundStyle(.secondary)
             }
             if showsText, !item.text.isEmpty {
