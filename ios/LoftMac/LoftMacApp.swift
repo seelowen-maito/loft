@@ -49,6 +49,7 @@ struct LoftMacApp: App {
         // The PR screenshots draw a session that hides nothing.
         let focus = FocusController(hidesApps: !ProcessInfo.processInfo.arguments.contains { $0 == "-render-window" || $0 == "-render-menubar" })
         _focus = State(initialValue: focus)
+        nav.isFocusing = { focus.session != nil }
         MacAppDelegate.dockMenu = {
             focus.dockMenu {
                 quickSearch.showWindow?()
@@ -147,9 +148,11 @@ struct LoftMacApp: App {
 final class MacNav {
     /// The section the window shows and the sidebar highlights, and the chat-opened count for the composer.
     var selection = MacSelection()
+    /// A focus session is running: only its sections open (set by the app).
+    var isFocusing: () -> Bool = { false }
     var section: MacSection {
-        get { selection.section }
-        set { selection.go(newValue) }
+        get { FocusSession.shown(selection.section, focusing: isFocusing()) }
+        set { selection.go(FocusSession.shown(newValue, focusing: isFocusing())) }
     }
     var agentId: String?
     var picksRecipient = false
@@ -381,10 +384,6 @@ struct MainWindow: View {
         .webPage()
         .sheet(isPresented: $nav.picksRecipient) { RecipientPicker() }
         .sheet(isPresented: $focus.picksLength) { FocusLengthSheet() }
-        // A session leaves only Agents and Issues: from another section, it goes to Agents.
-        .onChange(of: focus.session == nil) {
-            if focus.session != nil, !FocusSession.sections.contains(nav.section) { nav.section = .agents }
-        }
         .onChange(of: nav.section) { keepSidebarKeyboard() }
     }
 

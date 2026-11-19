@@ -13,6 +13,8 @@ import UserNotifications
 final class FocusController {
     static let minutesKey = "focusMinutes"
     static let allowListKey = "focusAllowList"
+    /// The bundle ids a running session hid, so the next launch shows them again after a crash or force quit.
+    static let hiddenKey = "focusHidden"
 
     private(set) var session: FocusSession?
     /// The last chosen length, remembered across launches.
@@ -26,8 +28,10 @@ final class FocusController {
     let loftBundleId: String
     /// Off for screenshots: a session drawn for a PR mustn't hide the apps on this Mac.
     private let hidesApps: Bool
-    /// The apps this session hid, to show again at the end (never one the user had hidden before).
-    private var hidden: [NSRunningApplication] = []
+    /// The apps this session hid, to show again at the end.
+    @ObservationIgnored private var hider = FocusHider<NSRunningApplication>() {
+        didSet { UserDefaults.standard.set(hider.bundleIds, forKey: Self.hiddenKey) }
+    }
     private var observers: [NSObjectProtocol] = []
     private var ticker: Task<Void, Never>?
     private let dockTile = FocusDockTile()
@@ -37,6 +41,11 @@ final class FocusController {
         loftBundleId = Bundle.main.bundleIdentifier ?? "loft"
         minutes = FocusDuration.remembered(UserDefaults.standard.integer(forKey: Self.minutesKey))
         allowList = FocusAllowList.load(UserDefaults.standard.data(forKey: Self.allowListKey), loftBundleId: loftBundleId)
+        // `willTerminate` doesn't run after a crash or force quit: what that session hid comes back now.
+        if hidesApps, let saved = UserDefaults.standard.stringArray(forKey: Self.hiddenKey), !saved.isEmpty {
+            FocusHider.unhide(saved: saved, in: NSWorkspace.shared.runningApplications)
+            UserDefaults.standard.removeObject(forKey: Self.hiddenKey)
+        }
     }
 
     func start(minutes: Int) {
@@ -73,8 +82,7 @@ final class FocusController {
         ticker = nil
         observers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
         observers = []
-        for app in hidden where !app.isTerminated { app.unhide() }
-        hidden = []
+        hider.unhideAll()
         dockTile.show(nil)
         if !TestMode.noAlerts { notifyEnded(session, timeUp: timeUp) }
     }
@@ -82,18 +90,19 @@ final class FocusController {
     /// A newly allowed app comes back at once.
     func allow(_ app: FocusApp) {
         allowList.add(app)
-        for running in hidden where running.bundleIdentifier == app.bundleId { running.unhide() }
-        hidden.removeAll { $0.bundleIdentifier == app.bundleId }
+        hider.unhide(bundleId: app.bundleId)
+    }
+
+    /// An app taken off the list mid-session is hidden at once.
+    func disallow(_ bundleId: String) {
+        allowList.remove(bundleId)
+        guard hidesApps else { return }
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleId) { hideIfNeeded(app) }
     }
 
     private func hideIfNeeded(_ app: NSRunningApplication) {
-        guard session != nil, !app.isHidden,
-              allowList.hides(bundleId: app.bundleIdentifier, isRegularApp: app.activationPolicy == .regular, loftBundleId: loftBundleId)
-        else { return }
-        // hide() returns false even when it works (seen from the sandboxed, signed app on macOS 27), so every app
-        // asked is shown again at the end.
-        _ = app.hide()
-        if !hidden.contains(app) { hidden.append(app) }
+        guard session != nil else { return }
+        hider.hide(app, unless: allowList, loftBundleId: loftBundleId)
     }
 
     private func notifyEnded(_ session: FocusSession, timeUp: Bool) {
@@ -122,6 +131,10 @@ final class FocusController {
         }
         return menu
     }
+}
+
+extension NSRunningApplication: @retroactive FocusRunningApp {
+    public var isRegularApp: Bool { activationPolicy == .regular }
 }
 
 /// A menu item that runs a closure: the Dock menu is AppKit's.
@@ -288,7 +301,7 @@ struct FocusSettings: View {
                     AppIcon(bundleId: app.bundleId).frame(width: 20, height: 20)
                     Text(app.name)
                     Spacer()
-                    Button { focus.allowList.remove(app.bundleId) } label: { Image(systemName: "minus.circle") }
+                    Button { focus.disallow(app.bundleId) } label: { Image(systemName: "minus.circle") }
                         .buttonStyle(.borderless)
                         .help("Remove \(app.name)")
                         .accessibilityLabel("Remove \(app.name)")

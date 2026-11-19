@@ -112,3 +112,58 @@ public struct FocusAllowList: Equatable, Sendable {
         return starting(loftBundleId: loftBundleId)
     }
 }
+
+extension FocusSession {
+    /// The section the window shows: while a session runs, one it hides (quick search, Spotlight, a widget) shows Agents.
+    public static func shown(_ section: MacSection, focusing: Bool) -> MacSection {
+        focusing && !sections.contains(section) ? .agents : section
+    }
+}
+
+/// A running app as a focus session sees it: `NSRunningApplication` on the Mac, a fake in the tests.
+public protocol FocusRunningApp: AnyObject {
+    var bundleIdentifier: String? { get }
+    var isRegularApp: Bool { get }
+    var isHidden: Bool { get }
+    var isTerminated: Bool { get }
+    func hide() -> Bool
+    func unhide() -> Bool
+}
+
+/// The apps a session hid, to show again when it ends (never one the user had hidden before).
+public struct FocusHider<App: FocusRunningApp> {
+    public private(set) var hidden: [App] = []
+
+    public init() {}
+
+    /// The hidden apps' bundle ids, saved so a launch after a crash can show them again.
+    public var bundleIds: [String] { hidden.compactMap(\.bundleIdentifier) }
+
+    /// Hides the app when it's off the allow list and not hidden already.
+    public mutating func hide(_ app: App, unless allowList: FocusAllowList, loftBundleId: String) {
+        guard !app.isHidden,
+              allowList.hides(bundleId: app.bundleIdentifier, isRegularApp: app.isRegularApp, loftBundleId: loftBundleId)
+        else { return }
+        // hide() returns false even when it works (seen from the sandboxed, signed app on macOS 27), so every app
+        // asked is shown again at the end.
+        _ = app.hide()
+        if !hidden.contains(where: { $0 === app }) { hidden.append(app) }
+    }
+
+    /// A newly allowed app comes back at once.
+    public mutating func unhide(bundleId: String) {
+        for app in hidden where app.bundleIdentifier == bundleId && !app.isTerminated { _ = app.unhide() }
+        hidden.removeAll { $0.bundleIdentifier == bundleId }
+    }
+
+    /// The session ended: every app it hid comes back.
+    public mutating func unhideAll() {
+        for app in hidden where !app.isTerminated { _ = app.unhide() }
+        hidden = []
+    }
+
+    /// The first launch after a crash or force quit mid-session: the apps that session hid come back.
+    public static func unhide(saved bundleIds: [String], in running: [App]) {
+        for app in running where app.isHidden && app.bundleIdentifier.map(bundleIds.contains) == true { _ = app.unhide() }
+    }
+}
