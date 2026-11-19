@@ -2044,10 +2044,14 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
 /// Whether a command other than `cmds[i]` may write `file`: it is a redirect target, or a word of a command that isn't a test or
 /// a read (`[ -f ./env.sh ]`, `cat ./env.sh` don't write it).
 fn written_elsewhere(cmds: &[Cmd], i: usize, file: &str) -> bool {
-    let name = file.trim_start_matches("./");
+    // Compared by the last part of the path, not its spelling (`$PWD/env.sh`, `src/../env.sh`, `./env.sh`) or its folder.
+    let last = |p: &str| p.rsplit('/').next().unwrap_or_default().to_string();
+    let name = last(file);
     cmds.iter().enumerate().any(|(j, c)| {
         let reads = c.words.iter().find(|w| !KEYWORDS.contains(&w.as_str())).is_some_and(|w| matches!(base(w), "[" | "[[" | "test" | "cat" | "ls" | "stat" | "head" | "tail" | "grep" | "wc" | "file" | "diff" | "echo" | "source" | "." | "true" | ":"));
-        c.targets.iter().any(|t| t.trim_start_matches("./") == name) || (j != i && !reads && c.words.iter().any(|w| w.contains(name)))
+        // A read command with a substitution in it (`echo $(cp x ./env.sh)`) may write.
+        let reads = reads && !c.words.iter().any(|w| w.contains(['$', '`']) || w.contains("<("));
+        c.targets.iter().any(|t| t.contains(['$', '`', '*', '?', '[', '{']) || last(t) == name) || (j != i && !reads && c.words.iter().any(|w| w.contains(&name)))
     })
 }
 
@@ -2066,6 +2070,10 @@ fn unread_shell(name: &str) -> bool {
     let b = whole.trim_end_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | '-')).trim_end_matches(".exe");
     if shell_name(&whole) || whole == "ssh" {
         return false;
+    }
+    // A version of a shell it reads (`zsh-5.9`, `bash5`, `ksh93`) is one it can't tell from another program.
+    if shell_name(b) {
+        return true;
     }
     let listed = matches!(b, "csh" | "tcsh" | "fish" | "oksh" | "pdksh" | "mksh" | "lksh" | "posh" | "rbash" | "rzsh" | "yash" | "ash" | "hush" | "xonsh" | "pwsh" | "nsh" | "osh" | "ion" | "nu" | "rc" | "es" | "elvish" | "busybox" | "powershell");
     let script = (name.contains('/') && !name.starts_with('/')) || whole.ends_with(".sh");
@@ -3698,6 +3706,16 @@ mod tests {
             format!("/bin/Bash -c 'cd {u}; pnpm install'"),
             format!("TCSH -c 'cd {u}; pnpm install'"),
             format!("./tcsh -c 'cd {u}; pnpm install'"),
+            format!("../../../bin/zsh-5.9 -c 'cd {u}; pnpm install'"),
+            format!("./ksh93 -c 'cd {u}; pnpm install'"),
+            format!("echo 'cd {u}' > $PWD/env.sh; source ./env.sh; pnpm install"),
+            format!("echo 'cd {u}' > ~+/env.sh; source ./env.sh; pnpm install"),
+            format!("echo 'cd {u}' > src/../env.sh; source ./env.sh; pnpm install"),
+            format!("echo 'cd {u}' > src/e.sh; cd src; source ./e.sh; pnpm install"),
+            format!("echo 'cd {u}' > $HOME/a.sh; source ~/a.sh; pnpm install"),
+            format!("echo 'cd {u}' > en{{v,}}.sh; source ./env.sh; pnpm install"),
+            "echo ${x:-$(cp /tmp/x ./env.sh)}; source ./env.sh; pnpm install".to_string(),
+            format!("ls ./env.sh || echo 'cd {u}' > $PWD/env.sh; source ./env.sh; pnpm install"),
             format!("../../../../bin/tcsh -c 'cd {u}; pnpm install'"),
             format!("~/../../bin/tcsh -c 'cd {u}; pnpm install'"),
             format!("node_modules/.bin/fish -c 'cd {u}; pnpm install'"),
