@@ -572,6 +572,18 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             dirs.made = true;
             continue;
         }
+        // A literal file is the agent's own; one from stdin or an expansion isn't read: the shell may end anywhere (`source /dev/stdin <<< 'cd x'`).
+        if matches!(name.as_str(), "source" | ".") && args.iter().find(|a| !a.starts_with('-') || a.len() == 1).is_none_or(|f| f.contains(['$', '`', '*', '?', '[', '{', '<', '=']) || matches!(f.as_str(), "-" | "/dev/stdin") || f.starts_with("/dev/fd/") || f.starts_with("/proc/")) {
+            dirs.lose();
+            dirs.made = true;
+            continue;
+        }
+        // A shell the guard doesn't read (`tcsh -c 'cd x; …'`): what it runs is unknown.
+        if matches!(base(name).to_lowercase().as_str(), "csh" | "tcsh" | "fish" | "ash" | "mksh" | "yash" | "pdksh" | "rc" | "es" | "xonsh" | "nu" | "pwsh" | "elvish") && args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c')) {
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+            dirs.made = true;
+            continue;
+        }
         // A command word from an expansion (`$X -C d reset`, `env $NAME=x cmd`, `env $ASSIGNMENT cmd`): what runs is unknown.
         if expands(name) {
             out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
@@ -751,6 +763,10 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     inner.enter(&chdir);
                     changes(&t, &mut inner, depth + 1, out);
                     dirs.keep_made(&inner);
+                    // A script from stdin the guard can't see (`curl … | sh`, `zsh /dev/stdin`) may end anywhere.
+                    if t.trim().is_empty() {
+                        dirs.lose();
+                    }
                 }
                 dirs.made = true;
                 continue;
@@ -917,6 +933,8 @@ fn reads_state(all: &[String]) -> (bool, bool) {
                 }
             }
         }
+        // A function named by an expansion may be `cd` (`K=cd; function $K { : }`, `$K() { : }`).
+        opaque |= (w == "function" && all.get(i + 1).is_some_and(|n| n.contains(['$', '`']))) || (w.ends_with("()") && w.contains(['$', '`']));
         // `functions` as the command (`functions -c f cd`) or the array being set (`set -A functions cd :`), not an argument.
         let from = all[..i].iter().rposition(|b| matches!(b.as_str(), "]]" | "))")).map_or(0, |p| p + 1);
         let at_command = all[from..i].iter().all(|b| b == "function" || all[..i].iter().any(|f| f == "function") || assignment(b).is_some() || WRAPPERS.contains(&b.as_str()) || KEYWORDS.contains(&b.as_str()) || b.ends_with("()") || b.starts_with('-') || b.chars().all(|c| c.is_ascii_digit()));
@@ -935,6 +953,9 @@ fn reads_state(all: &[String]) -> (bool, bool) {
             "emulate" | "shopt" => opaque = true,
             // `read -rA functions` fills the whole array.
             "read" if args.iter().any(|a| matches!(a.as_str(), "functions" | "options")) => opaque = true,
+            // The name these write is a word an expansion may build (`strftime -s CD$K`, `zformat -f CD$K`).
+            "strftime" | "zformat" => opaque |= args.iter().enumerate().any(|(k, a)| matches!(a.as_str(), "-s" | "-f") && args.get(k + 1).is_none_or(|n| !plain(n))),
+            "private" => opaque |= args.iter().any(|a| !a.starts_with('-') && !plain_name(a)),
             "export" | "typeset" | "declare" | "local" | "readonly" | "integer" | "float" | "read" => opaque |= args.iter().any(|a| !a.starts_with('-') && !plain_name(a)),
             // `-v name`, bundled (`-rv name`) or not, or glued (`-vname`).
             "printf" | "print" => {
@@ -1789,6 +1810,8 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
             rest = rest.get(1..).unwrap_or_default();
         }
     }
+    // `zsh /dev/stdin` reads the script from stdin like `-s`.
+    stdin |= rest.first().is_some_and(|f| matches!(f.as_str(), "-" | "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0"));
     if !rest.is_empty() && !stdin {
         return None;
     }
@@ -3335,6 +3358,29 @@ mod tests {
             "f() { echo; }; f; f; f",
             "f() { cd backend; }; f; cargo test",
         ] {
+            assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn scripts_it_does_not_read_and_names_built_by_other_builtins_ask() {
+        let u = USER;
+        for cmd in [
+            "source \"$F\"; pnpm install".to_string(),
+            "source <(echo x); pnpm install".to_string(),
+            format!("source /dev/stdin <<< 'cd {u}'; pnpm install"),
+            "zsh /dev/stdin; pnpm install".to_string(),
+            format!("tcsh -c 'cd {u}; pnpm install'"),
+            format!("fish -c 'cd {u}; pnpm install'"),
+            format!("K=cd; function $K {{ : }}; cd {u}; pnpm install"),
+            format!("K=cd; strftime -s CD$K %s; cd {u}; pnpm install"),
+            format!("K=cd; zformat -f CD$K x; cd {u}; pnpm install"),
+            format!("K=cd; private CD$K=; cd {u}; pnpm install"),
+            format!("K=cd; trap \"CD$K=x\" EXIT; cd {u}; pnpm install"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in ["source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
     }
