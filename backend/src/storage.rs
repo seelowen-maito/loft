@@ -95,8 +95,8 @@ pub fn migrate(old: &Path, new: &Path, root: &Path, projects_dir: &Path, data_di
                 // A fresh install, or the move is done.
                 safe_destination(new, root, projects_dir).map_err(|why| anyhow::anyhow!("agents' workspaces can't be in {}: {why}", new.display()))?;
                 if old.is_dir() {
-                    if only_folders(old, true) {
-                        match std::fs::remove_dir_all(old) {
+                    if !old.is_symlink() && only_folders(old, true) {
+                        match remove_folders(old, true) {
                             Ok(()) => tracing::warn!("agents' workspaces: removed {}, which reappeared empty after the move", old.display()),
                             Err(e) => tracing::error!("agents' workspaces: couldn't remove {}, which reappeared after the move: {e}", old.display()),
                         }
@@ -184,6 +184,23 @@ fn only_folders(dir: &Path, top: bool) -> bool {
         let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
         is_dir && ((top && e.file_name() == ".agent-files") || only_folders(&e.path(), false))
     })
+}
+
+/// Removes `dir`, bottom-up, folder by folder: a file that appeared since [`only_folders`] looked (a container
+/// writing into its bind mount) makes it fail, never goes. Only the `top`'s `.agent-files`, Loft's own, goes whole.
+fn remove_folders(dir: &Path, top: bool) -> std::io::Result<()> {
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        if !e.file_type()?.is_dir() {
+            continue;
+        }
+        if top && e.file_name() == ".agent-files" {
+            std::fs::remove_dir_all(e.path())?;
+        } else {
+            remove_folders(&e.path(), false)?;
+        }
+    }
+    std::fs::remove_dir(dir)
 }
 
 /// The old storage folder in the checkout `root`, when it is there though Loft uses `storage` (one with files that
@@ -653,6 +670,32 @@ mod tests {
         assert!(o.old_dir().join("agent-2/link").symlink_metadata().is_ok());
         assert!(o.home.join("dev").exists(), "it followed the link");
         assert_eq!(reappeared(&o.root, &o.old_dir()), None, "not while Loft uses it");
+
+        // An old folder that is a symlink, even to empty folders, is left and shown.
+        std::fs::remove_dir_all(o.old_dir()).unwrap();
+        let target = o.home.join("target/agent-2");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(target.parent().unwrap(), o.old_dir()).unwrap();
+        assert_eq!(o.migrate(), o.new_dir());
+        assert!(o.old_dir().is_symlink() && target.is_dir());
+        assert_eq!(reappeared(&o.root, &o.new_dir()), Some(o.old_dir()));
+    }
+
+    #[test]
+    fn removing_the_empty_folders_never_deletes_a_file_that_appeared_since() {
+        let (_home, home, _root) = home();
+        let old = home.join(NAME);
+        std::fs::create_dir_all(old.join("agent-2/db")).unwrap();
+        std::fs::create_dir_all(old.join(".agent-files/x")).unwrap();
+        std::fs::write(old.join(".agent-files/x/env.sh"), "").unwrap();
+        assert!(only_folders(&old, true));
+        // A container writes into its bind mount after the check.
+        std::fs::write(old.join("agent-2/db/data"), "x").unwrap();
+        assert!(remove_folders(&old, true).is_err());
+        assert!(old.join("agent-2/db/data").exists());
+        std::fs::remove_file(old.join("agent-2/db/data")).unwrap();
+        remove_folders(&old, true).unwrap();
+        assert!(!old.exists());
     }
 
     #[test]
