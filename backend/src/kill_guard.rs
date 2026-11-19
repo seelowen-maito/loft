@@ -683,6 +683,9 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         }
         // zsh's `=zsh` is the path of `zsh`.
         let name = base(name.trim_start_matches('='));
+        // A shell is found under any case (`BASH`, which macOS runs as `bash`).
+        let lower = name.to_lowercase();
+        let name = if shell_name(&lower) { lower.as_str() } else { name };
         let chdir = env_chdir(&all[..all.len() - words.len()]);
         // GNU coreutils under their Homebrew names (`gmv`, `gln`, `gcp`).
         let tool = name.strip_prefix('g').filter(|n| matches!(*n, "ln" | "mv" | "cp" | "rm" | "install")).unwrap_or(name);
@@ -1243,7 +1246,7 @@ fn mentions_git_env(words: &[String], targets: &[String], stdin: &str) -> bool {
     if sets || words.iter().any(|w| w.contains("${(P)")) {
         return true;
     }
-    let shell = words.iter().any(|w| matches!(base(w), "eval" | "sh" | "bash" | "zsh" | "dash" | "ksh"));
+    let shell = words.iter().any(|w| base(w) == "eval" || shell_name(&base(w).to_lowercase()));
     words.iter().chain(targets).any(|w| hit(w) || (shell && named(w))) || (shell && named(stdin))
 }
 
@@ -1878,16 +1881,16 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
         };
         let Some((name, args)) = words.split_first() else { continue };
         match base(name) {
+            _ if shell_name(&base(name).to_lowercase()) => {
+                if let Some(text) = shell_script(cmds, i, args) {
+                    f.add(scan(&text, depth + 1, true));
+                }
+            }
             k if KILLS.contains(&k) => {
                 f.kill = true;
                 f.unscoped |= bypass || name.contains('/') || (k == "kill" && shell);
             }
             "find" => runs.extend(find_execs(args)),
-            "sh" | "bash" | "zsh" | "dash" | "ksh" => {
-                if let Some(text) = shell_script(cmds, i, args) {
-                    f.add(scan(&text, depth + 1, true));
-                }
-            }
             "eval" => f.add(scan(&args.join(" "), depth + 1, shell)),
             // Removing or replacing Loft's functions, or pointing the name at the real command.
             // Only a name that is exactly kill, pkill or killall counts: `unset skills` or `alias skillcheck=...`
@@ -1998,12 +2001,21 @@ fn shell_script(cmds: &[Cmd], i: usize, args: &[String]) -> Option<String> {
     Some(text)
 }
 
-/// A shell the guard can't read: any name ending in `sh` (csh, fish, oksh, rzsh, pwsh, ...) or another known one, with a version
-/// (`zsh-5.9`, `ksh93`), but not sh, bash, zsh, dash or ksh themselves, which it reads, nor `ssh`.
+/// A shell the guard reads.
+fn shell_name(name: &str) -> bool {
+    matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+}
+
+/// A shell the guard can't read: a bare program name (or an absolute path) ending in `sh` (csh, fish, oksh, rzsh, pwsh, ...) or
+/// another known one, with a version (`zsh-5.9`, `ksh93`), but not sh, bash, zsh, dash or ksh themselves, which it reads, nor `ssh`.
+/// A script (`./build.sh`, `scripts/test.sh`) or an everyday command that ends in `sh` (`hash`, `rehash`, `trash`) isn't one.
 fn unread_shell(name: &str) -> bool {
-    let whole = base(name.trim_start_matches('=')).to_lowercase();
+    let name = name.trim_start_matches('=');
+    let whole = base(name).to_lowercase();
     let b = whole.trim_end_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | '-')).trim_end_matches(".exe");
-    !matches!(whole.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh" | "ssh") && (b.ends_with("sh") || matches!(b, "ion" | "nu" | "rc" | "es" | "elvish" | "busybox" | "powershell"))
+    let script = (name.contains('/') && !name.starts_with('/')) || whole.ends_with(".sh");
+    let everyday = matches!(b, "hash" | "rehash" | "trash" | "publish" | "mosh" | "refresh" | "flush" | "finish" | "push" | "stash" | "squash" | "crash" | "wash");
+    !shell_name(&whole) && whole != "ssh" && !script && !everyday && (b.ends_with("sh") || matches!(b, "ion" | "nu" | "rc" | "es" | "elvish" | "busybox" | "powershell"))
 }
 
 fn base(name: &str) -> &str {
@@ -3618,10 +3630,15 @@ mod tests {
             format!("ion -c 'cd {u}; pnpm install'"),
             format!("oksh <<< 'cd {u}; pnpm install'"),
             format!("ksh93 -c 'cd {u}; pnpm install'"),
+            format!("BASH -c 'cd {u}; pnpm install'"),
+            format!("Zsh -c 'cd {u}; pnpm install'"),
+            format!("SH -c 'cd {u}; pnpm install'"),
+            format!("/bin/Bash -c 'cd {u}; pnpm install'"),
+            format!("TCSH -c 'cd {u}; pnpm install'"),
         ] {
             assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
-        for cmd in ["bashdb x; cargo test", "dashboard; cargo test", "zsh_prompt_test; cargo test", "ssh host ls", "source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test"] {
+        for cmd in ["bashdb x; cargo test", "dashboard; cargo test", "zsh_prompt_test; cargo test", "ssh host ls", "source ~/.zshrc", ". ./env.sh", "trap 'rm -f tmp' EXIT; cargo test", "./build.sh; cargo test", "scripts/test.sh; cargo test", "hash -r; cargo test", "rehash; cargo test", "trash x; cargo test", "BASH -c 'cd backend; cargo test'"] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
         }
     }
