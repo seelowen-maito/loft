@@ -29,7 +29,7 @@ final class TalkRecipientTests: XCTestCase {
     }
 
     /// Talk with `id`, saying `text`, finished to review.
-    private func say(_ text: String, picks: Bool = true) async throws -> VoiceSession {
+    private func say(_ text: String, picks: Bool = true, then phase: VoiceSession.Phase = .review) async throws -> VoiceSession {
         let api = MockAPI()
         api.agentList = [agent("lead", "Loft Lead", role: "lead"), agent("dev", "Loft Dev", role: "dev"), agent("mobile", "Loft mobile dev", role: "dev")]
         let store = LoftStore(api: api, cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("t-\(UUID()).json")))
@@ -41,7 +41,7 @@ final class TalkRecipientTests: XCTestCase {
         addTeardownBlock { session.discard() }
         await session.start(agentId: "lead")
         await session.finish(.review)
-        XCTAssertEqual(session.phase, .review)
+        XCTAssertEqual(session.phase, phase)
         return session
     }
 
@@ -57,6 +57,14 @@ final class TalkRecipientTests: XCTestCase {
         XCTAssertEqual(s.agentId, "lead")
         XCTAssertEqual(s.raw, "Dev, can you fix the build?")
         XCTAssertEqual(s.recipientNote, "Didn't catch who: still to Loft Lead.")
+    }
+
+    /// Only a name: nothing to send, so Talk stays open on the new agent and says to go on.
+    func testOnlyANameSwitchesAndAsksForTheMessage() async throws {
+        let s = try await say("Send this to Loft Dev", then: .idle)
+        XCTAssertEqual(s.agentId, "dev")
+        XCTAssertEqual(s.raw, "")
+        XCTAssertEqual(s.recipientNote, "Switched to Loft Dev: say the message.")
     }
 
     func testNoNameChangesNothing() async throws {

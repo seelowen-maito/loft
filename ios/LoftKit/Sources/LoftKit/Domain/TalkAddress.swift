@@ -29,15 +29,12 @@ public enum TalkAddress {
             guard let (id, end) = match(norm, at: start, names) else { return .unclear }
             return .agent(id: id, text: rest(words[end...]))
         }
-        // "… send this to <agent>": the name ends the message.
+        // "… send this to <agent>": the name ends the message. Words that aren't a name are only part of the message
+        // ("… send this to the customer").
         for s in stride(from: norm.count - 1, to: 0, by: -1) {
-            guard let start = lead(in: norm, at: s) else { continue }
-            guard let (id, end) = match(norm, at: start, names), end == norm.count else {
-                // A name of up to four words can follow; later in the message it's only words ("send this to them and …").
-                if norm.count - start > 4 { continue }
-                return .unclear
-            }
-            return .agent(id: id, text: String(words[..<s].joined(separator: " ")).trimmingCharacters(in: trim))
+            guard let start = lead(in: norm, at: s), let l = longest(norm, at: start, names), start + l.length == norm.count else { continue }
+            guard l.ids.count == 1 else { return .unclear }
+            return .agent(id: l.ids[0], text: String(words[..<s].joined(separator: " ")).trimmingCharacters(in: trim))
         }
         // "<agent>, …" or "<agent> can you …"
         guard let longest = longest(norm, at: 0, names) else { return .none }

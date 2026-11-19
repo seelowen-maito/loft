@@ -17,6 +17,7 @@ final class TalkAddressTests: XCTestCase {
         agent("mobile", "Loft mobile dev", role: "dev", group: "Loft"),
         agent("dine-lead", "Lead", role: "lead", group: "Dineout"),
         agent("qa", "QA", role: "qa"),
+        agent("design", "Designer", group: ""),
     ]
 
     private func read(_ text: String) -> TalkAddress.Reading { TalkAddress.read(text, agents: agents) }
@@ -51,7 +52,37 @@ final class TalkAddressTests: XCTestCase {
 
     func testAnUnknownNameIsUnclear() {
         XCTAssertEqual(read("Send this to Bob, ship it"), .unclear)
-        XCTAssertEqual(read("Fix it and send this to Bob."), .unclear)
+    }
+
+    func testAnAmbiguousNameAtTheEndIsUnclear() {
+        XCTAssertEqual(read("Ship it, send this to the Lead."), .unclear, "two Leads")
+    }
+
+    /// At the end, "send this to …" or "this is for …" that names no agent is only part of the message: no note.
+    func testWordsThatArentANameAtTheEndLeaveTheMessage() {
+        XCTAssertEqual(read("Please send this to the customer"), .none)
+        XCTAssertEqual(read("Tell them this is for the demo"), .none)
+        XCTAssertEqual(read("Fix it and send this to Bob."), .none)
+    }
+
+    /// "Loft" is an agent and the start of "Loft Dev" and "Loft mobile dev": the longest wins, at either end.
+    func testLoftAsASharedPrefix() {
+        XCTAssertEqual(read("It's red, send this to Loft"), .agent(id: "loft", text: "It's red"))
+        XCTAssertEqual(read("It's red, send this to Loft Dev"), .agent(id: "loft-dev", text: "It's red"))
+        XCTAssertEqual(read("It's red, send this to Loft mobile dev."), .agent(id: "mobile", text: "It's red"))
+        XCTAssertEqual(read("Loft, can you restart?"), .agent(id: "loft", text: "Can you restart?"))
+        XCTAssertEqual(read("Loft mobile dev, can you look?"), .agent(id: "mobile", text: "Can you look?"))
+    }
+
+    /// An agent with an empty group answers to its name only, not to " Designer".
+    func testAnAgentWithAnEmptyGroup() {
+        XCTAssertEqual(read("Send this to Designer, the icons are blurry."), .agent(id: "design", text: "The icons are blurry."))
+        XCTAssertEqual(read("The icons are blurry, this is for the Designer."), .agent(id: "design", text: "The icons are blurry"))
+    }
+
+    /// Only the name: the recipient switches, and the message is empty.
+    func testOnlyANameLeavesAnEmptyMessage() {
+        XCTAssertEqual(read("Send this to QA"), .agent(id: "qa", text: ""))
     }
 
     func testNoNameLeavesTheMessage() {

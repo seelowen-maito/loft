@@ -362,7 +362,9 @@ public final class VoiceSession {
         case .agent(let id, let text):
             setCommitted(text)
             switchAgent(id)
-            recipientNote = "To \(store.agent(id)?.name ?? "them"), from what you said."
+            let name = store.agent(id)?.name ?? "them"
+            // Only the name was said: nothing goes out, so say the switch happened and the message is still to come.
+            recipientNote = text.isEmpty ? "Switched to \(name): say the message." : "To \(name), from what you said."
             VoiceLog.shared.add("talk: heard who: \(id)")
         case .unclear:
             recipientNote = "Didn't catch who: still to \(store.agent(agentId)?.name ?? "this agent")."
