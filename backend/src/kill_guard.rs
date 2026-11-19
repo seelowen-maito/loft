@@ -538,7 +538,8 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 if cmds[i].maybe || cmds[i].piped {
                     dirs.may_stay(before);
                 }
-                dirs.made = true;
+                // A `trap f EXIT` doesn't call `f` now.
+                dirs.made |= !(all.first().is_some_and(|w| w == "trap") && makes_nothing(all, all, &cmds[i].live));
             }
         }
         let words = match unwrap(all, &mut false) {
@@ -791,7 +792,8 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 folders
             }
         };
-        dirs.made |= !makes_nothing(all, words, live);
+        // A definition runs nothing: its body does when called.
+        dirs.made |= defined.is_empty() && !makes_nothing(all, words, live);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
     // A trap's handler runs in each folder the commands were in (the folder it ran in can be any of them), as a call to a
@@ -955,6 +957,16 @@ fn reads_state(all: &[String]) -> (bool, bool) {
 /// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
 fn makes_nothing(all: &[String], words: &[String], live: &[bool]) -> bool {
     const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream", "--graph", "--name-only", "--force-with-lease", "-sb"];
+    // Only a group's opening (`{ rm x`) may come before the command, not an assignment or a wrapper.
+    let bare = all[..all.len() - words.len()].iter().all(|w| matches!(w.as_str(), "{" | "(" | "then" | "do" | "else"));
+    // `rm` only removes (what it removes is tracked apart, in `removed`).
+    if matches!(words.first().map(String::as_str), Some("rm")) && bare && !live.iter().any(|&l| l) && !words.iter().any(|w| w.contains(['$', '`'])) {
+        return true;
+    }
+    // `trap` only sets what runs later: at the end for a signal or EXIT, but before the next command for these.
+    if words.first().is_some_and(|w| w == "trap") && bare && !live.iter().any(|&l| l) && !words.iter().any(|w| w.contains(['$', '`']) || ["DEBUG", "ERR", "RETURN"].contains(&w.to_uppercase().as_str())) {
+        return true;
+    }
     let [git, args @ ..] = words else { return false };
     let args = match args {
         [c, _, rest @ ..] if c == "-C" => rest,
@@ -3312,12 +3324,36 @@ mod tests {
             "bash -c 'f() { if true; then echo hi; fi; }; f'",
             "eval \"trap 'rm -f tmp' EXIT\"; cd backend; cargo test",
             "trap 'rm -f tmp' EXIT; cd backend; cargo test",
+            "cleanup() { rm -f x; }; trap cleanup EXIT; cd backend; git add -A",
+            "cleanup() { rm -f x; }; cd backend; git add -A",
+            "cleanup() { rm -f x; }; cd backend; git add -A; cleanup",
+            "{ rm -f x; }; cd backend; git add -A",
+            "rm -f x; trap 'echo' EXIT; cd backend; git add -A",
+            "trap 'rm -f tmp' EXIT; cd backend; git add -A",
             "build() { pnpm build; }; build && git add -A",
             "a() { b; }; b() { echo; }; a",
             "f() { echo; }; f; f; f",
             "f() { cd backend; }; f; cargo test",
         ] {
             assert_eq!(asks(cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
+    fn a_function_or_trap_before_a_cd_asks_only_when_it_can_make_the_folder() {
+        let u = USER;
+        for cmd in [
+            format!("cleanup() {{ rm -f x; }}; trap cleanup EXIT; cd {u}; git add -A"),
+            format!("cleanup() {{ rm -f x; }}; cd {u}; git add -A"),
+            format!("trap 'rm -f tmp' EXIT; cd {u}; git add -A"),
+            "f() { mkdir backend; }; trap f EXIT; cd backend; git add -A".to_string(),
+            "f() { mkdir backend; }; cd backend; git add -A".to_string(),
+            "f() { git clone x backend; }; f; cd backend; git add -A".to_string(),
+            "trap 'mkdir backend' DEBUG; cd backend; git add -A".to_string(),
+            "f() { mkdir backend; }; trap f DEBUG; cd backend; git add -A".to_string(),
+            "trap 'git clone x backend' ERR; cd backend; git add -A".to_string(),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
         }
     }
 
