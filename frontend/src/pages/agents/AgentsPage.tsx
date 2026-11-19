@@ -152,7 +152,6 @@ export default function AgentsPage() {
 
   const permMap = useMemo(() => new Map(perms.map((p) => [p.id, p])), [perms]);
   const agentPerms = useMemo(() => perms.filter((p) => p.agent_id === selectedId), [perms, selectedId]);
-  const agentPrs = useMemo(() => prs.filter((p) => p.agent_id === selectedId), [prs, selectedId]);
   const pendingBy = useMemo(() => {
     const m = new Map<string, number>();
     perms.forEach((p) => p.status === "pending" && m.set(p.agent_id, (m.get(p.agent_id) ?? 0) + 1));
@@ -305,7 +304,7 @@ export default function AgentsPage() {
             messages={messages}
             loading={loadedFor !== selected.id}
             perms={permMap}
-            prs={agentPrs}
+            prs={prs}
             grill={grill}
             headerActions={
               <button
