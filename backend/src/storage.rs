@@ -79,6 +79,8 @@ pub fn migrate(old: &Path, new: &Path, root: &Path, projects_dir: &Path, data_di
     let kept = |old: &Path, why: String| {
         tracing::error!("agents' workspaces: not moved from {} to {}: {why}. Loft keeps using {}", old.display(), new.display(), old.display());
         let _ = std::fs::remove_file(&marker);
+        // No move happened: a copy left now would make a later start take the move for done.
+        let _ = std::fs::remove_file(data_dir.join(DB_COPY));
         Ok((old.to_path_buf(), Some(why)))
     };
     let old = match std::fs::read(&marker) {
@@ -737,5 +739,26 @@ mod tests {
         let before = Db::open(&o.data().join(DB_COPY)).unwrap();
         let kept: String = before.conn().query_row("SELECT content FROM memories", [], |r| r.get(0)).unwrap();
         assert!(kept.ends_with(" (later)") && kept.contains(&o.old_dir().display().to_string()), "{kept}");
+    }
+
+    #[test]
+    fn a_rename_that_failed_leaves_no_sign_of_a_finished_move() {
+        use std::os::unix::fs::PermissionsExt;
+        let o = Old::make();
+        // The checkout can't be written, so the rename fails after the database was copied.
+        std::fs::set_permissions(&o.root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let (dir, why) = o.migrate_why();
+        std::fs::set_permissions(&o.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(dir, o.old_dir());
+        assert!(why.is_some_and(|w| w.contains("couldn't rename")));
+        assert!(!o.data().join(DB_COPY).exists() && !o.data().join(MARKER).exists());
+
+        // Something then lands in the new folder: the real workspaces are still the old ones.
+        std::fs::create_dir_all(o.new_dir().join("agent-2")).unwrap();
+        std::fs::write(o.new_dir().join("agent-2/x"), "").unwrap();
+        let (dir, why) = o.migrate_why();
+        assert_eq!(dir, o.old_dir());
+        assert!(why.is_some_and(|w| w.contains("already holds files")));
+        assert!(o.old_dir().join("agent-1/notes/plan.md").exists());
     }
 }
