@@ -348,6 +348,13 @@ impl Dirs {
         self.cd(None);
     }
 
+    /// `GIT_DIR` or `GIT_WORK_TREE` is set to `value`: git uses that folder.
+    fn set_git_env(&mut self, value: &str) {
+        if let Some(p) = self.at(value).filter(|_| !folder_expands(value)) {
+            self.git_env.push(if p.ends_with(".git") { p.parent().map(Path::to_path_buf).unwrap_or(p) } else { p });
+        }
+    }
+
     /// The folders the shell has been in during the command, and the ones the stack holds.
     fn visited(&self) -> Vec<PathBuf> {
         self.left.iter().chain(self.stack.iter()).flatten().chain(self.old.iter()).cloned().collect()
@@ -498,10 +505,8 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         let all = &cmds[i].words;
         // `export GIT_DIR=x`, `declare -x GIT_DIR=x`, `GIT_DIR=x;`: later git commands use that folder.
         if all.first().is_some_and(|w| matches!(base(w), "export" | "declare" | "typeset" | "readonly" | "local")) || all.iter().all(|w| assignment(w).is_some()) {
-            for v in all.iter().filter_map(|w| w.strip_prefix("GIT_WORK_TREE=").or(w.strip_prefix("GIT_DIR="))).filter(|v| !folder_expands(v)) {
-                if let Some(p) = dirs.at(v) {
-                    dirs.git_env.push(if p.ends_with(".git") { p.parent().map(Path::to_path_buf).unwrap_or(p) } else { p });
-                }
+            for v in all.iter().filter_map(|w| w.strip_prefix("GIT_WORK_TREE=").or(w.strip_prefix("GIT_DIR="))) {
+                dirs.set_git_env(v);
             }
         }
         let family = |n: &str| matches!(base(n), "cd" | "chdir" | "pushd" | "popd");
@@ -870,6 +875,9 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 if let Some(t) = shell_script(cmds, i, args) {
                     let mut inner = dirs.clone();
                     inner.posix = name != "zsh";
+                    for v in vars.iter().filter_map(|v| v.strip_prefix("GIT_WORK_TREE=").or(v.strip_prefix("GIT_DIR="))) {
+                        inner.set_git_env(v);
+                    }
                     inner.enter(&chdir);
                     changes(&t, &mut inner, depth + 1, out);
                     dirs.keep_made(&inner);
@@ -1279,7 +1287,7 @@ fn names_dotgit(words: &[String], targets: &[String]) -> bool {
 fn command_folders(name: &str, args: &[String], live: &[bool], vars: &[&String], dirs: &mut Dirs) -> Vec<PathBuf> {
     match name {
         // These read a folder option anywhere: a word from an expansion may be one (`npm install $K`).
-        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_arg(name, args) => unknown_in(dirs, None),
+        "cargo" | "npm" | "pnpm" | "yarn" | "bun" if hidden_arg(name, args) => with_named(unknown_in(dirs, None), &option_folders(dirs, args)),
         "git" => git_changes(dirs, vars, args, live),
         "cargo" => match flags(args, &["--manifest-path"], CARGO_CHANGES) {
             (manifests, Some(s)) if CARGO_CHANGES.contains(&s) => match manifests[..] {
@@ -1387,7 +1395,8 @@ fn hidden_arg(tool: &str, args: &[String]) -> bool {
     const VALUED: &[&str] = &["--filter", "-F", "-p", "--package", "--workspace", "-w", "--features", "--bin", "--example", "--test", "--bench", "--target", "--profile", "--loglevel", "--reporter", "--registry", "--tag", "--jobs", "-j", "--color"];
     args.iter().enumerate().any(|(i, a)| {
         let run = i > 0 && matches!(args[i - 1].as_str(), "run" | "run-script") && args[..i - 1].iter().all(|b| b.starts_with('-'));
-        folder_expands(a) && !run && !(matches!(tool, "cargo" | "pnpm") && a.split_once('=').is_some_and(|(o, _)| VALUED.contains(&o)))
+        let value = if a.starts_with('-') { a.split_once('=').map_or(a.as_str(), |(_, v)| v) } else { a.as_str() };
+        folder_expands(value) && !run && !(matches!(tool, "cargo" | "pnpm") && a.split_once('=').is_some_and(|(o, _)| VALUED.contains(&o)))
     })
 }
 
@@ -1604,7 +1613,7 @@ fn named_folders(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf>
             "--namespace" | "--config-env" | "--super-prefix" => drop(it.next()),
             _ => match a.strip_prefix("--work-tree=").or(a.strip_prefix("--git-dir=")) {
                 Some(v) => values.push(v),
-                None if a.starts_with('-') => {}
+                None if a.starts_with('-') || expands(a) => {}
                 None => break,
             },
         }
@@ -1612,6 +1621,25 @@ fn named_folders(dirs: &Dirs, vars: &[&String], args: &[String]) -> Vec<PathBuf>
     let absolute = |p: &str| p.starts_with(['/', '~']) || p.starts_with("$HOME") || p.starts_with("${HOME}");
     let paths = values.into_iter().filter(|v| absolute(v) && !folder_expands(v)).filter_map(|v| dirs.at(v));
     paths.map(|p| if p.ends_with(".git") { p.parent().map(Path::to_path_buf).unwrap_or(p) } else { p }).chain(dirs.git_env.iter().cloned()).collect()
+}
+
+/// The folders a package manager or cargo is given with a literal absolute folder option (`-C`, `--dir`, `--prefix`, `--cwd`,
+/// `--manifest-path`), attached or not: asked about even when another word of the command can't be placed.
+fn option_folders(dirs: &Dirs, args: &[String]) -> Vec<PathBuf> {
+    let mut found = vec![];
+    let mut it = args.iter().map(String::as_str);
+    while let Some(a) = it.next() {
+        let (name, attached) = a.split_once('=').map_or((a, None), |(n, v)| (n, Some(v)));
+        if !matches!(name, "-C" | "--dir" | "--prefix" | "--cwd" | "--manifest-path") {
+            continue;
+        }
+        let Some(v) = attached.or_else(|| it.next()) else { break };
+        if v.starts_with(['/', '~']) || v.starts_with("$HOME") || v.starts_with("${HOME}") {
+            let p = dirs.at(v).filter(|_| !folder_expands(v));
+            found.extend(p.map(|p| if name == "--manifest-path" { p.parent().map(Path::to_path_buf).unwrap_or(p) } else { p }));
+        }
+    }
+    found
 }
 
 fn with_named(mut found: Vec<PathBuf>, named: &[PathBuf]) -> Vec<PathBuf> {
@@ -2567,7 +2595,8 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
     }
     let mut depth = 0; // subshell parens open inside a `$(`
     let mut array = 0; // parens open in an array assignment, `pids=($(pgrep x))`: its elements stay in the word
-    let mut arith = 0; // parens open in `(( … ))` and `for (( … ))`, and brackets in `$[ … ]`: a `<<` there is a shift
+    let mut arith = 0; // parens open in `(( … ))` and `for (( … ))`: a `<<` there is a shift
+    let mut brackets = 0; // brackets open in `$[ … ]`: so is one there
     while let Some(&ch) = c.get(i) {
         let next = c.get(i + 1).copied();
         i += 1;
@@ -2679,14 +2708,19 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 i = lex(p, c, i + 1, Some(')'));
             }
             '$' if next == Some('[') => {
-                arith += 1;
+                brackets += 1;
                 l.in_word = true;
                 l.word.push('$');
                 l.word.push('[');
                 i += 1;
             }
-            ']' if arith > 0 && l.word.contains("$[") => {
-                arith -= 1;
+            '[' if brackets > 0 => {
+                brackets += 1;
+                l.in_word = true;
+                l.word.push(ch);
+            }
+            ']' if brackets > 0 => {
+                brackets -= 1;
                 l.word.push(ch);
             }
             '$' if next == Some('{') => {
@@ -2717,7 +2751,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             }
             ' ' | '\t' => l.end_word(p),
             '(' => {
-                if arith > 0 || (next == Some('(') && !l.in_word) {
+                if arith > 0 || (next == Some('(') && !l.in_word && closes_arithmetic(c, i)) {
                     arith += 1;
                 }
                 if stop == Some(')') {
@@ -2817,7 +2851,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 }
                 l.end_word(p);
                 let is_let = l.cur.is_some_and(|id| p.cmds[id].words.first().is_some_and(|w| w == "let"));
-                if ch == '<' && next == Some('<') && (arith > 0 || is_let) {
+                if ch == '<' && next == Some('<') && (arith > 0 || brackets > 0 || is_let) {
                     // A shift, not a here-document.
                     i += 1;
                     l.word.push_str("<<");
@@ -2862,6 +2896,24 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
     l.end(p);
     p.scope.truncate(scope);
     i
+}
+
+/// Whether the `(` at `i` (the second of `((`) closes with `))`: arithmetic. `((cmd); …)` is a subshell in a subshell.
+fn closes_arithmetic(c: &[char], i: usize) -> bool {
+    let mut depth = 0;
+    for (j, &ch) in c.iter().enumerate().skip(i) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return c.get(j + 1) == Some(&')');
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
@@ -3878,6 +3930,35 @@ mod tests {
         }
         let _ = h;
         assert!(failed.is_empty(), "should ask:\n{}", failed.join("\n"));
+    }
+
+    #[test]
+    fn open_brackets_and_subshells_dont_hide_what_follows_a_heredoc_and_homes_reach_every_option() {
+        let u = USER;
+        for cmd in [
+            format!("x=$[ 1 + 2 ]; cat > f.md <<'EOF'\nDon't do this\nEOF\ngit -C {u} reset --hard"),
+            format!("x=$[ a[1] + 2 ]; cat > f.md <<'EOF'\nDon't do this\nEOF\ngit -C {u} reset --hard"),
+            format!("((echo a); cat <<'EOF'\nit's\nEOF\n)\ngit -C {u} reset --hard"),
+            // A folder option with a literal path, beside a word the guard can't read.
+            format!("GIT_DIR={u}/.git sh -c 'git reset --hard'"),
+            format!("env GIT_DIR={u}/.git sh -c 'git reset --hard'"),
+            format!("GIT_WORK_TREE={u} bash -c 'git checkout -f .'"),
+            format!("git $OPTS -C {u} reset --hard"),
+            format!("git $OPTS --work-tree={u} checkout ."),
+            format!("pnpm -C $D --dir {u} install"),
+            format!("npm --prefix $D --prefix {u} install"),
+            "npm --prefix=$HOME/dev/loft install".to_string(),
+            "npm install --prefix=\"$HOME/dev/loft\"".to_string(),
+            "pnpm --dir=$HOME/dev/loft install".to_string(),
+            "pnpm --dir=${HOME}/dev/loft install".to_string(),
+            "yarn --cwd=$HOME/dev/loft install".to_string(),
+            "bun install --cwd=$HOME/dev/loft".to_string(),
+            "cargo build --manifest-path=$HOME/dev/loft/backend/Cargo.toml".to_string(),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        // Arithmetic that closes still reads a shift.
+        assert!(!asks_all(&format!("x=$[ 1 << 2 ]\ngit -C {u} reset --hard"), CLONE).is_empty());
     }
 
     #[test]
