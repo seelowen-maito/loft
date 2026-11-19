@@ -163,6 +163,8 @@ struct Dirs {
     shadowed: bool,
     /// The shell has `cd`'d (or `pushd`/`popd`'d) since the command began.
     moved: bool,
+    /// `CDPATH` is set or exported, or `cdablevars` or `auto_cd` is on: a `cd x` may land somewhere else than `x`.
+    cd_search: bool,
     /// GIT_DIR or GIT_WORK_TREE appears somewhere in the command so far (in any word, assigned, exported, unset or
     /// hidden in a name): git may use a repository the guard can't follow, so every git call after it is unknown.
     git_env: bool,
@@ -415,6 +417,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     if depth > MAX_DEPTH {
         return;
     }
+    // The whole text, so a mention inside a `<(…)` or a subshell counts too.
+    dirs.cd_search |= mentions_cd_search(text);
     let cmds = parse(text);
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
@@ -437,8 +441,20 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
         let defines = (cmds[i].defines && all.iter().any(|n| family(n)))
             || all.iter().position(|f| f == "function").is_some_and(|f| all[f + 1..].iter().take_while(|n| !KEYWORDS.contains(&n.as_str())).any(|n| family(n)))
             || all.iter().any(|w| w.strip_prefix("functions[").is_some_and(|r| r.split(']').next().is_some_and(family)))
+            // `functions+=(cd :)`: the array holds pairs of a name and a body.
+            || all.iter().any(|w| w.strip_prefix("functions+=(").is_some_and(|r| r.trim_end_matches(')').split_whitespace().any(family)))
             || (all.iter().any(|w| w == "autoload") && all.iter().any(|n| family(n)));
         dirs.shadowed |= defines || all.iter().any(|w| w == "disable");
+        let (search, opaque) = reads_state(all);
+        dirs.cd_search |= search;
+        // Something the guard can't read changes `cd` or `functions` (a name built by an expansion, `functions+=(…)`,
+        // `${functions[cd]::=:}`): a `cd` may be shadowed and a body may run anything, so it asks outright.
+        if opaque {
+            dirs.cd_search = true;
+            dirs.shadowed = true;
+            dirs.lose();
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
+        }
         // `cd() { ... }` isn't a `cd`.
         if cmds[i].defines && defines {
             continue;
@@ -456,6 +472,10 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 changes(&text, &mut inner, depth + 1, out);
                 dirs.keep_made(&inner);
                 dirs.made = true;
+                // The words after the `-S` text run too, with an environment the guard doesn't follow (`CDPATH=x`).
+                if all.len() > used + 1 && all[..used].iter().any(|w| w.starts_with("-S") || w == "--split-string") {
+                    out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
+                }
                 continue;
             }
         };
@@ -467,6 +487,12 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             dirs.made |= all.iter().any(|w| assignment(w).is_some());
             continue;
         };
+        // `source <(…)` and `. =(…)` run text the command makes.
+        if matches!(name.as_str(), "source" | ".") && (text.contains("<(") || text.contains("=(")) {
+            out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
+            dirs.made = true;
+            continue;
+        }
         // A command word from an expansion (`$X -C d reset`, `env $NAME=x cmd`, `env $ASSIGNMENT cmd`): what runs is unknown.
         if expands(name) {
             out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
@@ -474,7 +500,8 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             continue;
         }
         let (args, live) = (args, &live[1..]);
-        let name = base(name);
+        // zsh's `=zsh` is the path of `zsh`.
+        let name = base(name.trim_start_matches('='));
         let chdir = env_chdir(&all[..all.len() - words.len()]);
         // GNU coreutils under their Homebrew names (`gmv`, `gln`, `gcp`).
         let tool = name.strip_prefix('g').filter(|n| matches!(*n, "ln" | "mv" | "cp" | "rm" | "install")).unwrap_or(name);
@@ -531,11 +558,14 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             // zsh's other name for `cd`.
             "cd" | "chdir" => {
                 let (physical, i) = dir_word(args);
+                // zsh's `cd old new` swaps `old` for `new` in the path; CDPATH, cdablevars and auto_cd send `x` elsewhere.
+                let two_words = args.iter().filter(|a| !a.starts_with('-') && *a != "}").count() >= 2;
                 match i.map(|i| (args[i].as_str(), live[i])) {
                     None => {
                         dirs.alts.clear();
                         dirs.cd(dirs::home_dir());
                     }
+                    Some((d, _)) if (d != "-" && two_words) || dirs.cd_search || dirs.shadowed => dirs.lose(),
                     Some(("-", _)) => {
                         // After a failed `cd` or a `popd` the folder `cd -` goes to may be any the command left.
                         let keep = !dirs.alts.is_empty() || dirs.popped;
@@ -568,6 +598,10 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 let left = dirs.left.clone();
                 dirs.popped = true;
                 match i.map(|i| (args[i].as_str(), live[i])) {
+                    Some((d, _)) if d != "-" && dirs.cd_search => {
+                        dirs.stack.push(from);
+                        dirs.lose();
+                    }
                     // `pushd` swaps the top two folders; `pushd +1` rotates the stack.
                     None => {
                         dirs.alts.clear();
@@ -606,7 +640,7 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
                 let left = dirs.left.clone();
                 dirs.popped = true;
                 match dirs.stack.pop() {
-                    _ if !plain => dirs.lose(),
+                    _ if !plain || dirs.cd_search || dirs.shadowed => dirs.lose(),
                     // The folder pushed was one the guard lost.
                     Some(None) => dirs.lose(),
                     Some(to) => {
@@ -676,6 +710,99 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
+}
+
+fn mentions_cd_search(text: &str) -> bool {
+    let plain: String = text.chars().filter(|c| !matches!(c, '_' | '-')).collect::<String>().to_lowercase();
+    ["cdpath", "cdablevars", "autocd"].iter().any(|n| plain.contains(n))
+}
+
+/// What a command does to how a later `cd` resolves, read by allow lists: `(search, opaque)`. `search`: it mentions
+/// `CDPATH`, `cdablevars` or `auto_cd`. `opaque` (the command asks, and `cd` may be shadowed): it sets options beyond a
+/// short safe list, starts a shell with options beyond `-c -e -u -x -l`, writes a variable in a way the guard doesn't read
+/// (`${x::=…}`, `(P)`, `read`, `print -v`, `set -A`, a name an expansion builds), or writes `functions` or `options`.
+fn reads_state(all: &[String]) -> (bool, bool) {
+    const WRAPPERS: &[&str] = &["env", "command", "builtin", "noglob", "nocorrect", "time", "exec", "coproc", "repeat"];
+    const SAFE_OPTIONS: &[&str] = &["extendedglob", "nullglob", "globdots", "pipefail", "autopushd", "pushdsilent", "pushdignoredups", "errexit", "nounset", "xtrace", "localoptions"];
+    let literal = |w: &str| !w.contains(['$', '`', '{', '}', '*', '?', '[', '(', '<', '=']);
+    let plain = |w: &str| w.chars().all(|c| c.is_alphanumeric() || c == '_');
+    // The name an assignment `name=…` sets: plain when it is an identifier.
+    let plain_name = |w: &str| plain(w.split('=').next().unwrap_or_default());
+    // `NO_`, `_` and case don't matter in a zsh option name.
+    let safe_option = |w: &str| {
+        let n = w.replace('_', "").to_lowercase();
+        literal(w) && (SAFE_OPTIONS.contains(&n.as_str()) || SAFE_OPTIONS.contains(&n.strip_prefix("no").unwrap_or(&n)))
+    };
+    let (search, mut opaque) = (all.iter().any(|w| mentions_cd_search(w)), false);
+    for (i, w) in all.iter().enumerate() {
+        let start = w.trim_start_matches(['$', '{', '"', '\'']);
+        opaque |= ["options+=", "options=", "functions+=", "functions="].iter().any(|n| start.starts_with(n));
+        // `functions[` or `options[` anywhere in a word may name an element something writes (`x=functions[cd]=0`,
+        // `(( 1,functions[cd]=0 ))`, `strftime -s 'functions[f]'`). A read has `$` or `{` before it (`$functions[f]`,
+        // `${options[errexit]}`), and a name that ends in the letters (`myfunctions[1]`, `.options[0]`) is another word.
+        for n in ["functions[", "options["] {
+            opaque |= w.match_indices(n).any(|(p, _)| !w[..p].ends_with(|c: char| c.is_alphanumeric() || matches!(c, '$' | '{' | '.' | '_')));
+        }
+        // `${name=…}`, `${name:=…}`, `${name::=…}` with a name that isn't a plain identifier, the `(P)` flag, and an assignment
+        // after a nested `}`.
+        opaque |= w.split("${(").skip(1).any(|f| f.split(')').next().is_some_and(|f| f.contains(['P', 'e']))) || w.contains("}:=") || w.contains("}::=") || w.contains("}=");
+        // `${(AA)=functions::=cd :}` sets a whole array.
+        opaque |= w.contains("${") && ["functions", "options"].iter().any(|n| ["=", ":=", "::="].iter().any(|o| w.contains(&format!("{n}{o}"))));
+        for part in w.split("${").skip(1) {
+            let body = part.split('}').next().unwrap_or_default();
+            let name = body.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(body.len());
+            let rest = &body[name..];
+            opaque |= ["=", ":=", "::="].iter().any(|o| rest.starts_with(o)) && name == 0;
+            opaque |= rest.starts_with('[') && rest.split_once(']').is_some_and(|(_, after)| ["=", ":=", "::="].iter().any(|o| after.starts_with(o)));
+        }
+        // A shell may be started by any program in front of it (`nohup zsh -T -c …`, `xargs zsh`): look at any place in the
+        // words. Its options come before the script or the `-c` text, whose first word isn't one.
+        let name = base(w.trim_start_matches('='));
+        let name = name.to_lowercase();
+        let name = name.as_str();
+        if matches!(name, "zsh" | "bash" | "sh" | "ksh" | "dash") {
+            let mut args = all[i + 1..].iter();
+            while let Some(a) = args.next().filter(|a| a.starts_with(['-', '+'])) {
+                if a.len() < 2 || !a[1..].chars().all(|c| "clexufison".contains(c)) {
+                    opaque = true;
+                } else if a.contains('o') {
+                    // A bundle with an `o` (`-eo`, `-so`) takes the next word as an option name.
+                    opaque |= args.next().is_none_or(|n| !safe_option(n));
+                }
+            }
+        }
+        // `functions` as the command (`functions -c f cd`) or the array being set (`set -A functions cd :`), not an argument.
+        let from = all[..i].iter().rposition(|b| matches!(b.as_str(), "]]" | "))")).map_or(0, |p| p + 1);
+        let at_command = all[from..i].iter().all(|b| b == "function" || all[..i].iter().any(|f| f == "function") || assignment(b).is_some() || WRAPPERS.contains(&b.as_str()) || KEYWORDS.contains(&b.as_str()) || b.ends_with("()") || b.starts_with('-') || b.chars().all(|c| c.is_ascii_digit()));
+        opaque |= w == "functions" && (at_command || (i > 0 && all[i - 1] == "-A"));
+        if !at_command {
+            continue;
+        }
+        // Up to the keyword that ends the command (`{ setopt -T }`).
+        let args: Vec<&String> = all[i + 1..].iter().take_while(|a| !KEYWORDS.contains(&a.as_str())).collect();
+        match name {
+            "set" => {
+                // Letter bundles of `e u x v` (and `o` with a safe name), and safe option names; what follows `--` is data.
+                opaque |= args.iter().take_while(|a| a.as_str() != "--").any(|a| if a.starts_with(['-', '+']) { a.len() < 2 || !a[1..].chars().all(|c| "euxvom".contains(c)) } else { !safe_option(a) });
+            }
+            "setopt" | "unsetopt" => opaque |= args.iter().any(|a| !safe_option(a)),
+            "emulate" | "shopt" => opaque = true,
+            // `read -rA functions` fills the whole array.
+            "read" if args.iter().any(|a| matches!(a.as_str(), "functions" | "options")) => opaque = true,
+            "export" | "typeset" | "declare" | "local" | "readonly" | "integer" | "float" | "read" => opaque |= args.iter().any(|a| !a.starts_with('-') && !plain_name(a)),
+            // `-v name`, bundled (`-rv name`) or not, or glued (`-vname`).
+            "printf" | "print" => {
+                opaque |= args.iter().enumerate().any(|(k, a)| {
+                    let bundle = a.starts_with('-') && !a.starts_with("--") && a.contains('v');
+                    let glued = a.split_once('v').map_or("", |(_, r)| r);
+                    bundle && if a.ends_with('v') { args.get(k + 1).is_none_or(|n| !plain(n)) } else { !plain(glued) }
+                })
+            }
+            "zstyle" => opaque |= args.iter().any(|a| matches!(a.as_str(), "-s" | "-a" | "-b" | "-g" | "-e")),
+            _ => {}
+        }
+    }
+    (search, opaque)
 }
 
 /// Whether a command (`git -C dir fetch`, `git commit -m x`) can't make a folder, a link or a `.git`: git's own history
@@ -1929,6 +2056,8 @@ impl Level {
     /// `;`, `&&`, `||`, `&` or a newline: the next command starts a new pipeline.
     fn separate(&mut self, p: &mut Parse) {
         self.end(p);
+        // `always` after a `;` is a command's name, not the keyword.
+        self.closed = None;
         self.case_pending = false;
         let f = self.frame();
         (f.pipe, f.place) = (None, 0);
@@ -2708,6 +2837,229 @@ mod tests {
     }
 
     #[test]
+    fn a_cd_that_lands_somewhere_else_asks() {
+        let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
+        for cmd in [
+            // CDPATH, cdablevars and auto_cd send a relative `cd` elsewhere.
+            format!("CDPATH={u} cd sub; pnpm install"),
+            format!("export CDPATH={u}; cd sub; pnpm install"),
+            format!("cdpath=({u}); cd sub; pnpm install"),
+            format!("typeset -x CDPATH={u}; cd sub; pnpm install"),
+            format!("CDPATH={u}; pushd sub; pnpm install"),
+            "setopt cdablevars; cd x; pnpm install".to_string(),
+            "setopt CD_ABLE_VARS; cd x; pnpm install".to_string(),
+            "set -o autocd; cd x; pnpm install".to_string(),
+            "setopt auto_cd; cd x; pnpm install".to_string(),
+            // zsh's `cd old new`.
+            format!("cd sub; cd a b; pnpm install"),
+            // A `cd` or `always` that the shell reads another way.
+            format!("cd {u}; functions+=(cd :); cd {w}; pnpm install"),
+            format!("cd {u}; functions[cd]=':'; cd {w}; pnpm install"),
+            format!("functions[f]='git -C {u} reset --hard'; f"),
+            format!("functions[cd]='git -C {u} reset --hard'; cd"),
+            format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
+            format!("functions[g]=':'; cd backend && cargo test"),
+            format!("functions[f]='pnpm install'; cd {u}; f"),
+            format!("cd {u}; read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; read -Ar functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; read -A -- functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; read -rAu0 functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; IFS=' ' read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; builtin read -rA functions <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; echo cd : | read -rA functions; cd {w}; pnpm install"),
+            format!("cd {u}; while read -rA functions; do break; done <<< 'cd :'; cd {w}; pnpm install"),
+            format!("cd {u}; zsh -c 'read -rA functions <<< \"cd :\"; cd {w}; pnpm install'"),
+            format!("K=ablevars; read -A options <<< \"cd$K on\"; x={u}; cd x; pnpm install"),
+            format!("K=ablevars; echo cd$K on | read -A options; x={u}; cd x; pnpm install"),
+            format!("cd {u}; : ${{(AA)=functions::=cd :}}; cd {w}; pnpm install"),
+            format!("cd {u}; x=${{(AA)=functions::=cd :}}; cd {w}; pnpm install"),
+            format!("cd {u}; \"${{(AA)=functions:=cd :}}\"; cd {w}; pnpm install"),
+            format!("cd {u}; : ${{(AA)=^functions::=cd :}}; cd {w}; pnpm install"),
+            format!("cd {u}; : ${{(AA)=functions::=pushd :}}; pushd {w}; pnpm install"),
+            format!(": ${{(AA)=functions::=f 'git -C {u} reset --hard'}}; f"),
+            format!("K=ablevars; : ${{(AA)=options::=cd$K on}}; x={u}; cd x; pnpm install"),
+            format!("cd {u}; (( x=functions[cd]=0 )); cd {w}; pnpm install"),
+            format!("cd {u}; (( 1,functions[cd]=0 )); cd {w}; pnpm install"),
+            format!("cd {u}; x=$[functions[cd]=0]; cd {w}; pnpm install"),
+            format!("cd {u}; : $[functions[cd]=0]; cd {w}; pnpm install"),
+            format!("cd {u}; integer x=functions[cd]=0; cd {w}; pnpm install"),
+            format!("cd {u}; typeset -i x=functions[cd]=0; cd {w}; pnpm install"),
+            format!("cd {u}; float x='functions[cd]=0'; cd {w}; pnpm install"),
+            format!("cd {u}; integer x; x=functions[cd]=0; cd {w}; pnpm install"),
+            format!("cd {u}; let 'x = functions[cd] = 0'; cd {w}; pnpm install"),
+            format!("cd {u}; a=(1 2); : $a[functions[cd]=1]; cd {w}; pnpm install"),
+            format!("cd {u}; a=(1 2); a[functions[cd]=1]=x; cd {w}; pnpm install"),
+            format!("cd {u}; printf %d '0+(functions[cd]=0)' >/dev/null; cd {w}; pnpm install"),
+            format!("cd {u}; K='functions[cd]=0'; (( K )); cd {w}; pnpm install"),
+            format!("cd {u}; K='functions[cd]=0'; : $(( K )); cd {w}; pnpm install"),
+            format!("cd {u}; K='functions[cd]=0'; integer x=K; cd {w}; pnpm install"),
+            format!("function f {{ setopt -T }}; f; x={u}; cd x; pnpm install"),
+            format!("function f g {{ setopt -T }}; g; x={u}; cd x; pnpm install"),
+            format!("function {{ setopt -T }}; x={u}; cd x; pnpm install"),
+            format!("if [[ -n x ]] setopt -T; x={u}; cd x; pnpm install"),
+            format!("if [[ -n x ]] {{ setopt -T }}; x={u}; cd x; pnpm install"),
+            format!("K=PATH; function f {{ export CD$K={u} }}; f; cd sub; pnpm install"),
+            format!("K=PATH; if [[ -n x ]] export CD$K={u}; cd sub; pnpm install"),
+            format!("cd {u}; f() {{ : }}; function g {{ functions -c f cd }}; g; cd {w}; pnpm install"),
+            format!("O=ablevars; zsh -fo cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; zsh -lo cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; zsh +eo nocd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; nohup zsh -eo cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; echo 'x={u}; cd x; pnpm install' | zsh -so cd$O"),
+            format!("K=CD; K+=PATH; x=${{(@P)K::={u}}}; cd sub; pnpm install"),
+            format!("K=CD; K+=PATH; : ${{(P@)K::={u}}}; cd sub; pnpm install"),
+            format!("x=${{(j.:.P)K::={u}}}; cd sub; pnpm install"),
+            format!("A='${{CD'; B='PATH::={u}}}'; T=$A$B; : ${{(e)T}}; cd sub; pnpm install"),
+            format!("K=CD; K+=PATH; x=${{(e)${{:-'${{'$K'::={u}}}'}}}}; cd sub; pnpm install"),
+            format!("cd {u}; (( functions[cd] = 0 )); cd {w}; pnpm install"),
+            format!("cd {u}; : $(( functions[cd] = 0 )); cd {w}; pnpm install"),
+            format!("zmodload zsh/datetime; strftime -s 'functions[f]' 'git -C {u} reset --hard' 0; f"),
+            format!("zformat -f 'functions[f]' 'git -C {u} reset --hard'; f"),
+            format!("K=ablevars; zformat -f \"options[cd$K]\" on; x={u}; cd x; pnpm install"),
+            format!("/bin/ZSH -T -c 'x={u}; cd x; pnpm install'"),
+            format!("K=PATH; print -rv CD$K {u}; cd sub; pnpm install"),
+            format!("K=PATH; print -vCD$K {u}; cd sub; pnpm install"),
+            format!("{{ setopt -T }}; x={u}; cd x; pnpm install"),
+            format!("if setopt -T; then :; fi; x={u}; cd x; pnpm install"),
+            format!("for i in 1; do setopt -T; done; x={u}; cd x; pnpm install"),
+            format!("f() {{ setopt -T }}; f; x={u}; cd x; pnpm install"),
+            format!("{{ export CD$K={u} }}; cd sub; pnpm install"),
+            format!("f() {{ export CD$K={u} }}; f; cd sub; pnpm install"),
+            format!("cd {u}; {{ functions -c f cd }}; cd {w}; pnpm install"),
+            format!("nohup zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("env -u FOO zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("exec -a x zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("echo a | xargs zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("find . -maxdepth 0 -exec zsh -T -c 'x={u}; cd x; pnpm install' \\;"),
+            format!("echo 'x={u}; cd x; pnpm install' | nice zsh -T"),
+            format!("K=CD; K+=PATH; x=${{(P)${{K}}::={u}}}; cd sub; pnpm install"),
+            format!("cd {u}; K=tions; x=${{(P)${{:-func$K\\[cd\\]}}::=:}}; cd -; pnpm install"),
+            format!("set -9T; x={u}; cd x; pnpm install"),
+            format!("setopt -T1; x={u}; cd x; pnpm install"),
+            format!("zsh -T9 -c 'x={u}; cd x; pnpm install'"),
+            format!("F=T; set -$F; x={u}; cd x; pnpm install"),
+            format!("set -${{:-T}}; x={u}; cd x; pnpm install"),
+            format!("F=-T; set $F; x={u}; cd x; pnpm install"),
+            format!("set -{{T,e}}; x={u}; cd x; pnpm install"),
+            format!("O=ablevars; set -o cd$O; x={u}; cd x; pnpm install"),
+            format!("set -o cd{{able,}}vars; x={u}; cd x; pnpm install"),
+            format!("set -o $(printf 'cd%s' ablevars); x={u}; cd x; pnpm install"),
+            format!("O=ablevars; set +o nocd$O; x={u}; cd x; pnpm install"),
+            format!("O=cd; O+=ablevars; set -o $O; x={u}; cd x; pnpm install"),
+            format!("/bin/zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("/bin/zsh -fT -c 'x={u}; cd x; pnpm install'"),
+            format!("=zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("env /bin/zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("F=T; zsh -$F -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; zsh -o cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("O=ablevars; zsh --cd$O -c 'x={u}; cd x; pnpm install'"),
+            format!("echo 'x={u}; cd x; pnpm install' | /bin/zsh -T9"),
+            format!("K=ablevars; options+=(cd$K on); x={u}; cd x; pnpm install"),
+            format!("K=ablevars; x=${{options[cd$K]::=on}}; cd x; pnpm install"),
+            format!("K=cd; K+=ablevars; options+=($K on); x={u}; cd x; pnpm install"),
+            format!("X=able_vars; bash -O cd$X -c 'x={u}; cd x; pnpm install'"),
+            format!("bash -c 'X=able_vars; shopt -s cd$X; x={u}; cd x; pnpm install'"),
+            format!("bash -c 'shopt -s cd{{able,}}_vars; x={u}; cd x; pnpm install'"),
+            format!("K=PATH; print -v CD$K {u}; cd sub; pnpm install"),
+            format!("K=PATH; zstyle -s :x y CD$K; cd sub; pnpm install"),
+            format!("K=CD; K+=PATH; x=${{(P)K::={u}}}; cd sub; pnpm install"),
+            format!("cd {u}; x=${{functions[cd]::=:}}; cd {w}; pnpm install"),
+            format!("cd {u}; N='functions[cd]'; x=${{(P)N::=:}}; cd {w}; pnpm install"),
+            format!("cd {u}; K=functions; set -A $K cd :; cd -; pnpm install"),
+            format!("cd {u}; K=tions; set -A func$K cd :; cd -; pnpm install"),
+            format!("pushd {w}; cd {u}; K=tions; set -A func$K popd :; popd; pnpm install"),
+            format!("functions+=([f]='git -C {u} reset --hard'); f"),
+            format!("x=${{functions[f]::='git -C {u} reset --hard'}}; f"),
+            format!("set -A functions f 'git -C {u} reset --hard'; f"),
+            format!("K=tions; set -A func$K f 'git -C {u} reset --hard'; f"),
+            format!("K=tions; typeset \"func${{K}}[f]=git -C {u} reset --hard\"; f"),
+            // Other ways to turn on cdablevars or set CDPATH, and to write `functions`.
+            format!("unsetopt nocdablevars; x={u}; cd x; pnpm install"),
+            format!("set +o nocdablevars; x={u}; cd x; pnpm install"),
+            format!("set -T; x={u}; cd x; pnpm install"),
+            format!("set -ocdablevars; x={u}; cd x; pnpm install"),
+            format!("setopt -m '*vars'; x={u}; cd x; pnpm install"),
+            format!("options+=(cdablevars on); x={u}; cd x; pnpm install"),
+            format!("emulate zsh +o nocdablevars; x={u}; cd x; pnpm install"),
+            format!("zsh +o nocdablevars -c 'x={u}; cd x; pnpm install'"),
+            format!("zsh -fT -c 'x={u}; cd x; pnpm install'"),
+            format!("K=CDPATH; typeset -g $K={u}; cd sub; pnpm install"),
+            format!("export {{CD,}}PATH={u}; cd sub; pnpm install"),
+            format!("env -S 'CDPATH={u}' zsh -c 'cd sub; pnpm install'"),
+            format!(". =(echo CDPATH={u}); cd sub; pnpm install"),
+            format!("source <(echo cd {u}); pnpm install"),
+            format!("cd {u}; functions -c f cd; cd {w}; pnpm install"),
+            format!("setopt -T; x={u}; cd x; pnpm install"),
+            format!("set -eT; x={u}; cd x; pnpm install"),
+            format!("setopt -m 'cd*'; x={u}; cd x; pnpm install"),
+            format!("options[cdablevars]=on; x={u}; cd x; pnpm install"),
+            format!("O=cdablevars; setopt $O; x={u}; cd x; pnpm install"),
+            format!("setopt cd{{able,}}vars; x={u}; cd x; pnpm install"),
+            format!("emulate zsh -T; x={u}; cd x; pnpm install"),
+            format!("zsh -T -c 'x={u}; cd x; pnpm install'"),
+            format!("zsh --cd-able-vars -c 'x={u}; cd x; pnpm install'"),
+            format!(": ${{CDPATH:={u}}}; cd sub; pnpm install"),
+            format!("K=CDPATH; export $K={u}; cd sub; pnpm install"),
+            format!("K=CDPATH; read $K <<< {u}; cd sub; pnpm install"),
+            format!("K=CDPATH; printf -v $K %s {u}; cd sub; pnpm install"),
+            format!("K=cdpath; set -A $K {u}; cd sub; pnpm install"),
+            format!("export CD$K={u}; cd sub; pnpm install"),
+            format!("export {{CDPATH,X}}={u}; cd sub; pnpm install"),
+            format!("source <(echo CDPATH={u}); cd sub; pnpm install"),
+            format!("cd {u}; functions+=([cd]=:); cd {w}; pnpm install"),
+            format!("cd {u}; K=cd; functions+=($K :); cd {w}; pnpm install"),
+            format!("cd {u}; set -A functions cd :; cd {w}; pnpm install"),
+            format!("cd {u}; : ${{functions[cd]::=:}}; cd {w}; pnpm install"),
+            format!("cd {u}; f() {{ : }}; functions -c f cd; cd {w}; pnpm install"),
+            format!("functions+=(f 'git -C {u} reset --hard'); f"),
+            format!("functions[f]+='git -C {u} reset --hard'; f"),
+            format!("functions[f]='cd {u}'; f; pnpm install"),
+            format!("functions[TRAPDEBUG]='cd {u}'; pnpm install"),
+            format!("functions[f]='setopt cdablevars'; f; x={u}; cd x; pnpm install"),
+        ] {
+            assert!(!asks_all(&cmd, CLONE).is_empty(), "should ask: {cmd}");
+        }
+        for cmd in [
+            "cd backend && cargo test".to_string(),
+            format!("cd {w} && pnpm install"),
+            "cd -P backend && cargo test".to_string(),
+            "export PATH=$PATH:/x; cd backend && cargo test".to_string(),
+            "cd functions && cargo test".to_string(),
+            "ls functions; cd src && cargo test".to_string(),
+            "pnpm -C functions install".to_string(),
+            "cd src; cargo test -- functions".to_string(),
+            "set -eu; cd src && cargo test".to_string(),
+            "set -euo pipefail; cd backend && cargo test".to_string(),
+            "set +e; setopt extendedglob nullglob autopushd; cd backend && cargo test".to_string(),
+            "source ~/.zshrc; . ./env.sh; cd backend && cargo test".to_string(),
+            "zsh -c 'cd backend && cargo test'".to_string(),
+            "bash -n script; bash scripts/x.sh --verbose; sh -eu script".to_string(),
+            ": ${(AA)=aliases::=a b}; : ${FOO::=bar}; cargo test".to_string(),
+            "read -r functions_list; read -rA parts; read -r options_json".to_string(),
+            "jq '.options[0]=\"x\"' package.json; echo ${options[errexit]} $functions[f] myfunctions[1]".to_string(),
+            "jq '.options[0]' package.json; : \"$x\"; set -o nounset; set -m".to_string(),
+            ": ${FOO:=bar}; cargo test".to_string(),
+            "x=${opt#--name=}; cargo test".to_string(),
+            "echo ${FOO:-a=b}; cargo test".to_string(),
+            "printf -v out '%s' \"$x\"; cargo test".to_string(),
+            "echo ${options[errexit]}; cargo test".to_string(),
+            "set -- a b; cd src; cargo test".to_string(),
+            "bash -lc 'cd src && cargo test'".to_string(),
+            "zsh -ic 'cd src && cargo test'".to_string(),
+            "bash -euo pipefail -c 'cd src && cargo test'".to_string(),
+            "read -r x <<< \"$(git rev-parse HEAD)\"; cargo test".to_string(),
+            "print -v x hello; cargo test".to_string(),
+            "setopt localoptions nullglob; cargo test".to_string(),
+            "nohup cargo test".to_string(),
+            "bash ./build.sh --release".to_string(),
+            "export PATH=$HOME/bin:$PATH; set -e; cd backend && cargo test".to_string(),
+            "setopt extendedglob; cd backend && cargo test".to_string(),
+        ] {
+            assert_eq!(asks(&cmd, CLONE), None, "should run: {cmd}");
+        }
+    }
+
+    #[test]
     fn a_cd_that_may_not_run_leaves_the_folder_before_it_as_a_place() {
         let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
         for cmd in [
@@ -2893,7 +3245,6 @@ mod tests {
             "cd backend; cd() { :; }".to_string(),
             "f() { :; }; () { :; }; cd backend && cargo test".to_string(),
             "autoload zargs; cd backend && cargo test".to_string(),
-            "functions[g]=':'; cd backend && cargo test".to_string(),
             "noglob cd backend && cargo test".to_string(),
             "nocorrect cd backend && cargo test".to_string(),
             "time cd backend && cargo test".to_string(),
