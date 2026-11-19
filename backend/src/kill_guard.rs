@@ -667,8 +667,13 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             dirs.trapped |= !makes_nothing(text, all, words, live, true);
             // A handler that runs early and changes folder moves the shell before each later command.
             let handler = args.iter().find(|a| !a.starts_with('-') && !a.is_empty());
-            if !trap_defers(text, words, true) && handler.is_some_and(|h| h.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| matches!(w, "cd" | "pushd" | "popd" | "chdir")) || dirs.funcs.iter().any(|(f, _)| f == h)) {
+            if !trap_defers(text, words, true) && handler.is_some_and(|h| h.replace(['\\', '"', '\''], "").split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| matches!(w, "cd" | "pushd" | "popd" | "chdir" | "ln" | "mv" | "cp" | "rsync" | "install" | "ditto")) || dirs.funcs.iter().any(|(f, _)| f == h)) {
                 dirs.lose();
+            }
+            // A handler that makes a link (`ln -s x backend`) at the end of a subshell: the folders the line names after it may be swapped.
+            if !trap_defers(text, words, true) && handler.is_some_and(|h| h.replace(['\\', '"', '\''], "").split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| matches!(w, "ln" | "mv" | "cp" | "rsync" | "install" | "ditto"))) {
+                dirs.unreadable = true;
+                dirs.moved = true;
             }
             for h in args.iter().find(|a| !a.starts_with('-') && !a.is_empty()) {
                 if !dirs.traps.contains(h) {
@@ -3639,6 +3644,13 @@ mod tests {
             format!("if true; then for d in 1 2; do pnpm install; cd {u}; done; fi"),
             format!("for a in 1; do for b in 2; do :; done; pnpm install; cd {u}; done"),
             format!("while pnpm install; do cd {u}; done"),
+            format!("command for d in 1 2; do pnpm install; cd {u}; done"),
+            format!("cat <<EOF\n${{x:-`cd {u}; pnpm install`}}\nEOF"),
+            format!("(trap 'ln -s {u} backend' EXIT); pnpm -C backend install"),
+            format!("(trap 'ln -s {u} backend' EXIT); cargo build --manifest-path backend/Cargo.toml"),
+            format!("trap 'c\\d {u}' DEBUG; pnpm install"),
+            format!("trap 'c\"\"d {u}' DEBUG; pnpm install"),
+            format!("trap \"c''d {u}\" DEBUG; pnpm install"),
             format!("time for d in 1 2; do pnpm install; cd {u}; done"),
             format!("noglob for d in 1 2; do pnpm install; cd {u}; done"),
             format!("cd $X; cd ~+; pnpm install"),
