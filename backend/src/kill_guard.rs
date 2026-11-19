@@ -171,6 +171,9 @@ struct Dirs {
     /// The functions the command defined, newest last, with the commands of the body (an index range of the text being
     /// checked) when the guard holds it. A call checks that body where it is called, not where it was defined.
     funcs: Vec<(String, Option<(usize, usize, bool)>)>,
+    /// What `trap` was set to run so far, by this text or one it ran (`eval`) or a subshell: the shell runs it later, in
+    /// whatever folder it is in by then, so every text that ends checks it again in the folders the line has been in.
+    traps: Vec<String>,
     /// The text is for sh, bash, dash or ksh: a `}` is a command's argument unless it is in command position.
     posix: bool,
     /// How many function bodies were checked at a call (shared by every copy): a few are plenty, and it ends recursion.
@@ -335,6 +338,11 @@ impl Dirs {
         self.unreadable |= inner.unreadable;
         self.git_env |= inner.git_env;
         self.touched.extend(inner.touched.iter().cloned());
+        for t in &inner.traps {
+            if !self.traps.contains(t) {
+                self.traps.push(t.clone());
+            }
+        }
         self.removed.extend(inner.removed.iter().cloned());
     }
 
@@ -440,8 +448,6 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
     let mut saved: Vec<(usize, Dirs)> = vec![];
     let mut pending_dotgit = false;
-    // What `trap` sets to run: the shell runs it later, in whatever folder it is in by then.
-    let mut traps: Vec<String> = vec![];
     for i in range {
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
@@ -573,7 +579,11 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         }
         let (args, live) = (args, &live[1..]);
         if base(name) == "trap" {
-            traps.extend(args.iter().find(|a| !a.starts_with('-') && !a.is_empty()).cloned());
+            for h in args.iter().find(|a| !a.starts_with('-') && !a.is_empty()) {
+                if !dirs.traps.contains(h) {
+                    dirs.traps.push(h.clone());
+                }
+            }
         }
         // zsh's `=zsh` is the path of `zsh`.
         let name = base(name.trim_start_matches('='));
@@ -787,9 +797,9 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
     // A trap's handler runs in each folder the commands were in (the folder it ran in can be any of them), as a call to a
     // function or as text.
     let places: Vec<Option<PathBuf>> = std::iter::once(dirs.start.clone().map(Some).unwrap_or(None)).chain(dirs.left.clone()).chain(std::iter::once(dirs.cwd.clone())).chain(dirs.alts.iter().cloned().map(Some)).collect();
-    for h in traps {
+    for h in dirs.traps.clone() {
         for place in &places {
-            let mut at = Dirs { cwd: place.clone(), alts: vec![], ..dirs.clone() };
+            let mut at = Dirs { cwd: place.clone(), alts: vec![], traps: vec![], ..dirs.clone() };
             match dirs.funcs.iter().filter(|(n, _)| *n == h).collect::<Vec<_>>() {
                 f if f.is_empty() => changes(&h, &mut at, depth + 1, out),
                 f => {
@@ -3250,6 +3260,9 @@ mod tests {
             format!("f() {{ pnpm install; }}; chpwd_functions=(f); cd {u}"),
             format!("f() {{ pnpm install; }}; trap f EXIT; cd {u}"),
             format!("trap 'pnpm install' EXIT; cd {u}"),
+            format!("eval \"trap 'pnpm install' EXIT\"; cd {u}"),
+            format!("eval 'f() {{ pnpm install; }}; trap f EXIT'; cd {u}"),
+            format!("(trap 'pnpm install' EXIT); cd {u}"),
             format!("f() {{ pnpm install; }}; trap f DEBUG; cd {u}; true"),
             format!("nohup() {{ pnpm install }}; cd {u}; nohup true"),
             format!("xargs() {{ pnpm install }}; cd {u}; echo | xargs true"),
@@ -3270,6 +3283,11 @@ mod tests {
             "f() { pnpm install; }; (cd ..; f)",
             "f() { pnpm install; }; g() { f; }; g",
             "cleanup() { rm -f x; }; trap cleanup EXIT",
+            "echo function; cargo test",
+            "f() { echo function; }; f; cargo test",
+            "bash -c 'f() { echo hi; }; f; cargo test'",
+            "bash -c 'f() { if true; then echo hi; fi; }; f'",
+            "eval \"trap 'rm -f tmp' EXIT\"; cd backend; cargo test",
             "trap 'rm -f tmp' EXIT; cd backend; cargo test",
             "build() { pnpm build; }; build && git add -A",
             "a() { b; }; b() { echo; }; a",
