@@ -731,7 +731,7 @@ fn reads_state(all: &[String]) -> (bool, bool) {
     // `NO_`, `_` and case don't matter in a zsh option name.
     let safe_option = |w: &str| {
         let n = w.replace('_', "").to_lowercase();
-        literal(w) && SAFE_OPTIONS.contains(&n.strip_prefix("no").unwrap_or(&n))
+        literal(w) && (SAFE_OPTIONS.contains(&n.as_str()) || SAFE_OPTIONS.contains(&n.strip_prefix("no").unwrap_or(&n)))
     };
     let (search, mut opaque) = (all.iter().any(|w| mentions_cd_search(w)), false);
     for (i, w) in all.iter().enumerate() {
@@ -754,12 +754,14 @@ fn reads_state(all: &[String]) -> (bool, bool) {
         // A shell may be started by any program in front of it (`nohup zsh -T -c …`, `xargs zsh`): look at any place in the
         // words. Its options come before the script or the `-c` text, whose first word isn't one.
         let name = base(w.trim_start_matches('='));
+        let name = name.to_lowercase();
+        let name = name.as_str();
         if matches!(name, "zsh" | "bash" | "sh" | "ksh" | "dash") {
             let mut args = all[i + 1..].iter();
             while let Some(a) = args.next().filter(|a| a.starts_with(['-', '+'])) {
                 if matches!(a.as_str(), "-o" | "+o") {
                     opaque |= args.next().is_none_or(|n| !safe_option(n));
-                } else if a.len() < 2 || !a[1..].chars().all(|c| "clexufiso".contains(c)) {
+                } else if a.len() < 2 || !a[1..].chars().all(|c| "clexufison".contains(c)) {
                     opaque = true;
                 }
             }
@@ -775,12 +777,19 @@ fn reads_state(all: &[String]) -> (bool, bool) {
         match name {
             "set" => {
                 // Letter bundles of `e u x v` (and `o` with a safe name), and safe option names; what follows `--` is data.
-                opaque |= args.iter().take_while(|a| a.as_str() != "--").any(|a| if a.starts_with(['-', '+']) { a.len() < 2 || !a[1..].chars().all(|c| "euxvo".contains(c)) } else { !safe_option(a) });
+                opaque |= args.iter().take_while(|a| a.as_str() != "--").any(|a| if a.starts_with(['-', '+']) { a.len() < 2 || !a[1..].chars().all(|c| "euxvom".contains(c)) } else { !safe_option(a) });
             }
             "setopt" | "unsetopt" => opaque |= args.iter().any(|a| !safe_option(a)),
             "emulate" | "shopt" => opaque = true,
             "export" | "typeset" | "declare" | "local" | "readonly" | "integer" | "float" | "read" => opaque |= args.iter().any(|a| !a.starts_with('-') && !plain_name(a)),
-            "printf" | "print" => opaque |= args.iter().position(|a| a.as_str() == "-v").is_some_and(|v| args.get(v + 1).is_none_or(|n| !plain(n))),
+            // `-v name`, bundled (`-rv name`) or not, or glued (`-vname`).
+            "printf" | "print" => {
+                opaque |= args.iter().enumerate().any(|(k, a)| {
+                    let bundle = a.starts_with('-') && !a.starts_with("--") && a.contains('v');
+                    let glued = a.split_once('v').map_or("", |(_, r)| r);
+                    bundle && if a.ends_with('v') { args.get(k + 1).is_none_or(|n| !plain(n)) } else { !plain(glued) }
+                })
+            }
             "zstyle" => opaque |= args.iter().any(|a| matches!(a.as_str(), "-s" | "-a" | "-b" | "-g" | "-e")),
             _ => {}
         }
@@ -2843,6 +2852,9 @@ mod tests {
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
             format!("functions[g]=':'; cd backend && cargo test"),
             format!("functions[f]='pnpm install'; cd {u}; f"),
+            format!("/bin/ZSH -T -c 'x={u}; cd x; pnpm install'"),
+            format!("K=PATH; print -rv CD$K {u}; cd sub; pnpm install"),
+            format!("K=PATH; print -vCD$K {u}; cd sub; pnpm install"),
             format!("{{ setopt -T }}; x={u}; cd x; pnpm install"),
             format!("if setopt -T; then :; fi; x={u}; cd x; pnpm install"),
             format!("for i in 1; do setopt -T; done; x={u}; cd x; pnpm install"),
@@ -2957,6 +2969,8 @@ mod tests {
             "set +e; setopt extendedglob nullglob autopushd; cd backend && cargo test".to_string(),
             "source ~/.zshrc; . ./env.sh; cd backend && cargo test".to_string(),
             "zsh -c 'cd backend && cargo test'".to_string(),
+            "bash -n script; bash scripts/x.sh --verbose; sh -eu script".to_string(),
+            "jq '.options[0]' package.json; echo functions[1]; : \"$x\"; set -o nounset; set -m".to_string(),
             ": ${FOO:=bar}; cargo test".to_string(),
             "x=${opt#--name=}; cargo test".to_string(),
             "echo ${FOO:-a=b}; cargo test".to_string(),
