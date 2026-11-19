@@ -703,7 +703,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 continue;
             }
             "sh" | "bash" | "zsh" | "dash" | "ksh" => {
-                if let Some(t) = shell_script(&cmds, i, args) {
+                if let Some(t) = shell_script(cmds, i, args) {
                     let mut inner = dirs.clone();
                     inner.enter(&chdir);
                     changes(&t, &mut inner, depth + 1, out);
