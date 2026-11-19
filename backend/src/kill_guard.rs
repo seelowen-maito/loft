@@ -588,7 +588,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     dirs.may_stay(before);
                 }
                 // A `trap f EXIT` doesn't call `f` now.
-                dirs.made |= !(all.first().is_some_and(|w| w == "trap") && makes_nothing(text, all, all, &cmds[i].live));
+                dirs.made |= !(all.first().is_some_and(|w| w == "trap") && makes_nothing(text, all, all, &cmds[i].live, true));
             }
         }
         let words = match unwrap(all, &mut false) {
@@ -658,12 +658,16 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         let (args, live) = (args, &live[1..]);
         if base(name) == "alias" {
             dirs.aliases.extend(args.iter().filter_map(|a| a.split_once('=').map(|(n, _)| n.to_string())));
+            // Any later word may be the alias (`g`, a global alias, one named `cd`): what runs after is unknown.
+            if !dirs.aliases.is_empty() {
+                dirs.lose();
+            }
         }
         if base(name) == "trap" {
-            dirs.trapped |= !makes_nothing(text, all, words, live);
+            dirs.trapped |= !makes_nothing(text, all, words, live, true);
             // A handler that runs early and changes folder moves the shell before each later command.
             let handler = args.iter().find(|a| !a.starts_with('-') && !a.is_empty());
-            if !trap_defers(text, words) && handler.is_some_and(|h| h.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| matches!(w, "cd" | "pushd" | "popd" | "chdir")) || dirs.funcs.iter().any(|(f, _)| f == h)) {
+            if !trap_defers(text, words, true) && handler.is_some_and(|h| h.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| matches!(w, "cd" | "pushd" | "popd" | "chdir")) || dirs.funcs.iter().any(|(f, _)| f == h)) {
                 dirs.lose();
             }
             for h in args.iter().find(|a| !a.starts_with('-') && !a.is_empty()) {
@@ -837,6 +841,10 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                     inner.enter(&chdir);
                     changes(&t, &mut inner, depth + 1, out);
                     dirs.keep_made(&inner);
+                    // A trap of that shell runs when it ends, before what follows (`zsh -c "trap … EXIT"; cd backend; …`).
+                    if t.split_whitespace().any(|w| w == "trap") {
+                        dirs.lose();
+                    }
                     // A script from stdin the guard can't see (`curl … | sh`, `zsh /dev/stdin`) may end anywhere.
                     if t.trim().is_empty() {
                         dirs.lose();
@@ -845,7 +853,8 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 dirs.made = true;
                 continue;
             }
-            "eval" if args.first().is_some_and(|a| dirs.aliases.contains(a)) => {
+            // An alias this line defined, called by name or named in the text `eval` runs (`eval 'true; g'`).
+            n if dirs.aliases.iter().any(|a| a == n) || (n == "eval" && args.iter().any(|a| a.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|t| dirs.aliases.iter().any(|x| x == t)))) => {
                 // An alias this line defined: what it runs isn't followed.
                 out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: words.join(" ") }));
                 dirs.made = true;
@@ -894,7 +903,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             }
         };
         // A definition runs nothing: its body does when called.
-        dirs.made |= defined.is_empty() && !makes_nothing(text, all, words, live);
+        dirs.made |= defined.is_empty() && !makes_nothing(text, all, words, live, true);
         out.extend(folders.into_iter().map(|folder| Change { folder, command: words.join(" ") }));
     }
     // A trap's handler runs in each folder the commands were in (the folder it ran in can be any of them), as a call to a
@@ -1068,17 +1077,12 @@ fn substitutions(s: &str) -> Vec<String> {
     let mut i = 0;
     while i < c.len() {
         if c[i] == '$' && c.get(i + 1) == Some(&'(') {
-            let (mut depth, mut j) = (1, i + 2);
-            while j < c.len() && depth > 0 {
-                depth += (c[j] == '(') as i32 - (c[j] == ')') as i32;
-                j += 1;
-            }
-            out.push(c[i + 2..j.saturating_sub(1).max(i + 2)].iter().collect());
+            // To the end of the body: a `)` in a quote, a pattern or after a backslash can't end it early.
+            out.push(c[i + 2..].iter().collect());
             i += 2;
         } else if c[i] == '`' {
-            let end = c[i + 1..].iter().position(|&x| x == '`').map_or(c.len(), |e| i + 1 + e);
-            out.push(c[i + 1..end].iter().collect());
-            i = end + 1;
+            out.push(c[i + 1..].iter().collect());
+            i += 1;
         } else {
             i += 1;
         }
@@ -1086,12 +1090,26 @@ fn substitutions(s: &str) -> Vec<String> {
     out
 }
 
+/// The text of each `name() { … }` body in `text`, to the `}` that balances its first `{` (or the end).
+fn function_bodies(text: &str) -> impl Iterator<Item = &str> {
+    text.match_indices("()").filter_map(move |(p, _)| {
+        let rest = &text[p + 2..];
+        let open = rest.find('{')?;
+        let mut depth = 0;
+        let end = rest[open..].char_indices().find_map(|(k, c)| {
+            depth += (c == '{') as i32 - (c == '}') as i32;
+            (depth == 0).then_some(open + k)
+        });
+        Some(&rest[open..end.unwrap_or(rest.len())])
+    })
+}
+
 /// Whether the `trap` in `words` runs its handler only when the shell ends, so that it can't change what a later command
 /// of the line does. At the end of the shell for EXIT or a signal that ends it; any other name (`DEBUG`, `ERR`, `ZERR`, a
 /// number) runs before the next command, and so does one in a subshell, a background job or a pipeline part (it fires
 /// when that part ends): a line with `(` (but a named function's `()`), `|` or any `&` that isn't `&&` (or follows a
 /// backslash) isn't read.
-fn trap_defers(text: &str, words: &[String]) -> bool {
+fn trap_defers(text: &str, words: &[String], top: bool) -> bool {
     let lone_and = text.match_indices('&').any(|(p, _)| !text[..p].ends_with('&') && !text[p + 1..].starts_with('&')) || text.contains("\\&");
     // A `()` after a name defines a function; any other (`() cmd`, `function () cmd`) is an anonymous function that runs now.
     let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':');
@@ -1099,11 +1117,16 @@ fn trap_defers(text: &str, words: &[String]) -> bool {
         let before = text[..p].trim_end_matches([' ', '\t']);
         before.rsplit(|c: char| !name_char(c)).next().is_none_or(|n| n.is_empty() || n == "function") || !before.ends_with(name_char)
     });
+    // Only EXIT of the shell the line runs in, not in a function, a subshell, another shell's `-c` (`top`) or with a `kill`: a signal
+    // handler runs when the signal comes, a function's or subshell's EXIT when it ends, and the line goes on.
     !anonymous
+        && top
+        && !function_bodies(text).any(|b| b.contains("trap"))
+        && !text.split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "function" | "kill" | "pkill" | "killall"))
         && !text.replace("()", "").contains(['(', '|'])
         && !lone_and
         && words.len() >= 3
-        && words[2..].iter().all(|w| matches!(w.as_str(), "EXIT" | "INT" | "TERM" | "HUP" | "QUIT"))
+        && words[2..].iter().all(|w| w == "EXIT")
         && !words.iter().any(|w| w.contains(['$', '`']))
 }
 
@@ -1111,7 +1134,7 @@ fn trap_defers(text: &str, words: &[String]) -> bool {
 /// and remote commands, which don't write the work tree (`pull`, `checkout` do). Strict: the word `git` itself, with
 /// nothing before it (no assignment, `env` or wrapper: they can name a program git runs), no word the shell expands,
 /// and only options from a short list (git takes long ones by any unique prefix, so any other may run a program).
-fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool]) -> bool {
+fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool], top: bool) -> bool {
     const OPTIONS: &[&str] = &["--all", "--amend", "--no-edit", "--tags", "--prune", "--dry-run", "--quiet", "--verbose", "--short", "--stat", "--oneline", "--porcelain", "--set-upstream", "--graph", "--name-only", "--force-with-lease", "-sb"];
     // Only a group's opening (`{ rm x`) may come before the command, not an assignment or a wrapper.
     let bare = all[..all.len() - words.len()].iter().all(|w| matches!(w.as_str(), "{" | "(" | "then" | "do" | "else"));
@@ -1119,7 +1142,7 @@ fn makes_nothing(text: &str, all: &[String], words: &[String], live: &[bool]) ->
     if matches!(words.first().map(String::as_str), Some("rm")) && bare && !live.iter().any(|&l| l) && !words.iter().any(|w| w.contains(['$', '`'])) {
         return true;
     }
-    if words.first().is_some_and(|w| w == "trap") && bare && !live.iter().any(|&l| l) && trap_defers(text, words) {
+    if words.first().is_some_and(|w| w == "trap") && bare && !live.iter().any(|&l| l) && trap_defers(text, words, top) {
         return true;
     }
     let [git, args @ ..] = words else { return false };
@@ -2068,9 +2091,16 @@ fn unwrap<'a>(words: &'a [String], bypass: &mut bool) -> Run<'a> {
             *bypass |= sets_path(w);
             i += 1;
             // zsh's short `if [[ … ]] cmd`: the condition is not the command.
-            if matches!(w.as_str(), "if" | "elif" | "while" | "until") && words.get(i).is_some_and(|c| c == "[[") {
-                i = words[i..].iter().position(|c| c == "]]").map_or(words.len(), |e| i + e + 1);
+            // The command follows the last `]]` (`[[ a ]] && [[ b ]] cmd`, a quoted `]]`, `if ! [[ … ]] cmd`).
+            let j = i + words[i..].iter().take_while(|c| *c == "!").count();
+            if matches!(w.as_str(), "if" | "elif" | "while" | "until") && words.get(j).is_some_and(|c| c == "[[") {
+                i = words[j..].iter().rposition(|c| c == "]]").map_or(words.len(), |e| j + e + 1);
             }
+            continue;
+        }
+        // `[[ a ]] cmd` after `&&`: the condition of zsh's short `if`, not the command.
+        if w == "[[" && words[i..].iter().rposition(|c| c == "]]").is_some_and(|e| i + e + 1 < words.len()) {
+            i += words[i..].iter().rposition(|c| c == "]]").unwrap_or_default() + 1;
             continue;
         }
         if w == "function" {
@@ -2440,6 +2470,21 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
         let next = c.get(i + 1).copied();
         i += 1;
         let opens_array = ch == '(' && l.in_word && l.word.ends_with('=') && assignment(&l.word).is_some();
+        // `(` inside a word (`bin/(pnpm|zzz)`, `pnpm(.)`) is a zsh glob, kept in the word up to its `)`; `f()` is a function.
+        if ch == '(' && l.in_word && array == 0 && !opens_array && next != Some(')') && l.frame().pattern != Some(true) && !l.word.ends_with(['$', '=', '<', '>']) {
+            let mut open = 1;
+            l.word.push(ch);
+            while let Some(&n) = c.get(i) {
+                i += 1;
+                l.word.push(n);
+                open += (n == '(') as i32 - (n == ')') as i32;
+                if open == 0 {
+                    break;
+                }
+            }
+            l.live = true;
+            continue;
+        }
         // A `#` that starts an element comments out the rest of the line.
         if array > 0 && ch == '#' && i >= 2 && matches!(c[i - 2], ' ' | '\t' | '\n' | '(') {
             while c.get(i).is_some_and(|&n| n != '\n') {
@@ -3583,6 +3628,23 @@ mod tests {
             format!("if true; then for d in 1 2; do pnpm install; cd {u}; done; fi"),
             format!("for a in 1; do for b in 2; do :; done; pnpm install; cd {u}; done"),
             format!("while pnpm install; do cd {u}; done"),
+            format!("cat <<EOF\n$(echo ')'; cd {u}; pnpm install)\nEOF"),
+            format!("cat <<EOF\n$(case x in x) cd {u};; esac; pnpm install)\nEOF"),
+            format!("cat <<EOF\n`echo \\`x\\`; cd {u}; pnpm install`\nEOF"),
+            format!("cd {u}; if [[ \"]]\" == x ]] pnpm install"),
+            format!("cd {u}; if [[ a ]] && [[ b ]] pnpm install"),
+            format!("cd {u}; if ! [[ a ]] pnpm install"),
+            format!("alias g='cd {u}; pnpm install'; eval 'true; g'"),
+            format!("alias g='cd {u}'; g; pnpm install"),
+            format!("alias -g G='cd {u}'; echo G; pnpm install"),
+            format!("alias cd='cd {u}; cd'; cd x; pnpm install"),
+            format!("trap 'cd {u}' INT; kill -INT $$; pnpm install"),
+            format!("trap 'cd {u}' TERM; kill $$; pnpm install"),
+            format!("f() {{ trap 'cd {u}' EXIT; }}; f; pnpm install"),
+            format!("zsh -c \"trap 'cd {u}' EXIT\"; pnpm install"),
+            format!("zsh -c \"trap 'cd {u}' EXIT\"; cd backend; pnpm install"),
+            format!("cd {u}; /opt/homebrew/bin/(pnpm|zzz) install"),
+            format!("cd {u}; pnpm(.) install"),
             format!("cd {u}; if [[ -n 1 ]] pnpm install"),
             format!("cat <<EOF\n$(cd {u}; pnpm install)\nEOF"),
             format!("cd {u}; echo ${{$(pnpm install)}}"),
