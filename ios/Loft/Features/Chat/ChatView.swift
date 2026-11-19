@@ -935,7 +935,7 @@ private struct MessageBubble: View {
                         QuoteBlock(quote: q) { jump(q.id) }
                     }
                     if message.videos.isEmpty && message.photos.isEmpty || !message.displayContent.isEmpty {
-                        CollapsibleText(text: message.displayContent)
+                        CollapsibleText(text: message.displayContent, linkColor: isUser ? Theme.onAccent : nil)
                             .font(.body)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
