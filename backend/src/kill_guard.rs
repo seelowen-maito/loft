@@ -455,6 +455,12 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     dirs.funcs.iter_mut().zip(outer).for_each(|(f, r)| f.1 = r);
 }
 
+/// The loop keyword a command opens, after the words that may come before it (`{ for`, `then for`, `! while`).
+fn loop_word(c: &Cmd) -> Option<&str> {
+    let k = c.words.iter().zip(&c.quoted).position(|(w, &q)| q || !matches!(w.as_str(), "!" | "{" | "then" | "do" | "else"))?;
+    (!c.quoted[k]).then_some(c.words[k].as_str()).filter(|w| matches!(*w, "for" | "foreach" | "while" | "until" | "select" | "repeat"))
+}
+
 /// The commands `range` of `cmds` (the parse of `text`), run in order.
 fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
     // The folders as each open subshell found them, to go back to when it ends. What the subshell made stays made.
@@ -462,6 +468,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
     let mut pending_dotgit = false;
     let end = range.end;
     let mut loops: Vec<(usize, usize)> = vec![];
+    let mut open_ended: Vec<usize> = vec![];
     for i in range {
         let scope = &cmds[i].scope;
         while saved.last().is_some_and(|(s, _)| !scope.contains(s)) {
@@ -480,18 +487,21 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
             let (done, start) = loops.pop().unwrap();
             run(text, cmds, start..done, dirs, depth, out);
         }
-        if all.first().zip(cmds[i].quoted.first()).is_some_and(|(w, &q)| !q && matches!(w.as_str(), "for" | "foreach" | "while" | "until" | "select" | "repeat")) {
+        if let Some(kw) = loop_word(&cmds[i]) {
             let mut open = 0;
             let done = cmds[i..end].iter().position(|c| {
-                match c.words.first().map(String::as_str) {
-                    Some("for" | "foreach" | "while" | "until" | "select" | "repeat") => open += 1,
-                    Some("done") => open -= 1,
+                match (loop_word(c), c.words.first().map(String::as_str)) {
+                    (Some(_), _) => open += 1,
+                    (_, Some("done")) => open -= 1,
                     _ => {}
                 }
                 open == 0
             });
-            if let Some(d) = done.filter(|&d| d > 0) {
-                loops.push((i + d, i + 1));
+            match done.filter(|&d| d > 0) {
+                // The condition of `while` and `until` runs after each pass too, and `repeat 2 cmd; …` has the body in its own command.
+                Some(d) => loops.push((i + d, if matches!(kw, "while" | "until" | "repeat") { i } else { i + 1 })),
+                // No `done` (`foreach … end`, `for d (1 2) { … }`, `repeat 2 { … }`): the rest is run once more.
+                None => open_ended.push(if kw == "repeat" { i } else { i + 1 }),
             }
         }
         // A function named like one of them, however it is written (`function cd`, `{ cd() { … } }`, `f cd()`), a
@@ -907,6 +917,10 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
                 }
             }
         }
+    }
+    if let Some(&start) = open_ended.first().filter(|_| dirs.calls.get() < MAX_CALLS) {
+        dirs.calls.set(dirs.calls.get() + 1);
+        run(text, cmds, start..end, dirs, depth, out);
     }
     // The last command's `.git` counts for whatever runs after this text: `sh -c 'ln -s x .git'; git reset`.
     dirs.dotgit |= pending_dotgit;
@@ -1635,7 +1649,9 @@ fn outermost_checkout(folder: &Path) -> PathBuf {
 /// quotes (`live`, from the lexer). The ones a git word has are expanded first (`expand_args`).
 /// A folder word with a variable, a command substitution or a backtick: where it goes is known only to the shell.
 fn expands(word: &str) -> bool {
-    word.contains(['$', '`'])
+    // `~user`, `~-`, `~1`, `~name`: another folder, which the guard can't tell (`~`, `~/x` and `~+` it can).
+    let other_tilde = word.starts_with('~') && !(word == "~" || word.starts_with("~/") || word == "~+" || word.starts_with("~+/"));
+    word.contains(['$', '`']) || other_tilde
 }
 
 /// `expands` for a folder option's value: `$HOME` and `${HOME}` at the start are the home folder, which the guard knows.
@@ -3553,6 +3569,18 @@ mod tests {
         let cases: Vec<String> = vec![
             format!("for d in 1 2; do pnpm install; cd {u}; done"),
             format!("while true; do pnpm install; cd {u}; done"),
+            format!("cd ~gustavo/dev/loft; pnpm install"),
+            format!("git -C ~gustavo/dev/loft reset --hard"),
+            format!("cd {u}; cd {CLONE}; cd ~-; pnpm install"),
+            format!("pushd {u}; git -C ~1 reset --hard"),
+            format!("hash -d x={u}; git -C ~x reset --hard"),
+            format!("foreach d (1 2)\npnpm install\ncd {u}\nend"),
+            format!("for d (1 2) {{ pnpm install; cd {u} }}"),
+            format!("repeat 2 {{ pnpm install; cd {u} }}"),
+            format!("{{ for d in 1 2; do pnpm install; cd {u}; done; }}"),
+            format!("if true; then for d in 1 2; do pnpm install; cd {u}; done; fi"),
+            format!("for a in 1; do for b in 2; do :; done; pnpm install; cd {u}; done"),
+            format!("while pnpm install; do cd {u}; done"),
             format!("cd {u}; if [[ -n 1 ]] pnpm install"),
             format!("cat <<EOF\n$(cd {u}; pnpm install)\nEOF"),
             format!("cd {u}; echo ${{$(pnpm install)}}"),
