@@ -455,15 +455,6 @@ fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
             dirs.lose();
             out.extend(unknown_in(dirs, None).into_iter().map(|folder| Change { folder, command: all.join(" ") }));
         }
-        // The text a literal `functions[f]='...'` gives is a body: it runs when `f` is called, or on its own (`TRAPDEBUG`),
-        // so it is read here as a command that may run.
-        for body in all.iter().filter_map(|w| w.strip_prefix("functions[").and_then(|r| r.split_once("]=")).map(|(_, b)| b)).filter(|b| !b.is_empty() && !b.starts_with('=')) {
-            let before: Vec<PathBuf> = dirs.alts.iter().cloned().chain(dirs.cwd.clone()).collect();
-            dirs.flush(usize::MAX);
-            changes(body, dirs, depth + 1, out);
-            dirs.flush(usize::MAX);
-            dirs.may_stay(before);
-        }
         // `cd() { ... }` isn't a `cd`.
         if cmds[i].defines && defines {
             continue;
@@ -743,9 +734,7 @@ fn reads_state(all: &[String]) -> (bool, bool) {
     let (search, mut opaque) = (all.iter().any(|w| mentions_cd_search(w)), false);
     for (i, w) in all.iter().enumerate() {
         let start = w.trim_start_matches(['$', '{', '"', '\'']);
-        // A literal `functions[name]=text` is read (its text is run as a command that may run); any other write is opaque.
-        let literal_function = w.strip_prefix("functions[").and_then(|r| r.split_once("]=")).is_some_and(|(n, b)| !n.contains(['$', '`', '{', '[', '(']) && !b.starts_with('='));
-        opaque |= w.contains("options[") || (w.contains("functions[") && !literal_function) || ["options+=", "options=", "functions+=", "functions="].iter().any(|n| start.starts_with(n));
+        opaque |= w.contains("options[") || w.contains("functions[") || ["options+=", "options=", "functions+=", "functions="].iter().any(|n| start.starts_with(n));
         // `${name=…}`, `${name:=…}`, `${name::=…}`, and the `(P)` flag.
         opaque |= w.contains("(P)");
         for part in w.split("${").skip(1) {
@@ -2829,6 +2818,8 @@ mod tests {
             format!("functions[f]='git -C {u} reset --hard'; f"),
             format!("functions[cd]='git -C {u} reset --hard'; cd"),
             format!("cd {u}; {{ true }}; always cd {w}; pnpm install"),
+            format!("functions[g]=':'; cd backend && cargo test"),
+            format!("functions[f]='pnpm install'; cd {u}; f"),
             format!("set -9T; x={u}; cd x; pnpm install"),
             format!("setopt -T1; x={u}; cd x; pnpm install"),
             format!("zsh -T9 -c 'x={u}; cd x; pnpm install'"),
@@ -3121,7 +3112,6 @@ mod tests {
             "cd backend; cd() { :; }".to_string(),
             "f() { :; }; () { :; }; cd backend && cargo test".to_string(),
             "autoload zargs; cd backend && cargo test".to_string(),
-            "functions[g]=':'; cd backend && cargo test".to_string(),
             "noglob cd backend && cargo test".to_string(),
             "nocorrect cd backend && cargo test".to_string(),
             "time cd backend && cargo test".to_string(),
