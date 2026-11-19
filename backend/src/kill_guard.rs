@@ -577,7 +577,7 @@ fn run(text: &str, cmds: &[Cmd], range: std::ops::Range<usize>, dirs: &mut Dirs,
         if matches!(name.as_str(), "source" | ".") {
             let file = args.iter().find(|a| !a.starts_with('-') || a.len() == 1);
             let text = shell_script(cmds, i, &["-s".to_string()]).unwrap_or_default();
-            if !text.trim().is_empty() || file.is_none_or(|f| f.contains(['$', '`', '*', '?', '[', '{', '<', '=', '(']) || f == "-" || !f.contains('/') || f.contains("/dev/") || f.contains("/proc/") || f.contains("..")) {
+            if !text.trim().is_empty() || file.is_none_or(|f| f.contains(['$', '`', '*', '?', '[', '{', '<', '=', '(']) || f == "-" || !f.contains('/') || f.contains("/dev/") || f.contains("/proc/") || f.contains("..") || dirs.at_text(f).is_none_or(|p| dirs.touched.iter().any(|t| p.starts_with(t)) || std::fs::metadata(&p).is_ok_and(|m| !m.is_file()))) {
                 if !text.trim().is_empty() {
                     let mut inner = dirs.clone();
                     changes(&text, &mut inner, depth + 1, out);
@@ -3412,6 +3412,8 @@ mod tests {
             format!("K=cd; private CD$K=; cd {u}; pnpm install"),
             format!("K=cd; trap \"CD$K=x\" EXIT; cd {u}; pnpm install"),
             format!("source /dev/stdin <<< 'cd {u}; pnpm install'"),
+            format!("ln -s /dev/stdin s; source ./s <<< 'cd {u}; pnpm install'"),
+            "source /dev/null; pnpm install".to_string(),
             format!("echo 'cd {u}; pnpm install' | source /dev/stdin"),
             format!("source /dev/./stdin <<< 'cd {u}; pnpm install'"),
             format!("source //dev/stdin <<< 'cd {u}; pnpm install'"),
