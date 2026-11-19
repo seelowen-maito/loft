@@ -59,7 +59,8 @@ public protocol LoftAPI: Sendable {
     /// Makes a past Session the agent's own: its next run resumes it. Fails while the agent works.
     func resumeSession(agentId: String, sessionId: String) async throws -> Agent
     func permissions() async throws -> [PermissionRequest]
-    func decidePermission(id: String, decision: String) async throws
+    /// `answers` answers a `questions` request: the answer text per question text.
+    func decidePermission(id: String, decision: String, answers: [String: String]?) async throws
     func pullRequests() async throws -> [PullRequest]
     /// Every spec's Delivery in one read (the web board's source).
     func deliverySummaries() async throws -> [DeliverySummary]
@@ -356,8 +357,10 @@ public struct LiveLoftAPI: LoftAPI {
     }
     public func permissions() async throws -> [PermissionRequest] { try await get("/permissions") }
 
-    public func decidePermission(id: String, decision: String) async throws {
-        _ = try await send("POST", "/permissions/\(id)", body: ["decision": .string(decision)])
+    public func decidePermission(id: String, decision: String, answers: [String: String]?) async throws {
+        var body: [String: JSONValue] = ["decision": .string(decision)]
+        if let answers { body["answers"] = .object(answers.mapValues { .string($0) }) }
+        _ = try await send("POST", "/permissions/\(id)", body: .object(body))
     }
 
     public func pullRequests() async throws -> [PullRequest] { try await get("/pull-requests") }
