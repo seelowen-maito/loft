@@ -284,7 +284,7 @@ pub async fn pruner(storage: PathBuf) {
 
 /// Stops every process the agent owns, when it is deleted (see [`stop`]). Its session records go now.
 pub async fn stop_all(storage: &Path, agent_id: &str) {
-    stop(storage, agent_id, || true, |_| true).await;
+    stop(storage, agent_id, || true, false).await;
     let _ = tokio::fs::remove_dir_all(sessions_dir(storage, agent_id)).await;
 }
 
@@ -292,25 +292,26 @@ pub async fn stop_all(storage: &Path, agent_id: &str) {
 /// never closed its browser, crashed or timed out. Its detached servers keep running. Returns how many browsers:
 /// the stopped processes not run by another one stopped (a browser's renderers and GPU process are its own).
 pub async fn stop_test_browsers(storage: &Path, agent_id: &str) -> usize {
-    let stopped = stop(storage, agent_id, || true, |p| p.browser).await;
+    let stopped = stop(storage, agent_id, || true, true).await;
     let pids: HashSet<i32> = stopped.iter().map(|(pid, _, _)| *pid).collect();
     stopped.iter().filter(|(_, ppid, _)| !pids.contains(ppid)).count()
 }
 
-/// Stops every process the agent owns (see [`Owners`]) that `only` picks: SIGTERM, then SIGKILL for any still there after a grace period. Returns
+/// Stops every process the agent owns (see [`Owners`]), or with `browsers_only` its test browsers in its sessions
+/// (never by working folder: a script's browser runs in the script's session): SIGTERM, then SIGKILL for any still there after a grace period. Returns
 /// each one's PID, parent's PID and command. `proceed` is asked again right before the first signal, and nothing is stopped
 /// when it says no.
-async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static, only: fn(&Proc) -> bool) -> Vec<(i32, i32, String)> {
+async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static, browsers_only: bool) -> Vec<(i32, i32, String)> {
     let (storage, id) = (storage.to_path_buf(), agent_id.to_string());
     let targets = tokio::task::spawn_blocking(move || {
         if !proceed() {
             return vec![];
         }
-        let owners = Owners::load(&storage, std::slice::from_ref(&id));
+        let owners = Owners::load(&storage, if browsers_only { &[] } else { std::slice::from_ref(&id) });
         let me = std::process::id() as i32;
         let targets: Vec<(i32, i32, i32, String)> = table()
             .into_iter()
-            .filter(|p| p.pid != me && !p.helper && only(p) && owners.of(p) == Some(&id))
+            .filter(|p| p.pid != me && !p.helper && (p.browser || !browsers_only) && owners.of(p) == Some(&id))
             .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.ppid, p.command)))
             .collect();
         for (pid, _, _, _) in &targets {
@@ -351,7 +352,7 @@ pub async fn stop_idle(state: &AppState) -> Vec<crate::sweep::Line> {
         // Asked again right before the signals, so a run that just started keeps its processes.
         let (st, agent) = (state.clone(), a.clone());
         let still_idle = move || st.db.get_agent(&agent.id).ok().flatten().is_some_and(|a| crate::agents::idle(&st, &a, std::time::SystemTime::now()));
-        for (pid, _, command) in stop(&state.cfg.storage_dir, &a.id, still_idle, |_| true).await {
+        for (pid, _, command) in stop(&state.cfg.storage_dir, &a.id, still_idle, false).await {
             let (path, rel) = (PathBuf::from(format!("pid {pid}")), clip(&command, 200));
             lines.push(crate::sweep::Line { agent: a.id.clone(), path, rel, bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() });
         }
@@ -397,7 +398,7 @@ pub async fn stop_left_running(State(state): State<AppState>, UrlPath(id): UrlPa
     if !not_running() {
         return Err(crate::api::ApiError(axum::http::StatusCode::CONFLICT, "the agent is working".into()));
     }
-    let stopped = stop(&state.cfg.storage_dir, &id, not_running, |_| true).await;
+    let stopped = stop(&state.cfg.storage_dir, &id, not_running, false).await;
     let lines: Vec<crate::sweep::Line> = stopped
         .iter()
         .map(|(pid, _, command)| crate::sweep::Line { agent: id.clone(), path: PathBuf::from(format!("pid {pid}")), rel: clip(command, 200), bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() })
@@ -996,9 +997,14 @@ mod tests {
         /// A daemon: a session of its own that no run recorded, working in `dir`, left by the shell that started
         /// it, so it runs under launchd and not under Loft (here the test).
         fn daemon_in(dir: &Path) -> Self {
+            Self::daemon_as(Path::new("/bin/sleep"), dir)
+        }
+
+        /// [`Self::daemon_in`], from `path`, a link to sleep.
+        fn daemon_as(path: &Path, dir: &Path) -> Self {
             std::fs::create_dir_all(dir).unwrap();
             let mut cmd = std::process::Command::new("/bin/sh");
-            cmd.args(["-c", "/bin/sleep 60 >/dev/null 2>&1 & echo $!"]).current_dir(dir);
+            cmd.args(["-c", "\"$0\" 60 >/dev/null 2>&1 & echo $!"]).arg(path).current_dir(dir);
             unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
             let out = cmd.output().unwrap();
             let pid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
@@ -1299,8 +1305,10 @@ mod tests {
         for p in [&browser, &headless, &server] {
             record(&st.cfg.storage_dir, &a.id, p.pid() as u32).unwrap();
         }
-        // The user's own Chrome, and another agent's test browser in a run still going.
+        // The user's own Chrome, a test browser in no agent's session though it works in the agent's workspace,
+        // and another agent's test browser in a run still going.
         let users = Sleeper::start_as(&chrome, true);
+        let stray = Sleeper::daemon_as(&cft, &workspace(&st, &a.id));
         let others = Sleeper::start_as(&cft, true);
         record(&st.cfg.storage_dir, &b.id, others.pid() as u32).unwrap();
         st.rt.lock().unwrap().running.insert(b.id.clone(), Arc::new(tokio::sync::Notify::new()));
@@ -1310,6 +1318,7 @@ mod tests {
         until("its test browsers to stop", 5, || !browser.alive() && !headless.alive() && !alive(helper)).await;
         assert!(server.alive(), "it stopped the dev server");
         assert!(users.alive(), "it stopped the user's Chrome");
+        assert!(stray.alive(), "it stopped a browser in no session of the agent's");
         assert!(others.alive(), "it stopped another agent's browser");
 
         enqueue(&st, &a.id, Some("again".into()), "user");
@@ -1326,9 +1335,9 @@ mod tests {
         let a = crate::tasks::tests::agent(&st, "Builder");
         let server = Sleeper::start(true);
         record(&st.cfg.storage_dir, &a.id, server.pid() as u32).unwrap();
-        assert!(stop(&st.cfg.storage_dir, &a.id, || false, |_| true).await.is_empty());
+        assert!(stop(&st.cfg.storage_dir, &a.id, || false, false).await.is_empty());
         assert!(server.alive());
-        assert_eq!(stop(&st.cfg.storage_dir, &a.id, || true, |_| true).await.len(), 1);
+        assert_eq!(stop(&st.cfg.storage_dir, &a.id, || true, false).await.len(), 1);
         until("the server stops", 5, || !server.alive()).await;
     }
 
