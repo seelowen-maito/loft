@@ -278,8 +278,13 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
         if args.contains("-fixture-long-chat") {
             // The Backend Agent's chat is longer than a page: "Load earlier messages" is far above its newest reply
-            // (and, with `-fixture-risky-permission`, the approval card in its chat).
+            // (and, with `-fixture-risky-permission`, the approval card in its chat). A run of tool calls straddles
+            // the first page's oldest message, as a live chat's often does: its collapsed row grows once the
+            // earlier page comes.
             msgs["be"] = (1...150).map { (i: Int) -> ChatMessage in
+                if (49...51).contains(i) {
+                    return m(Int64(1000 + i), "be", "assistant", "tool_use", "Running the settings tests", Double(300 - i), meta: ["name": "Bash"])
+                }
                 let reply = i % 2 == 0
                 let text = !reply ? "Carry on with the next step."
                     : "Step \(i / 2) of the settings screen is done." + String(repeating: "\n\n- Built the **row** and its `toggle`, with a test for each state it can be in.", count: i % 7)
@@ -497,6 +502,8 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     public func messages(agentId: String, limit: Int, before: Int64?) async throws -> [ChatMessage] {
         try check()
+        // An earlier page takes a moment, as over the network.
+        if before != nil { try? await Task.sleep(for: .milliseconds(500)) }
         return locked { (msgs[agentId] ?? []).filter { before == nil || $0.id < before! }.suffix(limit) }
     }
 
