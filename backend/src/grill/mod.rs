@@ -645,9 +645,14 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
         } else {
             ""
         };
+        let foundation = if crate::greenfield::is_new_project(state, agent) {
+            " Your project folder has no git repo at all, so it is a new project: the first round also asks the clarifying questions, and the foundation questions follow before the spec is offered (see Planning: new project, Clarifying Round and Foundation Rounds)."
+        } else {
+            ""
+        };
         let which = which_project(agent);
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{for_new}{new_project}{which}]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{for_new}{new_project}{foundation}{which}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -1250,6 +1255,10 @@ When your project folder has no git repo or no GitHub remote yet (Loft says so w
 - Read the project folder in place to learn from it, but never write into it, and never run git there: only Loft does.
 - After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for junk and secret files (`.env`, keys), runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
 - If they decline, keep grilling: there is no docs branch until the repo exists. Before publishing the spec, ask the question again in a round, and publish only after a yes and the repo is created. If they decline again, finish the grill without a spec.
+
+When the project folder is not a git repo at all (Loft says "it is a new project" when the grill starts), a new Project, the grill also has the two parts below. A project that already has a git repo, even one with no GitHub remote, keeps the usual grill and only gets the repo offer above.
+- Clarifying Round: the first round asks the clarifying questions together with the new-repo question, each with a recommendation: who it's for and what it must do on day one; the stack, pre-filled from the idea the user gave; where it runs; and the constraints (auth, data sensitivity, compliance). Read the idea and the folder first, and recommend from them rather than asking open questions.
+- Foundation Rounds: after the clarifying answers, settle the foundations as questions with your recommendation, which the user can accept or change: the stack, the architecture, the security baseline, testing, CI and deployment. Each of the six needs a round question with a recommendation, and none is skipped or assumed: don't offer the spec ("Turn this into a spec and tickets?") before all six are answered. There are no per-stack templates: you recommend from what you know of the idea, the constraints and the stack they chose. Put the questions whose prerequisites are settled in the same round (the stack comes first; the rest depend on it).
 
 {TICKETS}
 
