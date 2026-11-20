@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Archive the app and upload it to TestFlight: what Xcode's Product → Archive → Distribute does, in one command.
+# Archive the app (iPhone, or Mac with --mac) and upload it to TestFlight: what Xcode's Product → Archive →
+# Distribute does, in one command.
 #
 # Signs and uploads with the Apple account signed in to Xcode (Settings → Accounts), so no API key
 # is needed. For headless runs (CI), set ASC_KEY_PATH, ASC_KEY_ID and ASC_ISSUER_ID to an
 # App Store Connect API key instead.
 #
-#   ./testflight.sh               tests, archive, upload
+#   ./testflight.sh               unit tests, archive, upload
+#   ./testflight.sh --ui          the app's UI smoke tests too (the Mac's drive this Mac's screen)
 #   ./testflight.sh --fast        skip the tests
-#   ./testflight.sh --no-upload   archive and export an .ipa to ios/build/testflight/export
+#   ./testflight.sh --no-upload   archive and export the signed app to ios/build/testflight(-mac)/export
+#   ./testflight.sh --mac         the Mac app instead
 #   VERSION=0.2.0 ./testflight.sh set the version shown in TestFlight (default: the project's)
 #
 # Needs LOFT_TEAM_ID and LOFT_BUNDLE_ID, in ios/Config/Local.xcconfig or the environment.
@@ -18,16 +21,22 @@ cd "$(dirname "$0")/.."
 for arg in "$@"; do
   case "$arg" in
     --fast) SKIP_TESTS=1 ;;
+    --ui) UI=1 ;;
     --no-upload) UPLOAD=0 ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --mac) MAC=1 ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
 
 # Every upload needs a new build number; a UTC timestamp always increases.
 BUILD_NUMBER="${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
-OUT=build/testflight
-ARCHIVE="$OUT/Loft.xcarchive"
+if [[ "${MAC:-0}" == 1 ]]; then
+  target=LoftMac platform=macOS what="Mac app" OUT=build/testflight-mac icons=LoftMac/Assets.xcassets/AppIcon.appiconset
+else
+  target=Loft platform=iOS what=app OUT=build/testflight icons=Loft/Resources/Assets.xcassets/AppIcon.appiconset
+fi
+ARCHIVE="$OUT/$target.xcarchive"
 LOG="$OUT/xcodebuild.log"
 mkdir -p "$OUT"
 : > "$LOG"
@@ -54,7 +63,7 @@ step() {
 }
 
 # The signing ids live outside the repo (Config/Signing.xcconfig); check they're set before a long build.
-ids=$(xcodebuild -project Loft.xcodeproj -target Loft -configuration Release -showBuildSettings 2>/dev/null)
+ids=$(xcodebuild -project Loft.xcodeproj -scheme "$target" -configuration Release -destination "generic/platform=$platform" -IDEBuildLocationStyle=Unique -showBuildSettings 2>/dev/null)
 team=$(awk -F' = ' '$1 ~ /^ +DEVELOPMENT_TEAM$/ {print $2}' <<<"$ids")
 bundle=$(awk -F' = ' '$1 ~ /^ +PRODUCT_BUNDLE_IDENTIFIER$/ {print $2}' <<<"$ids")
 if [[ -z "$team" || "$bundle" == com.example.* ]]; then
@@ -62,24 +71,42 @@ if [[ -z "$team" || "$bundle" == com.example.* ]]; then
   exit 2
 fi
 
+# App Store Connect rejects an upload whose icon set is missing a file, so check it before a long build.
+missing=$(python3 -c 'import json,os,sys; d=sys.argv[1]; print(" ".join(i["filename"] for i in json.load(open(d+"/Contents.json"))["images"] if "filename" in i and not os.path.exists(d+"/"+i["filename"])))' "$icons")
+if [[ -n "$missing" ]]; then
+  echo "The app icon set ios/$icons is missing: $missing" >&2
+  exit 2
+fi
+
 started=$(date +%s)
 
 if [[ "${SKIP_TESTS:-0}" != 1 ]]; then
-  sim=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in sorted(d.items(), reverse=True) if "iOS" in k for x in v if x["name"].startswith("iPhone")))')
+  # The unit tests: LoftKit's (the Mac app's logic lives there) and, for the iPhone, LoftTests. UI tests only with --ui.
+  step "Running LoftKit's unit tests" swift test --package-path LoftKit
+  if [[ "${MAC:-0}" == 1 ]]; then
+    dest="platform=macOS" suites=()
+    [[ "${UI:-0}" == 1 ]] && suites=(-only-testing:LoftMacUITests/LoftMacUITests)
+  else
+    dest="id=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in sorted(d.items(), reverse=True) if "iOS" in k for x in v if x["name"].startswith("iPhone")))')"
+    suites=(-only-testing:LoftTests)
+    [[ "${UI:-0}" == 1 ]] && suites+=(-only-testing:LoftUITests/LoftUITests)
+  fi
   # A test that hangs (e.g. waiting on a speech model) fails after 2 minutes instead of blocking the release.
-  step "Running tests" xcodebuild test -project Loft.xcodeproj -scheme Loft -destination "id=$sim" -derivedDataPath build/test \
-    -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -maximum-test-execution-time-allowance 180
+  if [[ ${#suites[@]} -gt 0 ]]; then
+    step "Running tests" xcodebuild test -project Loft.xcodeproj -scheme "$target" -destination "$dest" -derivedDataPath build/test -IDEBuildLocationStyle=Unique \
+      "${suites[@]}" -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -maximum-test-execution-time-allowance 180
+  fi
 fi
 
 rm -rf "$ARCHIVE"
-step "Archiving build $BUILD_NUMBER" xcodebuild archive -project Loft.xcodeproj -scheme Loft -configuration Release \
-  -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" "${auth[@]}" "${settings[@]}"
+step "Archiving the $what, build $BUILD_NUMBER" xcodebuild archive -project Loft.xcodeproj -scheme "$target" -configuration Release \
+  -destination "generic/platform=$platform" -archivePath "$ARCHIVE" -IDEBuildLocationStyle=Unique "${auth[@]}" "${settings[@]}"
 
 options=Config/ExportOptions.plist
 if [[ "${UPLOAD:-1}" == 0 ]]; then
   options="$OUT/ExportOptions-local.plist"
   sed 's#<string>upload</string>#<string>export</string>#' Config/ExportOptions.plist > "$options"
-  step "Exporting the .ipa" xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportOptionsPlist "$options" \
+  step "Exporting the signed $what" xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportOptionsPlist "$options" \
     -exportPath "$OUT/export" "${auth[@]}"
   echo "✓ Build $BUILD_NUMBER exported to $PWD/$OUT/export ($(( $(date +%s) - started ))s)"
   exit 0
@@ -89,6 +116,6 @@ step "Uploading to App Store Connect" xcodebuild -exportArchive -archivePath "$A
   -exportPath "$OUT/export" "${auth[@]}"
 
 version=$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$ARCHIVE/Info.plist")
-echo "✓ Loft $version ($BUILD_NUMBER) uploaded in $(( $(date +%s) - started ))s."
+echo "✓ Loft $what $version ($BUILD_NUMBER) uploaded in $(( $(date +%s) - started ))s."
 echo "  It appears in TestFlight after Apple processes it (usually 5–15 min): https://appstoreconnect.apple.com/apps"
-osascript -e "display notification \"Loft $version ($BUILD_NUMBER) uploaded to TestFlight\" with title \"Loft\"" 2>/dev/null || true
+osascript -e "display notification \"Loft $what $version ($BUILD_NUMBER) uploaded to TestFlight\" with title \"Loft\"" 2>/dev/null || true

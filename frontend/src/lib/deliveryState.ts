@@ -1,9 +1,10 @@
 import type { IssueDelivery } from "./api";
+import { fmtDuration } from "./time.ts";
 
-/** The tone of a Delivery card's state line: running, stalled, paused, needs you, final review or done. */
-export type DeliveryTone = "running" | "stalled" | "paused" | "needs_you" | "final" | "done";
+/** The tone of a Delivery card's state line: running, waiting for CI, stalled, paused, needs you, final review or done. */
+export type DeliveryTone = "running" | "ci" | "stalled" | "paused" | "needs_you" | "final" | "done";
 
-const TONES: DeliveryTone[] = ["running", "stalled", "paused", "needs_you", "final", "done"];
+const TONES: DeliveryTone[] = ["running", "ci", "stalled", "paused", "needs_you", "final", "done"];
 
 /** Why a Delivery stalled, as the card says it (only for an older server that sends no `state_line`). */
 function stallWhy(reason: string | null | undefined): string {
@@ -18,16 +19,20 @@ function stallWhy(reason: string | null | undefined): string {
 }
 
 /** A Delivery card's state line, or null before it started: the server's `state_line` as is (a tone it names
- *  that this build doesn't know shows as running). An older server sends none, so it's worded here: waiting for
- *  the user (a ticket after too many changes rounds, or the final review) wins over running. */
+ *  that this build doesn't know shows as running). Waiting for CI adds how long since the server's `ci_since`
+ *  (its earliest ticket waiting, at `now`), and links to the Checks tab on GitHub. An older server sends none, so it's worded here:
+ *  waiting for the user (a ticket after too many changes rounds, or the final review) wins over running. */
 export function deliveryStateLine(
-  d: Pick<IssueDelivery, "state" | "started" | "stall_reason" | "needs_human" | "state_line"> | null,
-): { tone: DeliveryTone; text: string } | null {
+  d: Pick<IssueDelivery, "state" | "started" | "stall_reason" | "needs_human" | "state_line" | "checks_url" | "ci_since"> | null,
+  now = Date.now(),
+): { tone: DeliveryTone; text: string; href?: string } | null {
   if (!d || !d.started) return null;
   if (d.state_line !== undefined) {
     if (!d.state_line) return null;
     const tone = TONES.find((t) => t === d.state_line?.tone) ?? "running";
-    return { tone, text: d.state_line.text };
+    if (tone !== "ci") return { tone, text: d.state_line.text };
+    const since = d.ci_since ? Date.parse(d.ci_since) : NaN;
+    return { tone, text: Number.isNaN(since) ? d.state_line.text : `${d.state_line.text} · ${fmtDuration(now - since)}`, ...(d.checks_url ? { href: d.checks_url } : {}) };
   }
   switch (d.state) {
     case "stalled":

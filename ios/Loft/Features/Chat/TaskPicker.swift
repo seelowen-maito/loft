@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// "Attach an issue" from the composer: search by title or project; open tasks first, the ones waiting on you on

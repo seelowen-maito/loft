@@ -17,7 +17,7 @@ The agents of one group. A team has at most one Lead.
 _Avoid_: Squad, crew
 
 **Project**:
-One folder under the user's projects directory that is, or will become, one git repo: its `origin` is the project's repo, and Loft can create the repo for a project that has none. A folder holding several repos is never a project.
+One folder under the user's projects directory that is, or will become, one git repo: its `origin` is the project's repo, and Loft can create the repo for a project that has none. A folder holding several repos is allowed on an agent, but issues and Deliveries need one repo, so Loft only hints at it.
 _Avoid_: Workspace (that is the agent's private folder), group
 
 **Lead**:
@@ -25,8 +25,8 @@ The agent with the Lead role: it plans with the user (grill, spec, tickets) and 
 _Avoid_: Orchestrator, manager, planner
 
 **Role**:
-What an agent does in its team: Lead, Dev, Code reviewer, QA, Security or Custom. Loft wakes an agent when its role's step in the work comes up and sends it that role's brief with the wake; a Custom agent has no step and follows only its own instructions. An agent has exactly one role.
-_Avoid_: Job, type, flag
+What an agent does in its team: Lead, Dev, Code reviewer, QA, Security or Custom. Loft wakes an agent when its role's step in the work comes up and sends it that role's brief with the wake; a Custom agent has no step and follows only its own instructions. An agent has exactly one role, and its role is the label Loft shows for it: agents have no separate title.
+_Avoid_: Job, type, flag, title
 
 **Delivery**:
 Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers while it follows their CI on GitHub and the Dev starts the next unblocked ticket (with at most one of its tickets in review; a fix waits for the ticket being built and comes before any new one), closes it when they pass and the CI is green, and tells the user when the spec PR is ready or a ticket needs them. No agent coordinates it.
@@ -35,6 +35,14 @@ _Avoid_: Build, run, pipeline
 **Stalled**:
 A Delivery waiting on a step no agent is working on: the run woken for it ended, failed or was lost to a restart without the call its step expects. It stays stalled, and tells only the user, until the user resumes it.
 _Avoid_: Stuck, failed, paused
+
+**Waiting** (ticket):
+A ticket its Dev reported, with `wait_ticket`, as unable to go on until an issue closes or another agent answers. Its Delivery keeps running and shows "waiting on …" with the reason, not a stall. Loft wakes the Dev on it when that issue closes or that agent messages it, and the Dev may take another ready ticket meanwhile.
+_Avoid_: Blocked (a ticket's blockers are set when it's published), parked
+
+**Waiting for CI** (ticket):
+A ticket in review whose reviewers have all passed, so only its CI on GitHub is left. Loft follows the CI itself and closes the ticket when it is green, or sends the Dev a fix round when it fails. No agent works on it meanwhile: the Delivery shows it as waiting for CI, not as running or stalled.
+_Avoid_: Waiting (that is a Dev's `wait_ticket`), pending, CI running
 
 **Paused**:
 A Delivery the user paused: Loft stopped the run in flight and sends no more wakes until the user resumes it. Unlike a stalled one, it sends no push and adds nothing to Needs you.
@@ -75,6 +83,10 @@ _Avoid_: Port pool, port block
 **Agent device**:
 The iOS Simulator device Loft creates for one agent the first time it needs one, named after the agent. The agent installs and runs apps only on its own device; the user picks which agent's device to watch.
 _Avoid_: Booted device, shared simulator
+
+**Sticker**:
+An agent's face: a small vector drawing, stored on the agent, that Loft shows wherever the agent appears. The agent draws it itself, from its role, its instructions and its project. Projects have no sticker.
+_Avoid_: Avatar (kept only in API names), icon, picture
 
 **Subagent**:
 A short-lived Claude Code worker an agent starts inside a run for a side job (a search, a self-contained task). It ends with the run at the latest and never talks to the user.
@@ -135,7 +147,7 @@ The one pull request from a spec branch to the default branch, opened as a draft
 _Avoid_: Feature PR, epic PR
 
 **Owner**:
-The GitHub user a spec or ticket is assigned to. Always a person, never an agent: agents act on GitHub as the user who runs Loft.
+The GitHub user an issue is assigned to, shown with their GitHub profile picture. Always a person, never an agent: agents act on GitHub as the user who runs Loft.
 _Avoid_: Assignee (GitHub's field name; the concept is ownership), claimer
 
 ## Usage and spend

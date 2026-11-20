@@ -1,5 +1,5 @@
 // Runs an evaluation set against Apple's on-device model on this Mac, using the app's own job code
-// (Loft/Core/AI/OnDeviceJobs.swift). Usage: Evaluations/run.sh <cases file> [...]
+// (LoftKit/Sources/LoftKit/Core/AI/OnDeviceJobs.swift). Usage: Evaluations/run.sh <cases file> [...]
 import Foundation
 import FoundationModels
 

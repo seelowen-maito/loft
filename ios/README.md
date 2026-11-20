@@ -72,17 +72,23 @@ There is no shell or command endpoint. The app can only use what's listed above.
 
 ```
 ios/
-  Loft.xcodeproj         Xcode 16+ project (folders sync automatically, no dependencies)
+  Loft.xcodeproj         Xcode 16+ project (folders sync automatically; one local package, LoftKit)
   Config/Info.plist          ATS: local networking only (see Security)
+  LoftKit/               Swift package shared with the Mac app (iOS 17+, macOS 14+)
+    Sources/LoftKit/
+      Store/                 LoftStore (all client state)
+      Core/                  LoftAPI (URLSession), realtime (SSE parser, backoff), errors,
+                             snapshot cache, notifications, push, on-device AI (AI/), the voice
+                             pipeline (Voice/), UI-test fixtures (Debug only)
+      Domain/                Codable models, status mapping, JSON helpers
+      Platform/              The only iOS- or macOS-specific calls: the audio session, VoiceOver,
+                             remote-notification registration
   Loft/
-    App/                     LoftApp (tabs, routing), LoftStore (all client state)
-    Core/                    LoftAPI (URLSession), realtime (SSE parser, backoff), errors,
-                             snapshot cache, notifications, UI-test fixtures (Debug only)
-    Domain/                  Codable models, status mapping, JSON helpers
+    App/                     LoftApp (tabs, routing), AppDelegate
     DesignSystem/            Colors, status badges, cards, empty states
     Features/                Overview, Agents, Tasks, Chat (incl. dictation), Settings
   LoftTests/             Unit tests
-  LoftUITests/           UI tests against fixtures
+  LoftUITests/           UI smoke tests against fixtures (and legacy UI tests, not run by default)
 ```
 
 - **One store, server-authoritative.** `LoftStore` (`@MainActor @Observable`) holds what the server last said. Every action waits for the server's answer before the UI changes. Statuses come from the server and the app doesn't invent any. Agent states are normalized to Working, Needs approval, Idle, Last run failed and Unknown, because those are the only states Loft can report. There is no pause, and no blocked state for agents (tasks can be blocked).
@@ -94,7 +100,7 @@ ios/
 
 ## Voice conversations
 
-Long dictation, cleaned up on the Mac, with replies read aloud. The engine is in `Loft/Core/Voice`:
+Long dictation, cleaned up on the Mac, with replies read aloud. The engine is in `LoftKit/Sources/LoftKit/Core/Voice`:
 
 - **`VoiceSession`** listens for as long as you talk.
   - On iOS 26 it uses `SpeechAnalyzer`, which is built for long audio.
@@ -106,7 +112,7 @@ Long dictation, cleaned up on the Mac, with replies read aloud. The engine is in
 - **`Speaker`** reads the agent's reply aloud with the best installed Apple voice for the reply's language. It skips code, links, tables and Markdown, and stops long replies at a paragraph with "the rest is in the chat".
 - **Hands-free** mode listens again after the reply. Background audio (`UIBackgroundModes: audio`) keeps it working with the screen locked, and the live connection stays open while a session is active.
 - The draft is saved after every segment, so an unsent dictation survives a crash (`VoiceSession.savedDraft()`).
-- **UI fixtures:** debug builds accept `-ui-testing -fixture-voice preparing|listening|paused|cleaning|review|sending|speaking|failed|failed-startup`.
+- **UI fixtures:** debug builds accept `-ui-testing -fixture-voice preparing|listening|paused|cleaning|review|picked|unclear|sending|speaking|failed|failed-startup`.
 
 ## Setup
 
@@ -144,8 +150,8 @@ Set the same `LOFT_BUNDLE_ID` (and `LOFT_TEAM_ID`) for the backend to use as pus
 
 ```sh
 cd ios
-xcodebuild -scheme Loft -destination 'generic/platform=iOS Simulator' -derivedDataPath build build
-xcrun simctl install booted build/Debug-iphonesimulator/Loft.app
+xcodebuild -scheme Loft -destination 'generic/platform=iOS Simulator' -derivedDataPath build -IDEBuildLocationStyle=Unique build
+xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/Loft.app
 xcrun simctl launch booted com.example.loft   # or your LOFT_BUNDLE_ID
 ```
 
@@ -189,21 +195,74 @@ not the app). Paste these into App Store Connect:
   no name or email is asked for. Push text passes through the relay in transit only and is never stored.
 - *Account deletion:* the only account is on the portal, and it has **Delete my account** (`https://portal.get-loft.com/account/delete`).
 
+**The Mac app**
+
+`LoftMac` is a native macOS 14+ app in the same project, built on LoftKit like the iPhone app. It reaches Loft at `http://localhost:7420` on this Mac, or another Mac's Tailscale address.
+
+It's always signed with your team, even for Debug, because its entitlements need a provisioning profile: so set `LOFT_TEAM_ID` and `LOFT_BUNDLE_ID` (see **Signing**). Its bundle id is `LOFT_BUNDLE_ID` + `.mac`. `Config/LoftMac.entitlements` gives it the App Sandbox (TestFlight requires it), network client, the microphone, read access to images you pick, and the Keychain group `<team>.<LOFT_BUNDLE_ID>.shared` for the desktop widgets.
+
+- *Run from Xcode:* open `ios/Loft.xcodeproj`, pick the **LoftMac** scheme and **My Mac**, then Run. The first build may ask Xcode to register this Mac with your team.
+- *Build from the command line:*
+
+  ```sh
+  cd ios
+  xcodebuild -scheme LoftMac -destination 'platform=macOS' -IDEBuildLocationStyle=Unique -allowProvisioningUpdates build
+  open "$(xcodebuild -scheme LoftMac -destination 'platform=macOS' -IDEBuildLocationStyle=Unique -showBuildSettings | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{print $2}')/Loft.app"
+  ```
+- *First launch:* it asks for the address (this Mac by default), checks Loft answers there and opens the agents.
+- *Quick search:* ⌥Space from any app opens a floating search over agents, issues, tickets, specs and Loft's pages. ↵ opens the result, ⌘↵ an agent's chat, ⌥↵ the browser instead (or the app, when Settings › Quick search opens results in the browser). Change the shortcut or turn it off there.
+- *Voice panel:* ⇧⌥Space from any app, or Talk in the menu bar, opens a small floating panel that starts listening to the open chat's agent (or the last one you talked to). It shows the same voice card as the chat's mic: Send (↵) has Loft tidy it up and sends it, unless the on-device model offers "Send to …?" first; the To chips change who gets it; Edit in chat opens the text in the agent's chat; Cancel (esc) stops and sends nothing. Settings › Voice panel changes the shortcut. Screenshots: `Loft -ui-testing -render-voice-panel <listening|cleaning|review|sending|failed> <file.png>`, and `-render-talk-sheet` with the same arguments for the chat's Talk sheet (Debug).
+- *TestFlight:* the same script with `--mac`. Create the Mac app in App Store Connect once (Apps → + → New App, platform macOS, bundle id `LOFT_BUNDLE_ID.mac`), then:
+
+  ```sh
+  ./testflight.sh --mac              # the LoftMac tests (they drive this Mac's screen), archive, upload
+  ./testflight.sh --mac --fast       # skip the tests
+  ./testflight.sh --mac --no-upload  # archive and export a signed Loft.pkg to ios/build/testflight-mac/export
+  ```
+
+  `-allowProvisioningUpdates` creates the Mac App Store and installer certificates the first time. Testers install it with Apple's TestFlight app for Mac.
+- *Focus mode:* ⇧⌘F (Focus › Start Focus), the Dock icon's menu, the menu bar item's Focus row or Start focus under the sidebar starts a session of 25, 50 or 90 minutes or a custom length (the last one is remembered). While it runs, every Dock app that isn't on the allow list is hidden, and hidden again when it comes forward; the sidebar has only Agents and Issues; the time left shows under the sidebar, in the menu bar item and on the Dock icon. When the time is up, on End or on quitting, the apps it hid come back and a notification says so. The allow list is in Settings › Focus and starts with Loft, Xcode, Terminal, iTerm, VS Code, Cursor and Simulator. macOS doesn't let an app take other apps off the Dock, so they're hidden; the Dock and the system's Focus modes aren't touched. The sandboxed app can hide other apps, but `NSRunningApplication.hide()` returns false even when it works, so its result isn't trusted. The timer and allow-list rules are in LoftKit (`FocusSession.swift`) with unit tests.
+- *App Store screenshots:* from `ios/`, run `scripts/appstore-mac.sh`. It builds the Mac app (Debug, unsigned, so no team is needed) and has it draw six shots from the demo's sample data, with no network, in the dark theme and without the demo banner: an agent's chat with the agents list, the Issues board, Needs you, quick search over the chat, the voice panel, and Overview. They land in `ios/build/appstore-mac/` as `1-chat.png` … `6-overview.png`, each exactly 2880 × 1800 px (a 1440 × 900 pt window at 2×); the script checks the sizes. To upload, open the Mac app's version in App Store Connect, go to Previews and Screenshots › macOS, and drag the six files in, in order (the first shows first). The window's sidebar of sections is left out because its glass draws blank offscreen. The shots come from `LoftMac/AppStoreShots.swift` (`-demo -render-app-store <folder>`, Debug only).
+- *Icon:* the ten PNGs in `LoftMac/Assets.xcassets/AppIcon.appiconset`, plus `LoftMac/Loft.icns` built from them, which the app ships as its icon file (`CFBundleIconFile`). Xcode 27 writes an `.icns` from the asset catalog without the 256pt and 512pt images, and App Store Connect rejects the upload without them, so the Mac target doesn't ask it to. When you change the PNGs, rebuild `Loft.icns` from `ios/`:
+
+  ```sh
+  set=$(mktemp -d)/Loft.iconset; mkdir "$set"
+  for pt in 16 32 128 256 512; do
+    cp "LoftMac/Assets.xcassets/AppIcon.appiconset/icon-$pt@1x.png" "$set/icon_${pt}x${pt}.png"
+    cp "LoftMac/Assets.xcassets/AppIcon.appiconset/icon-$pt@2x.png" "$set/icon_${pt}x${pt}@2x.png"
+  done
+  iconutil -c icns "$set" -o LoftMac/Loft.icns
+  ```
+- *Update:* a TestFlight install updates from the TestFlight app (turn on Automatic Updates there). A local build updates by pulling and running it again. The backend updates on its own, so only the app's own changes need a new build.
+
+**Widgets**
+
+Small and medium widgets for the Mac desktop and the iPhone home screen: Needs you (the count and the first items), who is working now, and the Usage week's spend. `LoftWidgets` (iPhone) and `LoftMacWidgets` (Mac) are two thin extensions around `LoftOverviewWidget` in LoftKit, embedded in the apps. A widget has no address field: it reads the Loft address from the Keychain group `<team>.<LOFT_BUNDLE_ID>.shared`, where the apps save it each time they connect. Until then it says "Not connected". A tap opens the app at `loft://needs-you`, `loft://agents` or `loft://agent/<id>`. They refresh about every 15 minutes. Add them from the desktop's or home screen's widget gallery (Edit Widgets); they need `LOFT_TEAM_ID` like the Mac app, since the Keychain group needs a provisioning profile.
+
 **Tests**
 
 ```sh
-ios/scripts/test.sh                 # build once, unit tests, then UI tests, with every test's time
-ios/scripts/test.sh --unit          # unit tests only: under a minute
+ios/scripts/test.sh                 # the unit tests (LoftKit's `swift test`, then LoftTests), with every test's time
+ios/scripts/test.sh --ui            # the iPhone's UI smoke tests
+ios/scripts/test.sh --mac-ui        # the Mac's UI smoke tests: they take over the Mac's screen
+ios/scripts/test.sh --ui-legacy     # legacy UI tests (also --mac-ui-legacy): see below
 ios/scripts/test.sh --no-build --only LoftTests/StoreTests   # rerun one class on the last build
-ios/scripts/test.sh --no-build --ui --only LoftUITests/LoftUITests/testOverview   # one UI test
+ios/scripts/test.sh --no-build --ui --only LoftUITests/LoftUITests/testChatSend   # one UI test
 cd backend && cargo test
 ```
 
-The script builds once (`build-for-testing`), runs the unit tests, and runs the UI tests only if those pass. It prints each test's time, slowest first, and flags a suite that goes over its target: 1 minute for unit tests, 2 for UI tests. Each test gets 60 s, which is the shortest limit Xcode allows. Tests run one at a time on one Simulator, never on clones. Set `SIMULATOR` to pick an already-booted device (the default is the first booted iPhone). The script never creates, boots or erases a Simulator: whoever schedules test runs owns them. Set `DERIVED_DATA` to keep builds warm, and `RESULT` to get result bundles. When `xcode-select` points at the Command Line Tools, the script finds Xcode itself, or you can set `DEVELOPER_DIR`.
+The script runs LoftKit's tests with `swift test` (no Simulator), builds once (`build-for-testing`) and runs LoftTests. UI tests run only with `--ui` or `--mac-ui`, and `testflight.sh` runs them only with `--ui`. It prints each test's time, slowest first, and flags a suite that goes over its target: 1 minute for unit tests, 2 for UI tests. Each test gets 60 s, which is the shortest limit Xcode allows. Tests run one at a time on one Simulator, never on clones. Set `SIMULATOR` to pick an already-booted device (the default is the first booted iPhone). The script never creates, boots or erases a Simulator: whoever schedules test runs owns them. Set `DERIVED_DATA` to keep builds warm, and `RESULT` to get result bundles. When `xcode-select` points at the Command Line Tools, the script finds Xcode itself, or you can set `DEVELOPER_DIR`.
 
 **Rerunning without a rebuild.** A full run builds once into `DERIVED_DATA` (default `ios/build`). As long as no code changed since, `--no-build` reuses that build and starts testing straight away, so a failing or slow test can be rerun on its own in seconds with `--only`. Rebuild (drop `--no-build`) after pulling or switching branches, or the run tests the old code. Keep the same `DERIVED_DATA` and Simulator for both runs.
 
-Rules belong in unit tests. UI tests check only that screens show and respond: each one is a single launch walking a whole journey, with `-no-animations -no-speech -no-ai` (no animations, microphone, speech recognizer or on-device model), and waits of 5 s or less.
+**A UI test only for what a unit test can't reach.** Rules, labels, counts, filters, formatting, routing and fixture data belong in unit tests on the store, the view models and the helpers (rendering a view with `ImageRenderer` is fine there). Each app keeps a small UI smoke suite for the core flows that need a real window, focus or the system:
+
+- iPhone (`LoftUITests`): launch and connect (the demo), the tabs, open an agent's chat and send, approve or deny a permission.
+- Mac (`LoftMacUITests`): launch and connect (the demo), sidebar navigation (clicks, ⌘1–⌘5, ↓), open an agent's chat and send, quick search.
+
+Run the Mac UI tests with `test.sh --mac-ui`. It builds into `ios/build`, on the Mac's own disk: a DerivedData folder on an external drive makes macOS ask whether "LoftMacUITests-Runner" may access files on a removable volume, and that prompt stops the run. Leave `DERIVED_DATA` unset, or point it at the internal disk. If every test hangs on its first query until the time limit, look at the screen: a system prompt (from UserNotificationCenter: a permission or removable-volume request) blocks the accessibility queries until someone answers it. Each Mac UI test launches Loft with `-ApplePersistenceIgnoreState YES` and opens the sidebar if an earlier run left it collapsed. The app under test is built with its own bundle id (`LOFT_BUNDLE_ID` + `.uitest`, so `….uitest.mac`), with its own defaults and Keychain group, so the tests run beside your own Loft without attaching to it or quitting it. Under `-ui-testing` it registers no global shortcut except one passed as a launch argument (`-quickSearchShortcut control-option-command-40`, ⌃⌥⌘K), so ⌥Space stays with your Loft.
+
+A new UI test outside those flows needs a reason a unit test can't cover it. The legacy UI tests (`LoftLegacyUITests`, `LoftMacLegacyUITests`) check rules that still live inside SwiftUI views; they run only with `--ui-legacy` or `--mac-ui-legacy`, and each one goes once its logic moves out of the view and gets unit tests. Each UI test is a single launch walking one flow, with `-no-animations -no-speech -no-ai` (no animations, microphone, speech recognizer or on-device model), and waits of 5 s or less.
 
 UI tests run against an in-app fixture server (`-ui-testing`, Debug builds only), so no agents run. The backend tests use a temporary database.
 

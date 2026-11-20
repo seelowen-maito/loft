@@ -1,6 +1,7 @@
 import AVFoundation
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The one owner of the audio session: the mic and the speaker never hold it together, a refused activation
 /// is retried, and an interruption ends whoever holds it.

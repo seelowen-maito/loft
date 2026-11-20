@@ -1,38 +1,33 @@
 import { useEffect, useState } from "react";
-import { Check, Copy } from "lucide-react";
-import { api, type HerdrStatus } from "../lib/api";
+import { Check, Copy, TriangleAlert } from "lucide-react";
+import { api } from "../lib/api";
+import { useAction } from "../lib/useAction";
+import { useCheck } from "../lib/useCheck";
+import { SettingsCard } from "../components/SettingsCard";
+import { Callout } from "../components/Callout";
+import { ActionButton } from "../components/ActionButton";
 import { herdrInstallCommand, isLocalOrigin } from "../lib/herdr";
 
 /** Settings → Herdr UI: every agent as an agent in Herdr UI, on this machine or another one. */
 export function HerdrSetup() {
-  const [status, setStatus] = useState<HerdrStatus | null>(null);
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const setUp = useAction();
   const [result, setResult] = useState<{ done: string[]; message: string } | null>(null);
-  const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const load = () => api.herdrStatus().then((s) => {
-    setStatus(s);
-    if (s.linked) setOpen(true);
-  }).catch(() => {});
+  const check = useCheck(api.herdrStatus);
+  const status = check.data;
   useEffect(() => {
-    load();
-  }, []);
+    if (status?.linked) setOpen(true);
+  }, [status?.linked]);
 
-  const setUpHere = async () => {
-    setBusy(true);
-    setErr(null);
+  const setUpHere = () => {
     setResult(null);
-    try {
+    setUp.run(async () => {
       const r = await api.herdrSetup();
       setResult(r);
-      await load();
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+      await check.run();
+    });
   };
 
   const origin = window.location.origin;
@@ -51,12 +46,13 @@ export function HerdrSetup() {
       : " ";
 
   return (
-    <section className="panel space-y-4 p-5">
-      <h2 className="text-[15px] font-medium tracking-tight">Herdr UI</h2>
-      <p className="text-[13px] text-fg-2">
-        See every agent in Herdr UI, the terminal multiplexer for coding agents: one tab per agent with its chat, slash commands,
-        approvals and this inspector as a sidebar. Herdr shows each one as an agent, working, idle or waiting for you.
-      </p>
+    <SettingsCard
+      id="herdr"
+      title="Herdr UI"
+      description="See every agent in Herdr UI, the terminal multiplexer for coding agents: one tab per agent with its chat, slash commands, approvals and this inspector as a sidebar. Herdr shows each one as an agent, working, idle or waiting for you."
+      error={setUp.error ?? check.err}
+      loading={check.loading}
+    >
       {!open ? (
         <button type="button" className="btn-primary" onClick={() => setOpen(true)}>
           Set up Herdr UI
@@ -69,9 +65,9 @@ export function HerdrSetup() {
             <p className="text-[12px] text-fg-3">
               Builds the Herdr UI client, adds Loft's plugin to Herdr and opens a Loft workspace with your agents. The first build takes a minute.
             </p>
-            <button type="button" className="btn" disabled={busy || (status !== null && !status.herdr)} onClick={setUpHere}>
-              {busy ? "Setting up…" : status?.linked ? "Set up again" : "Set up on this machine"}
-            </button>
+            <ActionButton type="button" variant="secondary" pending={setUp.busy} pendingLabel="Setting up…" disabled={status !== null && !status.herdr} onClick={setUpHere}>
+              {status?.linked ? "Set up again" : "Set up on this machine"}
+            </ActionButton>
             {status && !status.herdr && (
               <p className="text-[12px] text-fg-3">
                 Install it from <a className="text-accent hover:underline" href="https://herdr.dev" target="_blank" rel="noreferrer">herdr.dev</a>, then come back.
@@ -85,7 +81,6 @@ export function HerdrSetup() {
                 <li className="text-fg">{result.message}</li>
               </ul>
             )}
-            {err && <p className="rounded-xl border border-bad/25 bg-bad/[0.06] px-3 py-2 text-[12.5px] text-bad">{err}</p>}
           </div>
 
           <div className="space-y-3 rounded-xl border border-line p-4">
@@ -98,9 +93,9 @@ export function HerdrSetup() {
               </button>
             </div>
             {isLocalOrigin(origin) ? (
-              <p className="text-[12px] text-warn">
+              <Callout tone="warn" icon={<TriangleAlert />}>
                 You opened Loft at {origin}, which other machines can't reach. Open it by an address they can, such as its Tailscale name, to get the right command.
-              </p>
+              </Callout>
             ) : (
               <p className="text-[12px] text-fg-3">
                 That machine talks to this Loft at {origin}. It downloads a ready-made build when it has the same system as this one
@@ -110,6 +105,6 @@ export function HerdrSetup() {
           </div>
         </div>
       )}
-    </section>
+    </SettingsCard>
   );
 }

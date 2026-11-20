@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// Settings › Disk's Clean, a full screen: every workspace's top-level items in one list with agent, type, size, last

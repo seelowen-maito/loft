@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The checks around the on-device spoken version (no model needed): what goes in, and when the app falls back.
 final class SpokenVersionTests: XCTestCase {

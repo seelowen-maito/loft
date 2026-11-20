@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// Above the composer while a run looks stuck: what it's waiting on (or how long it's been quiet),

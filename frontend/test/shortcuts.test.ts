@@ -5,6 +5,7 @@ import {
   comboFromEvent, formatCombo, isReserved, isTyping, loadCombo, normalizeCombo, loadCombos, loadRecent, matchesCombo, nextNeedsYou, saveCombo, saveRecent,
   OPEN_SHORTCUT, openShortcut, searchRows, shortcutAction, switcherAgents,
 } from "../src/lib/shortcuts.ts";
+import { roleLabel } from "../src/lib/api.ts";
 
 function memory() {
   const m = new Map<string, string>();
@@ -131,11 +132,13 @@ test("⌘J goes through the agents in Needs you, in its order, and wraps", () =>
 });
 
 const agents = [
-  { id: "lead", name: "Loft Lead", title: "Plans", group: "Loft", project: "loft" },
-  { id: "dev", name: "Loft Dev", title: "Rust and TypeScript", group: "Loft", project: "loft" },
-  { id: "mobile", name: "Loft mobile dev", title: "iOS", group: "Loft", project: "loft" },
-  { id: "dine", name: "Dineout Dev", title: "Backend", group: "Dineout", project: "api", projects: ["api", "web"] },
+  { id: "lead", name: "Loft Lead", role: "lead", group: "Loft", project: "loft" },
+  { id: "dev", name: "Loft Dev", role: "dev", group: "Loft", project: "loft" },
+  { id: "mobile", name: "Loft mobile dev", role: "dev", group: "Loft", project: "ios" },
+  { id: "dine", name: "Dineout Dev", role: "code_reviewer", group: "Dineout", project: "api", projects: ["api", "web"] },
+  { id: "odd", name: "Odd", group: "", project: "" },
 ];
+const label = (a: { role?: string }) => roleLabel(a.role);
 
 test("with nothing typed the most recently opened come first, then the rest in order", () => {
   const s = memory();
@@ -143,18 +146,21 @@ test("with nothing typed the most recently opened come first, then the rest in o
   saveRecent("dine", s);
   saveRecent("mobile", s);
   assert.deepEqual(loadRecent(s), ["mobile", "dine"]);
-  assert.deepEqual(switcherAgents(agents, "", loadRecent(s)).map((a) => a.id), ["mobile", "dine", "lead", "dev"]);
+  assert.deepEqual(switcherAgents(agents, "", loadRecent(s), label).map((a) => a.id), ["mobile", "dine", "lead", "dev", "odd"]);
 });
 
-test("typing filters by name, title, group and project", () => {
-  const ids = (q: string) => switcherAgents(agents, q, []).map((a) => a.id);
+test("typing filters by name, Role label, group and project", () => {
+  const ids = (q: string) => switcherAgents(agents, q, [], label).map((a) => a.id);
   assert.deepEqual(ids("ios"), ["mobile"]);
   assert.deepEqual(ids("dineout"), ["dine"]);
   assert.deepEqual(ids("web"), ["dine"], "any of its projects");
   assert.deepEqual(ids("loft dev"), ["dev", "mobile"], "every word, names starting with it first");
   assert.deepEqual(ids("DEV"), ids("dev"), "case-insensitive");
   assert.deepEqual(ids("dev"), ["dev", "mobile", "dine"]);
-  assert.deepEqual(ids("d"), ["dine", "lead", "dev", "mobile"], "a name starting with it comes first");
+  assert.deepEqual(ids("reviewer"), ["dine"], "its Role label");
+  assert.deepEqual(ids("code reviewer"), ["dine"]);
+  assert.deepEqual(ids("custom"), ["odd"], "no role reads as Custom");
+  assert.deepEqual(ids("d"), ["dine", "lead", "dev", "mobile", "odd"], "a name starting with it comes first");
   assert.deepEqual(ids("nobody"), []);
 });
 
@@ -202,4 +208,11 @@ test("clicking a hint opens the search or the sheet through one event", () => {
   openShortcut("sheet", target);
   openShortcut("switcher", target);
   assert.deepEqual(got, ["sheet", "switcher"]);
+});
+
+test("an agent goes by its Role label", () => {
+  assert.equal(roleLabel("code_reviewer"), "Code reviewer");
+  assert.equal(roleLabel("custom"), "Custom");
+  assert.equal(roleLabel(""), "Custom", "an agent saved before roles");
+  assert.equal(roleLabel(undefined), "Custom");
 });

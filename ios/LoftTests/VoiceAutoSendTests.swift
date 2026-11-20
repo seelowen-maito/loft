@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// A chat's auto-send lives in the store, so it goes once, whether or not the chat is still open (#339).
 @MainActor

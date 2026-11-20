@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Demo mode (spec #144) runs on bundled data and leaves the real connection and its cache alone.
 @MainActor

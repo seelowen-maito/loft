@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class VoiceSendTests: XCTestCase {
     private func read(_ s: String) -> VoiceSend.Reading { VoiceSend.read(s) }

@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 struct TaskDetailView: View {
@@ -59,6 +60,12 @@ struct TaskDetailView: View {
                     if let labels = t.labels, !labels.isEmpty {
                         IssueLabels(labels: labels)
                     }
+                    // A spec's project sits up here too, not only under Details.
+                    if SpecViews.isSpec(t), !t.project.isEmpty {
+                        Label(t.project, systemImage: "folder").font(.caption).foregroundStyle(.secondary)
+                            .accessibilityLabel("Project \(t.project)")
+                            .accessibilityIdentifier("specProject")
+                    }
                 }
                 .padding(.vertical, 4)
                 if !t.description.isEmpty {
@@ -75,8 +82,8 @@ struct TaskDetailView: View {
             // Where it lives. GitHub owns the title, description, labels, owner and open/closed of a mirrored issue.
             Section("Where") {
                 if let g = t.github {
-                    // Only a web link: a malformed stored value can't open another app's scheme.
-                    if let url = URL(string: g.url), url.scheme == "https" {
+                    // Only a trusted web link: a malformed stored value can't open another app's scheme or page.
+                    if let url = PushDestination.link(g.url, loftHost: store.api?.baseURL.host()) {
                         Link(destination: url) {
                             LabeledContent("On GitHub") { IssueOriginMark(link: g) }
                         }
@@ -108,7 +115,9 @@ struct TaskDetailView: View {
                         }
                     }
                 }
-                if let o = t.ownerLogin { LabeledContent("Owner", value: "@\(o)") }
+                if let o = t.ownerLogin {
+                    LabeledContent("Owner") { OwnerBadge(login: o, size: 22, relativeTo: .body) }
+                }
             }
 
             if t.state.isActive && !t.note.isEmpty {
@@ -247,7 +256,7 @@ struct TaskDetailView: View {
         }
         .sheet(isPresented: $pickAgent) {
             NavigationStack {
-                AgentPickerList(title: t.state.canSendAgain ? "Send to…" : "Run with…") { a in
+                AgentPickerList(title: t.state.canSendAgain ? "Send to…" : "Run with…", issueProject: t.project) { a in
                     pickAgent = false
                     run(t, agentId: a.id)
                 }
@@ -324,10 +333,12 @@ struct AgentPickerList: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let title: String
+    /// Set for an issue's picker: its project's agents first, Devs first (`Agent.issuePickerOrder`).
+    var issueProject: String? = nil
     let pick: (Agent) -> Void
 
     var body: some View {
-        List(store.sortedAgents) { a in
+        List(issueProject.map { Agent.issuePickerOrder(store.agents, project: $0) } ?? store.sortedAgents) { a in
             Button { pick(a) } label: { AgentRow(agent: a) }
                 .buttonStyle(.plain)
         }

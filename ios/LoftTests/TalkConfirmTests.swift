@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Talk's message box step: it asks after a pause (never sends by itself), a touch stops it, "send it" sends.
 final class TalkConfirmTests: XCTestCase {

@@ -1,15 +1,18 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Scriptable server for store tests.
 final class MockAPI: LoftAPI, @unchecked Sendable {
     let baseURL = URL(string: "https://mock.invalid")!
-    var agentList: [Agent] = [Agent(id: "a1", name: "Orchestrator Bot", title: nil, project: "p", model: nil, effort: nil, permissionMode: nil,
+    var agentList: [Agent] = [Agent(id: "a1", name: "Orchestrator Bot", project: "p", model: nil, effort: nil, permissionMode: nil,
                                     intervalMinutes: 0, status: "idle", statusText: nil, running: false, lastRunAt: nil, nextRunAt: nil,
                                     createdAt: nil, totalCostUsd: nil, contextTokens: nil, prompt: nil)]
     var features = ["tasks", "activity", "idempotent_messages"]
     var failSends = false
     var sentClientIds: [String] = []
+    /// Each send's agent and text, in order.
+    var sent: [(agentId: String, text: String)] = []
     var reachable = true
     private var nextId: Int64 = 100
 
@@ -25,6 +28,7 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
         // Like URLSession: a request made from a cancelled task fails as cancelled.
         try Task.checkCancellation()
         sentClientIds.append(clientId)
+        sent.append((agentId, text))
         if failSends { throw APIError.timeout }
         nextId += 1
         let m = ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "user", kind: "text", content: text,
@@ -52,13 +56,16 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func stopRun(agentId: String) async throws {}
     var deleted: [(String, Bool)] = []
     func deleteAgent(id: String, purgeFiles: Bool) async throws { try check(); deleted.append((id, purgeFiles)) }
-    func restartRun(agentId: String) async throws {}
+    /// Restarting a run that waits on background work ends the wait, as the server does.
+    func restartRun(agentId: String) async throws {
+        if let i = agentList.firstIndex(where: { $0.id == agentId }) { agentList[i].waitingOn = nil; agentList[i].waitingSince = nil }
+    }
     func resetSession(agentId: String) async throws {}
     func compact(agentId: String) async throws {}
     func sessions(agentId: String) async throws -> PastSessions { PastSessions(sessions: [], current: nil) }
     func resumeSession(agentId: String, sessionId: String) async throws -> Agent { throw APIError.unsupported("Resume") }
     func permissions() async throws -> [PermissionRequest] { try check(); return [] }
-    func decidePermission(id: String, decision: String) async throws {}
+    func decidePermission(id: String, decision: String, answers: [String: String]?) async throws {}
     func pullRequests() async throws -> [PullRequest] { [] }
     /// Every spec's Delivery, and how many times the app fetched them.
     var deliveryList: [DeliverySummary] = []
@@ -97,7 +104,13 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     func usage() async throws -> PlanUsage { try check(); return planUsage }
     func system() async throws -> SystemReading { try check(); return SystemReading(cpuTempC: 61, level: "nominal", sampledAt: .now) }
     func agentSummaries() async throws -> [AgentSummary] { try check(); return [] }
-    func cleanVoice(text: String) async throws -> VoiceCleanResponse { VoiceCleanResponse(text: text, cleaned: false, reason: nil) }
+    /// What cleanup returns (nil: nothing to change), and how long it takes.
+    var cleanedText: String?
+    var cleanDelay: Duration = .zero
+    func cleanVoice(text: String) async throws -> VoiceCleanResponse {
+        try await Task.sleep(for: cleanDelay)
+        return VoiceCleanResponse(text: cleanedText ?? text, cleaned: cleanedText != nil, reason: nil)
+    }
     func eventLines() async throws -> AsyncThrowingStream<String, Error> {
         try check()
         return AsyncThrowingStream { c in
@@ -264,7 +277,7 @@ final class StoreTests: XCTestCase {
     func testAgentEventsUpsertAndDelete() async throws {
         let store = try await connectedStore(MockAPI())
         var a = store.agents[0]
-        a.status = "running"
+        a.running = true // #594: Working comes from the live run, not the saved status.
         store.apply(.agentUpdated(a))
         XCTAssertEqual(store.state(of: store.agents[0]), .working)
         store.apply(.agentDeleted("a1"))

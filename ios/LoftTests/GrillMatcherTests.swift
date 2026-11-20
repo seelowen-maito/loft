@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class GrillMatcherTests: XCTestCase {
     private func intent(_ s: String, _ phrases: GrillPhrases? = nil) -> GrillMatcher.Intent? { GrillMatcher.match(s, phrases: phrases)?.intent }
