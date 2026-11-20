@@ -237,6 +237,8 @@ export type GrillSession = {
   questions: GrillQuestion[] | null;
   started_at: string;
   updated_at: string;
+  /** The new Project this grill was started for from Repos, for the chat's project strip. */
+  project?: { name: string; path: string } | null;
 };
 
 /** A link to an issue the planning published. */
@@ -678,6 +680,11 @@ export const api = {
   backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
+  /** Whether `name` can be a new Project: the fixed name, where it goes, and why it can't. */
+  checkProjectName: (name: string) => req<import("./newProject").NameCheck>("GET", `/projects/check?name=${encodeURIComponent(name)}`),
+  /** Creates the Project's folder, gives it to the Lead and starts the grill on it. */
+  createProject: (b: { name: string; idea: string; lead_id: string }) =>
+    req<{ ok: boolean; project: { name: string; path: string }; agent_id: string; session_id: string | null }>("POST", "/projects", b),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
 

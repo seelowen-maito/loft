@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Link, useLocation } from "react-router";
 import { permCard } from "../../lib/pending";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, FolderPlus, Hourglass, ImagePlus, Info, ListTodo, Loader2, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
 } from "lucide-react";
 import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtQuiet, fmtSchedule, timeAgo } from "../../lib/format";
@@ -465,6 +465,15 @@ export function Chat({
           {headerActions}
         </div>
       </div>
+
+      {/* the new Project this grill plans: name and path (steps come with the Foundation rounds) */}
+      {grill?.project && grill.state !== "ended" && (
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 border-b border-line bg-ink-950/40 px-6 py-2 max-md:px-4">
+          <FolderPlus className="size-3.5 shrink-0 text-accent" />
+          <span className="text-[13px] text-fg">{grill.project.name}</span>
+          <span className="min-w-0 truncate font-mono text-[11px] text-fg-3">{grill.project.path}</span>
+        </div>
+      )}
 
       {/* transcript */}
       <div

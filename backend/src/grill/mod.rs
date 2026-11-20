@@ -76,6 +76,16 @@ pub struct Session {
     /// Older sessions stored a single one.
     #[serde(default, deserialize_with = "one_or_many")]
     pub published: Vec<Published>,
+    /// The new Project this grill was started for from Repos (`new_project`), for the chat's project strip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<NewProject>,
+}
+
+/// A Project created from Loft: its folder name and where it is, as shown (`~/projects/<name>`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewProject {
+    pub name: String,
+    pub path: String,
 }
 
 fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Published>, D::Error> {
@@ -331,6 +341,7 @@ pub fn view(s: &Session) -> Value {
         "started_at": s.started_at,
         "updated_at": s.updated_at,
         "notes_path": s.notes_path,
+        "project": s.project,
         // en | pt, for the phrases the app reads aloud: en until the first round sets it, null only for sessions saved before it was kept.
         "language": (!s.lang.is_empty()).then_some(&s.lang),
     })
@@ -492,6 +503,7 @@ fn new_session(agent_id: &str, topic: &str, status: &str) -> Session {
         summarized: false,
         seen_commands: vec![],
         published: vec![],
+        project: None,
     }
 }
 
@@ -568,6 +580,20 @@ pub enum Routed {
 /// other agents, task briefs and wake-ups never count as answers.
 pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, meta: Value) -> Result<Routed, ApiError> {
     locked(state, &agent.id, || route_user_message(state, agent, text, grill, meta))
+}
+
+/// Starts a grill on `agent` as the user's `text` would with /grill, for the new Project `project`, which
+/// the session keeps for the chat's project strip. Returns the prompt to wake the agent with.
+pub fn start_for_project(state: &AppState, agent: &Agent, text: &str, project: NewProject) -> Result<Option<String>, ApiError> {
+    locked(state, &agent.id, || {
+        let Routed::Handled { wake, .. } = route_user_message(state, agent, text, Some(&json!({ "role": "start_request" })), json!({}))? else {
+            return Err(internal("a start request is always handled".into()));
+        };
+        let mut s = active(state, &agent.id).ok_or_else(|| internal("the grill didn't start".into()))?;
+        s.project = Some(project);
+        save(state, &mut s).map_err(internal)?;
+        Ok(wake)
+    })
 }
 
 fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, mut meta: Value) -> Result<Routed, ApiError> {
