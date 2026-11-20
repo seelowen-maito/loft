@@ -1,7 +1,7 @@
-//! A new Project, started from Repos: Loft makes its empty folder under the projects folder, gives it to
-//! the chosen Lead as its main project and starts a grill there with the user's idea. It writes nothing
-//! into the folder: `git init` and the GitHub repo come with the greenfield flow in the grill's first round
-//! (`greenfield`), which a main project with no repo triggers. User-only (ADR 0004): agents get no tool for it.
+//! A new Project, started from Repos: Loft makes its empty folder under the projects folder and starts a
+//! grill on the chosen Lead for it with the user's idea. The grill is scoped to the new project
+//! (`grill::scope`); the Lead's main project stays. Loft writes nothing into the folder: `git init` and the
+//! GitHub repo come with the greenfield flow in the grill's first round (`greenfield`). User-only (ADR 0004): agents get no tool for it.
 
 use std::path::{Path, PathBuf};
 
@@ -150,12 +150,17 @@ pub(crate) fn create_project(state: &AppState, b: &CreateBody) -> Result<(Value,
     let lead = pick_lead(state, b.lead_id.as_deref())?;
     let dir = make_dir(state, &name)?;
 
-    // The new project becomes the Lead's main one: the grill and the greenfield flow work on that one.
+    // The Lead's main project stays: the grill is scoped to the new one (`grill::scope`). The Lead gets
+    // it as one more project, last, so it can work there after the grill; a Lead with no projects at all
+    // isn't limited to any, so it needs none.
     let before = lead.clone();
     let mut lead = lead;
-    lead.projects.retain(|p| p != &name);
-    lead.projects.insert(0, name.clone());
-    lead.project = name.clone();
+    if lead.projects.is_empty() && !lead.project.trim().is_empty() {
+        lead.projects.push(lead.project.trim().to_string());
+    }
+    if !lead.projects.is_empty() && !lead.has_project(&name) {
+        lead.projects.push(name.clone());
+    }
     let undo = |state: &AppState| {
         let _ = state.db.save_agent(&before);
         crate::agents::emit_agent(state, &before);
@@ -180,7 +185,7 @@ pub(crate) fn create_project(state: &AppState, b: &CreateBody) -> Result<(Value,
     Ok((json!({ "ok": true, "project": project, "agent_id": lead.id, "session_id": session }), lead, wake))
 }
 
-/// `POST /api/projects`: creates the folder, gives it to the Lead and starts the grill on it.
+/// `POST /api/projects`: creates the folder and starts the Lead's grill on it.
 pub async fn create(State(state): State<AppState>, Json(b): Json<CreateBody>) -> ApiResult<Value> {
     let (out, lead, wake) = create_project(&state, &b)?;
     if let Some(p) = wake {
@@ -238,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn it_creates_the_folder_gives_it_to_the_lead_and_starts_the_grill() {
+    fn it_creates_the_folder_and_starts_the_grill_without_moving_the_main_project() {
         let st = state();
         let l = lead(&st, "Lofty", "Acme", &["api"]);
         let (out, got, wake) = create_project(&st, &body("On Call", "A pager rota for the team", Some(&l.id))).unwrap();
@@ -249,10 +254,11 @@ mod tests {
         assert!(out["project"]["path"].as_str().unwrap().ends_with("/on-call"));
         assert_eq!(out["agent_id"], l.id);
 
+        // The Lead's main project is unchanged; the new one is added last.
         let saved = st.db.get_agent(&l.id).unwrap().unwrap();
-        assert_eq!(saved.project, "on-call");
-        assert_eq!(saved.projects, vec!["on-call".to_string(), "api".into()]);
-        assert_eq!(got.project, "on-call");
+        assert_eq!(saved.project, "api");
+        assert_eq!(saved.projects, vec!["api".to_string(), "on-call".into()]);
+        assert_eq!(got.project, "api");
 
         let s = crate::grill::active(&st, &l.id).unwrap();
         assert_eq!(out["session_id"], s.id);
@@ -263,6 +269,38 @@ mod tests {
         // No repo yet, so the first round offers to create it.
         let w = wake.unwrap();
         assert!(w.contains("A pager rota") && w.contains("no GitHub repo yet"), "{w}");
+        assert!(w.contains("new project `on-call`") && !w.contains("several projects"), "{w}");
+
+        // Greenfield and publishing see the new project while the grill runs, the main project after.
+        let scoped = crate::grill::scoped(&st, &saved);
+        assert_eq!((scoped.project.as_str(), scoped.projects.as_slice()), ("on-call", &["on-call".to_string()][..]));
+        assert!(crate::greenfield::needs_repo(&st, &scoped));
+        assert!(!crate::greenfield::needs_repo(&st, &saved), "the main project isn't touched");
+        assert_eq!(crate::planning::for_project(&scoped, &json!({})).unwrap().project, "on-call");
+        crate::grill::mcp_call(&st, &saved, "grill_end", &json!({ "summary": "Planned." })).unwrap().unwrap();
+        assert_eq!(crate::grill::scoped(&st, &saved).project, "api");
+    }
+
+    #[test]
+    fn a_grill_started_normally_uses_the_main_project() {
+        let st = state();
+        let l = lead(&st, "Lofty", "Acme", &["api", "web"]);
+        std::fs::create_dir(root(&st).join("api")).unwrap();
+        crate::grill::on_user_message(&st, &l, "/grill the login flow", Some(&json!({ "role": "start_request" })), json!({})).unwrap();
+        let s = crate::grill::active(&st, &l.id).unwrap();
+        assert!(s.project.is_none());
+        let scoped = crate::grill::scoped(&st, &l);
+        assert_eq!((scoped.project.as_str(), scoped.projects.len()), ("api", 2));
+    }
+
+    #[test]
+    fn a_lead_without_projects_keeps_none() {
+        let st = state();
+        let l = lead(&st, "Lofty", "Acme", &[]);
+        create_project(&st, &body("fresh", "idea", None)).unwrap();
+        let saved = st.db.get_agent(&l.id).unwrap().unwrap();
+        assert_eq!((saved.project.as_str(), saved.projects.len()), ("", 0));
+        assert_eq!(crate::grill::scoped(&st, &saved).project, "fresh");
     }
 
     #[test]

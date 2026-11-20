@@ -94,6 +94,8 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     }
     // Everything below plans for one project: `me` as if that were its only one. A ticket can name
     // another of the agent's projects, checked against `all` (the agent as it is).
+    // A grill started for a new Project publishes to that project (`grill::scope`).
+    let me = &crate::grill::scoped(state, me);
     let all = me;
     let me = &match for_project(me, args) {
         Ok(a) => a,

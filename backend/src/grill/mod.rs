@@ -186,6 +186,22 @@ pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
     state.db.active_grill(agent_id).ok()?
 }
 
+/// `a` as the grill `s` sees it. A grill started for a new Project plans for that project alone, as if it
+/// were the agent's only one; the agent's own main project and projects stay as they are.
+pub fn scope(a: &Agent, s: &Session) -> Agent {
+    let mut a = a.clone();
+    if let Some(p) = &s.project {
+        a.project = p.name.clone();
+        a.projects = vec![p.name.clone()];
+    }
+    a
+}
+
+/// `a` as its running grill sees it (`scope`), or as it is when none is running.
+pub fn scoped(state: &AppState, a: &Agent) -> Agent {
+    active(state, &a.id).map_or_else(|| a.clone(), |s| scope(a, &s))
+}
+
 /// Notes what Loft just published for this agent on its running grill, for the end-of-planning card.
 pub fn record_published(state: &AppState, agent_id: &str, repo: &str, spec: Option<IssueLink>, tickets: Vec<IssueLink>) {
     locked(state, agent_id, || record_published_locked(state, agent_id, repo, spec, tickets))
@@ -586,12 +602,16 @@ pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Optio
 /// the session keeps for the chat's project strip. Returns the prompt to wake the agent with.
 pub fn start_for_project(state: &AppState, agent: &Agent, text: &str, project: NewProject) -> Result<Option<String>, ApiError> {
     locked(state, &agent.id, || {
+        // The session holds the project before the start is routed, so the first round is scoped to it.
+        if let Some(mut old) = active(state, &agent.id) {
+            finish(state, &mut old, "superseded").map_err(internal)?;
+        }
+        let mut s = new_session(&agent.id, text, "preparing");
+        s.project = Some(project);
+        save(state, &mut s).map_err(internal)?;
         let Routed::Handled { wake, .. } = route_user_message(state, agent, text, Some(&json!({ "role": "start_request" })), json!({}))? else {
             return Err(internal("a start request is always handled".into()));
         };
-        let mut s = active(state, &agent.id).ok_or_else(|| internal("the grill didn't start".into()))?;
-        s.project = Some(project);
-        save(state, &mut s).map_err(internal)?;
         Ok(wake)
     })
 }
@@ -615,6 +635,11 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
         save(state, &mut s).map_err(internal)?;
         meta["grill"] = json!({ "session_id": s.id, "role": "start_request" });
         let message = add_msg(state, &agent.id, None, "user", "text", text, meta);
+        // A grill for a new Project plans for that folder, not the agent's main project.
+        let agent = &scope(agent, &s);
+        let for_new = s.project.as_ref().map_or(String::new(), |p| {
+            format!(" This grill is for the new project `{}` ({}): read and plan for that folder, not your main project. Loft publishes the spec and tickets there.", p.name, p.path)
+        });
         let new_project = if crate::greenfield::needs_repo(state, agent) {
             " Your project has no GitHub repo yet: the first round also offers to create one (see Planning: new project)."
         } else {
@@ -622,7 +647,7 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
         };
         let which = which_project(agent);
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{for_new}{new_project}{which}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -1100,6 +1125,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
             let mut s = active(state, &me.id)
                 .or_else(|| state.db.list_grills(&me.id).ok()?.into_iter().next().filter(|s| s.status == "ended" && !s.summarized && s.end_reason.as_deref() != Some("superseded")))
                 .ok_or("No grill is running.")?;
+            let me = &scope(me, &s);
             let summary = args["summary"].as_str().unwrap_or("").trim();
             if summary.is_empty() {
                 return Err("summary is required".into());

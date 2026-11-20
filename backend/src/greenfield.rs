@@ -44,6 +44,8 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     if name != "preview_new_repo" && name != "create_repo" {
         return None;
     }
+    // A grill started for a new Project publishes that folder (`grill::scope`).
+    let me = &crate::grill::scoped(state, me);
     Some(if name == "preview_new_repo" { preview(state, me).await } else { create(state, me, args).await })
 }
 
@@ -595,6 +597,35 @@ mod tests {
         assert_eq!(git(&dir, &["remote", "get-url", "origin"]), r.to_str().unwrap());
         assert!(dir.join(".DS_Store").exists() && dir.join(".remember/today.md").exists(), "ignored files stay on disk");
         assert!(crate::grill::active(&st, &a.id).is_some(), "the grill goes on");
+    }
+
+    #[tokio::test]
+    async fn a_grill_for_a_new_project_publishes_that_folder_not_the_main_project() {
+        let st = state();
+        let fake = own_fake(&st);
+        owners_on(&fake);
+        // The Lead's main project is already on GitHub; the new project's folder isn't a repo yet.
+        let (a, main) = new_project(&st, "gf-main", &[("a.txt", "a")]);
+        git(&main, &["init", "-q"]);
+        git(&main, &["remote", "add", "origin", "https://github.com/octo-me/gf-main.git"]);
+        let fresh = st.settings.boot().projects_dir.join("gf-fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("idea.md"), "# Idea\n").unwrap();
+        let r = remote(&st, "gf-fresh");
+        fake.route("POST", "/user/repos", 201, json!({ "clone_url": r, "html_url": "https://github.com/octo-me/gf-fresh", "private": true }));
+
+        let project = crate::grill::NewProject { name: "gf-fresh".into(), path: "~/projects/gf-fresh".into() };
+        let wake = crate::grill::start_for_project(&st, &a, "New project gf-fresh: an idea", project).unwrap().unwrap();
+        assert!(wake.contains("no GitHub repo yet") && wake.contains("new project `gf-fresh`"), "{wake}");
+
+        let p = call(&st, &a, "preview_new_repo", json!({})).await.unwrap();
+        assert!(p.contains("Default name: gf-fresh.") && p.contains("`idea.md`"), "{p}");
+        let text = "Create the GitHub repo `octo-me/gf-fresh` and publish this folder?";
+        let qid = ask_q(&st, &a, json!({ "text": text, "speak": "Create the repo?", "recommendation": "Yes, private under octo-me", "kind": "single_choice", "options": ["Yes, private under octo-me", "No, not now"] }), Some("yes"), true);
+        call(&st, &a, "create_repo", json!({ "question_id": qid })).await.unwrap();
+        assert_eq!(pushed(&r), [".gitignore", "idea.md"]);
+        assert!(!main.join(".gitignore").exists(), "the main project is untouched");
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().project, "gf-main");
     }
 
     #[tokio::test]
