@@ -22,15 +22,20 @@ final class FocusController {
     var allowList: FocusAllowList {
         didSet { UserDefaults.standard.set(allowList.saved, forKey: Self.allowListKey) }
     }
-    /// The custom length sheet is up.
+    /// The length popover is up, under the sidebar's "Start focus".
     var picksLength = false
+    /// How many apps this session hid, under the countdown.
+    private(set) var hiddenCount = 0
 
     let loftBundleId: String
     /// Off for screenshots: a session drawn for a PR mustn't hide the apps on this Mac.
     private let hidesApps: Bool
     /// The apps this session hid, to show again at the end.
     @ObservationIgnored private var hider = FocusHider<NSRunningApplication>() {
-        didSet { UserDefaults.standard.set(hider.bundleIds, forKey: Self.hiddenKey) }
+        didSet {
+            UserDefaults.standard.set(hider.bundleIds, forKey: Self.hiddenKey)
+            if hiddenCount != hider.hidden.count { hiddenCount = hider.hidden.count }
+        }
     }
     private var observers: [NSObjectProtocol] = []
     private var ticker: Task<Void, Never>?
@@ -68,7 +73,7 @@ final class FocusController {
             while !Task.isCancelled {
                 guard let self, let session = self.session else { return }
                 if session.isOver(at: .now) { self.end(timeUp: true); return }
-                self.dockTile.show(session.dockLabel(at: .now))
+                self.dockTile.show(session.dockFace(at: .now))
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -152,17 +157,18 @@ private final class ClosureMenuItem: NSMenuItem {
     @objc private func fire() { run() }
 }
 
-/// The Dock icon: the app icon, with the time left under it while a session runs. The badge stays the Needs you count.
+/// The Dock icon: the app icon in a ring that fills over the session, with the time left under it. The badge stays the
+/// Needs you count. It redraws only when the label or the ring's whole percent changes.
 @MainActor
 final class FocusDockTile {
-    private var label: String?
+    private var face: FocusDockFace?
 
-    func show(_ label: String?) {
-        guard label != self.label else { return }
-        self.label = label
+    func show(_ face: FocusDockFace?) {
+        guard face != self.face else { return }
+        self.face = face
         let tile = NSApp.dockTile
-        tile.contentView = label.map { text in
-            let view = NSHostingView(rootView: FocusDockIcon(timeLeft: text))
+        tile.contentView = face.map { face in
+            let view = NSHostingView(rootView: FocusDockIcon(timeLeft: face.label, progress: Double(face.percent) / 100))
             view.frame = NSRect(origin: .zero, size: tile.size)
             return view
         }
@@ -172,10 +178,12 @@ final class FocusDockTile {
 
 struct FocusDockIcon: View {
     let timeLeft: String
+    let progress: Double
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            Image(nsImage: NSApp.applicationIconImage).resizable().scaledToFit()
+            Image(nsImage: NSApp.applicationIconImage).resizable().scaledToFit().padding(10)
+                .overlay { FocusRing(progress: progress, lineWidth: 4, track: WebTheme.good.opacity(0.25)).padding(4) }
             Text(timeLeft)
                 .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
                 .foregroundStyle(.black)
@@ -210,75 +218,178 @@ struct FocusMenuItems: View {
     }
 }
 
-/// Under the sidebar: Start focus, or the time left and End.
+/// Under the sidebar: Start focus (with the length popover), or the ring, the time left, the hidden count and ×.
 struct FocusSidebarControl: View {
     @Environment(FocusController.self) private var focus
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The popover is up. The menus ask through `focus.picksLength`, which can come before this control is on screen
+    /// (the window just opened, or the sidebar was collapsed), so it opens a moment later.
+    @State private var picks = false
 
     var body: some View {
         if let session = focus.session {
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                HStack(spacing: 8) {
-                    Image(systemName: "timer").foregroundStyle(WebTheme.good).accessibilityHidden(true)
-                    Text(session.countdown(at: context.date)).font(.body.monospacedDigit().weight(.semibold)).foregroundStyle(WebTheme.fg)
-                        .accessibilityLabel("Focus, \(session.countdown(at: context.date)) left")
-                        .accessibilityIdentifier("focusCountdown")
-                    Spacer()
-                    Button("End") { focus.end() }.buttonStyle(.plain).foregroundStyle(WebTheme.fg2)
-                        .accessibilityIdentifier("endFocus")
+                HStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        FocusRing(progress: session.progress(at: context.date), lineWidth: 3.5)
+                            .frame(width: 34, height: 34)
+                            .animation(reduceMotion ? nil : .linear(duration: 1), value: session.progress(at: context.date))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(session.countdown(at: context.date)).font(.body.monospacedDigit().weight(.semibold)).foregroundStyle(WebTheme.fg)
+                            Text(FocusSession.hiddenLabel(focus.hiddenCount)).font(.caption).foregroundStyle(WebTheme.fg3)
+                        }
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Focus, \(session.spokenLeft(at: context.date)), \(FocusSession.hiddenLabel(focus.hiddenCount).lowercased())")
+                    .accessibilityIdentifier("focusCountdown")
+                    Spacer(minLength: 0)
+                    Button { focus.end() } label: {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(WebTheme.fg2)
+                            .frame(width: 20, height: 20).background(Circle().fill(WebTheme.raised))
+                    }
+                    .buttonStyle(.plain)
+                    .help("End focus")
+                    .accessibilityLabel("End focus")
+                    .accessibilityIdentifier("endFocus")
                 }
             }
         } else {
-            Button { focus.picksLength = true } label: {
+            Button { picks = true } label: {
                 Label("Start focus", systemImage: "timer").frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
             .foregroundStyle(WebTheme.fg2)
             .help("Hides every app that isn't on the allow list (Settings) for a while")
             .accessibilityIdentifier("startFocus")
+            .popover(isPresented: $picks, arrowEdge: .trailing) { FocusLengthPopover() }
+            .onChange(of: focus.picksLength, initial: true) {
+                guard focus.picksLength else { return }
+                Task {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    picks = true
+                }
+            }
+            .onChange(of: picks) { if !picks { focus.picksLength = false } }
         }
     }
 }
 
-/// Picks the length and starts: 25, 50 or 90 minutes, or a custom length.
-struct FocusLengthSheet: View {
-    @Environment(FocusController.self) private var focus
-    @Environment(\.dismiss) private var dismiss
-    @State private var minutes = FocusDuration.defaultMinutes
+/// The ring that fills over a session, from 12 o'clock: under the sidebar, on the Dock tile and in the menu bar item.
+/// VoiceOver skips it: the countdown next to it says the same.
+struct FocusRing: View {
+    let progress: Double
+    let lineWidth: CGFloat
+    var track: Color = WebTheme.lineStrong
 
     var body: some View {
-        VStack(spacing: 18) {
-            Text("Focus").font(.title2.bold())
-            Text("\(minutes) min").font(.system(size: 48, weight: .bold, design: .rounded).monospacedDigit())
-                .accessibilityIdentifier("focusLength")
-            HStack(spacing: 8) {
-                ForEach(FocusDuration.presets, id: \.self) { m in
-                    Button { minutes = m } label: {
-                        Text("\(m) min").font(.callout.weight(.semibold)).padding(.horizontal, 14).padding(.vertical, 7)
-                            .foregroundStyle(minutes == m ? Color.black : WebTheme.fg)
-                            .background(Capsule().fill(minutes == m ? WebTheme.good : WebTheme.raised))
-                    }
+        ZStack {
+            Circle().stroke(track, lineWidth: lineWidth)
+            Circle().trim(from: 0, to: progress)
+                .stroke(WebTheme.good, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .padding(lineWidth / 2)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Picks the length: a click on 25, 50 or 90 starts at once; Return starts the highlighted row (the last length at
+/// first), ↑/↓ move, Esc closes. Custom takes 1 to 480 minutes.
+struct FocusLengthPopover: View {
+    @Environment(FocusController.self) private var focus
+    @Environment(\.dismiss) private var dismiss
+    /// The highlighted row: an index into the presets, or `presets.count` for Custom.
+    @State private var row = 0
+    @State private var custom = ""
+    @FocusState private var focused: Field?
+
+    private enum Field { case list, custom }
+    private var customRow: Int { FocusDuration.presets.count }
+    private var customMinutes: Int? { Int(custom).flatMap { FocusDuration.range.contains($0) ? $0 : nil } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(FocusDuration.presets.enumerated()), id: \.offset) { i, m in
+                Button { start(m) } label: { line(i, isLast: m == focus.minutes) { Text("\(m) min") } }
                     .buttonStyle(.plain)
-                    .accessibilityAddTraits(minutes == m ? .isSelected : [])
+                    .accessibilityAddTraits(row == i ? .isSelected : [])
                     .accessibilityIdentifier("length-\(m)")
+            }
+            Divider().padding(.vertical, 4)
+            line(customRow, isLast: false) {
+                HStack(spacing: 6) {
+                    Text("Custom")
+                    TextField("", text: $custom, prompt: Text("1–480"))
+                        .textFieldStyle(.roundedBorder).frame(width: 56).multilineTextAlignment(.trailing)
+                        .focused($focused, equals: .custom)
+                        .onSubmit(startCustom)
+                        .accessibilityLabel("Custom length in minutes")
+                        .accessibilityIdentifier("customLength")
+                    Text("min")
+                    Spacer(minLength: 0)
+                    Button("Start", action: startCustom).controlSize(.small).disabled(customMinutes == nil)
+                        .accessibilityIdentifier("startFocusSession")
                 }
             }
-            Stepper("Custom length", value: $minutes, in: FocusDuration.range, step: 5).fixedSize()
-                .accessibilityIdentifier("customLength")
-            Text("Apps that aren't on your allow list (Settings) are hidden until the time is up. Only Agents and Issues stay in the sidebar.")
-                .font(.callout).foregroundStyle(WebTheme.fg2).multilineTextAlignment(.center)
-            HStack {
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Start focus") {
-                    focus.start(minutes: minutes)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .accessibilityIdentifier("startFocusSession")
+            .accessibilityElement(children: .contain)
+            .accessibilityAddTraits(row == customRow ? .isSelected : [])
+            .onTapGesture { row = customRow; focused = .custom }
+            Text("Hides apps not on your allow list.").font(.caption).foregroundStyle(WebTheme.fg3).padding([.horizontal, .top], 8)
+        }
+        .padding(8)
+        .frame(width: 270)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused, equals: .list)
+        .onKeyPress(.upArrow) { move(-1) }
+        .onKeyPress(.downArrow) { move(1) }
+        .onKeyPress(.return) {
+            if row == customRow { startCustom() } else { start(FocusDuration.presets[row]) }
+            return .handled
+        }
+        .onKeyPress(.escape) { dismiss(); return .handled }
+        .onAppear {
+            if let i = FocusDuration.presets.firstIndex(of: focus.minutes) {
+                row = i
+                focused = .list
+            } else {
+                row = customRow
+                custom = "\(focus.minutes)"
+                focused = .custom
             }
         }
-        .padding(24)
-        .frame(width: 400)
-        .onAppear { minutes = focus.minutes }
+        .onChange(of: row) { focused = row == customRow ? .custom : .list }
+    }
+
+    /// A row: the highlighted one is tinted `good`, with "last used ↩" (or "↩") as the hint for Return.
+    private func line<Content: View>(_ i: Int, isLast: Bool, @ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            content().font(.body.monospacedDigit()).foregroundStyle(WebTheme.fg)
+            Spacer(minLength: 8)
+            if row == i || isLast {
+                Text(isLast ? (row == i ? "last used ↩" : "last used") : "↩").font(.caption).foregroundStyle(row == i ? WebTheme.good : WebTheme.fg3)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 8).frame(height: 30)
+        .contentShape(Rectangle())
+        .background(RoundedRectangle(cornerRadius: 6).fill(row == i ? WebTheme.good.opacity(0.16) : .clear))
+        .onHover { if $0 { row = i } }
+    }
+
+    private func move(_ by: Int) -> KeyPress.Result {
+        row = min(customRow, max(0, row + by))
+        return .handled
+    }
+
+    private func start(_ minutes: Int) {
+        focus.start(minutes: minutes)
+        dismiss()
+    }
+
+    private func startCustom() {
+        guard let m = customMinutes else { return }
+        start(m)
     }
 }
 

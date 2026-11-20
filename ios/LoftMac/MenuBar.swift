@@ -164,7 +164,11 @@ struct MenuBarFocus: View {
         if let session = focus.session {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 HStack {
-                    Label("Focus · \(session.countdown(at: context.date)) left", systemImage: "timer")
+                    Label {
+                        Text("Focus · \(session.countdown(at: context.date)) left").monospacedDigit()
+                    } icon: {
+                        FocusRing(progress: session.progress(at: context.date), lineWidth: 2).frame(width: 14, height: 14)
+                    }
                     Spacer()
                     Button("End") { focus.end() }.foregroundStyle(Theme.accent).accessibilityIdentifier("menuEndFocus")
                 }

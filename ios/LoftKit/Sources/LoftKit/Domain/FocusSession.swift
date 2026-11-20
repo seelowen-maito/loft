@@ -38,6 +38,38 @@ public struct FocusSession: Equatable, Sendable {
         let s = secondsLeft(at: now)
         return s >= 60 ? "\((s + 59) / 60)m" : "\(s)s"
     }
+
+    /// VoiceOver's time left, in whole minutes up, then seconds in the last minute: "15 minutes left", "42 seconds left".
+    public func spokenLeft(at now: Date) -> String {
+        let s = secondsLeft(at: now)
+        let (n, unit) = s >= 60 ? ((s + 59) / 60, "minute") : (s, "second")
+        return "\(n) \(unit)\(n == 1 ? "" : "s") left"
+    }
+
+    /// What the Dock tile draws now. The tile redraws only when this changes: the label, or a whole percent of the ring.
+    public func dockFace(at now: Date) -> FocusDockFace {
+        FocusDockFace(label: dockLabel(at: now), percent: Int(progress(at: now) * 100))
+    }
+
+    /// Under the countdown: "No apps hidden", "1 app hidden", "5 apps hidden".
+    public static func hiddenLabel(_ count: Int) -> String {
+        switch count {
+        case 0: "No apps hidden"
+        case 1: "1 app hidden"
+        default: "\(count) apps hidden"
+        }
+    }
+}
+
+/// The Dock tile during a session: the minutes capsule and the ring's whole percent.
+public struct FocusDockFace: Equatable, Sendable {
+    public let label: String
+    public let percent: Int
+
+    public init(label: String, percent: Int) {
+        self.label = label
+        self.percent = percent
+    }
 }
 
 /// The lengths a session can be.

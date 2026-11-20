@@ -127,4 +127,31 @@ final class LoftMacUITests: MacUITestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.placeholderValue, "Message QA Agent", "the agent's chat opens")
     }
+
+    /// #659: "Start focus" opens the length popover with the last length highlighted; ↓ moves, Esc closes. It never
+    /// starts a session, which would hide the apps on this Mac.
+    func testStartFocusOpensTheLengthPopover() {
+        launch(["-ui-testing", "-no-ai", "-focusMinutes", "50"])
+        let start = card("startFocus")
+        XCTAssertTrue(start.waitForExistence(timeout: 10))
+        start.click()
+        XCTAssertTrue(card("length-25").waitForExistence(timeout: 5), "the popover opens")
+        XCTAssertTrue(card("length-90").exists)
+        XCTAssertTrue(card("customLength").exists)
+        XCTAssertTrue(card("length-50").isSelected, "the last length is highlighted")
+        shot("Focus length popover")
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(card("length-90").isSelected, "↓ moves the highlight")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(card("length-25").waitForNonExistence(timeout: 5), "Esc closes it")
+        XCTAssertFalse(card("focusCountdown").exists, "no session started")
+        // Focus › Focus for… with the sidebar collapsed shows the sidebar and the same popover.
+        app.toolbars.buttons["Hide Sidebar"].click()
+        XCTAssertTrue(start.waitForNonExistence(timeout: 5))
+        app.menuBars.menuBarItems["Focus"].click()
+        app.menuBars.menuItems["Focus for…"].click()
+        XCTAssertTrue(card("length-25").waitForExistence(timeout: 5), "Focus for… opens the popover")
+        XCTAssertTrue(start.exists, "under the sidebar, shown again")
+        app.typeKey(.escape, modifierFlags: [])
+    }
 }

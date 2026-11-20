@@ -338,7 +338,6 @@ struct MainWindow: View {
 
     var body: some View {
         @Bindable var nav = nav
-        @Bindable var focus = focus
         NavigationSplitView(columnVisibility: $columns) {
             List(selection: $nav.section) {
                 ForEach(focus.session == nil ? MacSection.allCases : FocusSession.sections) { s in
@@ -383,7 +382,8 @@ struct MainWindow: View {
         // The web's page, cards and text colours behind every section.
         .webPage()
         .sheet(isPresented: $nav.picksRecipient) { RecipientPicker() }
-        .sheet(isPresented: $focus.picksLength) { FocusLengthSheet() }
+        // "Focus for…" (the Dock and Focus menus) opens the popover under the sidebar: show the sidebar first.
+        .onChange(of: focus.picksLength) { if focus.picksLength { columns = .all } }
         .onChange(of: nav.section) { keepSidebarKeyboard() }
     }
 
@@ -474,6 +474,18 @@ func renderWindow(store: LoftStore, nav: MacNav, focus: FocusController, to fold
         view.cacheDisplay(in: view.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
     }
+    /// A piece of the window on its own, at 2x, for a close-up.
+    func png<V: View>(_ content: V, _ name: String) {
+        let host = NSHostingView(rootView: content.environment(store).environment(nav).environment(focus).padding(10).background(WebTheme.canvas))
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        host.layoutSubtreeIfNeeded()
+        let size = host.bounds.size
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return }
+        rep.size = size
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
+    }
     if store.agents.isEmpty {
         png("connect")
     } else {
@@ -502,13 +514,21 @@ func renderWindow(store: LoftStore, nav: MacNav, focus: FocusController, to fold
         nav.section = .agents
         try? await Task.sleep(for: .seconds(1))
         png("focus-idle")
+        // The length popover: the last length (50) highlighted, then a custom last length (37) in Custom.
+        focus.start(minutes: 50)
+        focus.end()
+        png(FocusLengthPopover().fixedSize(), "focus-popover")
+        focus.start(minutes: 37)
+        focus.end()
+        png(FocusLengthPopover().fixedSize(), "focus-popover-custom")
         focus.start(minutes: 50)
         try? await Task.sleep(for: .seconds(3))
         png("focus-agents")
+        png(FocusSidebarControl().frame(width: 180), "focus-row")
         nav.section = .issues
         try? await Task.sleep(for: .seconds(2))
         png("focus-issues")
-        let dock = ImageRenderer(content: FocusDockIcon(timeLeft: "50m").frame(width: 128, height: 128))
+        let dock = ImageRenderer(content: FocusDockIcon(timeLeft: "35m", progress: 0.3).frame(width: 128, height: 128))
         dock.scale = 2
         if let tiff = dock.nsImage?.tiffRepresentation, let data = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
             try? data.write(to: URL(fileURLWithPath: folder).appendingPathComponent("focus-dock.png"))

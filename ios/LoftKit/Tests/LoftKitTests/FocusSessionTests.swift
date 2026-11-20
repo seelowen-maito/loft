@@ -39,6 +39,32 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(s.progress(at: start.addingTimeInterval(60 * 60)), 1)
     }
 
+    func testTheHiddenCountReadsNaturally() {
+        XCTAssertEqual(FocusSession.hiddenLabel(0), "No apps hidden")
+        XCTAssertEqual(FocusSession.hiddenLabel(1), "1 app hidden")
+        XCTAssertEqual(FocusSession.hiddenLabel(5), "5 apps hidden")
+    }
+
+    func testVoiceOverReadsTheTimeLeftInWords() {
+        let s = FocusSession(minutes: 25, from: start)
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(10 * 60)), "15 minutes left")
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(10 * 60 + 30)), "15 minutes left")  // 14:30 rounds up
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(24 * 60)), "1 minute left")
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(24 * 60 + 18)), "42 seconds left")
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(25 * 60 - 1)), "1 second left")
+    }
+
+    func testTheDockTileRedrawsOnlyOnTheLabelOrAWholePercent() {
+        let s = FocusSession(minutes: 50, from: start)  // 1% is 30 seconds
+        XCTAssertEqual(s.dockFace(at: start), FocusDockFace(label: "50m", percent: 0))
+        // Same label and whole percent: nothing to redraw.
+        XCTAssertEqual(s.dockFace(at: start.addingTimeInterval(1)), s.dockFace(at: start.addingTimeInterval(29)))
+        // The next whole percent, under the same label.
+        XCTAssertEqual(s.dockFace(at: start.addingTimeInterval(30)), FocusDockFace(label: "50m", percent: 1))
+        XCTAssertEqual(s.dockFace(at: start.addingTimeInterval(25 * 60)), FocusDockFace(label: "25m", percent: 50))
+        XCTAssertEqual(s.dockFace(at: start.addingTimeInterval(50 * 60)).percent, 100)
+    }
+
     func testCustomLengthsAreClamped() {
         XCTAssertEqual(FocusSession(minutes: 0, from: start).secondsLeft(at: start), 60)
         XCTAssertEqual(FocusSession(minutes: 10_000, from: start).secondsLeft(at: start), 480 * 60)
