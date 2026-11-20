@@ -39,6 +39,32 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(s.progress(at: start.addingTimeInterval(60 * 60)), 1)
     }
 
+    func testTheHiddenCountReadsNaturally() {
+        XCTAssertEqual(FocusSession.hiddenLabel(0), "No apps hidden")
+        XCTAssertEqual(FocusSession.hiddenLabel(1), "1 app hidden")
+        XCTAssertEqual(FocusSession.hiddenLabel(5), "5 apps hidden")
+    }
+
+    func testVoiceOverReadsTheTimeLeftInWords() {
+        let s = FocusSession(minutes: 25, from: start)
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(10 * 60)), "15 minutes left")
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(10 * 60 + 30)), "15 minutes left")  // 14:30 rounds up
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(24 * 60)), "1 minute left")
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(24 * 60 + 18)), "42 seconds left")
+        XCTAssertEqual(s.spokenLeft(at: start.addingTimeInterval(25 * 60 - 1)), "1 second left")
+    }
+
+    func testTheDockTileRedrawsOnlyOnTheLabelOrAWholePercent() {
+        let s = FocusSession(minutes: 50, from: start)  // 1% is 30 seconds
+        XCTAssertEqual(s.dockFace(at: start), FocusDockFace(label: "50m", percent: 0))
+        // Same label and whole percent: nothing to redraw.
+        XCTAssertEqual(s.dockFace(at: start.addingTimeInterval(1)), s.dockFace(at: start.addingTimeInterval(29)))
+        // The next whole percent, under the same label.
+        XCTAssertEqual(s.dockFace(at: start.addingTimeInterval(30)), FocusDockFace(label: "50m", percent: 1))
+        XCTAssertEqual(s.dockFace(at: start.addingTimeInterval(25 * 60)), FocusDockFace(label: "25m", percent: 50))
+        XCTAssertEqual(s.dockFace(at: start.addingTimeInterval(50 * 60)).percent, 100)
+    }
+
     func testCustomLengthsAreClamped() {
         XCTAssertEqual(FocusSession(minutes: 0, from: start).secondsLeft(at: start), 60)
         XCTAssertEqual(FocusSession(minutes: 10_000, from: start).secondsLeft(at: start), 480 * 60)
@@ -53,6 +79,50 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(FocusDuration.remembered(50), 50)
         XCTAssertEqual(FocusDuration.remembered(37), 37)
         XCTAssertEqual(FocusDuration.remembered(-3), 1)
+    }
+}
+
+final class FocusLengthChoiceTests: XCTestCase {
+    func testTheLastPresetIsHighlighted() {
+        let c = FocusLengthChoice(lastMinutes: 50)
+        XCTAssertEqual(c.row, 1)
+        XCTAssertFalse(c.isCustom)
+        XCTAssertEqual(c.minutes(custom: ""), 50)
+    }
+
+    func testACustomLastLengthStartsInCustom() {
+        let c = FocusLengthChoice(lastMinutes: 37)
+        XCTAssertTrue(c.isCustom)
+        XCTAssertEqual(c.customText, "37")
+        XCTAssertEqual(c.minutes(custom: "37"), 37)
+    }
+
+    func testUpLeavesCustomAndMovesStopAtTheEnds() {
+        var c = FocusLengthChoice(lastMinutes: 37)
+        c.move(-1)
+        XCTAssertEqual(c.row, 2, "↑ from Custom goes to 90")
+        XCTAssertEqual(c.minutes(custom: "37"), 90, "Return then starts 90, not the custom length")
+        c.move(-1); c.move(-1); c.move(-1)
+        XCTAssertEqual(c.row, 0)
+        c.move(1); c.move(1); c.move(1); c.move(1)
+        XCTAssertTrue(c.isCustom)
+    }
+
+    func testCustomsStartButtonStartsTheTypedLengthWhateverIsHighlighted() {
+        var c = FocusLengthChoice(lastMinutes: 37)
+        c.move(-1)  // ↑ to 90: Return would start 90…
+        XCTAssertEqual(c.minutes(custom: "37"), 90)
+        XCTAssertEqual(FocusLengthChoice.customMinutes("37"), 37)  // …but Custom's Start starts 37
+        XCTAssertNil(FocusLengthChoice.customMinutes("0"))
+    }
+
+    func testCustomTakesOneToFourHundredEighty() {
+        let c = FocusLengthChoice(lastMinutes: 37)
+        XCTAssertNil(c.minutes(custom: "0"))
+        XCTAssertNil(c.minutes(custom: "481"))
+        XCTAssertNil(c.minutes(custom: "abc"))
+        XCTAssertEqual(c.minutes(custom: "480"), 480)
+        XCTAssertEqual(c.minutes(custom: " 1 "), 1)
     }
 }
 
