@@ -95,6 +95,8 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     }
     // Everything below plans for one project: `me` as if that were its only one. A ticket can name
     // another of the agent's projects, checked against `all` (the agent as it is).
+    // A grill started for a new Project publishes to that project (`grill::scope`).
+    let me = &crate::grill::scoped(state, me);
     let all = me;
     let me = &match for_project(me, args) {
         Ok(a) => a,
@@ -2501,6 +2503,26 @@ pub(crate) mod tests {
         assert!(g.contains("## Problem Statement") && g.contains("## Acceptance criteria") && !g.contains("# Planning: grilling"), "{g}");
         // Each ticket names its repo, the breakdown shows it, and the spec lists the repos it touches.
         assert!(g.contains("Repo: <project>") && g.contains("its repo, what it delivers") && g.contains("## Repos") && g.contains("one ticket per repo"), "{g}");
+    }
+
+    #[tokio::test]
+    async fn the_planning_guide_puts_a_walking_skeleton_first_for_a_new_project_only() {
+        let st = state();
+        let a = crate::tasks::tests::agent(&st, "guide");
+        let g = mcp_call(&st, &a, "planning_guide", &json!({})).await.unwrap().unwrap();
+        let rule = g.lines().find(|l| l.starts_with("- New Project only")).expect("a new-project tickets rule");
+        for want in [
+            "a folder with no git repo when its grill started", "the first ticket is a walking skeleton",
+            "builds, runs one end-to-end test and has a CI workflow that passes", "Every other ticket of the spec is blocked by it",
+            "The breakdown round lists it first", "Every other project keeps the rules above unchanged, with no skeleton ticket",
+        ] {
+            assert!(rule.contains(want), "missing {want}: {rule}");
+        }
+        // Today's rules are all still there, for every project.
+        for want in ["- Vertical slices:", "- Blockers: a ticket is blocked by another only when it can't start before that one lands", "- Approve first:", "Publish these N tickets?"] {
+            assert!(g.contains(want), "missing {want}");
+        }
+        assert_eq!(crate::grill::brief().matches("the first ticket is a walking skeleton").count(), 1, "the brief carries the same rule");
     }
 
     /// The summary message `grill_end` just posted.

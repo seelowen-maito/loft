@@ -14,6 +14,7 @@ mod github_inbox;
 mod greenfield;
 mod grill;
 mod needs_you;
+mod new_project;
 mod planning;
 mod ports;
 mod guard;
@@ -94,6 +95,8 @@ fn api_routes() -> Router<AppState> {
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
+        .route("/projects", post(new_project::create))
+        .route("/projects/check", get(new_project::check))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))

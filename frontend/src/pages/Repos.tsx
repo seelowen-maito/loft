@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import {
   AlertTriangle, ArrowDown, ArrowUp, CircleDot, ExternalLink, FolderGit2, GitCommitHorizontal,
-  GitPullRequest, Globe, KeyRound, Lock, RefreshCw, Search, Star, X,
+  GitPullRequest, Globe, KeyRound, Lock, Plus, RefreshCw, Search, Star, X,
 } from "lucide-react";
 import { api, type Commit, type GithubInfo, type GithubItem, type Info, type Repo, type Site } from "../lib/api";
 import { cx, fmtNum } from "../lib/format";
@@ -15,6 +15,7 @@ import { Dialog } from "../components/Dialog";
 import { Heatmap, ShareBars, WeeklyBars } from "../components/Charts";
 import { AgentActivity } from "./AgentActivity";
 import { pickGreeting } from "../lib/greetings";
+import { NewProjectDialog } from "./NewProjectDialog";
 
 type Sort = "activity" | "name" | "commits";
 
@@ -43,6 +44,17 @@ export default function ReposPage() {
   const [sort, setSort] = useState<Sort>("activity");
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [greeting] = useState(pickGreeting);
+  const [creating, setCreating] = useState(false);
+  // Focus goes back to the button that opened the dialog.
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const openNew = (e: React.MouseEvent<HTMLButtonElement>) => {
+    opener.current = e.currentTarget;
+    setCreating(true);
+  };
+  const closeNew = () => {
+    setCreating(false);
+    requestAnimationFrame(() => opener.current?.focus());
+  };
 
   // The list loads (again) on its own: a load or a Refresh marks the time.
   useEffect(() => {
@@ -132,6 +144,9 @@ export default function ReposPage() {
               <ActionButton variant="secondary" icon={<RefreshCw className="size-3.5" />} pending={refreshing.busy} pendingLabel="Refreshing…" onClick={refresh}>
                 Refresh
               </ActionButton>
+              <button className="btn-primary" onClick={openNew} aria-label="New project">
+                <Plus className="size-3.5" /> <span className="max-sm:hidden">New project</span>
+              </button>
             </div>
             <ErrorLine error={refreshing.error} className="w-full text-right" />
           </div>
@@ -256,11 +271,17 @@ export default function ReposPage() {
             ))}
           </div>
           {repos && repos.length === 0 && (
-            <div className="panel p-10 text-center text-fg-2">No git repositories found in {info?.projects_dir}.</div>
+            <div className="panel flex flex-col items-center gap-4 p-10 text-center text-fg-2">
+              <div>No git repositories found in {info?.projects_dir}.</div>
+              <button className="btn-primary" onClick={openNew}>
+                <Plus className="size-3.5" /> New project
+              </button>
+            </div>
           )}
         </section>
       </div>
 
+      {creating && <NewProjectDialog projectsDir={info?.projects_dir} onClose={closeNew} />}
       {sel && <RepoDrawer repo={sel} gh={gh[sel.name]} onClose={() => setSelected(null)} />}
     </div>
   );

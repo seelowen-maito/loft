@@ -76,6 +76,16 @@ pub struct Session {
     /// Older sessions stored a single one.
     #[serde(default, deserialize_with = "one_or_many")]
     pub published: Vec<Published>,
+    /// The new Project this grill was started for from Repos (`new_project`), for the chat's project strip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<NewProject>,
+}
+
+/// A Project created from Loft: its folder name and where it is, as shown (`~/projects/<name>`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewProject {
+    pub name: String,
+    pub path: String,
 }
 
 fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Published>, D::Error> {
@@ -174,6 +184,22 @@ fn locked<T>(state: &AppState, agent_id: &str, f: impl FnOnce() -> T) -> T {
 
 pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
     state.db.active_grill(agent_id).ok()?
+}
+
+/// `a` as the grill `s` sees it. A grill started for a new Project plans for that project alone, as if it
+/// were the agent's only one; the agent's own main project and projects stay as they are.
+pub fn scope(a: &Agent, s: &Session) -> Agent {
+    let mut a = a.clone();
+    if let Some(p) = &s.project {
+        a.project = p.name.clone();
+        a.projects = vec![p.name.clone()];
+    }
+    a
+}
+
+/// `a` as its running grill sees it (`scope`), or as it is when none is running.
+pub fn scoped(state: &AppState, a: &Agent) -> Agent {
+    active(state, &a.id).map_or_else(|| a.clone(), |s| scope(a, &s))
 }
 
 /// Notes what Loft just published for this agent on its running grill, for the end-of-planning card.
@@ -331,6 +357,7 @@ pub fn view(s: &Session) -> Value {
         "started_at": s.started_at,
         "updated_at": s.updated_at,
         "notes_path": s.notes_path,
+        "project": s.project,
         // en | pt, for the phrases the app reads aloud: en until the first round sets it, null only for sessions saved before it was kept.
         "language": (!s.lang.is_empty()).then_some(&s.lang),
     })
@@ -492,6 +519,7 @@ fn new_session(agent_id: &str, topic: &str, status: &str) -> Session {
         summarized: false,
         seen_commands: vec![],
         published: vec![],
+        project: None,
     }
 }
 
@@ -570,6 +598,24 @@ pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Optio
     locked(state, &agent.id, || route_user_message(state, agent, text, grill, meta))
 }
 
+/// Starts a grill on `agent` as the user's `text` would with /grill, for the new Project `project`, which
+/// the session keeps for the chat's project strip. Returns the prompt to wake the agent with.
+pub fn start_for_project(state: &AppState, agent: &Agent, text: &str, project: NewProject) -> Result<Option<String>, ApiError> {
+    locked(state, &agent.id, || {
+        // The session holds the project before the start is routed, so the first round is scoped to it.
+        if let Some(mut old) = active(state, &agent.id) {
+            finish(state, &mut old, "superseded").map_err(internal)?;
+        }
+        let mut s = new_session(&agent.id, text, "preparing");
+        s.project = Some(project);
+        save(state, &mut s).map_err(internal)?;
+        let Routed::Handled { wake, .. } = route_user_message(state, agent, text, Some(&json!({ "role": "start_request" })), json!({}))? else {
+            return Err(internal("a start request is always handled".into()));
+        };
+        Ok(wake)
+    })
+}
+
 fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, mut meta: Value) -> Result<Routed, ApiError> {
     let role = grill.and_then(|g| g["role"].as_str()).unwrap_or("");
     let conflict = |e: &str| ApiError(StatusCode::CONFLICT, e.into());
@@ -589,14 +635,24 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
         save(state, &mut s).map_err(internal)?;
         meta["grill"] = json!({ "session_id": s.id, "role": "start_request" });
         let message = add_msg(state, &agent.id, None, "user", "text", text, meta);
+        // A grill for a new Project plans for that folder, not the agent's main project.
+        let agent = &scope(agent, &s);
+        let for_new = s.project.as_ref().map_or(String::new(), |p| {
+            format!(" This grill is for the new project `{}` ({}): read and plan for that folder, not your main project. Loft publishes the spec and tickets there.", p.name, p.path)
+        });
         let new_project = if crate::greenfield::needs_repo(state, agent) {
             " Your project has no GitHub repo yet: the first round also offers to create one (see Planning: new project)."
         } else {
             ""
         };
+        let foundation = if crate::greenfield::is_new_project(state, agent) {
+            " Your project folder has no git repo at all, so it is a new project: the first round also asks the clarifying questions, and the foundation questions follow before the spec is offered; the foundation docs and its `CLAUDE.md` go on your docs branch, passed as `docs_branch` to publish_spec (see Planning: new project, Clarifying Round, Foundation Rounds and Foundation docs). Its first ticket is a walking skeleton that blocks every other one (see Planning: tickets)."
+        } else {
+            ""
+        };
         let which = which_project(agent);
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{for_new}{new_project}{foundation}{which}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -1074,6 +1130,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
             let mut s = active(state, &me.id)
                 .or_else(|| state.db.list_grills(&me.id).ok()?.into_iter().next().filter(|s| s.status == "ended" && !s.summarized && s.end_reason.as_deref() != Some("superseded")))
                 .ok_or("No grill is running.")?;
+            let me = &scope(me, &s);
             let summary = args["summary"].as_str().unwrap_or("").trim();
             if summary.is_empty() {
                 return Err("summary is required".into());
@@ -1186,7 +1243,7 @@ While you grill, build the project's language and record its hard decisions.
   ```
 
 - Where: only when your project has a repo. Work in your clone in your workspace, never in the project folder: on the first resolved term or decision, pull the default branch and create `docs/<topic>` (a short slug of the grill's topic), and commit each glossary or ADR change on it as you go.
-- If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms. Never touch an existing `CLAUDE.md`.
+- If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms (a new Project's names the foundation docs too: see Planning: new project). Never touch an existing `CLAUDE.md`.
 - With a spec, no Docs PR: before `mcp__loft__publish_spec`, push the docs branch and pass it as `docs_branch`. Loft starts the spec branch from it, so the docs commits ship in the spec PR with the rest of the spec. Commit later glossary or ADR changes on the spec branch.
 - Without a spec, one Docs PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.
 
@@ -1198,6 +1255,18 @@ When your project folder has no git repo or no GitHub remote yet (Loft says so w
 - Read the project folder in place to learn from it, but never write into it, and never run git there: only Loft does.
 - After the user's yes, in a round they sent, call `mcp__loft__create_repo` with that question's id and the owner they chose (public only if they asked for it). Loft writes a `.gitignore` for junk and secret files (`.env`, keys), runs `git init`, commits everything else, creates the repo and pushes. Then clone it into your workspace for your docs branch.
 - If they decline, keep grilling: there is no docs branch until the repo exists. Before publishing the spec, ask the question again in a round, and publish only after a yes and the repo is created. If they decline again, finish the grill without a spec.
+
+When the project folder is not a git repo at all (Loft says "it is a new project" when the grill starts), a new Project, the grill also has the two parts below. A project that already has a git repo, even one with no GitHub remote, keeps the usual grill and only gets the repo offer above.
+- Clarifying Round: the first round asks the clarifying questions together with the new-repo question, each with a recommendation: who it's for and what it must do on day one; the stack, pre-filled from the idea the user gave; where it runs; and the constraints (auth, data sensitivity, compliance). Read the idea and the folder first, and recommend from them rather than asking open questions.
+- Foundation Rounds: after the clarifying answers, settle the foundations as questions with your recommendation, which the user can accept or change: the stack, the architecture, the security baseline, testing, CI and deployment. Each of the six needs a round question with a recommendation, and none is skipped or assumed: don't offer the spec ("Turn this into a spec and tickets?") before all six are answered. There are no per-stack templates: you recommend from what you know of the idea, the constraints and the stack they chose. Put the questions whose prerequisites are settled in the same round (the stack comes first; the rest depend on it).
+- Foundation docs: every agent on the team builds from what the foundations decided, so write them down as docs on your docs branch (in your clone, once the repo exists) and commit them before the spec is published:
+  - `docs/architecture.md`: the stack, the architecture and how the parts fit, and where it runs and is deployed.
+  - `docs/security.md`: the security baseline: auth, secrets, data sensitivity, compliance, what is never allowed.
+  - `docs/conventions.md`: how code is written, tested and shipped: layout, style, testing, CI, deployment.
+  - One ADR per stack or architecture choice in `docs/adr/` (see Planning: docs for the format), even where it isn't a hard trade-off: on a new Project these choices set every later one.
+  - `GLOSSARY.md`, with the terms the grill resolved.
+  - `CLAUDE.md`: a new Project has none. It tells agents to read `docs/architecture.md`, `docs/security.md`, `docs/conventions.md`, the ADRs in `docs/adr/` and `GLOSSARY.md` before they work, to follow them, and to use the glossary's terms.
+  Push the docs branch and pass it as `docs_branch` to `mcp__loft__publish_spec`, so the foundation docs ship in the spec PR. Don't publish the spec without them.
 
 {TICKETS}
 
@@ -1248,6 +1317,7 @@ Once the spec is published, split it into tickets the team can pick up.
 - Wide refactors go expand–contract: a first ticket adds the new way beside the old one, the next ones move the callers over, a last one removes the old way, so every ticket lands green.
 - Blockers: a ticket is blocked by another only when it can't start before that one lands. Keep the chains short so the team can work in parallel.
 - Repos: each ticket goes to one repo, one of your projects; propose it from what the slice touches. A slice that spans repos (an API plus a UI) becomes one ticket per repo, the UI one blocked by the API one, or names the primary repo it's mostly in.
+- New Project only (a folder with no git repo when its grill started: Loft says "it is a new project"): the first ticket is a walking skeleton. The project builds, runs one end-to-end test and has a CI workflow that passes, with only as much of the product as that takes. Every other ticket of the spec is blocked by it, so the Delivery builds the skeleton first and every later ticket lands on a working base. The breakdown round lists it first. Every other project keeps the rules above unchanged, with no skeleton ticket.
 - Other specs: when the grill makes several specs (one per repo, say), a ticket can need a ticket of another spec. Decide each such blocker from what that ticket needs, never from the repos' names or a fixed order, and name it in `blocked_by` as `owner/repo#n`. In the breakdown round list every blocker that crosses specs ("<ticket> waits on <repo>#<n>") so the user can confirm or drop it, and publish the specs in dependency order (the one that blocks first, its tickets included) so you have the real numbers. Blockers can't form a loop.
 - Approve first: put the breakdown to the user as one round question, "Publish these N tickets?" (recommendation: yes), listing every ticket's title, its repo, what it delivers and what blocks it. Publish nothing before their yes; if they want changes, change the breakdown and ask again.
 - Write each ticket in the glossary's terms, in the user's language, with this template (no Parent for a standalone ticket; don't list blockers, Loft links them):
