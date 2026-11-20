@@ -20,8 +20,8 @@ class MacUITestCase: XCTestCase {
         app.activate()
         // macOS can restore Loft with its window closed, leaving only the menu bar item: Go › Agents (⌘2) opens it.
         if !app.windows.firstMatch.waitForExistence(timeout: 5) { app.typeKey("2", modifierFlags: .command) }
-        // The split view saves a collapsed sidebar in the app's defaults, which the tests share with the Loft
-        // installed on this Mac (same bundle id), so show it here rather than clear those defaults.
+        // The split view saves a collapsed sidebar in the app's defaults, kept from one test run to the next, so
+        // show it here rather than clear those defaults.
         let show = app.toolbars.buttons["Show Sidebar"]
         if show.exists { show.click() }
     }
@@ -111,11 +111,10 @@ final class LoftMacUITests: MacUITestCase {
     }
 
     /// Quick search: the panel opens over the main window, typing finds an agent, and Return opens its chat there.
-    /// A synthesized ⌥Space goes to the app, not through the global hot key, so `-show-quick-search` opens it at
-    /// launch as the hot key does.
+    /// The test's own shortcut, ⌃⌥⌘K, leaves ⌥Space to the Loft open on this Mac.
     func testQuickSearchOpensAnAgentsChat() {
-        // In the app, whatever Settings › Quick search was left at on this Mac.
-        launch(["-ui-testing", "-no-ai", "-show-quick-search", "-quickSearchOpensIn", "app"])
+        launch(["-ui-testing", "-no-ai", "-quickSearchShortcut", "control-option-command-40", "-quickSearchOpensIn", "app"])
+        app.typeKey("k", modifierFlags: [.control, .option, .command])
         let field = app.textFields["quickSearchField"]
         XCTAssertTrue(field.waitForExistence(timeout: 5), "the shortcut opens the panel")
         field.typeText("qa")
