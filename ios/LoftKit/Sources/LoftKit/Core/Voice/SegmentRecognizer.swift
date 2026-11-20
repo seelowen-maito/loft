@@ -45,14 +45,14 @@ public enum Recognizers {
     }
 }
 
-/// `-no-speech` (UI tests): starts at once and never hears anything.
+/// `-no-speech` (UI tests): starts at once and hears nothing, or `-fixture-dictation`'s text as it starts.
 public final class SilentRecognizer: SegmentRecognizer {
     public var onPartial: ((String) -> Void)?
     public var onCommit: ((String) -> Void)?
     public var onError: ((String) -> Void)?
     public var inputFormat: AVAudioFormat? { nil }
     public func prepare() async throws {}
-    public func start() throws {}
+    public func start() throws { if let t = TestMode.dictation { onCommit?(t) } }
     public func append(_ buffer: AVAudioPCMBuffer) {}
     public func flush() async {}
     public func cancel() {}

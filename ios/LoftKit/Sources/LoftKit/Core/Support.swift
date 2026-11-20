@@ -76,6 +76,17 @@ public enum TestMode {
     /// `-no-speech`: no microphone, speech recognizer or permission prompts. Talking and dictation start at once
     /// and hear nothing, so a UI test never stalls on "Failed to initialize recognizer" in the Simulator.
     public static let noSpeech = flag("-no-speech")
+    /// `-fixture-dictation <text>`: with `-no-speech`, each dictation hears `text` as it starts, so a UI test can
+    /// run Talk to the end without a microphone.
+    public static let dictation: String? = {
+        #if DEBUG
+        let a = ProcessInfo.processInfo.arguments
+        guard let i = a.firstIndex(of: "-fixture-dictation"), i + 1 < a.count else { return nil }
+        return a[i + 1]
+        #else
+        return nil
+        #endif
+    }()
     /// `-no-ai`: the on-device model counts as off, so no UI test waits on it (`-fixture-ai-status` still wins).
     public static let noAI = flag("-no-ai")
     /// `-hold-reading`: reading aloud plays no audio and holds its state (the Skip/Stop bar) until Skip or Stop,

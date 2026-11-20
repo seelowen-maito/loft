@@ -248,8 +248,11 @@ struct VoicePresenter: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .onChange(of: voice.phase, initial: true) { old, new in
-                if new != .idle && (old == .idle || !shown) { shown = true }
+            .onChange(of: voice.phase, initial: true) { old, _ in
+                // The phase now, not the one this change was for: the Talk screen's own onChange may already have
+                // handed a finished dictation to the chat (back to idle) and closed. Reopening for that stale
+                // phase left the screen up on "Getting ready…" (#656).
+                if voice.phase != .idle && (old == .idle || !shown) { shown = true }
             }
             .fullScreenCover(isPresented: $presentation.shown, onDismiss: {
                 voice.close()
