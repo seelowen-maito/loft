@@ -111,8 +111,12 @@ public struct FocusLengthChoice: Equatable, Sendable {
 
     /// The length Return starts: the highlighted preset, or the Custom field's minutes when they're 1 to 480.
     public func minutes(custom: String) -> Int? {
-        guard isCustom else { return FocusDuration.presets[row] }
-        return Int(custom.trimmingCharacters(in: .whitespaces)).flatMap { FocusDuration.range.contains($0) ? $0 : nil }
+        isCustom ? Self.customMinutes(custom) : FocusDuration.presets[row]
+    }
+
+    /// The Custom field's minutes when they're 1 to 480. Custom's Start button starts these whatever is highlighted.
+    public static func customMinutes(_ text: String) -> Int? {
+        Int(text.trimmingCharacters(in: .whitespaces)).flatMap { FocusDuration.range.contains($0) ? $0 : nil }
     }
 }
 

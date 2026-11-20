@@ -327,7 +327,7 @@ struct FocusLengthPopover: View {
                     TextField("", text: $custom, prompt: Text("1–480"))
                         .textFieldStyle(.roundedBorder).frame(width: 56).multilineTextAlignment(.trailing)
                         .focused($focused, equals: .custom)
-                        .onSubmit(startHighlighted)
+                        .onSubmit(startCustom)
                         // The field takes ↑/↓ before the popover does: they move the highlight from here too.
                         .onKeyPress(.upArrow) { move(-1) }
                         .onKeyPress(.downArrow) { move(1) }
@@ -335,7 +335,7 @@ struct FocusLengthPopover: View {
                         .accessibilityIdentifier("customLength")
                     Text("min")
                     Spacer(minLength: 0)
-                    Button("Start", action: startHighlighted).controlSize(.small).disabled(choice.isCustom && choice.minutes(custom: custom) == nil)
+                    Button("Start", action: startCustom).controlSize(.small).disabled(FocusLengthChoice.customMinutes(custom) == nil)
                         .accessibilityIdentifier("startFocusSession")
                 }
             }
@@ -394,6 +394,12 @@ struct FocusLengthPopover: View {
 
     private func startHighlighted() {
         guard let m = choice.minutes(custom: custom) else { return }
+        start(m)
+    }
+
+    /// Custom's Start and Return in its field: the typed length, whatever row is highlighted.
+    private func startCustom() {
+        guard let m = FocusLengthChoice.customMinutes(custom) else { return }
         start(m)
     }
 

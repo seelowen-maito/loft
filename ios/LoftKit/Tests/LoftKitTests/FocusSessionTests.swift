@@ -108,6 +108,14 @@ final class FocusLengthChoiceTests: XCTestCase {
         XCTAssertTrue(c.isCustom)
     }
 
+    func testCustomsStartButtonStartsTheTypedLengthWhateverIsHighlighted() {
+        var c = FocusLengthChoice(lastMinutes: 37)
+        c.move(-1)  // ↑ to 90: Return would start 90…
+        XCTAssertEqual(c.minutes(custom: "37"), 90)
+        XCTAssertEqual(FocusLengthChoice.customMinutes("37"), 37)  // …but Custom's Start starts 37
+        XCTAssertNil(FocusLengthChoice.customMinutes("0"))
+    }
+
     func testCustomTakesOneToFourHundredEighty() {
         let c = FocusLengthChoice(lastMinutes: 37)
         XCTAssertNil(c.minutes(custom: "0"))
