@@ -1043,6 +1043,24 @@ final class LoftLegacyUITests: XCTestCase {
         XCTAssertFalse(any("demoBanner", app).exists)
     }
 
+    /// Talk, said and ended 20 times in a row: each time the cover closes and the text is in the chat's box (#656).
+    func testTalkCoverClosesAfterEveryDictation() {
+        let app = launch(["-fixture-dictation", "The build is red again."])
+        for i in 1...20 {
+            app.tabBars.buttons["Overview"].tap()
+            app.buttons["talkButton"].tap()
+            let hold = app.buttons["voiceHoldToTalk"]
+            XCTAssertTrue(hold.appears(timeout: 5), "Talk \(i) opens")
+            // Listening once the mic "starts"; letting go ends the dictation.
+            let deadline = Date().addingTimeInterval(5)
+            while !(hold.isEnabled), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
+            hold.tap()
+            XCTAssertTrue(app.buttons["voiceClose"].disappears(timeout: 5), "Talk \(i): the cover closes")
+            XCTAssertTrue(app.textFields["composerField"].appears(timeout: 5), "Talk \(i): in the chat")
+            XCTAssertTrue(composerValue(app)?.contains("The build is red again.") == true, "Talk \(i): the text is in the box")
+        }
+    }
+
     func testAPermissionShowsItsRisksAndExplainsOnRequest() {
         let app = launch(["-fixture-risky-permission", "-fixture-explain", "Sends your commits to the main branch on GitHub."])
         app.tabBars.buttons["Agents"].tap()

@@ -44,6 +44,10 @@ public final class VoiceSession {
     /// The cleaned-up text, set in `.review`. Nil when cleanup failed or isn't available: show `raw`.
     public private(set) var cleaned: String?
     public private(set) var cleanupNote: String?
+    /// iPhone Talk: an agent named at the start or end of the dictation becomes who it goes to (`TalkAddress`).
+    public var picksRecipient = false
+    /// What came of a name said in the dictation ("To Loft Dev, from what you said."); nil when none was said.
+    public private(set) var recipientNote: String?
     /// In hands-free review, listening for "send" / "continue" / "discard".
     public private(set) var awaitingVoiceConfirm = false
     /// The message that couldn't be sent, for "Retry sending" on the failure screen.
@@ -141,6 +145,7 @@ public final class VoiceSession {
         live = ""
         cleaned = nil
         cleanupNote = nil
+        recipientNote = nil
         reply = nil
         awaitingVoiceConfirm = false
         await listen()
@@ -225,9 +230,11 @@ public final class VoiceSession {
         // A command at the very end of what was said isn't part of the message.
         let reading = VoiceSend.command(in: committed, sincePause: pauseBase)
         if reading.command != nil || reading.saidToFinish { setCommitted(reading.text) }
+        let switched = picksRecipient && pickRecipient()
         saveDraft()
         guard !raw.isEmpty else {
-            phase = .idle
+            // Only a name was said ("Send this to Loft Dev"): listen again for the message itself.
+            if switched { await listen() } else { phase = .idle }
             return
         }
         let (text, note) = await clean()
@@ -345,6 +352,29 @@ public final class VoiceSession {
         autoSend?.cancel()
         autoSend = nil
         autoSendAt = nil
+    }
+
+    /// "Send this to Loft Dev, …": that agent, and the message without those words; a name that's no one's or more
+    /// than one's keeps who it goes to, and says so.
+    /// True when it switched who it goes to.
+    private func pickRecipient() -> Bool {
+        switch TalkAddress.read(raw, agents: store.agents) {
+        case .none:
+            recipientNote = nil
+            return false
+        case .agent(let id, let text):
+            setCommitted(text)
+            switchAgent(id)
+            let name = store.agent(id)?.name ?? "them"
+            // Only the name was said: nothing goes out, so say the switch happened and the message is still to come.
+            recipientNote = text.isEmpty ? "Switched to \(name): say the message." : "To \(name), from what you said."
+            VoiceLog.shared.add("talk: heard who: \(id)")
+            return true
+        case .unclear:
+            recipientNote = "Didn't catch who: still to \(store.agent(agentId)?.name ?? "this agent")."
+            VoiceLog.shared.add("talk: heard a name, but not whose: recipient kept")
+            return false
+        }
     }
 
     /// The cleaned text, and a note when cleanup wasn't possible (the original stays, never lost).
@@ -671,6 +701,7 @@ public final class VoiceSession {
         committed = ""
         live = ""
         cleaned = nil
+        recipientNote = nil
         reply = nil
         elapsed = 0
         accumulated = 0
@@ -857,9 +888,11 @@ public final class VoiceSession {
         case "cleaning":
             live = ""
             phase = .cleaning
-        case "review", "ask", "confirm":
+        case "review", "ask", "confirm", "picked", "unclear":
             live = ""
             cleaned = "I want the settings screen to show the server version and the last sync time, and add a button to copy the diagnostics."
+            if name == "picked" { recipientNote = "To \(store.agent(agentId)?.name ?? "them"), from what you said." }
+            if name == "unclear" { recipientNote = "Didn't catch who: still to \(store.agent(agentId)?.name ?? "this agent")." }
             phase = .review
             awaitingVoiceConfirm = handsFree
         case "autosend":

@@ -20,8 +20,8 @@ class MacUITestCase: XCTestCase {
         app.activate()
         // macOS can restore Loft with its window closed, leaving only the menu bar item: Go › Agents (⌘2) opens it.
         if !app.windows.firstMatch.waitForExistence(timeout: 5) { app.typeKey("2", modifierFlags: .command) }
-        // The split view saves a collapsed sidebar in the app's defaults, which the tests share with the Loft
-        // installed on this Mac (same bundle id), so show it here rather than clear those defaults.
+        // The split view saves a collapsed sidebar in the app's defaults, kept from one test run to the next, so
+        // show it here rather than clear those defaults.
         let show = app.toolbars.buttons["Show Sidebar"]
         if show.exists { show.click() }
     }
@@ -111,11 +111,10 @@ final class LoftMacUITests: MacUITestCase {
     }
 
     /// Quick search: the panel opens over the main window, typing finds an agent, and Return opens its chat there.
-    /// A synthesized ⌥Space goes to the app, not through the global hot key, so `-show-quick-search` opens it at
-    /// launch as the hot key does.
+    /// The test's own shortcut, ⌃⌥⌘K, leaves ⌥Space to the Loft open on this Mac.
     func testQuickSearchOpensAnAgentsChat() {
-        // In the app, whatever Settings › Quick search was left at on this Mac.
-        launch(["-ui-testing", "-no-ai", "-show-quick-search", "-quickSearchOpensIn", "app"])
+        launch(["-ui-testing", "-no-ai", "-quickSearchShortcut", "control-option-command-40", "-quickSearchOpensIn", "app"])
+        app.typeKey("k", modifierFlags: [.control, .option, .command])
         let field = app.textFields["quickSearchField"]
         XCTAssertTrue(field.waitForExistence(timeout: 5), "the shortcut opens the panel")
         field.typeText("qa")
@@ -128,4 +127,55 @@ final class LoftMacUITests: MacUITestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.placeholderValue, "Message QA Agent", "the agent's chat opens")
     }
+
+    /// #659: "Start focus" opens the length popover with the last length highlighted; ↓ moves, Esc closes. It never
+    /// starts a session, which would hide the apps on this Mac.
+    func testStartFocusOpensTheLengthPopover() {
+        launch(["-ui-testing", "-no-ai", "-focusMinutes", "50"])
+        let start = card("startFocus")
+        XCTAssertTrue(start.waitForExistence(timeout: 10))
+        start.click()
+        XCTAssertTrue(card("length-25").waitForExistence(timeout: 5), "the popover opens")
+        XCTAssertTrue(card("length-90").exists)
+        XCTAssertTrue(card("customLength").exists)
+        XCTAssertTrue(card("length-50").isSelected, "the last length is highlighted")
+        shot("Focus length popover")
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(card("length-90").isSelected, "↓ moves the highlight")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(card("length-25").waitForNonExistence(timeout: 5), "Esc closes it")
+        XCTAssertFalse(card("focusCountdown").exists, "no session started")
+        // Focus for… (⌥⇧⌘F) with the sidebar collapsed shows the sidebar and the same popover.
+        app.toolbars.buttons["Hide Sidebar"].click()
+        XCTAssertTrue(start.waitForNonExistence(timeout: 5))
+        app.typeKey("f", modifierFlags: [.command, .shift, .option])
+        XCTAssertTrue(card("length-25").waitForExistence(timeout: 5), "Focus for… opens the popover")
+        XCTAssertTrue(start.exists, "under the sidebar, shown again")
+        app.typeKey(.escape, modifierFlags: [])
+    }
+
+    /// #659: a custom last length starts in the Custom field. Hovering a preset doesn't move the highlight (so Return
+    /// can't start it), and ↑ leaves the field.
+    func testTheCustomFieldKeepsTheKeyboardUntilUp() {
+        launch(["-ui-testing", "-no-ai", "-focusMinutes", "37"])
+        let start = card("startFocus")
+        XCTAssertTrue(start.waitForExistence(timeout: 10))
+        start.click()
+        let field = app.textFields["customLength"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "37")
+        XCTAssertTrue(card("length-25").exists)
+        card("length-25").hover()
+        XCTAssertFalse(card("length-25").isSelected, "hover doesn't take the highlight")
+        XCTAssertTrue(field.hasKeyboardFocus, "the field keeps the keyboard")
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(card("length-90").isSelected, "↑ leaves Custom for 90")
+        XCTAssertFalse(field.hasKeyboardFocus)
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(card("length-25").waitForNonExistence(timeout: 5))
+    }
+}
+
+extension XCUIElement {
+    var hasKeyboardFocus: Bool { (value(forKey: "hasKeyboardFocus") as? Bool) ?? false }
 }

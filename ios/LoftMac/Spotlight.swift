@@ -61,10 +61,14 @@ final class MacSpotlight {
     }
 }
 
-/// Opens a Loft item chosen in Spotlight.
+/// Opens a Loft item chosen in Spotlight, and gives the Dock icon its menu.
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
     /// Set by the app once quick search, which knows how to open an item, exists.
     @MainActor static var openSpotlightItem: ((String) -> Void)?
+    /// The Dock icon's menu (focus sessions), set by the app.
+    @MainActor static var dockMenu: (() -> NSMenu)?
+
+    @MainActor func applicationDockMenu(_ sender: NSApplication) -> NSMenu? { Self.dockMenu?() }
 
     func application(_ application: NSApplication, continue activity: NSUserActivity,
                      restorationHandler: @escaping ([any NSUserActivityRestoring]) -> Void) -> Bool {
