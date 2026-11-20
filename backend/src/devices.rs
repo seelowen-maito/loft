@@ -353,7 +353,7 @@ mod tests {
         let seen = crate::apns::tests::fake_apns();
         let dir = crate::apns::key_dir();
         let mut s = st.settings.get();
-        s.projects_dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        s.projects_dir = st.cfg.root.as_path().to_path_buf();
         st.settings.save(s).unwrap();
         let good = "ab".repeat(32);
         let gone = format!("dead{}", "cd".repeat(30));

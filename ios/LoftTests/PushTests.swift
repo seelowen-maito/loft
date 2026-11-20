@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class PushTests: XCTestCase {
     func testAPushOpensItsItem() {
@@ -11,6 +12,81 @@ final class PushTests: XCTestCase {
         XCTAssertNil(PushDestination.from(["type": "test"]), "a test push just opens the app")
         XCTAssertNil(PushDestination.from(["target": ["url": "javascript:alert(1)"]]), "only https links open")
         XCTAssertNil(PushDestination.from([:]))
+    }
+
+    /// Needs you's Open and the Overview's rows open a server link only when it's https on github.com or the Loft's host.
+    func testAServerLinkOpensOnlyWhenTrusted() {
+        let host = "mac.tail1.ts.net"
+        XCTAssertEqual(PushDestination.link("https://github.com/o/r/pull/7", loftHost: host), URL(string: "https://github.com/o/r/pull/7"))
+        XCTAssertEqual(PushDestination.link("https://MAC.tail1.ts.net/tasks/t1", loftHost: host), URL(string: "https://MAC.tail1.ts.net/tasks/t1"))
+        XCTAssertNil(PushDestination.link("http://github.com/o/r/pull/7", loftHost: host), "not https")
+        XCTAssertNil(PushDestination.link("javascript:alert(1)", loftHost: host))
+        XCTAssertNil(PushDestination.link("file:///etc/passwd", loftHost: host))
+        XCTAssertNil(PushDestination.link("ssh://github.com/o/r", loftHost: host))
+        XCTAssertNil(PushDestination.link("https://evil.example/x", loftHost: host))
+        XCTAssertNil(PushDestination.link("https://github.com.evil.example/x", loftHost: host))
+        XCTAssertNil(PushDestination.link("https://mac.tail1.ts.net/x", loftHost: nil), "no connected Loft: only github.com")
+        XCTAssertNil(PushDestination.link(nil, loftHost: host))
+    }
+
+    /// Needs you's Open also takes the server's Settings (`http`) and Screen Sharing (`vnc`) links on the Loft's own
+    /// hosts, and still refuses everything else.
+    func testANeedsYouLinkOpensTheLoftsOwnSettingsAndScreenSharing() {
+        func link(_ s: String, loft: String? = "127.0.0.1") -> URL? {
+            PushDestination.needsYouLink(s, loftHost: loft, tailnetHost: "mac.tail1.ts.net")
+        }
+        XCTAssertNotNil(link("http://mac.tail1.ts.net:7420/settings#mac-access"), "Open Mac access")
+        XCTAssertNotNil(link("http://mac.tail1.ts.net:7420/settings#backups"), "Open Settings")
+        XCTAssertNotNil(link("vnc://mac.tail1.ts.net"), "Screen Sharing")
+        XCTAssertNotNil(link("vnc://MAC.tail1.ts.net"))
+        XCTAssertNotNil(link("http://127.0.0.1:7420/settings#push"), "the connected Loft's own host")
+        XCTAssertNotNil(link("https://github.com/o/r/pull/7"), "what any server link may open")
+        XCTAssertNil(link("http://mac.tail1.ts.net.evil.example/settings"), "look-alike host")
+        XCTAssertNil(link("vnc://mac.tail1.ts.net.evil.example"), "look-alike host")
+        XCTAssertNil(link("http://evil.example/settings"), "foreign host")
+        XCTAssertNil(link("vnc://evil.example"), "foreign host")
+        XCTAssertNil(link("http://github.com/o/r"), "http only on the Loft's hosts")
+        XCTAssertNil(link("ssh://mac.tail1.ts.net"), "other schemes")
+        XCTAssertNil(link("file:///etc/passwd"))
+        XCTAssertNil(link("javascript:alert(1)"))
+        XCTAssertNil(PushDestination.needsYouLink("vnc://mac.tail1.ts.net", loftHost: nil, tailnetHost: nil), "no known hosts")
+    }
+
+    /// A Mac notification's userInfo (MacAlerts: `needs_you_id` plus `NeedsYouAlerts.target`) routes back to its item.
+    func testAMacNotificationOpensItsItem() {
+        func agent(_ id: String) -> NeedsYouItem.AgentRef { .init(id: id, name: "Agent") }
+        func item(_ type: String, agent a: String?, open: NeedsYouAction.Target? = nil) -> NeedsYouItem {
+            NeedsYouItem(id: "\(type):1", type: type, urgency: 2, agent: a.map(agent), taskId: nil, title: "t", reason: "", text: "",
+                         createdAt: nil, ageSeconds: nil, links: nil,
+                         actions: open.map { [NeedsYouAction(kind: "open", label: "Open", target: $0)] } ?? [], project: nil, pr: nil)
+        }
+        func info(_ i: NeedsYouItem) -> [AnyHashable: Any] {
+            var info: [String: Any] = ["needs_you_id": i.id]
+            if let t = NeedsYouAlerts.target(of: i) { info["target"] = t }
+            return info
+        }
+        let host = "mac.tail1.ts.net"
+        XCTAssertEqual(PushDestination.from(info(item("question", agent: "be")), loftHost: host), .chat(agentId: "be"))
+        XCTAssertEqual(PushDestination.from(info(item("permission", agent: nil, open: .init(screen: "chat", agentId: "ios"))), loftHost: host),
+                       .chat(agentId: "ios"))
+        let pr = "https://github.com/o/r/pull/7"
+        XCTAssertEqual(PushDestination.from(info(item("pr_ready", agent: nil, open: .init(url: pr))), loftHost: host), .url(URL(string: pr)!))
+        XCTAssertNil(PushDestination.from(info(item("pr_ready", agent: nil, open: .init(url: "https://evil.example/x"))), loftHost: host),
+                     "an untrusted link only opens the app")
+        XCTAssertEqual(PushDestination.from(info(item("pr_ready", agent: nil)), loftHost: host), .needsYou)
+    }
+
+    /// Sign in on the Mac's Settings › Push opens the relay's portal only over https on the relay's own host.
+    func testThePortalLinkOpensOnlyOnTheRelay() {
+        let relay = "https://relay.example.com"
+        XCTAssertEqual(PushDestination.portal("https://relay.example.com/connect?code=1", relay: relay), URL(string: "https://relay.example.com/connect?code=1"))
+        XCTAssertEqual(PushDestination.portal("https://Relay.Example.com/c", relay: relay), URL(string: "https://Relay.Example.com/c"), "hosts have no case")
+        for link in ["http://relay.example.com/connect", "https://evil.example/connect", "https://relay.example.com.evil.example/c",
+                     "javascript:alert(1)", "file:///etc/passwd", "relay.example.com/connect", ""] {
+            XCTAssertNil(PushDestination.portal(link, relay: relay), link)
+        }
+        XCTAssertNil(PushDestination.portal(nil, relay: relay))
+        XCTAssertNil(PushDestination.portal("https://relay.example.com/c", relay: ""), "no relay set up: nothing opens")
     }
 
     func testAPushLinkOpensOnlyOnGitHubOrTheConnectedLoft() {

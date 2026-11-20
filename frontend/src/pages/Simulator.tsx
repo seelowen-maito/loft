@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { CornerDownLeft, Delete, House, Lock, Send } from "lucide-react";
 import { api, type Simulator, type SimulatorInput } from "../lib/api";
 import { cx } from "../lib/format";
+import { errorText } from "../lib/useAction";
+import { usePoll } from "../hooks/usePoll";
+import { ErrorLine } from "../components/Callout";
 
 type Devices = { interactive: boolean; devices: Simulator[]; error?: string };
 type Ripple = { id: number; x: number; y: number };
@@ -32,12 +35,7 @@ export default function SimulatorPage() {
     }
   };
 
-  useEffect(() => {
-    const load = () => api.simulators().then(setData).catch(() => setData({ interactive: false, devices: [] }));
-    load();
-    const t = setInterval(load, 10_000);
-    return () => clearInterval(t);
-  }, []);
+  usePoll(() => api.simulators().then(setData).catch(() => setData({ interactive: false, devices: [] })), 10_000);
 
   const device = data?.devices.find((d) => d.udid === udid) ?? data?.devices[0];
 
@@ -84,7 +82,7 @@ function LiveScreen({ device }: { device: Simulator }) {
   const img = useRef<HTMLImageElement>(null);
 
   const send = (input: SimulatorInput) =>
-    api.simulatorInput(device.udid, input).then(() => setErr(null), (e) => setErr(e instanceof Error ? e.message : String(e)));
+    api.simulatorInput(device.udid, input).then(() => setErr(null), (e) => setErr(errorText(e)));
 
   // Where on the screen, as fractions; object-contain can letterbox the image inside its box.
   const at = (e: React.PointerEvent) => {
@@ -147,7 +145,7 @@ function LiveScreen({ device }: { device: Simulator }) {
           ))}
         </div>
       </div>
-      {err && <p className="text-[12px] text-bad">{err}</p>}
+      <ErrorLine error={err} />
       <div className="flex w-full max-w-md flex-wrap items-center justify-center gap-2">
         <button className="btn" title="Home" onClick={() => send({ action: "button", name: "home" })}><House className="size-4" /></button>
         <button className="btn" title="Lock" onClick={() => send({ action: "button", name: "lock" })}><Lock className="size-4" /></button>
@@ -195,7 +193,7 @@ function PolledScreen({ device }: { device: Simulator }) {
         timer = setTimeout(tick, 250);
       } catch (e) {
         if (stopped) return;
-        setErr(e instanceof Error ? e.message : String(e));
+        setErr(errorText(e));
         timer = setTimeout(tick, 3000);
       }
     };
@@ -210,7 +208,7 @@ function PolledScreen({ device }: { device: Simulator }) {
   return (
     <>
       {frame && <img src={frame} alt={`${device.name} screen`} className={cx("min-h-0 flex-1 rounded-[2.5rem] border border-line object-contain", err && "opacity-50")} />}
-      {err && <p className="text-[12px] text-bad">{err}</p>}
+      <ErrorLine error={err} />
     </>
   );
 }

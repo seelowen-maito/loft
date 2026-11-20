@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::api::{ApiError, not_found};
-use crate::db::{Agent, Message, Task};
+use crate::db::{Agent, Message, PermissionRequest, Task};
 use crate::state::{AppState, Event};
 
 /// A run quiet this long counts as possibly stuck (the clients' watchdog uses the same).
@@ -176,7 +176,7 @@ fn open_delivery(d: &crate::db::Delivery, issue: Option<&Task>) -> Value {
 pub(crate) fn merge_reason(state: &AppState, d: &crate::db::Delivery) -> String {
     let built = crate::delivery::builders(state, d);
     let by = if built.is_empty() { String::new() } else { format!(" Built by {}.", built.join(", ")) };
-    format!("Its reviews passed: merge `{}` into `{}`.{by}", d.branch, d.base)
+    format!("Its reviews passed: merge `{}` into {}.{by}", d.branch, crate::delivery::merge_into(d))
 }
 
 fn dismiss(id: &str) -> Value {
@@ -197,7 +197,36 @@ fn permission_text(tool: &str, input: &Value) -> String {
         }
         "Edit" | "Write" | "MultiEdit" | "Read" => s("file_path"),
         "WebFetch" => s("url"),
+        crate::agents::ASK_TOOL => question_texts(input).join("\n"),
         _ => serde_json::to_string_pretty(input).unwrap_or_default(),
+    }
+}
+
+/// What an `AskUserQuestion` call asks, one line per question.
+fn question_texts(input: &Value) -> Vec<String> {
+    input["questions"].as_array().into_iter().flatten().filter_map(|q| q["question"].as_str().map(String::from)).collect()
+}
+
+/// An agent's multiple-choice questions, once it may ask them: answered on its chat, where the options show.
+fn questions_item(p: &PermissionRequest, who: Option<(String, String)>, project: Option<String>) -> Item {
+    let asked = question_texts(&p.input);
+    let name = who.as_ref().map_or("An agent", |w| w.1.as_str()).to_string();
+    Item {
+        id: format!("permission:{}", p.id),
+        kind: "permission",
+        urgency: 3,
+        title: text(&format!("{name} has questions for you"), MAX_TITLE),
+        reason: text("Answer them in the chat.", MAX_REASON),
+        text: text(&asked.join("\n"), MAX_TEXT),
+        agent: who,
+        task_id: None,
+        created_at: p.created_at.clone(),
+        links: vec![],
+        actions: vec![open_chat(&p.agent_id), action("deny", "Skip", "POST", format!("/api/permissions/{}", p.id), json!({ "decision": "deny" }))],
+        // Fixed text: the questions can hold anything the agent read, and a push leaves the machine.
+        push: (format!("{name} has questions for you"), "Open the chat to answer".into()),
+        project,
+        pr: None,
     }
 }
 
@@ -214,8 +243,17 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for p in state.db.list_permissions(None).map_err(e)?.into_iter().filter(|p| p.status == "pending") {
         let who = name(&p.agent_id);
         let base = format!("/api/permissions/{}", p.id);
-        // A kill with no program to name has no rule to save, so no Always.
-        let always = p.tool_name != "Kill" || crate::processes::kill_spec(&p.rule).is_some();
+        if p.source == crate::agents::QUESTIONS {
+            items.push(questions_item(&p, who, agent_project(&p.agent_id)));
+            continue;
+        }
+        // A kill with no program to name has no rule to save, so no Always; a change to the user's checkout is only
+        // ever allowed once.
+        let always = match p.tool_name.as_str() {
+            "Kill" => crate::processes::kill_spec(&p.rule).is_some(),
+            "Checkout" => false,
+            _ => true,
+        };
         let mut actions = vec![action("approve", "Allow once", "POST", base.clone(), json!({ "decision": "allow_once" }))];
         if always {
             actions.push(action("approve_always", "Always allow", "POST", base.clone(), json!({ "decision": "allow_always", "rule": p.rule })));
@@ -558,7 +596,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 json!({ "label": "Pull request", "url": url }),
             ),
             _ => (
-                format!("Every ticket is done and its reviews passed: merge `{}` into `{}`.", d.branch, d.base),
+                format!("Every ticket is done and its reviews passed: merge `{}` into {}.", d.branch, crate::delivery::merge_into(&d)),
                 action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
                 Value::Null,
             ),
@@ -709,8 +747,10 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     for a in asking {
         let id = format!("mac_access:{}:{}", a.service, a.since);
         let mut actions = vec![];
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Mac access", "target": { "url": format!("{web}/settings#mac-access") } }));
+        }
         if let Some(h) = &host {
-            actions.push(json!({ "kind": "open", "label": "Open Mac access", "target": { "url": format!("http://{h}:{}/settings#mac-access", state.cfg.port) } }));
             actions.push(json!({ "kind": "open", "label": "Screen Sharing", "target": { "url": format!("vnc://{h}") } }));
         }
         actions.push(action("check", "Check again", "POST", "/api/system/mac-access".into(), json!({})));
@@ -744,8 +784,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             None => "There is no good backup yet.".into(),
         };
         let mut actions = vec![action("retry", "Back up now", "POST", "/api/backups".into(), json!({}))];
-        if let Some(h) = crate::tailnet::host() {
-            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#backups", state.cfg.port) } }));
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#backups") } }));
         }
         actions.push(dismiss(&id));
         items.push(Item {
@@ -782,8 +822,8 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
     if let Some(since) = off_since {
         let id = format!("push_off:{since}");
         let mut actions = vec![];
-        if let Some(h) = crate::tailnet::host() {
-            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#push", state.cfg.port) } }));
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#push") } }));
         }
         actions.push(dismiss(&id));
         let phones = if phones == 1 { "your phone".to_string() } else { format!("your {phones} phones") };
@@ -821,8 +861,8 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         let gb = free as f64 / 1e9;
         // Nothing is removed blind: Settings previews what a clean removes.
         let mut actions = vec![];
-        if let Some(h) = crate::tailnet::host() {
-            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("http://{h}:{}/settings#workspaces", state.cfg.port) } }));
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#workspaces") } }));
         }
         actions.push(dismiss(&id));
         items.push(Item {
@@ -840,6 +880,48 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
             project: None,
             pr: None,
             id,
+        });
+    }
+
+    // The agents' workspaces stayed in the checkout on start (storage.rs): until a start moves them. Not dismissible:
+    // the guard asks about commands in a workspace with no clone until they move.
+    let not_moved = state.rt.lock().unwrap().workspaces_not_moved.clone();
+    if let Some(why) = not_moved {
+        items.push(Item {
+            kind: "workspaces_not_moved",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("Agents' workspaces didn't move", MAX_TITLE),
+            reason: text("They stay in Loft's checkout, where Loft keeps using them.", MAX_REASON),
+            text: text(&format!("{why}.\n\nAgents work as before. Fix that, then restart Loft to move them (docs/adr/0005)."), MAX_TEXT),
+            created_at: Utc::now().to_rfc3339(),
+            links: vec![],
+            actions: vec![],
+            push: ("Agents' workspaces didn't move".to_string(), String::new()),
+            project: None,
+            pr: None,
+            id: "workspaces_not_moved".to_string(),
+        });
+    }
+
+    // The old storage folder came back in the checkout after the move (storage.rs), with files: Loft doesn't use it.
+    if let Some(old) = crate::storage::reappeared(&state.cfg.root, &state.cfg.storage_dir) {
+        items.push(Item {
+            kind: "old_workspaces_reappeared",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text("An old workspaces folder reappeared", MAX_TITLE),
+            reason: text("Loft doesn't use it; the agents work in their real workspaces.", MAX_REASON),
+            text: text(&format!("{} reappeared inside your checkout; look at it and delete it. Loft keeps the agents' workspaces in {} (docs/adr/0005).", old.display(), state.cfg.storage_dir.display()), MAX_TEXT),
+            created_at: Utc::now().to_rfc3339(),
+            links: vec![],
+            actions: vec![],
+            push: ("An old workspaces folder reappeared".to_string(), String::new()),
+            project: None,
+            pr: None,
+            id: "old_workspaces_reappeared".to_string(),
         });
     }
 
@@ -989,6 +1071,9 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     if id.starts_with("permission:") || id.starts_with("grill:") {
         return Err(ApiError(StatusCode::BAD_REQUEST, "This one needs an answer; it can't be dismissed.".into()));
     }
+    if id == "workspaces_not_moved" {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "This one goes once a start moves the workspaces; it can't be dismissed.".into()));
+    }
     let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !items.iter().any(|i| i.id == id) {
         return Err(not_found());
@@ -1123,12 +1208,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_kill_with_no_rule_offers_no_always_allow() {
+    async fn a_kill_with_no_rule_or_a_change_to_a_checkout_offers_no_always_allow() {
         let st = state();
         let dev = agent(&st, "Dev");
-        for (id, rule) in [("k1", "Kill(/d/*/App)"), ("k2", "")] {
+        for (id, tool, rule) in [("k1", "Kill", "Kill(/d/*/App)"), ("k2", "Kill", ""), ("c1", "Checkout", ""), ("c2", "Checkout", "Checkout(/d/loft)")] {
             st.db.save_permission(&PermissionRequest {
-                id: id.into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: "Kill".into(), input: json!({ "command": "pkill sleep" }),
+                id: id.into(), agent_id: dev.id.clone(), source: "prompt".into(), tool_name: tool.into(), input: json!({ "command": "pkill sleep" }),
                 reason: String::new(), rule: rule.into(), status: "pending".into(), created_at: now(),
             }).unwrap();
         }
@@ -1136,6 +1221,8 @@ mod tests {
         let kinds = |id: &str| items.iter().find(|i| i.id == format!("permission:{id}")).unwrap().actions.iter().map(|a| a["kind"].as_str().unwrap()).collect::<Vec<_>>();
         assert!(kinds("k1").contains(&"approve_always"));
         assert_eq!(kinds("k2"), vec!["approve", "deny", "open"]);
+        assert_eq!(kinds("c1"), vec!["approve", "deny", "open"]);
+        assert_eq!(kinds("c2"), vec!["approve", "deny", "open"]);
     }
 
     #[tokio::test]
@@ -1232,6 +1319,30 @@ mod tests {
         let (_, v) = tick_lists(&st).unwrap();
         emit_if_changed(&st, &v);
         assert_eq!(events(), 1, "the mark emits at once, and the next tick doesn't send it again");
+    }
+
+    #[tokio::test]
+    async fn questions_are_answered_on_the_chat_not_allowed() {
+        let st = state();
+        let dev = agent(&st, "Dev");
+        st.db.save_permission(&PermissionRequest {
+            id: "q1".into(), agent_id: dev.id.clone(), source: crate::agents::QUESTIONS.into(), tool_name: crate::agents::ASK_TOOL.into(),
+            input: json!({ "questions": [{ "question": "Which store?" }, { "question": "Which region?" }] }),
+            reason: String::new(), rule: String::new(), status: "pending".into(), created_at: now(),
+        }).unwrap();
+        let items = collect(&st).unwrap();
+        let q = &items[0];
+        assert_eq!((q.title.as_str(), q.text.as_str()), ("Dev has questions for you", "Which store?\nWhich region?"));
+        let labels: Vec<&str> = q.actions.iter().filter_map(|a| a["label"].as_str()).collect();
+        assert_eq!(labels, ["Open chat", "Skip"], "no Allow: it would answer nothing");
+        assert_eq!(q.push, ("Dev has questions for you".to_string(), "Open the chat to answer".to_string()), "the push never carries the questions");
+
+        // Before that, the permission to ask lists the questions too.
+        st.db.save_permission(&PermissionRequest { id: "q0".into(), source: "prompt".into(), rule: crate::agents::ASK_TOOL.into(), ..st.db.get_permission("q1").unwrap().unwrap() }).unwrap();
+        let items = collect(&st).unwrap();
+        let p = items.iter().find(|i| i.id == "permission:q0").unwrap();
+        assert_eq!((p.title.as_str(), p.text.as_str()), ("Dev wants to use AskUserQuestion", "Which store?\nWhich region?"));
+        assert_eq!(p.actions[0]["label"], "Allow once");
     }
 
     #[tokio::test]
@@ -1370,6 +1481,38 @@ mod tests {
         assert!(same_site(&h(Some("same-origin"))).is_ok());
         assert!(same_site(&h(Some("cross-site"))).is_err());
         assert!(same_site(&h(Some("same-site"))).is_err());
+    }
+
+    #[tokio::test]
+    async fn workspaces_that_didnt_move_cant_be_dismissed() {
+        let st = crate::tasks::tests::state();
+        st.rt.lock().unwrap().workspaces_not_moved = Some("/x/agent-local-storage already holds files".into());
+        assert!(dismiss_item(State(st.clone()), Path("workspaces_not_moved".into())).await.is_err());
+        assert!(st.db.dismissed_needs_you().unwrap().is_empty(), "nothing is kept");
+        assert!(collect(&st).unwrap().iter().any(|i| i.kind == "workspaces_not_moved"), "still shown");
+    }
+
+    #[test]
+    fn workspaces_that_didnt_move_show_why() {
+        let st = crate::tasks::tests::state();
+        let shown = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "workspaces_not_moved").map(|i| i.text).collect::<Vec<_>>();
+        assert!(shown(&st).is_empty());
+        st.rt.lock().unwrap().workspaces_not_moved = Some("/x/agent-local-storage already holds files".into());
+        let text = shown(&st);
+        assert!(text.len() == 1 && text[0].starts_with("/x/agent-local-storage already holds files."), "{text:?}");
+    }
+
+    #[test]
+    fn an_old_workspaces_folder_in_the_checkout_is_shown_until_it_is_deleted() {
+        let st = crate::tasks::tests::state();
+        let shown = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "old_workspaces_reappeared").map(|i| i.text).collect::<Vec<_>>();
+        assert!(shown(&st).is_empty());
+        let old = st.cfg.root.join(crate::storage::NAME);
+        std::fs::create_dir_all(old.join("agent-2")).unwrap();
+        let text = shown(&st);
+        assert!(text.len() == 1 && text[0].starts_with(&format!("{} reappeared inside your checkout; look at it and delete it.", old.display())), "{text:?}");
+        std::fs::remove_dir_all(&old).unwrap();
+        assert!(shown(&st).is_empty());
     }
 
     #[tokio::test]

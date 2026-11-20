@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// A Loft issue's thread: comments, agents' notes and status changes, oldest first, with a box to comment.

@@ -5,18 +5,20 @@ import { costChange, exactDollars, resetText, wholeDollars } from "../src/lib/us
 
 const NOW = new Date(2026, 9, 27, 12, 0).getTime(); // Tue 12:00 local
 
-test("a reset reads as relative, then day and 24h time", () => {
+test("a reset reads as relative, then day and time", () => {
   assert.equal(resetText(new Date(2026, 9, 27, 14, 0).toISOString(), NOW, "en-GB"), "Resets in 2h · Tue 14:00");
   assert.equal(resetText(new Date(2026, 9, 27, 12, 25).toISOString(), NOW, "en-GB"), "Resets in 25m · Tue 12:25");
   assert.equal(resetText(new Date(2026, 9, 30, 21, 5).toISOString(), NOW, "en-GB"), "Resets in 3d · Fri 21:05");
 });
 
-test("a reset already due reads as in a moment", () => {
-  assert.equal(resetText(new Date(2026, 9, 27, 11, 59).toISOString(), NOW, "en-GB"), "Resets in a moment · Tue 11:59");
+test("a reset under 45 s away, due, or already past reads as in a moment", () => {
+  assert.equal(resetText(new Date(2026, 9, 27, 12, 0, 20).toISOString(), NOW, "en-GB"), "Resets in a moment · Tue 12:00");
+  assert.equal(resetText(new Date(2026, 9, 27, 11, 59, 30).toISOString(), NOW, "en-GB"), "Resets in a moment · Tue 11:59");
+  assert.equal(resetText(new Date(2026, 9, 27, 11, 55).toISOString(), NOW, "en-GB"), "Resets in a moment · Tue 11:55");
 });
 
-test("the time stays 24h even in a 12h locale", () => {
-  assert.equal(resetText(new Date(2026, 9, 27, 14, 0).toISOString(), NOW, "en-US"), "Resets in 2h · Tue 14:00");
+test("the time follows the locale's hour cycle", () => {
+  assert.match(resetText(new Date(2026, 9, 27, 14, 0).toISOString(), NOW, "en-US"), /^Resets in 2h · Tue 2:00\sPM$/);
 });
 
 test("no or bad reset time says unknown", () => {

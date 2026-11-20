@@ -44,7 +44,7 @@ const LOFT_PROMPT: &str = r#"You are Loft's own agent. You come with Loft and th
 
 ## What Loft is
 Loft is a small layer on top of the coding agent the user already uses (Claude Code). It runs agents for them, keeps them working on a schedule, lets them talk to each other and gives them memory that lasts. The user watches and steers from the web dashboard or the iPhone app.
-- Every agent has a name, a title, a project, standing instructions and a personality. It runs headless Claude Code in its own workspace folder and clones repos there; it never edits the user's checkout.
+- Every agent has a name, a role, a project, standing instructions and a personality. It runs headless Claude Code in its own workspace folder and clones repos there; it never edits the user's checkout.
 - A schedule (`interval_minutes`) wakes an agent on its own. Quiet hours hold those wake-ups during the user's working day so background runs don't eat the usage they need while they work. The user can always message an agent directly.
 - Agents ask for permissions in the chat; the user approves once or always. They keep long-term memory, share a task list, message each other, and open pull requests that show up as live cards.
 - Agents in the same project are grouped together and can @-mention each other.
@@ -88,7 +88,6 @@ const KICKOFF: &str = "[Loft: first launch] Loft just started with you in it. Th
 pub struct Template {
     pub key: &'static str,
     pub name: &'static str,
-    pub title: &'static str,
     /// When this agent is worth having, for the agent that picks templates.
     pub fits: &'static str,
     /// When it isn't.
@@ -114,11 +113,10 @@ pub const TEMPLATES: &[Template] = &[
     Template {
         key: "dev",
         name: "Dev",
-        title: "Feature developer",
         fits: "Projects the user is actively building and wants to push forward: apps, products, tools with a roadmap or a backlog of ideas. Suggest it for the most active projects.",
         skip: "Projects that already have a developer agent the user set up, finished or archived projects, and repos that only hold notes, config or dotfiles.",
         personality: "A builder who loves shipping. Curious about where the user wants to take the project, asks sharp questions before writing code, then delivers in small, reviewable steps. Upbeat, but never pads a reply.",
-        prompt: r#"You build new features for **{project}** (`{path}`), toward the direction the user sets. You start with no schedule: you only act when the user talks to you, until the two of you have agreed on a direction and a rhythm.
+        prompt: r#"You build new features for **{project}** (`{path}`), toward the direction the user sets. You start with no schedule: you work when the user or another agent hands you work, until the two of you have agreed on a direction and a rhythm.
 
 ## 1. Agree on a direction
 Before writing any code:
@@ -136,11 +134,11 @@ On each check-in, and whenever the user asks:
 2. Take the top roadmap item that isn't done. Build it as a small, complete slice on its own branch, with tests, following the project's conventions.
 3. Build and run the tests. Open a pull request (`gh pr create`) that says what it adds, why (which roadmap item) and how to try it.
 4. Update the roadmap: mark what shipped and note anything you learned.
-5. Report in a few lines: what you built, the pull request link, and what is next.
+5. Report in a few lines to whoever handed you the work (the user, or the agent that messaged you, as needs-action): what you built, the pull request link, and what is next.
 
 ## Rules
 - Never push to the default branch and never merge: every change goes through a pull request the user reviews.
-- When the direction is unclear, or a feature needs a decision (a new dependency, a data model change, a paid service), ask instead of guessing.
+- Ask only for real product decisions (the direction, a new dependency, a data model change, a paid service). Decide everything else with sensible defaults and carry on.
 - When the user changes direction, update the roadmap first, then follow it."#,
         model: "sonnet",
         interval_minutes: 0,
@@ -152,11 +150,10 @@ On each check-in, and whenever the user asks:
     Template {
         key: "lead",
         name: "Lead",
-        title: "Team lead",
         fits: "Projects with more than one agent, or that the user wants to plan before building: someone to turn ideas into specs and tickets for the team. Suggest it once a project has a Dev or the user plans to grow its team.",
         skip: "Projects with a single agent and nothing to plan, projects that already have a Lead, and agents without a project (a Lead always belongs to a project).",
         personality: "A calm captain. Asks the questions that matter, always with a recommendation, looks facts up instead of asking for them, and keeps the team pointed at the same goal.",
-        prompt: r#"You lead the team working on **{project}** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team; you have no step in that.
+        prompt: r#"You lead the team working on **{project}** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team: when it wakes you with ready tickets, you hand them out to the team's Devs (`mcp__loft__assign_ticket`) and do nothing else on the Delivery.
 
 Work only in your clone in your workspace; pull the default branch before you investigate.
 
@@ -183,7 +180,6 @@ Decisions the user made, one entry each. Ticket order lives in GitHub's blocking
     Template {
         key: "reviewer",
         name: "Reviewer",
-        title: "Code reviewer",
         fits: "Any project that changes often: recent commits, open pull requests, more than one contributor or agent working on it.",
         skip: "Repos that rarely change, generated code, notes or dotfiles.",
         personality: "Careful and specific. Points at the exact line and says why, separates real bugs from taste, and keeps praise and nitpicks short.",
@@ -192,11 +188,11 @@ Decisions the user made, one entry each. Ticket order lives in GitHub's blocking
 On each check-in:
 1. Keep a clone of the repo in your workspace and pull it. Look at what changed since your last review (remember the last commit you reviewed): new commits on the default branch and open pull requests (`gh pr list` if the repo is on GitHub).
 2. Review each change for correctness first: logic errors, unhandled edge cases, broken error handling, race conditions, data loss, API misuse, missing migrations. Then for clarity and consistency with the surrounding code.
-3. For a pull request, leave the review on GitHub (`gh pr review --comment`) when you have permission to; otherwise report it here. Lead with the problems that would cause a bug, each with the file, the line and a suggested fix.
+3. For a pull request, leave the review on GitHub (`gh pr review --comment`) when you have permission to; otherwise report it to whoever handed you the work. Lead with the problems that would cause a bug, each with the file, the line and a suggested fix.
 4. Don't push to the default branch and don't merge anything. If a fix is small and clear, you may open a pull request with it.
 5. Remember the last commit and pull requests you reviewed so the next check-in starts where you stopped.
 
-If nothing changed, say so in one line."#,
+If nothing changed, say so in one line. Report to whoever handed you the work."#,
         model: "sonnet",
         interval_minutes: 240,
         planning: false,
@@ -207,7 +203,6 @@ If nothing changed, say so in one line."#,
     Template {
         key: "security",
         name: "Security",
-        title: "Security auditor",
         fits: "Anything that can be reached or fed input by someone else: web apps, APIs, servers, mobile apps, browser extensions, bots, services that handle accounts, payments, personal data or secrets, and libraries other people install.",
         skip: "Local scripts, dotfiles, notes, static content with no input, throwaway experiments. Nothing reaches them from outside, so there is nothing to attack.",
         personality: "Calm and precise. Rates findings honestly, never inflates severity, and always explains how an attack would actually work.",
@@ -218,7 +213,7 @@ On each check-in:
 2. Look for problems an attacker could really use: missing authentication or authorization, injection (SQL, shell, path traversal, template), unsafe deserialization, SSRF, XSS and CSRF, secrets committed to the repo, weak crypto, insecure defaults, overly broad CORS, and dependencies with known vulnerabilities (`npm audit`, `cargo audit`, `pip-audit` or the equivalent, when available).
 3. For each finding give the severity (critical, high, medium, low), where it is, how it could be exploited and the fix. Verify before you report: trace the input to the sink. No speculative findings.
 4. Never test against production systems, never exfiltrate anything, and never commit secrets you find: report where they are so the user can rotate them.
-5. Report findings in this chat and add a Loft issue for each high or critical one (`mcp__loft__create_issue`). Open a pull request only for fixes that are small and safe.
+5. Report findings to whoever handed you the work (the user, or the agent that messaged you, as needs-action) and add a Loft issue for each high or critical one (`mcp__loft__create_issue`). Open a pull request only for fixes that are small and safe.
 6. Remember what you have already reported so you don't repeat it.
 
 If you found nothing new, say so in one line."#,
@@ -232,7 +227,6 @@ If you found nothing new, say so in one line."#,
     Template {
         key: "tests",
         name: "QA",
-        title: "Test keeper",
         fits: "Projects with real logic and a test setup, or ones that clearly need one: apps, services, libraries, CLIs.",
         skip: "Docs, notes, config and dotfiles repos, and tiny one-file scripts where a test would only repeat the code.",
         personality: "Methodical and skeptical. Trusts a passing test only once it has seen it fail for the right reason.",
@@ -245,7 +239,7 @@ On each check-in:
 4. Don't weaken or delete a test to make it pass. Don't push to the default branch.
 5. Remember how to run the suite and its usual run time, so later check-ins are quick.
 
-If everything passes and nothing new needs tests, say so in one line."#,
+If everything passes and nothing new needs tests, say so in one line. Report to whoever handed you the work."#,
         model: "sonnet",
         interval_minutes: 720,
         planning: false,
@@ -256,7 +250,6 @@ If everything passes and nothing new needs tests, say so in one line."#,
     Template {
         key: "deps",
         name: "Deps",
-        title: "Dependency keeper",
         fits: "Projects with a dependency manifest (package.json, Cargo.toml, requirements.txt or pyproject.toml, go.mod, Gemfile, Podfile, Package.swift) that are still in use.",
         skip: "Projects with no dependencies, archived projects, and ones pinned on purpose.",
         personality: "Conservative. Small, safe upgrades over big jumps, and always reads the changelog first.",
@@ -280,7 +273,6 @@ If everything is current, say so in one line."#,
     Template {
         key: "docs",
         name: "Docs",
-        title: "Docs keeper",
         fits: "Projects other people read or use: libraries, public repos, APIs, apps with setup steps, projects with a docs folder.",
         skip: "Personal scripts, private experiments, and repos with no README worth keeping.",
         personality: "Clear and plain-spoken. Writes for a newcomer, cuts jargon, and keeps docs short.",
@@ -303,7 +295,6 @@ If the docs are already accurate, say so in one line."#,
     Template {
         key: "triage",
         name: "Triage",
-        title: "Issue triage",
         fits: "Projects on GitHub that get issues, especially from other people.",
         skip: "Projects with no GitHub remote, or with issues turned off or never used.",
         personality: "Friendly and organized. Thanks reporters, asks for exactly what's missing, and never closes an issue it isn't sure about.",
@@ -327,7 +318,6 @@ If there is nothing new, say so in one line."#,
     Template {
         key: "ci",
         name: "CI",
-        title: "CI watcher",
         fits: "Projects on GitHub with CI workflows (.github/workflows) that run on every push or pull request.",
         skip: "Projects with no CI, or CI that only runs by hand.",
         personality: "Quick and to the point. Finds the first real error in a wall of logs and says what broke it.",
@@ -406,7 +396,6 @@ pub fn ensure_loft(state: &AppState) {
             let projects = state.settings.boot().projects_dir.display().to_string();
             let patch = json!({
                 "name": LOFT_NAME,
-                "title": "Your Loft guide",
                 "personality": LOFT_PERSONALITY,
                 "prompt": LOFT_PROMPT.replace("{projects}", &projects),
                 "model": "sonnet",
@@ -476,7 +465,6 @@ pub fn mcp_tools() -> Vec<Value> {
                 "project": { "type": "string", "description": "The project it works on: a repo name exactly as list_projects shows it (e.g. \"work/api\")." },
                 "group": { "type": "string", "description": "Its group, the label that makes its team, e.g. \"Loft\". Leave it out and it has no group, so no team and no part in a Delivery." },
                 "name": { "type": "string", "description": "Short name, unique within its main project. Defaults to the template's." },
-                "title": { "type": "string" },
                 "role": { "type": "string", "enum": ["lead", "dev", "code_reviewer", "qa", "security", "custom"], "description": "What it does in its team: \"lead\" plans with the user (one per group: it takes the role from any other Lead there), \"dev\" builds the tickets, \"code_reviewer\", \"qa\" and \"security\" review them, \"custom\" has no part in the team's work. Defaults to the template's, or custom without one." },
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },
                 "replace_prompt": { "type": "boolean", "description": "Use `prompt` instead of the template's instructions rather than after them." },
@@ -511,11 +499,10 @@ fn list_templates() -> String {
         .iter()
         .map(|t| {
             format!(
-                "## {key}: {name} ({title})\nFits: {fits}\nSkip: {skip}\nDefault: role {role}, {every}, model {model}.{starts}\nInstructions:\n{prompt}",
+                "## {key}: {name}\nFits: {fits}\nSkip: {skip}\nDefault: role {role}, {every}, model {model}.{starts}\nInstructions:\n{prompt}",
                 key = t.key,
                 role = t.role,
                 name = t.name,
-                title = t.title,
                 fits = t.fits,
                 skip = t.skip,
                 every = if t.interval_minutes > 0 { format!("every {}", every(t.interval_minutes)) } else { "no schedule (only runs when messaged, until it sets its own)".into() },
@@ -660,7 +647,6 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     // Only these fields: an agent can't hand another agent more tools, MCP servers or a looser permission mode.
     let patch = json!({
         "name": name,
-        "title": Some(s("title")).filter(|t| !t.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.title.to_string())),
         "project": project,
         "group": s("group"),
         "personality": Some(s("personality")).filter(|p| !p.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.personality.to_string())),
@@ -817,6 +803,8 @@ mod tests {
         assert_eq!(a.created_by.as_deref(), Some(me.id.as_str()));
         assert!(a.prompt.contains("**work/api**") && a.prompt.ends_with("## About this project\nAn Axum API behind Cloudflare."), "{}", a.prompt);
         assert!(a.quiet_hours.is_empty(), "runs through working hours unless the user asks");
+        let schema = mcp_tools().into_iter().find(|t| t["name"] == "create_agent").unwrap();
+        assert!(schema["inputSchema"]["properties"].get("title").is_none() && schema["inputSchema"]["properties"].get("role").is_some());
 
         std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
         // A project that isn't one: refused before anyone is asked.
@@ -862,9 +850,18 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!(req.tool_name, CREATE_RULE);
-        crate::agents::decide(&st, &req.id, "deny", None, Some("not now".into())).unwrap();
+        crate::agents::decide(&st, &req.id, "deny", None, Some("not now".into()), None).unwrap();
         assert_eq!(call.await.unwrap().unwrap_err(), "The user declined. Their note: not now");
         assert!(!st.db.list_agents().unwrap().iter().any(|a| a.name == "Docs"));
+    }
+
+    #[test]
+    fn role_templates_report_to_whoever_handed_over_the_work() {
+        for key in ["dev", "reviewer", "security", "tests"] {
+            let p = template(key).unwrap().prompt;
+            assert!(!p.contains("only act when the user talks to you") && !p.contains("in this chat") && !p.contains("report it here"), "{key}");
+            assert!(p.contains("whoever handed you the work"), "{key}");
+        }
     }
 
     #[test]
@@ -954,7 +951,7 @@ mod tests {
     async fn a_dev_agent_waits_for_a_direction_and_opens_the_interview() {
         let st = state();
         // The avatar run really starts: point it at a stand-in for claude that stays busy and does nothing.
-        let bin = st.cfg.storage_dir.parent().unwrap().join("idle-claude");
+        let bin = st.cfg.root.as_path().join("idle-claude");
         std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let mut set = st.settings.get();
@@ -984,7 +981,7 @@ mod tests {
     async fn a_kickoff_that_never_opens_the_interview_is_asked_again_and_its_text_stays_hidden() {
         let st = state();
         // A model that only narrates: it never posts a round.
-        let bin = st.cfg.storage_dir.parent().unwrap().join("chatty-claude");
+        let bin = st.cfg.root.as_path().join("chatty-claude");
         std::fs::write(&bin, r#"#!/bin/sh
 prompt=$(cat)
 printf '%s\n---\n' "$prompt" >> prompts.log
@@ -1028,7 +1025,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!((req.tool_name.as_str(), req.reason.as_str()), (SCHEDULE_RULE, "Agreed: every 6h"));
-        crate::agents::decide(&st, &req.id, "allow_once", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "allow_once", None, None, None).unwrap();
         assert_eq!(call.await.unwrap().unwrap(), "You now check in every 6 hour(s), paused Mon–Fri 09:00–18:00.");
         let a = st.db.get_agent(&me.id).unwrap().unwrap();
         assert_eq!((a.interval_minutes, a.quiet_hours.len()), (360, 1));
@@ -1050,8 +1047,9 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
             assert!(t.prompt.contains("{project}") && t.prompt.contains("{path}"), "{}", t.key);
             assert!(t.interval_minutes == 0 || t.interval_minutes >= MIN_INTERVAL, "{}", t.key);
         }
-        assert!(list_templates().contains("## security: Security (Security auditor)"));
-        assert!(list_templates().contains("## lead: Lead (Team lead)"));
+        assert!(list_templates().contains("## security: Security\n"));
+        assert!(list_templates().contains("## lead: Lead\n"));
+        assert!(!list_templates().contains("Security auditor") && !list_templates().contains("Team lead"), "no titles");
         let roles: Vec<_> = TEMPLATES.iter().map(|t| (t.key, t.role)).collect();
         assert_eq!(roles[..5], [("dev", "dev"), ("lead", "lead"), ("reviewer", "code_reviewer"), ("security", "security"), ("tests", "qa")]);
         assert!(roles[5..].iter().all(|(_, r)| *r == "custom"), "{roles:?}");
@@ -1132,16 +1130,16 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let path = st.settings.boot().projects_dir.join("lead-std").display().to_string();
         assert!(path.starts_with(&std::env::temp_dir().display().to_string()), "tests never use the real projects folder");
         assert!(lead.prompt.starts_with(&format!(
-            "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team; you have no step in that.\n\nWork only in your clone in your workspace;"
+            "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team: when it wakes you with ready tickets, you hand them out to the team's Devs (`mcp__loft__assign_ticket`) and do nothing else on the Delivery.\n\nWork only in your clone in your workspace;"
         )), "{}", lead.prompt);
         assert!(lead.prompt.contains("Ticket order lives in GitHub's blocking links, not in memory."));
-        // It no longer hands out or tracks tickets: Loft's Delivery does.
+        // It no longer tracks tickets by hand: Loft's Delivery does; it only hands out the ones Loft names.
         for gone in ["Handing out work", "in-progress", "needs-human", "changes-requested", "## Tracking"] {
             assert!(!lead.prompt.contains(gone), "still has {gone}");
         }
         assert!(!lead.prompt.contains("{project}") && !lead.prompt.contains("{path}"));
         let t = template("lead").unwrap();
-        assert_eq!((t.name, t.title, t.model, t.planning, t.role), ("Lead", "Team lead", "opus", true, "lead"));
+        assert_eq!((t.name, t.model, t.planning, t.role), ("Lead", "opus", true, "lead"));
 
         // Planning's rules win over standing instructions on specs and tickets.
         let sys = crate::agents::system_prompt(&st, &lead);

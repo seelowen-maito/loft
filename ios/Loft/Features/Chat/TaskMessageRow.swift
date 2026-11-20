@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// A task brief or a delegated-subtask report, shown as a compact row instead of a full bubble.

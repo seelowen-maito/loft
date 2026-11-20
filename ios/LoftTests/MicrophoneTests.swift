@@ -1,6 +1,7 @@
 import AVFoundation
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The guarded mic start: a route without a usable input throws instead of crashing, and starting again and
 /// again never leaves two listeners.

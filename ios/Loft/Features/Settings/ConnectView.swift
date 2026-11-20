@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// Enter, test and save the Loft server address.

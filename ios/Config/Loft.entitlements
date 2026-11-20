@@ -8,5 +8,10 @@
 	<!-- Urgency-3 items ("blocks an agent now") break through Focus. -->
 	<key>com.apple.developer.usernotifications.time-sensitive</key>
 	<true/>
+	<!-- The Loft address, shared with the home screen widgets. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)$(LOFT_BUNDLE_ID:default=com.example.loft).shared</string>
+	</array>
 </dict>
 </plist>

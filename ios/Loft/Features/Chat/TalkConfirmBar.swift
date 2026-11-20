@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// Above the message box while Talk's tidied text waits in it: a Send button whose ring fills for a few seconds, then
@@ -10,6 +11,8 @@ struct TalkConfirmBar: View {
     let text: String
     /// What the box holds now: typing in it ends the ask.
     let current: String
+    /// Who it goes to, from what you said ("To Loft Dev, from what you said."), when a name was heard.
+    let note: String?
     let send: () -> Void
     let cancel: () -> Void
     let done: () -> Void
@@ -24,9 +27,10 @@ struct TalkConfirmBar: View {
         TalkConfirm.listens(state, sayToSend: sayToSend, active: scenePhase == .active, listenedFor: now.timeIntervalSince(since))
     }
 
-    init(text: String, current: String, startAsking: Bool = false, send: @escaping () -> Void, cancel: @escaping () -> Void, done: @escaping () -> Void) {
+    init(text: String, current: String, note: String? = nil, startAsking: Bool = false, send: @escaping () -> Void, cancel: @escaping () -> Void, done: @escaping () -> Void) {
         self.text = text
         self.current = current
+        self.note = note
         self.send = send
         self.cancel = cancel
         self.done = done
@@ -35,6 +39,10 @@ struct TalkConfirmBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let note {
+                Label(note, systemImage: "person.crop.circle").font(.subheadline)
+                    .accessibilityIdentifier("talkRecipientNote")
+            }
             HStack(spacing: 10) {
                 if state == .asking {
                     Text("Send it?").font(.headline).accessibilityIdentifier("talkAsk")

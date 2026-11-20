@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class BackupsTests: XCTestCase {
     /// Choosing a folder sends only `backup_dir`, so a setting changed on the web since the last read isn't overwritten.

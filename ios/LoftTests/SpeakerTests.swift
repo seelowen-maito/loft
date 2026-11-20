@@ -1,6 +1,7 @@
 import AVFoundation
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The speaker as a holder of the audio: a wait that another request overtakes ends quietly, and the voice
 /// preview doesn't play when the audio is refused.

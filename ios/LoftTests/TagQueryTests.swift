@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class TagQueryTests: XCTestCase {
     func testOnlyAHashTokenAtTheEndOpensThePicker() {

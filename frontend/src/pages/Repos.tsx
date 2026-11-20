@@ -5,7 +5,13 @@ import {
   GitPullRequest, Globe, KeyRound, Lock, Plus, RefreshCw, Search, Star, X,
 } from "lucide-react";
 import { api, type Commit, type GithubInfo, type GithubItem, type Info, type Repo, type Site } from "../lib/api";
-import { cx, fmtNum, timeAgo } from "../lib/format";
+import { cx, fmtNum } from "../lib/format";
+import { Callout, ErrorLine } from "../components/Callout";
+import { ActionButton } from "../components/ActionButton";
+import { useAction } from "../lib/useAction";
+import { relTime } from "../lib/time";
+import { reposList, useRepos } from "../hooks/lists";
+import { Dialog } from "../components/Dialog";
 import { Heatmap, ShareBars, WeeklyBars } from "../components/Charts";
 import { AgentActivity } from "./AgentActivity";
 import { pickGreeting } from "../lib/greetings";
@@ -28,11 +34,11 @@ function lastActivity(r: Repo) {
 }
 
 export default function ReposPage() {
-  const [repos, setRepos] = useState<Repo[] | null>(null);
+  const repos = useRepos().items;
   const [gh, setGh] = useState<Record<string, GithubInfo>>({});
   const [ghLoading, setGhLoading] = useState(true);
   const [info, setInfo] = useState<Info | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const refreshing = useAction();
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("activity");
@@ -50,21 +56,24 @@ export default function ReposPage() {
     requestAnimationFrame(() => opener.current?.focus());
   };
 
-  const load = async (refresh = false) => {
-    setRefreshing(true);
-    try {
-      const r = await api.repos(refresh);
-      setRepos(r);
-      setLoadedAt(new Date());
-    } finally {
-      setRefreshing(false);
-    }
+  // The list loads (again) on its own: a load or a Refresh marks the time.
+  useEffect(() => {
+    if (repos) setLoadedAt(new Date());
+  }, [repos]);
+  const loadGithub = (refresh: boolean) => {
     setGhLoading(true);
     api.github(refresh).then(setGh).finally(() => setGhLoading(false));
   };
+  const refresh = () =>
+    refreshing.run(async () => {
+      // Read here, not through the list's reload, which keeps the old list on a failure: run() shows the error.
+      const rs = await api.repos(true);
+      await reposList.reload(async () => rs);
+      loadGithub(true);
+    });
 
   useEffect(() => {
-    load();
+    loadGithub(false);
     api.info().then(setInfo).catch(() => {});
   }, []);
 
@@ -131,14 +140,15 @@ export default function ReposPage() {
               </h1>
             </div>
             <div className="flex items-center gap-3">
-              {loadedAt && <span className="font-mono text-[11px] text-fg-3">updated {timeAgo(loadedAt.toISOString())}</span>}
-              <button className="btn" onClick={() => load(true)} disabled={refreshing}>
-                <RefreshCw className={cx("size-3.5", refreshing && "animate-spin")} /> Refresh
-              </button>
+              {loadedAt && <span className="font-mono text-[11px] text-fg-3">updated {relTime(loadedAt.toISOString())}</span>}
+              <ActionButton variant="secondary" icon={<RefreshCw className="size-3.5" />} pending={refreshing.busy} pendingLabel="Refreshing…" onClick={refresh}>
+                Refresh
+              </ActionButton>
               <button className="btn-primary" onClick={openNew} aria-label="New project">
                 <Plus className="size-3.5" /> <span className="max-sm:hidden">New project</span>
               </button>
             </div>
+            <ErrorLine error={refreshing.error} className="w-full text-right" />
           </div>
 
           <div className="mt-10 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-line bg-line md:grid-cols-5">
@@ -157,14 +167,11 @@ export default function ReposPage() {
 
       <div className="mx-auto max-w-[1600px] space-y-6 px-5 py-8">
         {info && !info.github_token && totals.ghErrors > 0 && (
-          <div className="flex items-start gap-3 rounded-2xl border border-warn/20 bg-warn/[0.06] px-4 py-3 text-[13px]">
-            <KeyRound className="mt-0.5 size-4 shrink-0 text-warn" />
-            <div className="text-fg-2">
-              <span className="text-fg">GitHub data is limited.</span> {totals.ghErrors} repo{totals.ghErrors > 1 ? "s" : ""} couldn't be read,
-              probably because they're private. Add a GitHub token in <Link to="/settings" className="text-accent underline decoration-accent/30 underline-offset-2">Settings</Link> to see
-              their pull requests and issues.
-            </div>
-          </div>
+          <Callout tone="warn" icon={<KeyRound />}>
+            <span className="text-fg">GitHub data is limited.</span> {totals.ghErrors} repo{totals.ghErrors > 1 ? "s" : ""} couldn't be read,
+            probably because they're private. Add a GitHub token in <Link to="/settings" className="text-accent underline decoration-accent/30 underline-offset-2">Settings</Link> to see
+            their pull requests and issues.
+          </Callout>
         )}
 
         <AgentActivity />
@@ -354,7 +361,7 @@ function ItemList({
                 <span>·</span>
                 <span>{it.author}</span>
                 <span>·</span>
-                <span>{timeAgo(it.updated_at)}</span>
+                <span>{relTime(it.updated_at)}</span>
                 {it.labels.slice(0, 3).map((l) => <span key={l} className="chip py-0 text-[10px]">{l}</span>)}
               </div>
             </div>
@@ -432,7 +439,7 @@ function RepoCard({ repo: r, gh, index, onOpen }: { repo: Repo; gh?: GithubInfo;
         {r.last_commit ? (
           <div className="flex items-center gap-2 border-t border-line pt-3 text-[12.5px]">
             <span className="truncate text-fg-2">{r.last_commit.subject}</span>
-            <span className="ml-auto shrink-0 font-mono text-[11px] text-fg-3">{timeAgo(r.last_commit.timestamp)}</span>
+            <span className="ml-auto shrink-0 font-mono text-[11px] text-fg-3">{relTime(r.last_commit.timestamp)}</span>
           </div>
         ) : (
           <div className="border-t border-line pt-3 text-[12.5px] text-fg-3">{r.error ? <span className="text-bad">{r.error}</span> : "No commits yet"}</div>
@@ -448,104 +455,94 @@ function RepoDrawer({ repo: r, gh, onClose }: { repo: Repo; gh?: GithubInfo; onC
     setCommits(null);
     api.commits(r.name).then(setCommits).catch(() => setCommits([]));
   }, [r.name]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
-      <aside className="relative flex h-full w-full max-w-[640px] animate-rise flex-col border-l border-line bg-ink-900 shadow-2xl">
-        <div className="flex items-start justify-between gap-4 border-b border-line px-6 py-5">
-          <div className="min-w-0">
-            <div className="eyebrow">{r.path}</div>
-            <h2 className="mt-1 font-serif text-[34px] leading-none tracking-tight">{r.name}</h2>
-            {gh?.description && <p className="mt-2 text-[13px] text-fg-2">{gh.description}</p>}
-          </div>
-          <button className="btn-ghost" onClick={onClose} aria-label="Close">
-            <X className="size-4" />
-          </button>
+    <Dialog title={r.name} size="drawer" onClose={onClose} className="flex flex-col">
+      <div className="flex items-start justify-between gap-4 border-b border-line px-6 py-5">
+        <div className="min-w-0">
+          <div className="eyebrow">{r.path}</div>
+          <h2 className="mt-1 font-serif text-[34px] leading-none tracking-tight">{r.name}</h2>
+          {gh?.description && <p className="mt-2 text-[13px] text-fg-2">{gh.description}</p>}
         </div>
-        <div className="min-h-0 flex-1 space-y-7 overflow-y-auto px-6 py-6">
-          <StatusChips r={r} />
+        <button className="btn-ghost" onClick={onClose} aria-label="Close">
+          <X className="size-4" />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 space-y-7 overflow-y-auto px-6 py-6">
+        <StatusChips r={r} />
 
-          {r.sites.length > 0 && <Sites sites={r.sites} />}
+        {r.sites.length > 0 && <Sites sites={r.sites} />}
 
-          <div className="grid grid-cols-4 gap-px overflow-hidden rounded-xl border border-line bg-line">
-            {[
-              ["Commits", fmtNum(r.total_commits)],
-              ["Branches", String(r.branches)],
-              ["Stars", gh && !gh.error ? String(gh.stars) : "—"],
-              ["Forks", gh && !gh.error ? String(gh.forks) : "—"],
-            ].map(([k, v]) => (
-              <div key={k} className="bg-ink-900 px-4 py-3">
-                <div className="eyebrow">{k}</div>
-                <div className="mt-1 font-serif text-[28px] leading-none">{v}</div>
-              </div>
-            ))}
+        <div className="grid grid-cols-4 gap-px overflow-hidden rounded-xl border border-line bg-line">
+          {[
+            ["Commits", fmtNum(r.total_commits)],
+            ["Branches", String(r.branches)],
+            ["Stars", gh && !gh.error ? String(gh.stars) : "—"],
+            ["Forks", gh && !gh.error ? String(gh.forks) : "—"],
+          ].map(([k, v]) => (
+            <div key={k} className="bg-ink-900 px-4 py-3">
+              <div className="eyebrow">{k}</div>
+              <div className="mt-1 font-serif text-[28px] leading-none">{v}</div>
+            </div>
+          ))}
+        </div>
+
+        <div>
+          <div className="eyebrow mb-3">Daily activity</div>
+          <div className="overflow-x-auto"><Heatmap daily={r.daily} cell={10} gap={3} /></div>
+        </div>
+
+        {gh?.error && (
+          <Callout tone="warn" icon={<AlertTriangle />}>{gh.error}</Callout>
+        )}
+        {gh && !gh.error && (
+          <div className="grid gap-5 sm:grid-cols-2">
+            <MiniList title="Pull requests" items={gh.pulls} />
+            <MiniList title="Issues" items={gh.issues} />
           </div>
+        )}
 
+        <div className="grid gap-6 sm:grid-cols-2">
           <div>
-            <div className="eyebrow mb-3">Daily activity</div>
-            <div className="overflow-x-auto"><Heatmap daily={r.daily} cell={10} gap={3} /></div>
+            <div className="eyebrow mb-3">Languages</div>
+            {r.languages.length ? <ShareBars items={r.languages} /> : <div className="text-[13px] text-fg-3">—</div>}
           </div>
-
-          {gh?.error && (
-            <div className="flex items-center gap-2 rounded-xl border border-warn/20 bg-warn/[0.06] px-3 py-2 text-[12.5px] text-fg-2">
-              <AlertTriangle className="size-3.5 text-warn" /> {gh.error}
-            </div>
-          )}
-          {gh && !gh.error && (
-            <div className="grid gap-5 sm:grid-cols-2">
-              <MiniList title="Pull requests" items={gh.pulls} />
-              <MiniList title="Issues" items={gh.issues} />
-            </div>
-          )}
-
-          <div className="grid gap-6 sm:grid-cols-2">
-            <div>
-              <div className="eyebrow mb-3">Languages</div>
-              {r.languages.length ? <ShareBars items={r.languages} /> : <div className="text-[13px] text-fg-3">—</div>}
-            </div>
-            <div>
-              <div className="eyebrow mb-3">Contributors</div>
-              <div className="space-y-1.5">
-                {r.contributors.map(([name, n]) => (
-                  <div key={name} className="flex items-center justify-between text-[12.5px]">
-                    <span className="truncate text-fg-2">{name}</span>
-                    <span className="font-mono text-[11px] text-fg-3">{n}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
           <div>
-            <div className="eyebrow mb-3">Recent commits</div>
-            {!commits && <div className="skeleton h-40 rounded-xl" />}
-            <ol className="relative space-y-0">
-              {commits?.map((c) => (
-                <li key={c.hash} className="group relative flex gap-3 py-2 pl-5 before:absolute before:left-[3px] before:top-0 before:h-full before:w-px before:bg-line">
-                  <span className="absolute left-0 top-[15px] size-[7px] rounded-full border border-fg-3 bg-ink-900 group-first:border-accent group-first:bg-accent" />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px]">{c.subject}</div>
-                    <div className="mt-0.5 flex gap-2 font-mono text-[11px] text-fg-3">
-                      <span>{c.hash.slice(0, 7)}</span>
-                      <span>{c.author}</span>
-                      <span>{timeAgo(c.timestamp)}</span>
-                      {c.insertions !== null && <span className="text-good">+{c.insertions}</span>}
-                      {c.deletions !== null && <span className="text-bad">−{c.deletions}</span>}
-                    </div>
-                  </div>
-                </li>
+            <div className="eyebrow mb-3">Contributors</div>
+            <div className="space-y-1.5">
+              {r.contributors.map(([name, n]) => (
+                <div key={name} className="flex items-center justify-between text-[12.5px]">
+                  <span className="truncate text-fg-2">{name}</span>
+                  <span className="font-mono text-[11px] text-fg-3">{n}</span>
+                </div>
               ))}
-            </ol>
+            </div>
           </div>
         </div>
-      </aside>
-    </div>
+
+        <div>
+          <div className="eyebrow mb-3">Recent commits</div>
+          {!commits && <div className="skeleton h-40 rounded-xl" />}
+          <ol className="relative space-y-0">
+            {commits?.map((c) => (
+              <li key={c.hash} className="group relative flex gap-3 py-2 pl-5 before:absolute before:left-[3px] before:top-0 before:h-full before:w-px before:bg-line">
+                <span className="absolute left-0 top-[15px] size-[7px] rounded-full border border-fg-3 bg-ink-900 group-first:border-accent group-first:bg-accent" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[13px]">{c.subject}</div>
+                  <div className="mt-0.5 flex gap-2 font-mono text-[11px] text-fg-3">
+                    <span>{c.hash.slice(0, 7)}</span>
+                    <span>{c.author}</span>
+                    <span>{relTime(c.timestamp)}</span>
+                    {c.insertions !== null && <span className="text-good">+{c.insertions}</span>}
+                    {c.deletions !== null && <span className="text-bad">−{c.deletions}</span>}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </div>
+    </Dialog>
   );
 }
 

@@ -1,4 +1,5 @@
 import type { NeedsYouAction, NeedsYouList } from "./needsYou";
+import { errorText } from "./useAction.ts";
 
 export type Avatar = { svg: string };
 
@@ -8,7 +9,6 @@ export type QuietWindow = { days: number[]; start: string; end: string };
 export type Agent = {
   id: string;
   name: string;
-  title: string;
   /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
   /** Free-text group its team goes by (Acme); "" means no team. Missing from servers before groups. */
@@ -16,13 +16,17 @@ export type Agent = {
   /** The projects it works in, main first. Missing from servers before groups. */
   projects?: string[];
   /** Projects that are a folder of repos or a missing folder: kept, but the user picks again. */
-  project_problems?: { project: string; problem: string }[];
+  project_problems?: { project: string; problem: string; hint?: boolean }[];
   personality: string;
   prompt: string;
   model: string;
   effort: string;
   interval_minutes: number;
   quiet_hours: QuietWindow[];
+  /** `/loop`: the prompt Loft sends again every interval until it's stopped. */
+  loop?: { prompt: string; interval_minutes: number; next_at: string } | null;
+  /** `/schedule`: prompts Loft sends once, or at each due time of a repeat. */
+  schedules?: { id: string; prompt: string; every: string | null; time: string | null; next_at: string }[];
   allowed_tools: string[];
   disallowed_tools: string[];
   mcp_servers: Record<string, unknown>;
@@ -52,6 +56,8 @@ export type Agent = {
   /** The agent that created this one, if an agent did. */
   created_by?: string | null;
   running?: boolean;
+  /** A Redraw waits behind its current run or is drawing now. Missing from servers before Redraw showed it. */
+  redrawing?: boolean;
   workspace?: string;
   /** Last event from claude in the current run; null when not running. */
   last_output_at?: string | null;
@@ -75,6 +81,9 @@ export const ROLES: { value: string; label: string; hint: string }[] = [
   { value: "security", label: "Security", hint: "checks for security problems" },
   { value: "custom", label: "Custom", hint: "follows only its own instructions" },
 ];
+
+/** The label an agent goes by, from its role: "Code reviewer", "Custom". No role yet reads as Custom. */
+export const roleLabel = (role?: string) => ROLES.find((r) => r.value === (role || "custom"))?.label ?? role ?? "Custom";
 
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
@@ -105,6 +114,9 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 /** A Loft issue (stored as a task): shaped like a GitHub issue, plus an agent, an execution status and a thread. */
 /** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
  *  outside it (`skipped` says why), so it never hands them out. */
+/** An open ticket outside a spec that one of its tickets waits on (`owner/repo#n`), and the Delivery that owns it (null when it has none). */
+export type WaitsOn = { blocker: string; delivery: { repo: string; spec: number; started: boolean; issue_id: string | null } | null };
+
 export type IssueDelivery = {
   /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
@@ -121,12 +133,21 @@ export type IssueDelivery = {
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;
   started: boolean;
+  /** A Loft issue whose project can't hold its Delivery (no git repo of its own): why, instead of a Start button. */
+  cannot_start?: string;
   agent_id: string | null;
   agent_name: string | null;
   pr: number | null;
+  /** Its PR's Checks tab on GitHub (the spec PR, or a standalone ticket's PR); null in a plan kept in Loft or before the PR opens. An older server doesn't send it. */
+  checks_url?: string | null;
+  /** When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included; null when none is. An older server doesn't send it. */
+  ci_since?: string | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */
+  waits_on?: WaitsOn[];
+  /** `waiting_for_ci`: its reviewers all passed, only its CI is left (no agent on it), since `ci_since` (RFC 3339). */
+  tickets?: { number: number; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; waiting_for_ci?: boolean; ci_since?: string | null }[];
   /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
   waiting_for_lead?: number[];
   /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
@@ -312,7 +333,9 @@ export type Memory = { id: number; agent_id: string; title: string; content: str
 export type PermissionRequest = {
   id: string;
   agent_id: string;
-  source: "prompt" | "request";
+  /** prompt: a blocked tool call. request: the agent asked explicitly. questions: an allowed `AskUserQuestion`'s
+   *  questions, answered rather than allowed. */
+  source: "prompt" | "request" | "questions";
   tool_name: string;
   input: Record<string, any>;
   reason: string;
@@ -470,12 +493,12 @@ export type HerdrStatus = {
 };
 
 export type UpdateStatus = {
-  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error";
+  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error" | "blocked";
   current: string;
   latest: string | null;
   running_agents: number;
   error: string | null;
-  /** For "restart": why the restart hasn't happened. */
+  /** For "restart": why the restart hasn't happened. For "blocked": why the checkout can't update. */
   why: string | null;
 };
 
@@ -573,6 +596,11 @@ export type MirrorSync = {
   skipped: { project: string; reason: string }[];
 };
 
+/** Loft's https address on the tailnet (null when `tailscale serve` doesn't serve it), and the command that turns it on. */
+export type Https = { url: string | null; host: string | null; command: string };
+/** Whether this Mac can transcribe the web's voice, and whether cleanup runs on Apple's on-device model or on Haiku. */
+export type VoiceStatus = { speech: { ready: boolean; text: string }; cleanup: { on_device: boolean; text: string } };
+
 /** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
 export type MacAccess = {
   items: { id: string; label: string; folder: string; state: "allowed" | "blocked" | "waiting" | "missing" }[];
@@ -592,6 +620,9 @@ export type SettingsView = {
   pending_restart: string[];
   running_agents: number;
 };
+
+/** Whether the claude CLI is logged in (`GET /claude/login`). */
+export type ClaudeLogin = { logged_in: boolean; account: string | null; plan: string | null; note: string | null; steps: string };
 
 /** Claude plan limits, as in Claude Code's /usage. percent is 0–100. */
 export type UsageWindow = { key: string; label: string; percent: number; resets_at: string | null };
@@ -617,6 +648,11 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     headers: body !== undefined ? { "content-type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return answer<T>(res);
+}
+
+/** A response's JSON, or its `error` thrown. */
+async function answer<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as any).error ?? `${res.status} ${res.statusText}`);
   return data as T;
@@ -625,7 +661,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 /** A grill request's error as text for the user: the 409 codes the server sends when the round was sent or the
  * interview ended elsewhere. Same list as the app's `LoftStore.grillFailure`. */
 export function grillError(e: unknown) {
-  const m = (e as Error).message;
+  const m = errorText(e);
   if (m === "grill_closed") return "This interview has already ended.";
   if (m === "round_closed" || m === "question_closed") return "This round was already sent.";
   return m;
@@ -643,6 +679,8 @@ export type SimulatorInput =
   | { action: "key"; code: number }
   | { action: "button"; name: "home" | "lock" };
 
+export type AgentCommand = { name: string; description: string; tag: "passthrough" | "loft" | "terminal"; reason: string | null };
+
 export const api = {
   simulators: () => req<{ interactive: boolean; devices: Simulator[]; error?: string }>("GET", "/simulator"),
   /** Agents' Simulator devices, biggest first; none without Xcode. */
@@ -653,7 +691,25 @@ export const api = {
   usage: () => req<Usage>("GET", "/usage"),
   system: () => req<SystemReading>("GET", "/system"),
   /** Lists a fixed set of macOS-guarded folders; can show macOS's prompts on the Mac. */
+  claudeLogin: () => req<ClaudeLogin>("GET", "/claude/login"),
+  claudeLoginTerminal: () => req<{ ok: boolean }>("POST", "/claude/login/terminal"),
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
+  /** Adds a chunk of a Talk session's audio (16 kHz mono 16-bit PCM) and returns the text of all of it so far; the
+   * final chunk ends the session. */
+  transcribe: async (session: string, audio: Uint8Array, final: boolean): Promise<{ text: string; final: boolean }> => {
+    const res = await fetch(`/api/voice/transcribe?session=${encodeURIComponent(session)}${final ? "&final=true" : ""}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: audio as BodyInit,
+    });
+    return answer<{ text: string; final: boolean }>(res);
+  },
+  /** Tidies a dictation; the original comes back (`cleaned: false`) when it can't. */
+  voiceClean: (text: string) => req<{ text: string; cleaned: boolean }>("POST", "/voice/clean", { text }),
+  /** Asks Tailscale whether it serves Loft over https. */
+  https: () => req<Https>("GET", "/system/https"),
+  /** Checks the transcriber and the on-device model now. */
+  voiceStatus: () => req<VoiceStatus>("GET", "/voice/status"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
@@ -706,9 +762,12 @@ export const api = {
   workspaceSize: (id: string) => req<{ bytes: number }>("GET", `/agents/${id}/workspace-size`),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
   messages: (id: string) => req<Message[]>("GET", `/agents/${id}/messages?limit=400`),
-  /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */
-  send: (id: string, text: string, images: string[] = [], taskId?: string) =>
-    req<{ ok: boolean; queued: boolean }>("POST", `/agents/${id}/messages`, { text, images, ...(taskId ? { meta: { task_id: taskId } } : {}) }),
+  /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. `replyTo`: the id
+   * of the message in this chat it replies to, which the agent gets quoted first. */
+  send: (id: string, text: string, images: string[] = [], taskId?: string, replyTo?: number) =>
+    req<{ ok: boolean; queued: boolean }>("POST", `/agents/${id}/messages`, {
+      text, images, ...(taskId ? { meta: { task_id: taskId } } : {}), ...(replyTo != null ? { reply_to: replyTo } : {}),
+    }),
   /** "Set up the team with lofty" on an end-of-planning card: sends its setup message once. */
   sendTeamSetup: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
@@ -731,6 +790,8 @@ export const api = {
   clearMessages: (id: string) => req("DELETE", `/agents/${id}/messages`),
   run: (id: string) => req("POST", `/agents/${id}/run`),
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
+  /** What the agent's CLI offers (Loft's own commands, then the CLI's by name), each tagged with how it runs. */
+  commands: (id: string) => req<AgentCommand[]>("GET", `/agents/${id}/commands`),
   /** The user has seen this chat: clears its Unread reply in every browser. */
   markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
@@ -796,10 +857,16 @@ export const api = {
     req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),
   restartRun: (id: string) => req("POST", `/agents/${id}/restart`),
   resetSession: (id: string) => req<Agent>("POST", `/agents/${id}/reset-session`),
+  loopStart: (id: string, interval: string, prompt: string) => req<{ ok: boolean }>("POST", `/agents/${id}/loop`, { interval, prompt }),
+  scheduleAdd: (id: string, text: string) => req<{ ok: boolean }>("POST", `/agents/${id}/schedules`, { text }),
+  scheduleCancel: (id: string, sid: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/schedules/${sid}`),
+  agentCommand: (id: string, name: string, arg: string) => req<{ text: string }>("POST", `/agents/${id}/command`, { name, arg }),
+  loopStop: (id: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/loop`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
   sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),
   resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),
-  randomizeAvatar: (id: string) => req<Agent>("POST", `/agents/${id}/avatar/randomize`),
+  /** Redraw: the agent draws a new sticker in a quiet run; it arrives with the agent event. */
+  redrawAvatar: (id: string) => req<{ ok: boolean }>("POST", `/agents/${id}/avatar/redraw`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
   addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),
@@ -821,6 +888,7 @@ export const api = {
   pullRequests: (agentId?: string) => req<PullRequest[]>("GET", `/pull-requests${agentId ? `?agent_id=${agentId}` : ""}`),
   refreshPullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/refresh`),
   mergePullRequest: (id: string, method: string) => req<PullRequest>("POST", `/pull-requests/${id}/merge`, { method }),
-  decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string) =>
-    req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule }),
+  /** `answers` answers an `AskUserQuestion` prompt: the pick per question text. */
+  decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string, answers?: Record<string, string>) =>
+    req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule, answers }),
 };

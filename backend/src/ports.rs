@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(b, 20010..=20019);
         // The same on every call, and after a restart (a new connection to the same db).
         assert_eq!(range(&st, "a").unwrap(), a);
-        let reopened = crate::db::Db::open(&st.cfg.storage_dir.parent().unwrap().join("loft.db")).unwrap();
+        let reopened = crate::db::Db::open(&st.db.path().unwrap()).unwrap();
         assert_eq!(reopened.port_slot("b", |_| true, 10).unwrap(), Some(1));
 
         st.db.delete_agent("a").unwrap();
@@ -72,7 +72,7 @@ mod tests {
         let mut st = crate::tasks::tests::state();
         let a = range(&st, "a").unwrap();
         // Loft now serves inside a's range (and its web app one port up, in the next): both move on.
-        st.cfg = Arc::new(crate::state::Config { port: 20009, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() });
+        st.cfg = Arc::new(crate::state::Config { port: 20009, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone(), root: st.cfg.root.clone() });
         let moved = range(&st, "a").unwrap();
         assert!(!moved.contains(&20009) && !moved.contains(&20010), "{moved:?}");
         assert_ne!(moved, a);

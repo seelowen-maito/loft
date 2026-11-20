@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { tipPosition } from "../lib/tipPosition";
+import { dayLabel, fmtMonth } from "../lib/time";
 
 const SEQ = ["var(--color-seq-0)", "var(--color-seq-1)", "var(--color-seq-2)", "var(--color-seq-3)", "var(--color-seq-4)"];
 
@@ -8,12 +9,6 @@ function level(v: number, max: number) {
   if (v <= 0 || max <= 0) return 0;
   const r = v / max;
   return r > 0.66 ? 4 : r > 0.33 ? 3 : r > 0.12 ? 2 : 1;
-}
-
-function dayLabel(offsetFromToday: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - offsetFromToday);
-  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
 /** GitHub-style contribution grid. `daily` is oldest-first, ending today. */
@@ -41,7 +36,7 @@ export function Heatmap({ daily, cell = 11, gap = 3 }: { daily: number[]; cell?:
       const d = new Date();
       d.setDate(d.getDate() - off);
       if (d.getMonth() !== last && d.getDate() <= 7) {
-        out.push({ x: ci * (cell + gap), label: d.toLocaleDateString(undefined, { month: "short" }) });
+        out.push({ x: ci * (cell + gap), label: fmtMonth(d) });
         last = d.getMonth();
       }
     });

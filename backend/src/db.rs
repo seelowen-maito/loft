@@ -99,6 +99,10 @@ pub struct Delivery {
     /// For a plan kept in Loft: the branch the spec branch started from and merges into.
     #[serde(default)]
     pub base: String,
+    /// For a plan kept in Loft whose tickets name repos inside the project folder: each repo's base, by the
+    /// repo's subfolder (`DeliveryTicket::repo`). `base` stays the project folder's.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bases: std::collections::BTreeMap<String, String>,
     /// For a plan kept in Loft: the spec's title, to name it.
     #[serde(default)]
     pub title: String,
@@ -165,6 +169,9 @@ pub struct DeliveryTicket {
     pub title: String,
     #[serde(default)]
     pub blocked_by: Vec<i64>,
+    /// Open blockers outside this spec, as `owner/repo#n`: the ticket isn't handed out until each closes.
+    #[serde(default)]
+    pub waiting_on: Vec<String>,
     /// "open", "started" (being built, or fixed), "review" (submitted), "changes" (sent back for changes while
     /// the Dev builds another ticket: its fix waits in `changes`), "closing" (passed, its close failed and is
     /// retried), "needs_human" (too many changes rounds), "elsewhere" (being built outside this Delivery:
@@ -183,9 +190,17 @@ pub struct DeliveryTicket {
     /// When the commits were last submitted (RFC 3339): how long a commit with no check yet has waited for one.
     #[serde(default)]
     pub submitted_at: String,
+    /// When it started waiting for CI (RFC 3339): its last reviewer passed while the CI was pending, or it was
+    /// submitted to a team with no reviewers. Empty otherwise: cleared when the CI passes or a changes round starts.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ci_since: String,
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,
+    /// In a plan kept in Loft in a folder of several repos: the repo inside the project folder it changes, its
+    /// subfolder (`api`). Its spec branch is made and merged there. Empty: the project folder itself.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
     /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
     #[serde(default)]
     pub skipped: String,
@@ -198,6 +213,14 @@ pub struct DeliveryTicket {
     /// The notes of the last changes verdict on this ticket (what a reassigned Dev starts from).
     #[serde(default)]
     pub notes: String,
+    /// What a "started" ticket waits on, after its Dev called `wait_ticket`: an issue as `owner/repo#N`, or an
+    /// agent's id. Empty while it's being built. Loft wakes the Dev when that issue closes or that agent
+    /// messages it.
+    #[serde(default)]
+    pub wait_for: String,
+    /// Why it waits, in the Dev's words.
+    #[serde(default)]
+    pub wait_reason: String,
 }
 
 impl DeliveryTicket {
@@ -211,7 +234,6 @@ impl DeliveryTicket {
 pub struct Agent {
     pub id: String,
     pub name: String,
-    pub title: String,
     /// Its main project: where its issues go by default. Always the first of `projects` ("" when it has
     /// none), so clients that only know one project keep working.
     #[serde(default)]
@@ -231,6 +253,12 @@ pub struct Agent {
     /// Windows when autonomous wake-ups are held (e.g. working hours). Empty runs around the clock.
     #[serde(default)]
     pub quiet_hours: Vec<QuietWindow>,
+    /// `/loop`: a prompt Loft sends again every interval until it's stopped.
+    #[serde(default, rename = "loop")]
+    pub repeat: Option<crate::loops::Loop>,
+    /// `/schedule`: prompts Loft sends once, or at each due time of a repeat.
+    #[serde(default)]
+    pub schedules: Vec<crate::schedules::Schedule>,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
     /// Map of MCP server name -> Claude Code MCP server config.
@@ -461,6 +489,8 @@ pub struct PullRequest {
     pub behind_by: i64,
     /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
     pub ready_sha: String,
+    /// The head commit the team's Lead was told is ready to merge (every verdict it needs passed), so it is told once.
+    pub ready_told_sha: String,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
@@ -1336,6 +1366,37 @@ impl Db {
         self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
     }
 
+    /// A copy of the whole database at `to`, a file that mustn't exist yet (`VACUUM INTO`).
+    pub fn copy_to(&self, to: &Path) -> Result<()> {
+        self.0.lock().unwrap().execute("VACUUM INTO ?1", [to.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// Replaces `from` with `to` in every text value of every table, whatever its column's declared type, in one
+    /// transaction: the absolute paths stored in chats, memories, tasks and the rest, when the agents' workspaces
+    /// move (storage.rs). Returns the number of values changed.
+    pub fn replace_everywhere(&self, from: &str, to: &str) -> Result<usize> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let tables: Vec<String> = tx
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut n = 0;
+        for t in tables {
+            let cols: Vec<String> = tx
+                .prepare("SELECT name FROM pragma_table_info(?1)")?
+                .query_map([&t], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for col in cols {
+                let sql = format!("UPDATE \"{t}\" SET \"{col}\" = replace(\"{col}\", ?1, ?2) WHERE typeof(\"{col}\") = 'text' AND instr(\"{col}\", ?1) > 0");
+                n += tx.execute(&sql, params![from, to])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Raw access for tests elsewhere in the crate that need to set up rows directly.
     #[cfg(test)]
     pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -1573,6 +1634,7 @@ impl Db {
                 local: false,
                 spec_id: String::new(),
                 base: String::new(),
+                bases: Default::default(),
                 title: String::new(),
                 created_at: now(),
             };
@@ -1595,6 +1657,12 @@ impl Db {
             "INSERT OR REPLACE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)",
             params![d.repo, d.spec, d.state, serde_json::to_string(d)?],
         )?;
+        Ok(())
+    }
+
+    pub fn delete_delivery(&self, repo: &str, spec: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM deliveries WHERE repo = ?1 AND spec = ?2", params![repo, spec])?;
         Ok(())
     }
 
