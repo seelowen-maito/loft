@@ -44,6 +44,7 @@ struct VoiceSessionView: View {
             // The tidied text goes to the chat's message box, to read there; sending it brings the status back.
             if p == .review, voice.autoSendAt == nil, let id = voice.agentId {
                 let text = voice.cleaned ?? voice.raw
+                VoicePresentation.shared.recipientNote = voice.recipientNote
                 voice.discard()
                 VoicePresentation.shared.statusAgentId = id
                 // Also for a chat that's already open, which keeps its own box.
@@ -117,6 +118,10 @@ struct VoiceSessionView: View {
             VStack(spacing: 2) {
                 Text(agentName).font(.headline).lineLimit(1).minimumScaleFactor(0.6)
                 Text(subtitle).font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
+                if let note = voice.recipientNote {
+                    Text(note).font(.caption).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.center)
+                        .accessibilityIdentifier("voiceRecipientNote")
+                }
             }
             .accessibilityElement(children: .combine)
             Spacer()
@@ -222,6 +227,8 @@ struct VoiceSessionView: View {
     var shown = false
     /// Talk: the chat whose message box holds a dictation; sending it there opens the status screen.
     var statusAgentId: String?
+    /// Talk: who it went to from what you said ("Didn't catch who: still to …"), shown over that chat's Send bar.
+    var recipientNote: String?
     /// Talk: text Undo sends back to that chat's message box.
     var returnedText: String?
     /// Talk: a message it sent; that agent's chat waits for the reply and reads it aloud.

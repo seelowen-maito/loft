@@ -16,7 +16,10 @@ struct LoftApp: App {
         OldPairing.clear()
         let store = LoftStore(api: Self.makeAPI())
         _store = State(initialValue: store)
-        _voice = State(initialValue: VoiceSession(store: store))
+        let voice = VoiceSession(store: store)
+        // On the Talk screen, an agent named in what you say is who it goes to (#343).
+        voice.picksRecipient = true
+        _voice = State(initialValue: voice)
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-fixture-digest") {
             UserDefaults.standard.set(Date().addingTimeInterval(-2 * 3600).timeIntervalSince1970, forKey: Prefs.digestLastLooked)

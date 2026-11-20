@@ -11,6 +11,8 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     var features = ["tasks", "activity", "idempotent_messages"]
     var failSends = false
     var sentClientIds: [String] = []
+    /// Each send's agent and text, in order.
+    var sent: [(agentId: String, text: String)] = []
     var reachable = true
     private var nextId: Int64 = 100
 
@@ -26,6 +28,7 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
         // Like URLSession: a request made from a cancelled task fails as cancelled.
         try Task.checkCancellation()
         sentClientIds.append(clientId)
+        sent.append((agentId, text))
         if failSends { throw APIError.timeout }
         nextId += 1
         let m = ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "user", kind: "text", content: text,

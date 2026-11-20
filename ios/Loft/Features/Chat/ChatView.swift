@@ -285,16 +285,21 @@ struct ChatView: View {
                     .accessibilityIdentifier("attachedTask")
                 }
                 if let t = talkText, !t.isEmpty {
-                    TalkConfirmBar(text: t, current: draft, startAsking: Self.fixtureAsks, send: {
+                    TalkConfirmBar(text: t, current: draft, note: VoicePresentation.shared.recipientNote, startAsking: Self.fixtureAsks, send: {
                         talkText = nil
                         draft = ""
                         VoicePresentation.shared.statusAgentId = nil
+                        VoicePresentation.shared.recipientNote = nil
                         voice.sendWithStatus(t, to: agentId)
                     }, cancel: {
                         talkText = nil
                         draft = ""
                         VoicePresentation.shared.statusAgentId = nil
-                    }, done: { talkText = nil })
+                        VoicePresentation.shared.recipientNote = nil
+                    }, done: {
+                        talkText = nil
+                        VoicePresentation.shared.recipientNote = nil
+                    })
                     .id(t)
                 }
                 ComposerView(text: $draft, recipient: agent.name, agentId: agentId, isOrchestrator: store.orchestratorId == agent.id,

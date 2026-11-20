@@ -112,7 +112,7 @@ Long dictation, cleaned up on the Mac, with replies read aloud. The engine is in
 - **`Speaker`** reads the agent's reply aloud with the best installed Apple voice for the reply's language. It skips code, links, tables and Markdown, and stops long replies at a paragraph with "the rest is in the chat".
 - **Hands-free** mode listens again after the reply. Background audio (`UIBackgroundModes: audio`) keeps it working with the screen locked, and the live connection stays open while a session is active.
 - The draft is saved after every segment, so an unsent dictation survives a crash (`VoiceSession.savedDraft()`).
-- **UI fixtures:** debug builds accept `-ui-testing -fixture-voice preparing|listening|paused|cleaning|review|sending|speaking|failed|failed-startup`.
+- **UI fixtures:** debug builds accept `-ui-testing -fixture-voice preparing|listening|paused|cleaning|review|picked|unclear|sending|speaking|failed|failed-startup`.
 
 ## Setup
 
