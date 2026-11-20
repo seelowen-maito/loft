@@ -55,6 +55,8 @@ final class FocusController {
 
     func start(minutes: Int) {
         guard session == nil else { return }
+        // A "Focus for…" that hasn't opened its popover yet mustn't open it after this session.
+        picksLength = false
         self.minutes = FocusDuration.clamp(minutes)
         UserDefaults.standard.set(self.minutes, forKey: Self.minutesKey)
         session = FocusSession(minutes: self.minutes, from: .now)
@@ -83,6 +85,7 @@ final class FocusController {
     func end(timeUp: Bool = false) {
         guard let session else { return }
         self.session = nil
+        picksLength = false
         ticker?.cancel()
         ticker = nil
         observers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
@@ -214,6 +217,7 @@ struct FocusMenuItems: View {
                 showWindow()
                 focus.picksLength = true
             }
+            .keyboardShortcut("f", modifiers: [.command, .shift, .option])
         }
     }
 }
@@ -266,7 +270,8 @@ struct FocusSidebarControl: View {
                 guard focus.picksLength else { return }
                 Task {
                     try? await Task.sleep(for: .milliseconds(400))
-                    picks = true
+                    // Not if a session started or ended meanwhile (they clear `picksLength`).
+                    if focus.picksLength && focus.session == nil { picks = true }
                 }
             }
             .onChange(of: picks) { if !picks { focus.picksLength = false } }
@@ -298,21 +303,21 @@ struct FocusRing: View {
 struct FocusLengthPopover: View {
     @Environment(FocusController.self) private var focus
     @Environment(\.dismiss) private var dismiss
-    /// The highlighted row: an index into the presets, or `presets.count` for Custom.
-    @State private var row = 0
+    /// The keyboard's highlight, which Return starts. The mouse only tints the row under it (`hovered`).
+    @State private var choice = FocusLengthChoice(lastMinutes: FocusDuration.defaultMinutes)
+    @State private var hovered: Int?
     @State private var custom = ""
     @FocusState private var focused: Field?
 
     private enum Field { case list, custom }
     private var customRow: Int { FocusDuration.presets.count }
-    private var customMinutes: Int? { Int(custom).flatMap { FocusDuration.range.contains($0) ? $0 : nil } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(Array(FocusDuration.presets.enumerated()), id: \.offset) { i, m in
                 Button { start(m) } label: { line(i, isLast: m == focus.minutes) { Text("\(m) min") } }
                     .buttonStyle(.plain)
-                    .accessibilityAddTraits(row == i ? .isSelected : [])
+                    .accessibilityAddTraits(choice.row == i ? .isSelected : [])
                     .accessibilityIdentifier("length-\(m)")
             }
             Divider().padding(.vertical, 4)
@@ -322,18 +327,22 @@ struct FocusLengthPopover: View {
                     TextField("", text: $custom, prompt: Text("1–480"))
                         .textFieldStyle(.roundedBorder).frame(width: 56).multilineTextAlignment(.trailing)
                         .focused($focused, equals: .custom)
-                        .onSubmit(startCustom)
+                        .onSubmit(startHighlighted)
+                        // The field takes ↑/↓ before the popover does: they move the highlight from here too.
+                        .onKeyPress(.upArrow) { move(-1) }
+                        .onKeyPress(.downArrow) { move(1) }
                         .accessibilityLabel("Custom length in minutes")
                         .accessibilityIdentifier("customLength")
                     Text("min")
                     Spacer(minLength: 0)
-                    Button("Start", action: startCustom).controlSize(.small).disabled(customMinutes == nil)
+                    Button("Start", action: startHighlighted).controlSize(.small).disabled(choice.isCustom && choice.minutes(custom: custom) == nil)
                         .accessibilityIdentifier("startFocusSession")
                 }
             }
             .accessibilityElement(children: .contain)
-            .accessibilityAddTraits(row == customRow ? .isSelected : [])
-            .onTapGesture { row = customRow; focused = .custom }
+            .accessibilityAddTraits(choice.isCustom ? .isSelected : [])
+            .onTapGesture { select(customRow) }
+            .onChange(of: focused) { if focused == .custom && !choice.isCustom { choice.select(customRow) } }
             Text("Hides apps not on your allow list.").font(.caption).foregroundStyle(WebTheme.fg3).padding([.horizontal, .top], 8)
         }
         .padding(8)
@@ -344,52 +353,53 @@ struct FocusLengthPopover: View {
         .onKeyPress(.upArrow) { move(-1) }
         .onKeyPress(.downArrow) { move(1) }
         .onKeyPress(.return) {
-            if row == customRow { startCustom() } else { start(FocusDuration.presets[row]) }
+            startHighlighted()
             return .handled
         }
         .onKeyPress(.escape) { dismiss(); return .handled }
         .onAppear {
-            if let i = FocusDuration.presets.firstIndex(of: focus.minutes) {
-                row = i
-                focused = .list
-            } else {
-                row = customRow
-                custom = "\(focus.minutes)"
-                focused = .custom
-            }
+            choice = FocusLengthChoice(lastMinutes: focus.minutes)
+            custom = choice.customText
+            focused = choice.isCustom ? .custom : .list
         }
-        .onChange(of: row) { focused = row == customRow ? .custom : .list }
     }
 
-    /// A row: the highlighted one is tinted `good`, with "last used ↩" (or "↩") as the hint for Return.
+    /// A row: the highlighted one is tinted `good`, with "last used ↩" (or "↩") as the hint for Return; the one under
+    /// the pointer gets a faint tint.
     private func line<Content: View>(_ i: Int, isLast: Bool, @ViewBuilder content: () -> Content) -> some View {
-        HStack {
+        let selected = choice.row == i
+        return HStack {
             content().font(.body.monospacedDigit()).foregroundStyle(WebTheme.fg)
             Spacer(minLength: 8)
-            if row == i || isLast {
-                Text(isLast ? (row == i ? "last used ↩" : "last used") : "↩").font(.caption).foregroundStyle(row == i ? WebTheme.good : WebTheme.fg3)
+            if selected || isLast {
+                Text(isLast ? (selected ? "last used ↩" : "last used") : "↩").font(.caption).foregroundStyle(selected ? WebTheme.good : WebTheme.fg3)
                     .accessibilityHidden(true)
             }
         }
         .padding(.horizontal, 8).frame(height: 30)
         .contentShape(Rectangle())
-        .background(RoundedRectangle(cornerRadius: 6).fill(row == i ? WebTheme.good.opacity(0.16) : .clear))
-        .onHover { if $0 { row = i } }
+        .background(RoundedRectangle(cornerRadius: 6).fill(selected ? WebTheme.good.opacity(0.16) : hovered == i ? WebTheme.raised : .clear))
+        .onHover { hovered = $0 ? i : (hovered == i ? nil : hovered) }
     }
 
     private func move(_ by: Int) -> KeyPress.Result {
-        row = min(customRow, max(0, row + by))
+        select(choice.row + by)
         return .handled
+    }
+
+    private func select(_ row: Int) {
+        choice.select(row)
+        focused = choice.isCustom ? .custom : .list
+    }
+
+    private func startHighlighted() {
+        guard let m = choice.minutes(custom: custom) else { return }
+        start(m)
     }
 
     private func start(_ minutes: Int) {
         focus.start(minutes: minutes)
         dismiss()
-    }
-
-    private func startCustom() {
-        guard let m = customMinutes else { return }
-        start(m)
     }
 }
 

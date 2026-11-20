@@ -85,6 +85,37 @@ public enum FocusDuration {
     public static func remembered(_ saved: Int) -> Int { saved == 0 ? defaultMinutes : clamp(saved) }
 }
 
+/// The length popover's keyboard highlight: the presets, then Custom. Return starts the highlighted row. Only ↑/↓ move
+/// it (hovering a row with the mouse doesn't), so Return never starts a row the pointer happened to cross.
+public struct FocusLengthChoice: Equatable, Sendable {
+    /// An index into `FocusDuration.presets`, or `presets.count` for Custom.
+    public private(set) var row: Int
+    /// What the Custom field starts with: the last length when it isn't a preset.
+    public let customText: String
+
+    public init(lastMinutes: Int) {
+        if let i = FocusDuration.presets.firstIndex(of: lastMinutes) {
+            row = i
+            customText = ""
+        } else {
+            row = FocusDuration.presets.count
+            customText = "\(lastMinutes)"
+        }
+    }
+
+    public var isCustom: Bool { row == FocusDuration.presets.count }
+
+    public mutating func move(_ by: Int) { row = min(FocusDuration.presets.count, max(0, row + by)) }
+
+    public mutating func select(_ row: Int) { self.row = min(FocusDuration.presets.count, max(0, row)) }
+
+    /// The length Return starts: the highlighted preset, or the Custom field's minutes when they're 1 to 480.
+    public func minutes(custom: String) -> Int? {
+        guard isCustom else { return FocusDuration.presets[row] }
+        return Int(custom.trimmingCharacters(in: .whitespaces)).flatMap { FocusDuration.range.contains($0) ? $0 : nil }
+    }
+}
+
 /// An app on the allow list.
 public struct FocusApp: Codable, Hashable, Identifiable, Sendable {
     public let bundleId: String

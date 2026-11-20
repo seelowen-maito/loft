@@ -82,6 +82,42 @@ final class FocusSessionTests: XCTestCase {
     }
 }
 
+final class FocusLengthChoiceTests: XCTestCase {
+    func testTheLastPresetIsHighlighted() {
+        let c = FocusLengthChoice(lastMinutes: 50)
+        XCTAssertEqual(c.row, 1)
+        XCTAssertFalse(c.isCustom)
+        XCTAssertEqual(c.minutes(custom: ""), 50)
+    }
+
+    func testACustomLastLengthStartsInCustom() {
+        let c = FocusLengthChoice(lastMinutes: 37)
+        XCTAssertTrue(c.isCustom)
+        XCTAssertEqual(c.customText, "37")
+        XCTAssertEqual(c.minutes(custom: "37"), 37)
+    }
+
+    func testUpLeavesCustomAndMovesStopAtTheEnds() {
+        var c = FocusLengthChoice(lastMinutes: 37)
+        c.move(-1)
+        XCTAssertEqual(c.row, 2, "↑ from Custom goes to 90")
+        XCTAssertEqual(c.minutes(custom: "37"), 90, "Return then starts 90, not the custom length")
+        c.move(-1); c.move(-1); c.move(-1)
+        XCTAssertEqual(c.row, 0)
+        c.move(1); c.move(1); c.move(1); c.move(1)
+        XCTAssertTrue(c.isCustom)
+    }
+
+    func testCustomTakesOneToFourHundredEighty() {
+        let c = FocusLengthChoice(lastMinutes: 37)
+        XCTAssertNil(c.minutes(custom: "0"))
+        XCTAssertNil(c.minutes(custom: "481"))
+        XCTAssertNil(c.minutes(custom: "abc"))
+        XCTAssertEqual(c.minutes(custom: "480"), 480)
+        XCTAssertEqual(c.minutes(custom: " 1 "), 1)
+    }
+}
+
 final class FocusAllowListTests: XCTestCase {
     private let loft = "dev.loft.mac"
     private var list: FocusAllowList { .starting(loftBundleId: loft) }

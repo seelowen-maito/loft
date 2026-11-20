@@ -145,13 +145,37 @@ final class LoftMacUITests: MacUITestCase {
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(card("length-25").waitForNonExistence(timeout: 5), "Esc closes it")
         XCTAssertFalse(card("focusCountdown").exists, "no session started")
-        // Focus › Focus for… with the sidebar collapsed shows the sidebar and the same popover.
+        // Focus for… (⌥⇧⌘F) with the sidebar collapsed shows the sidebar and the same popover.
         app.toolbars.buttons["Hide Sidebar"].click()
         XCTAssertTrue(start.waitForNonExistence(timeout: 5))
-        app.menuBars.menuBarItems["Focus"].click()
-        app.menuBars.menuItems["Focus for…"].click()
+        app.typeKey("f", modifierFlags: [.command, .shift, .option])
         XCTAssertTrue(card("length-25").waitForExistence(timeout: 5), "Focus for… opens the popover")
         XCTAssertTrue(start.exists, "under the sidebar, shown again")
         app.typeKey(.escape, modifierFlags: [])
     }
+
+    /// #659: a custom last length starts in the Custom field. Hovering a preset doesn't move the highlight (so Return
+    /// can't start it), and ↑ leaves the field.
+    func testTheCustomFieldKeepsTheKeyboardUntilUp() {
+        launch(["-ui-testing", "-no-ai", "-focusMinutes", "37"])
+        let start = card("startFocus")
+        XCTAssertTrue(start.waitForExistence(timeout: 10))
+        start.click()
+        let field = app.textFields["customLength"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "37")
+        XCTAssertTrue(card("length-25").exists)
+        card("length-25").hover()
+        XCTAssertFalse(card("length-25").isSelected, "hover doesn't take the highlight")
+        XCTAssertTrue(field.hasKeyboardFocus, "the field keeps the keyboard")
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(card("length-90").isSelected, "↑ leaves Custom for 90")
+        XCTAssertFalse(field.hasKeyboardFocus)
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(card("length-25").waitForNonExistence(timeout: 5))
+    }
+}
+
+extension XCUIElement {
+    var hasKeyboardFocus: Bool { (value(forKey: "hasKeyboardFocus") as? Bool) ?? false }
 }
