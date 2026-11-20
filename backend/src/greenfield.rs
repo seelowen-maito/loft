@@ -628,7 +628,7 @@ mod tests {
         let project = crate::grill::NewProject { name: "gf-fresh".into(), path: "~/projects/gf-fresh".into() };
         let wake = crate::grill::start_for_project(&st, &a, "New project gf-fresh: an idea", project).unwrap().unwrap();
         assert!(wake.contains("no GitHub repo yet") && wake.contains("new project `gf-fresh`"), "{wake}");
-        assert!(wake.contains("it is a new project") && wake.contains("Clarifying Round and Foundation Rounds"), "{wake}");
+        assert!(wake.contains("it is a new project") && wake.contains("Clarifying Round, Foundation Rounds and Foundation docs"), "{wake}");
 
         let p = call(&st, &a, "preview_new_repo", json!({})).await.unwrap();
         assert!(p.contains("Default name: gf-fresh.") && p.contains("`idea.md`"), "{p}");
@@ -915,13 +915,14 @@ mod tests {
         assert!(is_new_project(&st, &fresh));
         let w = wake_for(&fresh);
         assert!(w.contains("no GitHub repo yet") && w.contains("no git repo at all") && w.contains("the foundation questions follow before the spec is offered"), "{w}");
+        assert!(w.contains("the foundation docs and its `CLAUDE.md` go on your docs branch, passed as `docs_branch` to publish_spec") && w.contains("Foundation docs)"), "{w}");
 
         // A git repo with no remote keeps today's grill: the repo offer, nothing more.
         let (local, dir) = new_project(&st, "gf-localgit", &[("a.txt", "a")]);
         git(&dir, &["init", "-q"]);
         assert!(needs_repo(&st, &local) && !is_new_project(&st, &local));
         let w = wake_for(&local);
-        assert!(w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("Foundation Rounds"), "{w}");
+        assert!(w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("Foundation Rounds") && !w.contains("foundation docs"), "{w}");
 
         // A project already on GitHub gets neither.
         let (done, dir) = new_project(&st, "gf-hasorigin", &[("a.txt", "a")]);
@@ -929,7 +930,7 @@ mod tests {
         git(&dir, &["remote", "add", "origin", "https://github.com/octo/gf-hasorigin.git"]);
         assert!(!is_new_project(&st, &done));
         let w = wake_for(&done);
-        assert!(!w.contains("no GitHub repo yet") && !w.contains("no git repo at all"), "{w}");
+        assert!(!w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("foundation docs"), "{w}");
     }
 
     #[test]
@@ -941,6 +942,26 @@ mod tests {
         ] {
             assert!(p.contains(want), "missing {want}");
         }
+    }
+
+    #[test]
+    fn the_planning_prompt_requires_the_foundation_docs_for_a_new_project_only() {
+        let p = crate::grill::brief();
+        let section = &p[p.find("- Foundation docs:").expect("a Foundation docs part")..];
+        let section = &section[..section.find("\n\n").unwrap_or(section.len())];
+        for want in [
+            "`docs/architecture.md`", "`docs/security.md`", "`docs/conventions.md`", "One ADR per stack or architecture choice in `docs/adr/`", "`GLOSSARY.md`",
+            "commit them before the spec is published", "pass it as `docs_branch` to `mcp__loft__publish_spec`", "Don't publish the spec without them",
+            // The CLAUDE.md points at all of them.
+            "`CLAUDE.md`: a new Project has none. It tells agents to read `docs/architecture.md`, `docs/security.md`, `docs/conventions.md`, the ADRs in `docs/adr/` and `GLOSSARY.md`",
+        ] {
+            assert!(section.contains(want), "missing {want}: {section}");
+        }
+        // Only for a folder with no git repo; the existing-CLAUDE.md rule holds for everyone.
+        let new_part = &p[p.find("When the project folder is not a git repo at all").unwrap()..];
+        assert!(new_part.find("- Foundation docs:").unwrap() < new_part.find("{TICKETS}").unwrap_or(usize::MAX));
+        assert!(p.contains("A project that already has a git repo, even one with no GitHub remote, keeps the usual grill"));
+        assert!(p.contains("Never touch an existing `CLAUDE.md`."));
     }
 
     #[test]

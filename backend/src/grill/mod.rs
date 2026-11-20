@@ -646,7 +646,7 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
             ""
         };
         let foundation = if crate::greenfield::is_new_project(state, agent) {
-            " Your project folder has no git repo at all, so it is a new project: the first round also asks the clarifying questions, and the foundation questions follow before the spec is offered (see Planning: new project, Clarifying Round and Foundation Rounds)."
+            " Your project folder has no git repo at all, so it is a new project: the first round also asks the clarifying questions, and the foundation questions follow before the spec is offered; the foundation docs and its `CLAUDE.md` go on your docs branch, passed as `docs_branch` to publish_spec (see Planning: new project, Clarifying Round, Foundation Rounds and Foundation docs)."
         } else {
             ""
         };
@@ -1243,7 +1243,7 @@ While you grill, build the project's language and record its hard decisions.
   ```
 
 - Where: only when your project has a repo. Work in your clone in your workspace, never in the project folder: on the first resolved term or decision, pull the default branch and create `docs/<topic>` (a short slug of the grill's topic), and commit each glossary or ADR change on it as you go.
-- If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms. Never touch an existing `CLAUDE.md`.
+- If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms (a new Project's names the foundation docs too: see Planning: new project). Never touch an existing `CLAUDE.md`.
 - With a spec, no Docs PR: before `mcp__loft__publish_spec`, push the docs branch and pass it as `docs_branch`. Loft starts the spec branch from it, so the docs commits ship in the spec PR with the rest of the spec. Commit later glossary or ADR changes on the spec branch.
 - Without a spec, one Docs PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.
 
@@ -1259,6 +1259,14 @@ When your project folder has no git repo or no GitHub remote yet (Loft says so w
 When the project folder is not a git repo at all (Loft says "it is a new project" when the grill starts), a new Project, the grill also has the two parts below. A project that already has a git repo, even one with no GitHub remote, keeps the usual grill and only gets the repo offer above.
 - Clarifying Round: the first round asks the clarifying questions together with the new-repo question, each with a recommendation: who it's for and what it must do on day one; the stack, pre-filled from the idea the user gave; where it runs; and the constraints (auth, data sensitivity, compliance). Read the idea and the folder first, and recommend from them rather than asking open questions.
 - Foundation Rounds: after the clarifying answers, settle the foundations as questions with your recommendation, which the user can accept or change: the stack, the architecture, the security baseline, testing, CI and deployment. Each of the six needs a round question with a recommendation, and none is skipped or assumed: don't offer the spec ("Turn this into a spec and tickets?") before all six are answered. There are no per-stack templates: you recommend from what you know of the idea, the constraints and the stack they chose. Put the questions whose prerequisites are settled in the same round (the stack comes first; the rest depend on it).
+- Foundation docs: every agent on the team builds from what the foundations decided, so write them down as docs on your docs branch (in your clone, once the repo exists) and commit them before the spec is published:
+  - `docs/architecture.md`: the stack, the architecture and how the parts fit, and where it runs and is deployed.
+  - `docs/security.md`: the security baseline: auth, secrets, data sensitivity, compliance, what is never allowed.
+  - `docs/conventions.md`: how code is written, tested and shipped: layout, style, testing, CI, deployment.
+  - One ADR per stack or architecture choice in `docs/adr/` (see Planning: docs for the format), even where it isn't a hard trade-off: on a new Project these choices set every later one.
+  - `GLOSSARY.md`, with the terms the grill resolved.
+  - `CLAUDE.md`: a new Project has none. It tells agents to read `docs/architecture.md`, `docs/security.md`, `docs/conventions.md`, the ADRs in `docs/adr/` and `GLOSSARY.md` before they work, to follow them, and to use the glossary's terms.
+  Push the docs branch and pass it as `docs_branch` to `mcp__loft__publish_spec`, so the foundation docs ship in the spec PR. Don't publish the spec without them.
 
 {TICKETS}
 
