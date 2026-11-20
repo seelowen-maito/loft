@@ -916,13 +916,14 @@ mod tests {
         let w = wake_for(&fresh);
         assert!(w.contains("no GitHub repo yet") && w.contains("no git repo at all") && w.contains("the foundation questions follow before the spec is offered"), "{w}");
         assert!(w.contains("the foundation docs and its `CLAUDE.md` go on your docs branch, passed as `docs_branch` to publish_spec") && w.contains("Foundation docs)"), "{w}");
+        assert!(w.contains("Its first ticket is a walking skeleton that blocks every other one"), "{w}");
 
         // A git repo with no remote keeps today's grill: the repo offer, nothing more.
         let (local, dir) = new_project(&st, "gf-localgit", &[("a.txt", "a")]);
         git(&dir, &["init", "-q"]);
         assert!(needs_repo(&st, &local) && !is_new_project(&st, &local));
         let w = wake_for(&local);
-        assert!(w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("Foundation Rounds") && !w.contains("foundation docs"), "{w}");
+        assert!(w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("Foundation Rounds") && !w.contains("foundation docs") && !w.contains("walking skeleton"), "{w}");
 
         // A project already on GitHub gets neither.
         let (done, dir) = new_project(&st, "gf-hasorigin", &[("a.txt", "a")]);
@@ -930,7 +931,7 @@ mod tests {
         git(&dir, &["remote", "add", "origin", "https://github.com/octo/gf-hasorigin.git"]);
         assert!(!is_new_project(&st, &done));
         let w = wake_for(&done);
-        assert!(!w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("foundation docs"), "{w}");
+        assert!(!w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("foundation docs") && !w.contains("walking skeleton"), "{w}");
     }
 
     #[test]

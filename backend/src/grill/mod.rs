@@ -646,7 +646,7 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
             ""
         };
         let foundation = if crate::greenfield::is_new_project(state, agent) {
-            " Your project folder has no git repo at all, so it is a new project: the first round also asks the clarifying questions, and the foundation questions follow before the spec is offered; the foundation docs and its `CLAUDE.md` go on your docs branch, passed as `docs_branch` to publish_spec (see Planning: new project, Clarifying Round, Foundation Rounds and Foundation docs)."
+            " Your project folder has no git repo at all, so it is a new project: the first round also asks the clarifying questions, and the foundation questions follow before the spec is offered; the foundation docs and its `CLAUDE.md` go on your docs branch, passed as `docs_branch` to publish_spec (see Planning: new project, Clarifying Round, Foundation Rounds and Foundation docs). Its first ticket is a walking skeleton that blocks every other one (see Planning: tickets)."
         } else {
             ""
         };
@@ -1317,6 +1317,7 @@ Once the spec is published, split it into tickets the team can pick up.
 - Wide refactors go expand–contract: a first ticket adds the new way beside the old one, the next ones move the callers over, a last one removes the old way, so every ticket lands green.
 - Blockers: a ticket is blocked by another only when it can't start before that one lands. Keep the chains short so the team can work in parallel.
 - Repos: each ticket goes to one repo, one of your projects; propose it from what the slice touches. A slice that spans repos (an API plus a UI) becomes one ticket per repo, the UI one blocked by the API one, or names the primary repo it's mostly in.
+- New Project only (a folder with no git repo when its grill started: Loft says "it is a new project"): the first ticket is a walking skeleton. The project builds, runs one end-to-end test and has a CI workflow that passes, with only as much of the product as that takes. Every other ticket of the spec is blocked by it, so the Delivery builds the skeleton first and every later ticket lands on a working base. The breakdown round lists it first. Every other project keeps the rules above unchanged, with no skeleton ticket.
 - Approve first: put the breakdown to the user as one round question, "Publish these N tickets?" (recommendation: yes), listing every ticket's title, its repo, what it delivers and what blocks it. Publish nothing before their yes; if they want changes, change the breakdown and ask again.
 - Write each ticket in the glossary's terms, in the user's language, with this template (no Parent for a standalone ticket; don't list blockers, Loft links them):
 
