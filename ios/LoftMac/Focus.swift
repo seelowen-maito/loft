@@ -316,7 +316,7 @@ struct FocusLengthPopover: View {
                     .accessibilityIdentifier("length-\(m)")
             }
             Divider().padding(.vertical, 4)
-            line(customRow, isLast: false) {
+            line(customRow, isLast: !FocusDuration.presets.contains(focus.minutes)) {
                 HStack(spacing: 6) {
                     Text("Custom")
                     TextField("", text: $custom, prompt: Text("1–480"))
@@ -337,7 +337,7 @@ struct FocusLengthPopover: View {
             Text("Hides apps not on your allow list.").font(.caption).foregroundStyle(WebTheme.fg3).padding([.horizontal, .top], 8)
         }
         .padding(8)
-        .frame(width: 270)
+        .frame(width: 310)
         .focusable()
         .focusEffectDisabled()
         .focused($focused, equals: .list)
