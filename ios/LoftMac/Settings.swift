@@ -34,6 +34,7 @@ struct SettingsSection: View {
                 .accessibilityIdentifier("appearancePicker")
                 note("Dark matches Loft on the web. System follows this Mac.")
             }
+            FocusSettings()
             Section("Open Loft") {
                 ShortcutRow(.openLoft)
                 note("Brings this window to the front from any app. Off until you record one.")
