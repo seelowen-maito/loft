@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Settings › GitHub issues (#177): two global keys in `/api/settings`, saved without touching the rest.
 @MainActor

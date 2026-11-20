@@ -2,6 +2,7 @@ import { useState, type Dispatch, type DragEvent, type SetStateAction } from "re
 import { api } from "./api";
 import type { Attachment } from "./useDraft";
 import { attachable } from "./video";
+import { errorText } from "./useAction.ts";
 
 /** The API's limits: 3.75 MB raw (5 MB base64), and it scales anything bigger than 1568 px down anyway. */
 const MAX_IMAGE_BYTES = 3_750_000;
@@ -39,7 +40,7 @@ export function attachImages(agent: string, all: File[], have: number, setAttach
     const update = (u: Partial<Attachment>) => setAttachments((a) => a.map((x) => (x.key === key ? { ...x, ...u } : x)));
     (video ? Promise.resolve<Blob>(f) : prepareImage(f))
       .then((blob) => api.upload(agent, blob))
-      .then((r) => update({ file: r.file }), (e) => update({ error: (e as Error).message }));
+      .then((r) => update({ file: r.file }), (e) => update({ error: errorText(e) }));
   }
   return files.length < ok.length ? `Up to ${MAX_IMAGES} attachments per ${per}.` : why;
 }

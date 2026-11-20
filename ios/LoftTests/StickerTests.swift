@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class StickerTests: XCTestCase {
     /// The backend's generated shape: a shaded body via clipPath, hat, googly eyes, stroked mouth.

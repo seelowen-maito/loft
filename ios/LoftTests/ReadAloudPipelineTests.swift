@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The read-aloud entry point: a reply is read once it's whole, and one reading never cuts off another by accident.
 @MainActor

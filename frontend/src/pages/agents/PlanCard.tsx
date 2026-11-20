@@ -5,17 +5,8 @@ import { api, type Agent, type TaskPlan } from "../../lib/api";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
 import { cx } from "../../lib/format";
 import { Sticker } from "../../components/Sticker";
-
-const TONE: Record<string, string> = {
-  done: "text-good",
-  in_progress: "text-accent",
-  waiting_approval: "text-warn",
-  blocked: "text-warn",
-  failed: "text-bad",
-  cancelled: "text-fg-3",
-  ready: "text-info",
-  inbox: "text-fg-3",
-};
+import { TaskStatus } from "../../components/TaskStatus";
+import { taskStatus, toneText } from "../../lib/taskStatus";
 
 /** A delegated plan in the delegating agent's chat: each subtask, who's on it, its status and PRs, kept live. */
 export function PlanCard({ taskId, agents }: { taskId: string; agents: Agent[] }) {
@@ -29,7 +20,7 @@ export function PlanCard({ taskId, agents }: { taskId: string; agents: Agent[] }
     useCallback(
       (e: ServerEvent) => {
         if (e.type === "task" && (e.task.id === taskId || e.task.parent_id === taskId)) load();
-        if (e.type === "pull_request") load();
+        if (e.type === "pull_request" || e.type === "resync") load();
       },
       [taskId, load],
     ),
@@ -69,11 +60,11 @@ export function PlanCard({ taskId, agents }: { taskId: string; agents: Agent[] }
           return (
             <li key={s.id}>
               <Link to={`/issues/${s.id}`} className="flex items-start gap-2.5 rounded-lg px-2 py-1.5 hover:bg-white/[0.04]">
-                <CircleDot className={cx("mt-0.5 size-3.5 shrink-0", TONE[s.status])} />
+                <CircleDot className={cx("mt-0.5 size-3.5 shrink-0", toneText(taskStatus(s.status).tone))} />
                 <div className="min-w-0 flex-1">
                   <div className={cx("truncate text-[13px]", s.status === "cancelled" && "text-fg-3 line-through")}>{s.title}</div>
                   <div className="truncate font-mono text-[10.5px] text-fg-3">
-                    <span className={TONE[s.status]}>{s.status.replace("_", " ")}</span>
+                    <TaskStatus status={s.status} />
                     {s.agent && <> · {s.agent.name}</>}
                     {line && <> · {line.split("\n")[0]}</>}
                   </div>

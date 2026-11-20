@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class MentionQueryTests: XCTestCase {
     private func names(_ q: String, in agents: [Agent], excluding name: String) -> [String] {

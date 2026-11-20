@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// "Suggested" replies from the on-device model: dashed, so they read as suggestions rather than actions. A tap

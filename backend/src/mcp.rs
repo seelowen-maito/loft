@@ -129,12 +129,13 @@ fn base_tools() -> Value {
         },
         {
             "name": "set_pr_verdict",
-            "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
+            "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. A fail wakes the agent that opened the PR; once every verdict the PR needs has passed on its head, the team's Lead is woken to tell the user it's ready to merge. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
             "inputSchema": { "type": "object", "properties": {
                 "pr": { "type": "string", "description": "https://github.com/<owner>/<repo>/pull/<number>" },
                 "kind": { "type": "string", "enum": ["tests", "qa", "security"] },
                 "verdict": { "type": "string", "enum": ["pass", "fail"] },
-                "sha": { "type": "string", "description": "The PR's head commit you checked (at least 7 characters)." }
+                "sha": { "type": "string", "description": "The PR's head commit you checked (at least 7 characters)." },
+                "comment": { "type": "string", "description": "Optional: the link to your comment on the PR that explains the verdict. A fail wakes the PR's opener with it." }
             }, "required": ["pr", "kind", "verdict", "sha"] }
         },
         {
@@ -151,7 +152,7 @@ fn base_tools() -> Value {
         },
         {
             "name": "list_agents",
-            "description": "List the other Loft agents: id, name, title, group, projects (main first), role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
+            "description": "List the other Loft agents: id, name, group, projects (main first), role (Lead, Dev, Code reviewer, QA, Security or Custom), and what each is doing now.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -217,7 +218,7 @@ fn tool_error(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }], "isError": true })
 }
 
-async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) -> Value {
+pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) -> Value {
     if let Ok(Some(me)) = state.db.get_agent(agent_id) {
         if let Some(r) = match crate::setup::mcp_call(state, &me, name, &args).await {
             None => match crate::planning::mcp_call(state, &me, name, &args).await {
@@ -357,7 +358,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
         },
         "set_pr_verdict" => match state.db.get_agent(agent_id) {
             Ok(Some(me)) => match s("verdict").as_str() {
-                v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha")).await {
+                v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha"), &s("comment")).await {
                     Ok(t) => text(t),
                     Err(e) => tool_error(e),
                 },
@@ -400,7 +401,6 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                     .iter()
                     .filter(|a| a.id != agent_id)
                     .map(|a| {
-                        let title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) };
                         let group = if a.group.trim().is_empty() { String::new() } else { format!(" · group {}", a.group.trim()) };
                         let project = match a.projects.as_slice() {
                             [] if a.project.trim().is_empty() => String::new(),
@@ -413,7 +413,7 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                         } else {
                             a.status.clone()
                         };
-                        format!("- {}{} · id {}{group}{project}{role} · {}", a.name, title, a.id, doing)
+                        format!("- {} · id {}{group}{project}{role} · {}", a.name, a.id, doing)
                     })
                     .collect();
                 if lines.is_empty() { text("You are the only agent.") } else { text(lines.join("\n")) }
@@ -479,7 +479,14 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 (true, "") => return tool_error(format!("Not sent: kind is required. Use {KINDS}")),
                 (true, k) => return tool_error(format!("Not sent: kind {k:?} isn't one of the two. Use {KINDS}")),
             };
+            // A Dev whose ticket waits on the sender is woken on that ticket, and reads the message there.
+            let woke = |w: Vec<String>| text(format!("Delivered. {} was waiting on you for {}: Loft woke it on that ticket with your message.", to.name, w.join(", ")));
             if fyi {
+                // An FYI names no ticket.
+                let w = crate::delivery::agent_wrote(state, &from, &to, body.trim(), None).await;
+                if !w.is_empty() {
+                    return woke(w);
+                }
                 agents::fyi_from_agent(state, &from, &to, body.trim());
                 return text(format!("Delivered as FYI. {} will read it at the start of its next run.", to.name));
             }
@@ -494,8 +501,17 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 Ok(t) => t,
                 Err(e) => return tool_error(e),
             };
+            let w = crate::delivery::agent_wrote(state, &from, &to, body.trim(), ticket.as_deref()).await;
+            if !w.is_empty() {
+                return woke(w);
+            }
             // The dashboard reads the message id off a queued result to show when it's delivered.
-            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref()) {
+            // A report on a ticket the recipient handed the sender (a message that asked for a report back) answers that hand-over:
+            // it hands nothing back. An answer to a plain question on the ticket is not one.
+            let report = ticket.as_deref().is_some_and(|t| {
+                state.db.list_messages(&from.id, 1000, None).unwrap_or_default().iter().any(|m| m.meta["from_agent"]["id"] == to.id.as_str() && m.meta["ticket"] == t && m.meta["report_back"] == true)
+            });
+            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref(), !report) {
                 Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),
                 None => format!("Delivered. {} is reading it now.", to.name),
             })
@@ -511,14 +527,18 @@ async fn call_tool(state: &AppState, agent_id: &str, name: &str, args: Value) ->
                 .flatten()
                 .map(|a| a.allowed_tools.iter().any(|r| rule_matches(r, &tool, &input)))
                 .unwrap_or(false);
-            let d = if already {
-                crate::state::Decision { allow: true, message: None }
+            let mut d = if already {
+                crate::state::Decision { allow: true, message: None, input: None }
             } else {
                 let rule = suggest_rule(&tool, &input);
                 ask_permission(state, agent_id, "prompt", &tool, input.clone(), "", rule).await
             };
+            // Allowed to ask: now the questions themselves, whose answers go back in the input.
+            if d.allow && tool == agents::ASK_TOOL {
+                d = ask_permission(state, agent_id, agents::QUESTIONS, &tool, input.clone(), "", String::new()).await;
+            }
             let body = if d.allow {
-                json!({ "behavior": "allow", "updatedInput": input })
+                json!({ "behavior": "allow", "updatedInput": d.input.unwrap_or(input) })
             } else {
                 json!({ "behavior": "deny", "message": d.message.unwrap_or_else(|| "The user denied this action.".into()) })
             };
@@ -594,6 +614,92 @@ mod tests {
         assert_eq!(find_agent(&st, &team(&st, &me.id), &far.id).unwrap().id, far.id, "an id is exact");
     }
 
+    /// Calls the permission gate with two questions; `act` answers each pending request in turn (by its source)
+    /// until the gate replies, and returns that reply with the sources the user saw.
+    async fn gate(st: &AppState, agent: &str, mut act: impl FnMut(&crate::db::PermissionRequest)) -> (Value, Vec<String>) {
+        let (st2, agent2) = (st.clone(), agent.to_string());
+        let input = json!({ "questions": [{ "question": "Which store?", "header": "Store", "multiSelect": false, "options": [{ "label": "S3", "description": "" }, { "label": "B2", "description": "" }] }] });
+        let call = tokio::spawn(async move { call_tool(&st2, &agent2, "approval_prompt", json!({ "tool_name": agents::ASK_TOOL, "input": input })).await });
+        let pending = || st.db.list_permissions(Some(agent)).unwrap().into_iter().find(|p| p.status == "pending");
+        let mut seen = vec![];
+        while !call.is_finished() {
+            if let Some(p) = pending() {
+                seen.push(p.source.clone());
+                act(&p);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let r = call.await.unwrap();
+        (serde_json::from_str(said(&r).0).unwrap(), seen)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn questions_are_asked_once_the_user_allows_them_and_come_back_answered() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let st2 = st.clone();
+        let (r, seen) = gate(&st, &a.id, |p| match p.source.as_str() {
+            "prompt" => drop(agents::decide(&st2, &p.id, "allow_always", None, None, None).unwrap()),
+            _ => drop(agents::decide(&st2, &p.id, "allow_once", None, None, Some(json!({ "Which store?": "B2" }))).unwrap()),
+        })
+        .await;
+        assert_eq!(seen, ["prompt", agents::QUESTIONS], "the permission first, then the questions");
+        assert_eq!(r["behavior"], "allow");
+        assert_eq!(r["updatedInput"]["answers"], json!({ "Which store?": "B2" }));
+        assert_eq!(r["updatedInput"]["questions"][0]["header"], "Store");
+        let answered = st.db.list_permissions(Some(&a.id)).unwrap().into_iter().find(|p| p.source == agents::QUESTIONS).unwrap();
+        assert_eq!(answered.input["answers"]["Which store?"], "B2", "the card shows what was answered");
+
+        // Always allowed: straight to the questions.
+        assert!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools.iter().any(|t| t == agents::ASK_TOOL));
+        let st3 = st.clone();
+        let (r, seen) = gate(&st, &a.id, |p| drop(agents::decide(&st3, &p.id, "allow_once", None, None, Some(json!({ "Which store?": "S3" }))).unwrap())).await;
+        assert_eq!((seen, r["updatedInput"]["answers"]["Which store?"].clone()), (vec![agents::QUESTIONS.to_string()], json!("S3")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_answers_are_refused_and_the_questions_stay_asked() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let (st2, mut errors) = (st.clone(), vec![]);
+        let (r, _) = gate(&st, &a.id, |p| {
+            if p.source == "prompt" {
+                return drop(agents::decide(&st2, &p.id, "allow_once", None, None, None).unwrap());
+            }
+            for bad in [json!({}), json!({ "Which store?": 3 }), json!("B2")] {
+                errors.push(agents::decide(&st2, &p.id, "allow_once", None, None, Some(bad)).unwrap_err().to_string());
+            }
+            assert_eq!(st2.db.get_permission(&p.id).unwrap().unwrap().status, "pending");
+            drop(agents::decide(&st2, &p.id, "allow_once", None, None, Some(json!({ "Which store?": "S3" }))).unwrap());
+        })
+        .await;
+        assert_eq!(errors, ["the question \"Which store?\" has no answer", "the answer to \"Which store?\" must be text", "answers must be an object of answer text by question text"]);
+        assert_eq!(r["updatedInput"]["answers"], json!({ "Which store?": "S3" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn questions_denied_skipped_or_allowed_without_answers_tell_the_agent_why() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let decide = |d: &'static str| {
+            let st = st.clone();
+            move |p: &crate::db::PermissionRequest| drop(agents::decide(&st, &p.id, if p.source == "prompt" && d != "deny" { "allow_once" } else { d }, None, None, None).unwrap())
+        };
+        // Denied at the permission: the questions never show.
+        let st2 = st.clone();
+        let (r, seen) = gate(&st, &a.id, move |p| drop(agents::decide(&st2, &p.id, "deny", None, None, None).unwrap())).await;
+        assert_eq!((r["behavior"].clone(), seen), (json!("deny"), vec!["prompt".to_string()]));
+        // Allowed, then skipped.
+        let st2 = st.clone();
+        let (r, _) = gate(&st, &a.id, move |p| drop(agents::decide(&st2, &p.id, if p.source == "prompt" { "allow_once" } else { "deny" }, None, None, None).unwrap())).await;
+        assert_eq!(r["message"], "The user chose not to answer your questions.");
+        // Allowed, then a plain allow from an older app, which can't show the options.
+        let (r, _) = gate(&st, &a.id, decide("allow_once")).await;
+        assert_eq!(r["behavior"], "deny");
+        assert!(r["message"].as_str().unwrap().contains("Ask them in your reply"), "{r}");
+        assert!(!st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools.iter().any(|t| t == agents::ASK_TOOL), "allowed once: nothing saved");
+    }
+
     #[tokio::test]
     async fn remember_needs_a_title_and_a_body() {
         let st = crate::tasks::tests::state();
@@ -626,6 +732,7 @@ mod tests {
         let line = |name: &str| t.lines().find(|l| l.starts_with(&format!("- {name}"))).unwrap().to_string();
         assert!(line("Checker").contains(" · role Code reviewer · "), "{t}");
         assert!(line("Plain").contains(" · role Custom · "), "{t}");
+        assert!(line("Checker").starts_with("- Checker · id "), "the name, then no title: {t}");
     }
 
     #[tokio::test]
@@ -707,7 +814,7 @@ mod tests {
     async fn run(st: &AppState, a: &Agent, text: &str) -> String {
         let n = prompts(st, a).len();
         enqueue(st, &a.id, Some(text.into()), "user");
-        until("the run", 10, || !is_running(st, &a.id) && prompts(st, a).len() > n).await;
+        until("the run", 60, || !is_running(st, &a.id) && prompts(st, a).len() > n).await;
         prompts(st, a).pop().unwrap()
     }
 
@@ -768,10 +875,10 @@ mod tests {
         let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #12", "kind": "needs_action" })).await;
         assert!(said(&r).0.starts_with("Delivered."), "{r}");
         assert_eq!(queued(&st).await, json!([]));
-        until("the run", 10, || !is_running(&st, &to.id)).await;
+        until("the run", 60, || !is_running(&st, &to.id)).await;
 
         enqueue(&st, &to.id, Some("busy".into()), "user");
-        until("the run to start", 10, || is_running(&st, &to.id)).await;
+        until("the run to start", 60, || is_running(&st, &to.id)).await;
         let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #13", "kind": "needs_action" })).await;
         let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().rfind(|m| m.content == "Review PR #13").unwrap();
         assert_eq!(said(&r).0, format!("Queued: Worker is busy and will read it when its current run ends (message {}).", m.id));
@@ -782,7 +889,7 @@ mod tests {
 
         // The busy run ends: the next run takes the message.
         crate::agents::stop(&st, &to.id);
-        until("the next run to take it", 10, || prompts(&st, &to).iter().any(|p| p.contains("Review PR #13"))).await;
+        until("the next run to take it", 60, || prompts(&st, &to).iter().any(|p| p.contains("Review PR #13"))).await;
         assert_eq!(queued(&st).await, json!([]));
     }
 
@@ -968,7 +1075,7 @@ mod tests {
         // The resumed claude has the prompt but no session; the fresh retry can't start.
         let n = prompts(&st, &to).len();
         enqueue(&st, &to.id, Some("session-gone".into()), "user");
-        until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
+        until("the run to fail", 60, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
         assert!(prompts(&st, &to)[n].contains("Merged #12"));
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
         let bin = st.settings.get().claude_bin;
@@ -997,12 +1104,39 @@ mod tests {
     async fn a_message_with_substance_goes_through_even_with_thanks() {
         let (st, to) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Lead");
-        let texts = ["Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12", "Wait.", "OK, wait.", "Wait here.", "You wait", "Next.", "Great, next task", "Next task"];
+        let texts = ["#582 done: PR #588 ready, tests pass", "Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12", "Wait.", "OK, wait.", "Wait here.", "You wait", "Next.", "Great, next task", "Next task"];
         for text in texts {
             let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": "fyi" })).await;
             assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered"), "{text}: {r}");
         }
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), texts.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handed_over_ticket_asks_the_recipient_to_report_back_to_the_sender() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let line = format!("[When this work is done, or blocked, report back to Lead: call `mcp__loft__message_agent` with agent \"{}\", kind \"needs_action\" and ticket \"#12\", saying what you did and where it is.]", from.id);
+        message(&st, &from, json!({ "agent": to.id, "text": "Build #12", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        let p = &prompts(&st, &to)[0];
+        assert!(p.contains("Build #12") && p.contains(&line), "{p}");
+
+        // The report back answers that hand-over: the Lead isn't asked to report back in turn.
+        message(&st, &to, json!({ "agent": from.id, "text": "#12 done: PR #13 ready", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the Lead's run", 10, || !is_running(&st, &from.id) && !prompts(&st, &from).is_empty()).await;
+        let p = &prompts(&st, &from)[0];
+        assert!(p.contains("#12 done: PR #13 ready") && !p.contains("report back"), "{p}");
+
+        // The Dev's report was no hand-over: the Lead's follow-up on the same ticket is one, and asks for a report back.
+        message(&st, &from, json!({ "agent": to.id, "text": "Also fix the lint", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
+        assert!(prompts(&st, &to)[1].contains("Also fix the lint") && prompts(&st, &to)[1].contains("report back"), "{}", prompts(&st, &to)[1]);
+
+        // A message about no ticket hands nothing over.
+        message(&st, &from, json!({ "agent": to.id, "text": "Which branch?", "kind": "needs_action" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
+        assert!(!prompts(&st, &to)[2].contains("report back"), "{}", prompts(&st, &to)[2]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

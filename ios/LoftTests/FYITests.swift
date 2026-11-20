@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class FYITests: XCTestCase {
     private func msg(_ role: String, _ meta: JSONValue?) -> ChatMessage {

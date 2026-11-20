@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class AgentSectionsTests: XCTestCase {
     private func agent(_ name: String, group: String? = nil, lead: Bool = false) -> Agent {

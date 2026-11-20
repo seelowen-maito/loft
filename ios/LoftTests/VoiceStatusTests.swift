@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Talk's status screen after a dictated message is sent: Sending → Thinking → Speaking → Replied.
 final class VoiceStatusTests: XCTestCase {

@@ -2,6 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { Agent, GrillSession, Message, Task, TaskComment, PermissionRequest, PullRequest, SystemReading, UpdateStatus } from "./api";
 
 export type ServerEvent =
+  | { type: "resync" }
   | { type: "agent_updated"; agent: Agent }
   | { type: "agent_deleted"; agent_id: string }
   | { type: "message"; message: Message }
@@ -56,6 +57,19 @@ export function useServerEvents(fn: Listener) {
       listeners.delete(fn);
     };
   }, [fn]);
+}
+
+/** Listens to the live event stream for the page's lifetime (a shared store). */
+export function onServerEvent(fn: Listener) {
+  connect();
+  listeners.add(fn);
+}
+
+/** Tells `fn` each time the event stream opens or drops, for the page's lifetime. */
+export function onConnection(fn: (live: boolean) => void) {
+  connect();
+  statusListeners.add(() => fn(connected));
+  if (connected) fn(true);
 }
 
 export function useLiveConnection() {

@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// "Make it a brief" with Claude on the Mac (#118): the brief, or a note and the words kept.
 final class MacBriefTests: XCTestCase {

@@ -76,3 +76,15 @@ test("Pause shows only while the Delivery runs, Resume while it's paused", () =>
   assert.deepEqual(card(false, true), { pause: false, resume: true, reopen: false }, "paused");
   assert.deepEqual(card(true, false, false), { pause: false, resume: false, reopen: false }, "not started");
 });
+
+test("waiting for CI counts from the Delivery's ci_since and links to the checks", () => {
+  const now = Date.parse("2026-11-13T10:06:30Z");
+  const d = { state: "running", started: true, state_line: { tone: "ci", text: "Waiting for CI on #412, #413" }, checks_url: "https://github.com/o/r/pull/9/checks", ci_since: "2026-11-13T10:00:10.5+00:00" };
+  assert.deepEqual(deliveryStateLine(d, now), { tone: "ci", text: "Waiting for CI on #412, #413 · 6m 19s", href: "https://github.com/o/r/pull/9/checks" });
+  // A standalone ticket sends no tickets: its card counts from ci_since all the same.
+  const one = { state: "running", started: true, state_line: { tone: "ci", text: "Waiting for CI on #7" }, checks_url: "https://github.com/o/r/pull/12/checks", ci_since: "2026-11-13T10:04:00Z" };
+  assert.equal(deliveryStateLine(one, now)?.text, "Waiting for CI on #7 · 2m 30s");
+  assert.deepEqual(deliveryStateLine({ ...d, checks_url: null, ci_since: null }, now), { tone: "ci", text: "Waiting for CI on #412, #413" }, "no start time, no checks page: the line alone");
+  assert.equal(deliveryStateLine({ ...d, ci_since: "soon" }, now)?.text, "Waiting for CI on #412, #413", "an unreadable time shows no elapsed");
+  assert.equal(deliveryStateLine({ ...d, state_line: { tone: "running", text: "Running." } }, now)?.href, undefined, "only waiting for CI links");
+});

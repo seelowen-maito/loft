@@ -7,13 +7,6 @@ export const MAX_VIDEO_BYTES = 200_000_000;
 /** An upload's stored name (`<uuid>.<ext>`) is a video's. */
 export const isVideo = (file: string) => /\.(mp4|mov|webm)$/.test(file);
 
-/** A video's length as the chat shows it: `0:07`, `12:34`. */
-export function fmtLength(secs: number): string {
-  if (!Number.isFinite(secs)) return "";
-  const s = Math.round(secs);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
 /** Which of `all` can be attached: images, and with `videos` MP4, MOV and WebM up to MAX_VIDEO_BYTES. */
 export function attachable<F extends { type: string; size: number }>(all: F[], videos: boolean) {
   const video = (f: { type: string }) => videos && VIDEO_TYPES.includes(f.type);

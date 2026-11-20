@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// "Resume a session" from the chat's context menu: the agent's past Sessions, newest first; picking one makes it

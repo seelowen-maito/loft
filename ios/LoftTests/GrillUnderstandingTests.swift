@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The phrase matcher decides first; the model (faked here) only reads what the matcher can't tell.
 final class GrillUnderstandingTests: XCTestCase {

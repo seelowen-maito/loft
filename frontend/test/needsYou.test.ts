@@ -79,7 +79,7 @@ test("push off points at Settings → Push", () => {
 });
 
 test("urgency in words", () => {
-  assert.deepEqual([3, 2, 1, 0].map((u) => urgencyOf(u).label), ["Blocks an agent", "Waiting for you", "Worth a look", "To review"]);
+  assert.deepEqual([3, 2, 1, 0].map((u) => urgencyOf(u).label), ["Blocks an agent", "Needs you", "Worth a look", "To review"]);
 });
 
 test("the counter counts only what hasn't been seen, from the list and then from needs_you events", () => {

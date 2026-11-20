@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class NeedsYouTests: XCTestCase {
     private func fixture() throws -> NeedsYouList {
@@ -14,6 +15,21 @@ final class NeedsYouTests: XCTestCase {
         for rule in [nil, ""] { XCTAssertFalse(request("Kill", rule).canAlwaysAllow, rule ?? "nil") }
         XCTAssertTrue(request("Bash", "Bash(git *)").canAlwaysAllow)
         XCTAssertTrue(request("Bash", nil).canAlwaysAllow)
+        for rule in [nil, "", "Checkout(/d/loft)"] { XCTAssertFalse(request("Checkout", rule).canAlwaysAllow, rule ?? "nil") }
+    }
+
+    func testAnAgentsQuestionsListTheirTextAndAreNotAToolCall() {
+        let input: JSONValue = .object(["questions": .array([["question": "Which store?"], ["question": "Which region?"], ["header": "no text"]])])
+        let asks = PermissionRequest(id: "q", agentId: "a", source: "questions", toolName: "AskUserQuestion", input: input, reason: nil, rule: nil, status: "pending", createdAt: Date())
+        XCTAssertTrue(asks.isQuestions)
+        XCTAssertEqual(asks.summary, "Which store?\nWhich region?")
+        var prompt = asks
+        prompt.source = "prompt"
+        XCTAssertFalse(prompt.isQuestions, "the permission to ask is an ordinary Allow / Deny")
+        XCTAssertEqual(prompt.summary, "Which store?\nWhich region?", "but it lists the questions too")
+        XCTAssertEqual(AgentState.waitingApproval.label(pending: [asks]), "Has questions")
+        XCTAssertEqual(AgentState.waitingApproval.label(pending: [asks, prompt]), "Needs approval", "anything else waiting needs approval")
+        XCTAssertEqual(AgentState.waitingApproval.label(pending: []), "Needs approval")
     }
 
     func testTheBackendsFixtureDecodes() throws {

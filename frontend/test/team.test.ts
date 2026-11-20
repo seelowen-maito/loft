@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupByTeam, teamBadge, outsideWarning, projectChoices, projectsOf, teamOf, withProject } from "../src/lib/team.ts";
+import { groupByTeam, teamBadge, outsideWarning, projectChoices, projectsOf, teamOf, withProject, withTyped } from "../src/lib/team.ts";
 
 const a = (name: string, group: string | undefined, project: string, projects?: string[]) => ({ name, group, project, projects });
 
@@ -30,6 +30,14 @@ test("adding a project appends it once; starring makes it the main one", () => {
   assert.deepEqual(withProject(["b2c", "b2b"], "b2c"), ["b2c", "b2b"], "already there: unchanged");
   assert.deepEqual(withProject(["b2c", "b2b"], "b2b", true), ["b2b", "b2c"]);
   assert.deepEqual(withProject(["b2c"], ""), ["b2c"]);
+});
+
+test("saving takes in the project still typed in the add field", () => {
+  const form = { name: "A", projects: ["b2c"] };
+  assert.deepEqual(withTyped(form, " b2b "), { name: "A", projects: ["b2c", "b2b"] });
+  assert.deepEqual(withTyped(form, "  "), form, "nothing typed: unchanged");
+  assert.deepEqual(withTyped(form, "b2c"), form, "already there: unchanged");
+  assert.deepEqual(withTyped({ name: "A", projects: [] }, "notes").projects, ["notes"]);
 });
 
 test("a new issue offers the agent's projects first and every other known one after", () => {

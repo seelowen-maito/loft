@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 final class RunWatchTests: XCTestCase {
     private let now = Date()

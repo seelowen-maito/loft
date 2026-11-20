@@ -1,5 +1,6 @@
 /** Needs you on the web: the list `GET /api/needs-you` returns (docs/needs-you-api.md), where each item leads, and the
  * top bar's counter. Item text is plain text: render it as text, never as HTML. */
+import { NEEDS_YOU_LABEL } from "./taskStatus.ts";
 
 /** Where an `open` action goes. */
 export type NeedsYouTarget = { screen?: string; agent_id?: string; task_id?: string; url?: string };
@@ -97,7 +98,7 @@ export function answerBody(a: NeedsYouAction, text: string): Record<string, unkn
 /** How urgent an item is, in words and colour. */
 export function urgencyOf(u: number): { label: string; tone: "bad" | "warn" | "accent" | "muted" } {
   if (u >= 3) return { label: "Blocks an agent", tone: "bad" };
-  if (u === 2) return { label: "Waiting for you", tone: "warn" };
+  if (u === 2) return { label: NEEDS_YOU_LABEL, tone: "warn" };
   if (u === 1) return { label: "Worth a look", tone: "accent" };
   return { label: "To review", tone: "muted" };
 }
