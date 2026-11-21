@@ -536,6 +536,8 @@ export type WorkspaceSizes = {
   agents: { id: string; name: string; bytes: number; busy: boolean; processes: number }[];
   free_bytes: number | null;
   low_disk_bytes: number;
+  /** The shared Rust build cache: whether sccache is installed, what its cache takes, and its cap. */
+  sccache: { installed: boolean; bytes: number; limit_bytes: number };
 };
 /** A process an idle agent left running, listed in Clean; `age_secs` is how long ago it started. */
 export type LeftProcess = { pid: number; command: string; age_secs: number };

@@ -1416,6 +1416,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    crate::sccache::apply(&mut cmd, state.settings.dir());
     // Its own Simulator device, once it has one (an earlier run asked for it).
     match state.db.agent_device(&a.id)? {
         Some(udid) => cmd.env(crate::simulator::DEVICE_VAR, udid),

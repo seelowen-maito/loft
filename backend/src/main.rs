@@ -33,6 +33,7 @@ mod prs;
 mod push;
 mod signin;
 mod reply;
+mod sccache;
 mod repos;
 mod schedule;
 mod sessions;
