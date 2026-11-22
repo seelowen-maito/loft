@@ -139,8 +139,10 @@ final class LoftUITests: XCTestCase {
         let load = app.buttons["Load earlier messages"]
         // Each tap: the item at the top before it, and one that only the newly drawn page has.
         for (path, top, new) in [("cached", "Step 46 of", "Step 26 of"), ("server", "Step 26 of", "Step 1 of")] {
-            for _ in 0..<30 where !load.isHittable { app.swipeDown(velocity: .fast) }
-            XCTAssertTrue(load.isHittable, path)
+            // A tap on the status bar scrolls the chat to its oldest loaded message in one go: swiping up through
+            // 100 messages took over a minute (#663).
+            app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 200, dy: 10)).tap()
+            XCTAssertTrue(wait { load.isHittable }, path)
             let item = text(containing: top, app)
             XCTAssertTrue(item.exists, path)
             let before = item.frame.minY
