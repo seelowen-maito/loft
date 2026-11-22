@@ -153,6 +153,22 @@ final class LoftUITests: XCTestCase {
         }
     }
 
+    /// A confirmation opens next to the button that asked for it (#661): on iPhone it's a popover, and attached to
+    /// the whole screen it pointed at an unrelated row near the top.
+    func testDeleteAgentConfirmationOpensNextToItsButton() {
+        let app = launch()
+        app.tabBars.buttons["Agents"].tap()
+        openAgent("QA Agent", app)
+        let delete = app.buttons["deleteAgent"]
+        XCTAssertTrue(app.buttons["chatWithAgent"].appears(timeout: 5))
+        // The bottom of a lazy list: swipe until the button is there and clear of the tab bar.
+        for _ in 0..<8 where !delete.exists || !delete.isHittable || delete.frame.maxY > app.tabBars.firstMatch.frame.minY - 8 { app.swipeUp() }
+        delete.tap()
+        let confirm = app.buttons["Delete agent and workspace"]
+        XCTAssertTrue(confirm.appears(timeout: 5))
+        XCTAssertLessThan(delete.frame.minY - confirm.frame.maxY, 150, "the confirmation sits just above Delete agent")
+    }
+
     private func wait(_ done: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(5)
         while !done(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
