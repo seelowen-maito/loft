@@ -22,7 +22,7 @@ before(async () => {
 after(() => vite.close());
 
 const lead = { id: "lead", name: "Loft Lead", avatar: { svg: "" }, role: "lead" };
-const dev = { id: "dev", name: "Loft Dev", avatar: { svg: "" }, role: "dev", project: "loft", queued_messages: [5] };
+const dev = { id: "dev", name: "Loft Dev", avatar: { svg: "" }, role: "dev", project: "loft", queued_messages: [5, 6] };
 const msg = (id: number, role: string, meta: object | null = null) =>
   ({ id, agent_id: "dev", role, kind: "text", content: `message ${id}`, meta, created_at: "2026-11-23T14:05:00Z" });
 const noop = () => {};
@@ -62,4 +62,18 @@ test("a cancelled message offers Copy to box and no Reply", () => {
   assert.deepEqual(r.labels, ["Copy to box"]);
   assert.equal(r.inFooter, true);
   assert.match(r.footer.textContent!, /^Cancelled, not sent to the agent/);
+});
+
+test("your own queued message shows the mark and Cancel in its footer", () => {
+  const r = row(msg(6, "user"));
+  assert.deepEqual(r.labels, ["Cancel this queued message", "Reply to your message"]);
+  assert.equal(r.inFooter, true);
+  assert.match(r.footer.textContent!, /^\s*Queued until this run ends Cancel.*Reply$/);
+});
+
+test("your own cancelled message is struck through, offers Copy to box and no Reply", () => {
+  const r = row(msg(7, "user", { cancelled: true }));
+  assert.deepEqual(r.labels, ["Copy to box"]);
+  assert.match(r.footer.textContent!, /^Cancelled, not sent to the agent/);
+  assert.ok(r.div.querySelector(".line-through"));
 });

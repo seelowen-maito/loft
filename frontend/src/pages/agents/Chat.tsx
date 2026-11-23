@@ -961,6 +961,27 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
   const press = canReply ? longPress : {};
   const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} label={replyLabel(m, agent.name)} />;
   const cancel = useAction();
+  // The footer's status on a message waiting in the queue, yours or another agent's: Cancel, or Copy to box once cancelled.
+  const sender = m.meta?.from_agent ? (findAgent(agents, m.meta.from_agent.id)?.name ?? m.meta.from_agent.name) : null;
+  const status =
+    agent.queued_messages?.includes(m.id) ? (
+      <>
+        <span className="flex items-center gap-1 px-1 text-warn">
+          <Hourglass className="size-3" aria-hidden /> {QUEUED_MARK}
+        </span>
+        <button type="button" className="msg-act text-warn hover:bg-warn/[0.12] hover:text-warn" aria-label={sender ? `Cancel this queued message from ${sender}` : "Cancel this queued message"} disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id)).then((r) => r && !r.ok && cancel.setError("The agent already took this message"))}>
+          <X className="size-3.5" aria-hidden /> Cancel
+        </button>
+        {cancel.error && <span className="px-1 text-bad">{cancel.error}</span>}
+      </>
+    ) : m.meta?.cancelled ? (
+      <>
+        <span className="px-1">{CANCELLED_MARK}</span>
+        <button type="button" className="msg-act" title="Copy this message back into the box" onClick={() => onCopy(m)}>
+          <Copy className="size-3.5" aria-hidden /> Copy to box
+        </button>
+      </>
+    ) : null;
   if (m.kind === "clear") {
     return (
       <div className="flex items-center gap-3 py-2">
@@ -1050,26 +1071,7 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
-          <MessageFooter m={m} side="right" reply={replyButton} status={
-            agent.queued_messages?.includes(m.id) ? (
-              <>
-                <span className="flex items-center gap-1 px-1 text-warn">
-                  <Hourglass className="size-3" aria-hidden /> {QUEUED_MARK}
-                </span>
-                <button type="button" className="msg-act text-warn hover:bg-warn/[0.12] hover:text-warn" aria-label={`Cancel this queued message from ${from?.name ?? m.meta.from_agent.name}`} disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id)).then((r) => r && !r.ok && cancel.setError("The agent already took this message"))}>
-                  <X className="size-3.5" aria-hidden /> Cancel
-                </button>
-                {cancel.error && <span className="px-1 text-bad">{cancel.error}</span>}
-              </>
-            ) : m.meta?.cancelled ? (
-              <>
-                <span className="px-1">{CANCELLED_MARK}</span>
-                <button type="button" className="msg-act" title="Copy this message back into the box" onClick={() => onCopy(m)}>
-                  <Copy className="size-3.5" aria-hidden /> Copy to box
-                </button>
-              </>
-            ) : null
-          } />
+          <MessageFooter m={m} side="right" reply={replyButton} status={status} />
         </div>
         {from && <Sticker avatar={from.avatar} lead={from.role === "lead"} size={26} className="mt-5" />}
       </div>
@@ -1096,7 +1098,7 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
           </div>
         )}
         {m.content && (
-          <div className="min-w-0 max-w-[80%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
+          <div className={cx("min-w-0 max-w-[80%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]", m.meta?.cancelled && "text-fg-3 line-through")}>{taskText(m)}</div>
         )}
         <MessageTasks m={m} />
         <MessageTags m={m} />
@@ -1105,7 +1107,7 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
           <div className="font-mono text-[10.5px] text-fg-3">→ {m.meta.mentions_only ? "sent to" : "also sent to"} {m.meta.mentions.map((x: { name: string }) => x.name).join(", ")}</div>
         )}
         {m.meta?.mentioned_in && <div className="font-mono text-[10.5px] text-fg-3">mentioned in {m.meta.mentioned_in.name}'s chat</div>}
-        <MessageFooter m={m} side="right" reply={replyButton} />
+        <MessageFooter m={m} side="right" reply={replyButton} status={status} />
       </div>
     );
   }
