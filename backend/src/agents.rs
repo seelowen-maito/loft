@@ -732,7 +732,13 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
     let for_user = matches!(trigger, "schedule" | "manual" | "scheduled") || (text.is_some() && meta["from_agent"].is_null());
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
-    start(state, agent_id, prompt, trigger, for_user);
+    // Behind a running run it waits in the queue, where the user can still cancel it (`cancel_queued`).
+    start_with(state, agent_id, prompt, trigger, for_user, false, None, msg.as_ref().map(|m| m.id), false);
+    if let Some(m) = &msg
+        && state.rt.lock().unwrap().queued_messages.get(agent_id).is_some_and(|q| q.iter().any(|(i, _)| *i == m.id))
+    {
+        emit_run(state, agent_id);
+    }
     msg
 }
 
@@ -2902,6 +2908,25 @@ esac
         assert!(st.rt.lock().unwrap().fresh_before.contains(&to.id));
         assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#12"));
         assert!(st.rt.lock().unwrap().queued.get(&to.id).is_none_or(|q| q.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_user_message_to_a_busy_agent_waits_in_the_queue_and_can_be_cancelled() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let keep = enqueue_with(&st, &a.id, Some("first".into()), json!({}), "user").unwrap().id;
+        let drop = enqueue_with(&st, &a.id, Some("never mind".into()), json!({}), "user").unwrap().id;
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&a.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [keep, drop]);
+            assert_eq!(rt.queued[&a.id].len(), 2);
+        }
+        assert!(cancel_queued(&st, &a.id, drop).unwrap());
+        let rt = st.rt.lock().unwrap();
+        assert_eq!(rt.queued[&a.id].len(), 1);
+        assert!(rt.queued[&a.id][0].contains("first"));
+        assert_eq!(st.db.get_message(&a.id, drop).unwrap().unwrap().meta["cancelled"], true);
     }
 
     #[tokio::test]
