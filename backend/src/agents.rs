@@ -1221,7 +1221,9 @@ pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> 
             rt.fresh_before.remove(agent_id);
         }
     }
-    if let Some(t) = ticket {
+    // Unless an earlier message already handed the ticket over: then it is still the one in progress.
+    let handed = |t: &str| state.db.list_messages(agent_id, 1000, None).unwrap_or_default().iter().any(|m| m.id != id && m.meta["ticket"] == t && m.meta["cancelled"] != true);
+    if let Some(t) = ticket.filter(|t| !handed(t)) {
         // The ticket was never handed over: its next message is a boundary again.
         let _ = state.db.update_agent(agent_id, |a| {
             if a.delivery_ticket.as_deref() == Some(t.as_str()) {
@@ -2915,6 +2917,12 @@ esac
         assert!(!st.rt.lock().unwrap().fresh_before.contains(&to.id), "no context clear for a ticket it never got");
         assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket, None);
         assert!(st.rt.lock().unwrap().queued.get(&to.id).is_none_or(|q| q.is_empty()));
+
+        // A second message on the ticket, cancelled, leaves it handed over by the first.
+        message_on_ticket(&st, &from, &to, "Build #12", json!({}), Some("o/r#12"), true).unwrap();
+        let again = message_on_ticket(&st, &from, &to, "Also the lint", json!({}), Some("o/r#12"), true).unwrap();
+        assert!(cancel_queued(&st, &to.id, again).unwrap());
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#12"));
     }
 
     #[tokio::test]
