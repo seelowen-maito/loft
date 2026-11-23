@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# End-to-end test of setup.sh and start.sh on a fresh checkout, as the Windows CI runs it (in Git Bash):
+# End-to-end test of setup.sh and start.sh on a fresh checkout, as the CI runs it on Linux and on Windows (in Git Bash):
 # setup answered through stdin must save a projects folder Loft can open, build, and start.sh must serve Loft. On
-# Windows, saying no leaves no logon task, and accepting it must create one task whose Loft comes back after a restart
-# and a crash; a second checkout that takes the task over must stop the first one's Loft and serve its own.
+# Windows, setup must read back a C:\\… folder, and on a machine with nothing installed give a winget command for each
+# requirement and check long paths; saying no leaves no logon task, and accepting it must create one task whose Loft
+# comes back after a restart and a crash; a second checkout that takes the task over must stop the first one's Loft and
+# serve its own.
 # `scripts/test-setup.sh` from a checkout that was never set up (no .loft/settings.json). Uses $LOFT_PORT (7420).
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -62,7 +64,47 @@ check "in the form Loft opens ($form)" "$([[ $saved == $form && $saved != *\\* ]
 again=$(bash setup.sh </dev/null 2>&1 | grep -A2 '^Projects folder$')
 check "a second run reads it back" "$(echo "$again" | sed -n 2p)" "  ✓ $saved (change it under Settings)"
 check "and finds the folder" "$(echo "$again" | grep -c '^  !')" 0
+
 if [ "$WINDOWS" = 1 ] && [ "$rc" = 0 ]; then
+  # The backend writes the folder in Windows' form, JSON-escaped (C:\\Users\\…): setup reads it back as C:\Users\….
+  cp .loft/settings.json "$T/settings.json"
+  win_dir=$(cygpath -w "$projects")
+  printf '{\n  "projects_dir": "%s"\n}\n' "$(printf '%s' "$win_dir" | sed 's/\\/\\\\/g')" > .loft/settings.json
+  again=$(bash setup.sh </dev/null 2>&1 | grep -A2 '^Projects folder$')
+  check "a C:\\ folder from Settings reads back" "$(echo "$again" | sed -n 2p)" "  ✓ $win_dir (change it under Settings)"
+  check "and is found" "$(echo "$again" | grep -c '^  !')" 0
+  cp "$T/settings.json" .loft/settings.json
+
+  # A machine with nothing installed but Git for Windows (no cargo, node, claude or gh on the PATH, and a home with no
+  # ~/.cargo): setup stops with a winget command for each. Run twice, with git's long paths forced off then on (the
+  # command line's config beats every file's), to see the long paths checks too.
+  mkdir -p "$T/home"
+  git_dir=$(dirname "$(command -v git)")
+  bare() {
+    HOME=$T/home PATH="/usr/bin:$git_dir:$(cygpath -u "${SYSTEMROOT:-C:\\Windows}")/System32" \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.longpaths GIT_CONFIG_VALUE_0=$1 bash setup.sh </dev/null > "$T/bare.log" 2>&1
+  }
+  has() { grep -cF -- "$1" "$T/bare.log"; }
+  bare false
+  check "with nothing installed, setup stops" "$?" 1
+  check "but finds git" "$(has '✓ git')" 1
+  for id in Rustlang.Rustup OpenJS.NodeJS.LTS Anthropic.ClaudeCode GitHub.cli; do
+    check "and tells how to install $id" "$(has "Run: winget install -e --id $id")" 1
+  done
+  check "git's long paths off: it warns" "$(has '! long paths are off in git')" 1
+  check "and tells how to turn them on" "$(has 'Run: git config --global core.longpaths true')" 1
+  # Windows' own switch can't be flipped here (it's the machine's): the check must say what the registry says.
+  if MSYS_NO_PATHCONV=1 reg query 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem' /v LongPathsEnabled 2>/dev/null | tr -d '\r' | grep 'REG_DWORD *0x1$' >/dev/null; then
+    check "Windows' long paths on: it says so" "$(has '✓ long paths on in Windows')" 1
+  else
+    check "Windows' long paths off: it warns" "$(has '! long paths are off in Windows')" 1
+    check "and tells how to turn them on" "$(has 'LongPathsEnabled -Value 1')" 1
+  fi
+  bare true
+  check "git's long paths on: it says so" "$(has '✓ long paths on in git')" 1
+  check "and doesn't warn" "$(has 'long paths are off in git')" 0
+  [ "$(has '✓ long paths on in git')" = 1 ] || sed 's/^/    | /' "$T/bare.log"
+
   # No answer means no to the logon task: Loft runs only through start.sh.
   check "no to the logon task skips it" "$(grep -A1 '^Background task$' "$T/setup.log" | grep -c '✓ skipped')" 1
   check "and leaves no task" "$(MSYS_NO_PATHCONV=1 schtasks /Query /TN Loft >/dev/null 2>&1 && echo found || echo "not found")" "not found"
