@@ -1,0 +1,129 @@
+# Builds and tests the backend and the web app on Linux and Windows, side by side, for pull requests into develop
+# (spec PRs included) that touch them. No macOS: the team's agents test on a Mac already.
+#
+# The Rust cache is keyed by Cargo.lock and saved only on pushes to develop, so pull requests only read it; after
+# such a push, only the newest cache of each system is kept.
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - backend/**
+      - frontend/**
+      - scripts/**
+      - setup.sh
+      - start.sh
+      - dev.sh
+      - site/install.sh
+      - .github/workflows/ci.yml
+  push:
+    branches: [develop]
+    paths:
+      - backend/**
+      - frontend/**
+      - scripts/**
+      - setup.sh
+      - start.sh
+      - dev.sh
+      - site/install.sh
+      - .github/workflows/ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: ${{ matrix.os == 'windows-latest' && 'Windows' || 'Linux' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Rust stable
+        run: rustup update stable --no-self-update && rustup default stable
+
+      # Some tests commit in throwaway repos, as on a machine where git knows the user.
+      - name: Git identity
+        run: |
+          git config --global user.name "Loft CI"
+          git config --global user.email "ci@loft.invalid"
+
+      - name: Restore the Rust cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            backend/target
+          key: rust-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Backend build
+        working-directory: backend
+        run: cargo build --locked
+
+      - name: Backend tests
+        working-directory: backend
+        run: cargo test --locked
+
+      - name: Web build and tests
+        run: |
+          . scripts/frontend-pm.sh
+          cd frontend
+          fe_install
+          fe run build
+          fe test
+
+      - name: Save the Rust cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            backend/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+  prune-caches:
+    name: Keep the newest Rust caches
+    needs: test
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete all but the newest Rust cache of each system
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for os in Linux Windows; do
+            gh cache list --key "rust-$os-" --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' |
+              while read -r id; do
+                echo "Deleting cache $id (rust-$os)"
+                gh cache delete "$id"
+              done
+          done
