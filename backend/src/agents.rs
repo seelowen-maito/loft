@@ -1385,15 +1385,31 @@ fn loft_exe() -> Result<PathBuf> {
         if let Some(bin) = next_to_tests.filter(|b| b.exists()) {
             return Ok(bin);
         }
-        // With `CARGO_BUILD_BUILD_DIR` the test binary is built elsewhere; the loft binary stays in the target dir.
+        // With `build-dir` set the test binary is built elsewhere; the loft binary stays in the target dir.
         let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
         return Ok(target.join("debug/loft"));
     }
     Ok(exe)
 }
 
+/// Cargo keeps compiled dependencies in the workspace's `.cargo-build/`, shared by all the agent's clones; binaries
+/// stay in each clone's `target/`. It's set in the workspace's `.cargo/config.toml`, which every clone inside finds,
+/// and not in the environment: sccache hashes `CARGO_*` variables, so a build dir that differs per agent in the
+/// environment keeps agents from sharing cache hits.
+fn write_cargo_config(ws: &Path) -> Result<()> {
+    let dir = serde_json::to_string(&ws.join(".cargo-build").to_string_lossy())?;
+    let text = format!("[build]\nbuild-dir = {dir}\n");
+    let path = ws.join(".cargo/config.toml");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(&text) {
+        std::fs::create_dir_all(ws.join(".cargo"))?;
+        std::fs::write(path, text)?;
+    }
+    Ok(())
+}
+
 /// The claude command for a run. Writing its files fails the run rather than putting them on argv.
 fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
+    write_cargo_config(&workspace(state, &a.id))?;
     let mut servers = serde_json::Map::new();
     if let Value::Object(user) = &a.mcp_servers {
         for (k, v) in user {
@@ -1457,8 +1473,6 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
         .env("PORT", ports.start().to_string())
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
-        // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
-        .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
         // Workspaces live outside any repo (ADR 0005), but a home folder can be one: git in a workspace with no clone
         // stops here instead of finding it. Git ignores a relative ceiling.
         .env("GIT_CEILING_DIRECTORIES", std::path::absolute(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone()))
@@ -2399,7 +2413,6 @@ while [ $# -gt 0 ]; do
 done
 printf '%s %s\n' "$PORT" "$LOFT_PORT_RANGE" >> ports.log
 printf '%s\n' "${LOFT_SIMULATOR_UDID-none}" >> device.log
-printf '%s\n' "${CARGO_BUILD_BUILD_DIR-none}" >> cargo-build.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 case "$prompt" in *"redraw your sticker"*) cost=0.25 sid=s-redraw;; esac
@@ -2636,9 +2649,8 @@ esac
         let b = crate::tasks::tests::agent(&st, "Other");
         run(&st, &a.id, "hello", 1).await;
         run(&st, &b.id, "hello", 1).await;
-        let seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join("cargo-build.log")).unwrap().trim().to_string();
-        assert_eq!(seen(&a.id), workspace(&st, &a.id).join(".cargo-build").to_string_lossy());
-        assert_eq!(seen(&b.id), workspace(&st, &b.id).join(".cargo-build").to_string_lossy());
+        let seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join(".cargo/config.toml")).unwrap();
+        assert_eq!(seen(&a.id), format!("[build]\nbuild-dir = {:?}\n", workspace(&st, &a.id).join(".cargo-build").to_string_lossy()));
         assert_ne!(seen(&a.id), seen(&b.id));
     }
 
