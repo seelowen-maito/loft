@@ -1212,7 +1212,7 @@ fn substitutions(s: &str) -> Vec<String> {
         } else if c[i] == '`' {
             // Up to the next backtick that isn't escaped, unescaped as the shell does. Each backtick starts one, whatever
             // pairing the ones before it would make: a backtick in a quote or a comment inside `$(…)` is only text.
-            out.push(backtick_body(&c, i + 1, false).0.into_iter().collect());
+            out.extend(backtick_readings(&c, i + 1, false).0.into_iter().map(|b| b.into_iter().collect::<String>()));
             i += 1;
         } else {
             i += 1;
@@ -2738,7 +2738,6 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             '"' => {
                 l.in_word = true;
                 l.quoted = true;
-                let mut braces = 0; // open `${` in the string
                 while let Some(&q) = c.get(i) {
                     i += 1;
                     match q {
@@ -2755,25 +2754,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                         '`' => {
                             l.word.push('$');
                             l.cmd(p);
-                            let (body, next) = backtick_body(c, i, true);
-                            lex(p, &body, 0, Some('\0'));
-                            // In `${…}` zsh unescapes `\"` and bash doesn't: the command is read both ways.
-                            if braces > 0 {
-                                let (plain, _) = backtick_body(c, i, false);
-                                if plain != body {
-                                    l.cmd(p);
-                                    lex(p, &plain, 0, Some('\0'));
-                                }
-                            }
+                            let (bodies, next) = backtick_readings(c, i, true);
+                            lex_readings(p, &mut l, &bodies);
                             i = next;
-                        }
-                        '$' if c.get(i) == Some(&'{') => {
-                            braces += 1;
-                            l.word.push(q);
-                        }
-                        '}' if braces > 0 => {
-                            braces -= 1;
-                            l.word.push(q);
                         }
                         _ => l.word.push(q),
                     }
@@ -2783,8 +2766,8 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 l.in_word = true;
                 l.word.push('$');
                 l.cmd(p);
-                let (body, next) = backtick_body(c, i, false);
-                lex(p, &body, 0, Some('\0'));
+                let (bodies, next) = backtick_readings(c, i, false);
+                lex_readings(p, &mut l, &bodies);
                 i = next;
             }
             '$' | '<' | '>' if next == Some('(') => {
@@ -2828,8 +2811,8 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     // `${x:-`cmd`}` too.
                     if n == '`' {
                         l.cmd(p);
-                        let (body, next) = backtick_body(c, i, false);
-                        lex(p, &body, 0, Some('\0'));
+                        let (bodies, next) = backtick_readings(c, i, false);
+                        lex_readings(p, &mut l, &bodies);
                         i = next;
                     }
                 }
@@ -3022,6 +3005,31 @@ fn backtick_body(c: &[char], mut i: usize, in_quotes: bool) -> (Vec<char>, usize
         }
     }
     (body, i)
+}
+
+/// The readings of the backtick command at `i - 1`: its `backtick_body` for `in_quotes`, and inside a `${…}` also the
+/// other, since zsh and bash disagree there about `\"` (and double quotes opened inside the braces aren't followed).
+fn backtick_readings(c: &[char], i: usize, in_quotes: bool) -> (Vec<Vec<char>>, usize) {
+    let (body, next) = backtick_body(c, i, in_quotes);
+    let mut bodies = vec![body];
+    let open = c[..i - 1].windows(2).rposition(|w| w == ['$', '{']);
+    if open.is_some_and(|o| !c[o..i].contains(&'}')) {
+        let other = backtick_body(c, i, !in_quotes).0;
+        if other != bodies[0] {
+            bodies.push(other);
+        }
+    }
+    (bodies, next)
+}
+
+/// Lexes each reading as a command of its own; the first has its command slot already.
+fn lex_readings(p: &mut Parse, l: &mut Level, bodies: &[Vec<char>]) {
+    for (n, body) in bodies.iter().enumerate() {
+        if n > 0 {
+            l.cmd(p);
+        }
+        lex(p, body, 0, Some('\0'));
+    }
 }
 
 /// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
@@ -5442,5 +5450,22 @@ mod tests {
         ] {
             assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
         }
+    }
+
+    /// Double quotes opened inside `${…}`, with the backtick command in them (found on `main`): both readings of `\"` are
+    /// checked, so a git in either asks.
+    #[test]
+    fn double_quotes_inside_a_parameter_expansion_dont_hide_a_backtick_command() {
+        let git = format!("git -C {USER} reset --hard");
+        let inner = format!("`echo \"x\\\"; {git}; echo \\\"y\"`");
+        for cmd in [
+            format!("echo ${{x:-\"{inner}\"}}"),
+            format!("echo \"${{x:-\"{inner}\"}}\""),
+            format!("cat <<EOF\n${{x:-\"{inner}\"}}\nEOF"),
+            format!("bash -c 'echo ${{x:-\"{inner}\"}}'"),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), vec![PathBuf::from(USER)], "{cmd}");
+        }
+        assert!(asks_all("echo ${x:-\"`echo \\\"git status\\\"`\"}", CLONE).is_empty());
     }
 }
