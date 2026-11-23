@@ -459,6 +459,21 @@ export type AgentSummary = {
   prs: { total: number; open: number; merged: number };
 };
 
+/** A chat message kept in Saved (`/saved`). */
+export type SavedItem = {
+  id: number;
+  title: string;
+  tag: string;
+  /** The message as Markdown. */
+  content: string;
+  /** The agent it was saved from, and its name then: the agent may be gone. */
+  agent_id: string;
+  agent_name: string;
+  message_id: number;
+  created_at: string;
+  updated_at: string | null;
+};
+
 /** The home line's figures next to the per-agent summaries (`GET /agents/summary?totals=true`). */
 export type AgentsSummary = {
   agents: AgentSummary[];
@@ -864,6 +879,11 @@ export const api = {
   resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),
   /** Redraw: the agent draws a new sticker in a quiet run; it arrives with the agent event. */
   redrawAvatar: (id: string) => req<{ ok: boolean }>("POST", `/agents/${id}/avatar/redraw`),
+  saveMessage: (agentId: string, messageId: number, title: string, tag: string) =>
+    req<SavedItem>("POST", "/saved", { agent_id: agentId, message_id: messageId, title, tag }),
+  savedList: (q = "", tag = "") => req<{ items: SavedItem[]; tags: string[] }>("GET", `/saved?${new URLSearchParams({ q, tag })}`),
+  /** `source_exists`: the message it came from is still in its agent's chat. */
+  savedItem: (id: number) => req<SavedItem & { source_exists: boolean }>("GET", `/saved/${id}`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
   addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),
