@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install or check loft: requirements, first-run settings, build, and (macOS) a background service.
+# Install or check loft: requirements, first-run settings, build, and a background service (macOS: launchd, Windows: a
+# logon task).
 # Runs on macOS, Linux and Windows (in Git Bash). Safe to re-run; it reports what's missing and how to fix it.
 set -uo pipefail
 LAUNCH=$(pwd)
@@ -11,9 +12,13 @@ PORT=${LOFT_PORT:-7420}
 SETTINGS=.loft/settings.json
 LABEL=dev.loft
 PLIST=~/Library/LaunchAgents/$LABEL.plist
+# Windows' counterpart: a logon task that runs scripts/run-service.sh hidden.
+TASK=Loft
 BIN=$ROOT/backend/target/release/loft
 MACOS=$([ "$(uname)" = Darwin ] && echo 1 || echo 0)
 case "$(uname -s)" in MINGW*|MSYS*) WINDOWS=1 BIN=$BIN.exe ;; *) WINDOWS=0 ;; esac
+# Where the Windows logon task's loft writes its output (the Mac's is ~/Library/Logs/loft.log).
+[ "$WINDOWS" = 1 ] && SERVICE_LOG=$(cygpath -u "${LOCALAPPDATA:-$HOME/AppData/Local}")/Loft/loft.log
 
 if [ -t 1 ]; then B=$'\e[1m' G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' D=$'\e[2m' N=$'\e[0m'; else B="" G="" Y="" R="" D="" N=""; fi
 failed=0
@@ -88,6 +93,74 @@ install_axe() {
   ~/.local/bin/axe --version >/dev/null 2>&1
 }
 running_agents() { curl -s -m 2 "http://127.0.0.1:$PORT/api/settings" | sed -n 's/.*"running_agents": *\([0-9]*\).*/\1/p'; }
+# Windows commands take /flags, which Git Bash would turn into paths.
+win() { MSYS_NO_PATHCONV=1 "$@"; }
+xml_escape() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
+# The checkout whose loft the logon task runs (C:/…), read from its command line; empty when setup didn't make it.
+task_root() {
+  win schtasks /Query /XML /TN "$TASK" 2>/dev/null | tr -d '\0\r' \
+    | sed -n 's|.*<Arguments>.*&quot;\(.*\)/scripts/run-service.sh&quot;.*|\1|p; s|.*<Arguments>.*"\(.*\)/scripts/run-service.sh".*|\1|p' \
+    | head -1 | sed 's/&quot;/"/g; s/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g'
+}
+# The Windows process id of that checkout's run-service.sh while it runs (its pid file holds Git Bash's pid).
+task_pid() {
+  local root p; root=$(task_root); [ -n "$root" ] || return 1
+  p=$(cat "$root/.loft/service.pid" 2>/dev/null) && [ -n "$p" ] || return 1
+  tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'scripts/run-service\.sh' && cat "/proc/$p/winpid"
+}
+# Stops the task's loft: run-service.sh with everything it started, so it can't start loft again.
+task_stop() {
+  local p
+  p=$(task_pid) && win taskkill /F /T /PID "$p" >/dev/null 2>&1
+  win schtasks /End /TN "$TASK" >/dev/null 2>&1
+  for _ in $(seq 1 20); do task_pid >/dev/null || break; sleep 0.5; done
+  return 0
+}
+task_start() { win schtasks /Run /TN "$TASK" >/dev/null 2>&1; }
+# Writes the task's environment (.loft/service.env: this shell's PATH, the port, the log) and (re)creates the task:
+# at this user's logon, run-service.sh in Git Bash's mintty with its window hidden, as this user, with no time limit,
+# also on battery. run-service.sh starts loft again after an update or a crash; Windows retries if it can't start.
+task_install() {
+  local me=${USERDOMAIN:+$USERDOMAIN\\}$USERNAME xml=.loft/service.xml
+  mkdir -p .loft "$(dirname "$SERVICE_LOG")"
+  { printf 'export PATH=%q\n' "$PATH"; printf 'export LOFT_PORT=%q\n' "$PORT"; printf 'export LOFT_SERVICE_LOG=%q\n' "$SERVICE_LOG"; } > .loft/service.env
+  me=$(printf '%s' "$me" | xml_escape)
+  { printf '\xff\xfe'; iconv -f UTF-8 -t UTF-16LE <<EOF; } > "$xml"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Runs loft ($(cygpath -m "$ROOT" | xml_escape)) at logon, hidden. Made by setup.sh: run it again to update or switch it.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>$me</UserId></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author"><UserId>$me</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <Priority>5</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$(cygpath -w /usr/bin/mintty.exe | xml_escape)</Command>
+      <Arguments>$(printf -- '-w hide /usr/bin/bash "%s/scripts/run-service.sh"' "$(cygpath -m "$ROOT")" | xml_escape)</Arguments>
+      <WorkingDirectory>$(cygpath -w "$ROOT/backend" | xml_escape)</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+EOF
+  win schtasks /Create /F /TN "$TASK" /XML "$(cygpath -w "$ROOT/$xml")" >"$LOG" 2>&1; local rc=$?
+  rm -f "$xml"
+  [ $rc = 0 ] || return 1
+  task_stop
+  task_start
+}
 
 section "Requirements"
 if command -v git >/dev/null; then ok "git"
@@ -188,7 +261,10 @@ if [ $restore = 1 ]; then
   dirs=(); while IFS= read -r d; do dirs+=("$d"); done < <(backup_dirs)
   stopped=0
   # Only this checkout's own service is stopped, and only once a backup is chosen; it comes back after.
-  resume_service() { [ $stopped = 1 ] && launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; stopped=0; return 0; }
+  resume_service() {
+    if [ $stopped = 1 ]; then if [ "$WINDOWS" = 1 ]; then task_start; else launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; fi; fi
+    stopped=0; return 0
+  }
   while :; do
     list=(); while IFS= read -r l; do [ -n "$l" ] && list+=("$l"); done < <(find_backups ${dirs[@]+"${dirs[@]}"})
     if [ ${#list[@]} -eq 0 ]; then
@@ -210,7 +286,9 @@ if [ $restore = 1 ]; then
     fi
     [ -f .loft/loft.db ] && warn "your current data moves to .loft/before-restore/ (kept, not deleted)"
     # Loft writes its database while it runs: stop this checkout's service first.
-    if [ $stopped = 0 ] && [ -f "$PLIST" ] && grep -qF -e "<string>$BIN</string>" -e "<string>$BIN-signed</string>" "$PLIST" \
+    if [ $stopped = 0 ] && [ "$WINDOWS" = 1 ] && [ "$(task_root)" -ef "$ROOT" ] && task_pid >/dev/null; then
+      task_stop; stopped=1; sleep 1
+    elif [ $stopped = 0 ] && [ -f "$PLIST" ] && grep -qF -e "<string>$BIN</string>" -e "<string>$BIN-signed</string>" "$PLIST" \
       && launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
       launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null; stopped=1
       for _ in $(seq 1 20); do launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break; sleep 0.5; done
@@ -275,6 +353,52 @@ if [ "$MACOS" = 1 ]; then
 fi
 
 service=0
+if [ "$WINDOWS" = 1 ]; then
+  section "Background task"
+  # One task per user, like the Mac's service: another checkout of loft may own it, or something else named Loft.
+  other=""; task_dir=$(task_root)
+  if [ -n "$task_dir" ] && ! [ "$task_dir" -ef "$ROOT" ]; then
+    other=$task_dir; warn "the logon task runs another copy of loft ${D}(${other})${N}"
+    answer=$(ask "Switch the task to this copy? [y/N]" n)
+  elif [ -z "$task_dir" ] && win schtasks /Query /TN "$TASK" >/dev/null 2>&1; then
+    other="a task setup didn't make"; warn "there is already a task named $TASK that setup didn't make"
+    answer=$(ask "Replace it with loft's logon task? [y/N]" n)
+  elif [ -n "$task_dir" ]; then
+    answer=$(ask "Reinstall the logon task with this build and PATH? [Y/n]" y)
+  else
+    answer=$(ask "Run loft in the background, hidden, starting at logon? [y/N]" n)
+  fi
+  if [[ $answer =~ ^[Yy] ]]; then
+    n=$(running_agents)
+    if ! task_pid >/dev/null && curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/"; then
+      fail "port $PORT is already in use (is ${HERE}start.sh running?). Stop it, then run ${HERE}setup.sh again."
+    elif [ -n "$n" ] && [ "$n" -gt 0 ]; then
+      warn "$n agent(s) running; not restarting loft now. Run ${HERE}setup.sh again once they finish."
+    elif [ ! -f /usr/bin/mintty.exe ]; then
+      fail "Git Bash's mintty (/usr/bin/mintty.exe) is missing; it runs loft without a window"; tip "Reinstall Git for Windows: $(pkg git Git.Git)"
+    elif task_install; then
+      service=1
+      ok "installed ${D}(task \"$TASK\", logs in $(cygpath -w "$SERVICE_LOG"))${N}"
+      tip "It uses this shell's PATH, so npm, cargo and claude resolve the same way (re-run ${HERE}setup.sh after changing them)."
+      tip "To remove it: schtasks //Delete //TN $TASK //F   then sign out and back in."
+    else
+      fail "schtasks couldn't create the task"; show_log
+    fi
+  elif [ -n "$other" ]; then
+    ok "left as is${task_dir:+ ${D}(it keeps port $PORT, so run this copy with LOFT_PORT=7421 ${HERE}start.sh)${N}}"
+  elif [ -n "$task_dir" ]; then
+    ok "installed, left as is"
+    service=1
+  else
+    ok "skipped ${D}(run ${HERE}start.sh to use loft in the foreground)${N}"
+  fi
+  if [ "$service" = 1 ]; then
+    if win reg query 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' /v AutoAdminLogon 2>/dev/null | tr -d '\r' | grep -q 'REG_SZ *1$'; then
+      ok "automatic sign-in is on, so loft comes back after a reboot"
+    else warn "the task only runs while you're signed in"; tip "For a server: turn on automatic sign-in, e.g. with Sysinternals Autologon."; fi
+  fi
+fi
+
 if [ "$MACOS" = 1 ]; then
   section "Background service"
   # The service is per user, not per copy: another checkout of loft may own it.
@@ -389,6 +513,7 @@ section "Done"
 if [ "$service" = 1 ]; then
   answering() { for _ in $(seq 1 30); do curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/api/info" && return 0; sleep 2; done; return 1; }
   if spin "Starting loft" answering; then ok "loft is running: ${B}http://localhost:$PORT${N}"
+  elif [ "$WINDOWS" = 1 ]; then warn "loft isn't answering yet"; tip "Check $(cygpath -w "$SERVICE_LOG")."
   else warn "loft isn't answering yet"; tip "Check ~/Library/Logs/loft.log (a keychain prompt may be waiting on screen)."; fi
 else
   ok "loft is ready ${D}($ROOT)${N}"

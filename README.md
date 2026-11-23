@@ -68,7 +68,7 @@ loft runs on macOS, Linux and Windows (x64, Windows 10 22H2 or 11). On Windows i
 curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
 ```
 
-The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On Windows, run it in Git Bash: it saves the projects folder as `C:/…`, the form loft reads. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
+The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On Windows, run it in Git Bash: it saves the projects folder as `C:/…`, the form loft reads. It can also run loft in the background from login: on macOS as a launchd service (logs in `~/Library/Logs/loft.log`), on Windows as a logon task that runs it without a window (logs in `%LOCALAPPDATA%\Loft\loft.log`). Either one starts loft again after an update or a crash; run setup again to update it. The installer and setup are safe to run again at any time, for example after you move Node or Claude Code.
 
 Already have a clone? Run `./setup.sh` from it instead.
 
