@@ -63,6 +63,10 @@ pub(crate) fn tools(state: &AppState) -> Value {
     all.as_array_mut().unwrap().extend(crate::planning::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::delivery::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
+    // The Simulator is the Mac's: off it the tool isn't offered (and is refused).
+    if !crate::api::ON_MAC {
+        all.as_array_mut().unwrap().retain(|t| t["name"] != "simulator_device");
+    }
     all
 }
 
@@ -340,6 +344,7 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 Err(e) => tool_error(format!("Couldn't read that pull request: {e}")),
             }
         }
+        "simulator_device" if !crate::api::ON_MAC => tool_error("There is no iOS Simulator here: it needs a Mac."),
         "simulator_device" => match state.db.get_agent(agent_id) {
             Ok(Some(me)) => match crate::simulator::agent_device(state, &me).await {
                 Ok((udid, name)) => {
@@ -599,6 +604,18 @@ mod tests {
 
     fn said(r: &Value) -> (&str, bool) {
         (r["content"][0]["text"].as_str().unwrap(), r["isError"].as_bool().unwrap_or(false))
+    }
+
+    #[tokio::test]
+    async fn the_simulator_tool_is_offered_only_on_a_mac() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let listed = tools(&st).as_array().unwrap().iter().any(|t| t["name"] == "simulator_device");
+        assert_eq!(listed, crate::api::ON_MAC);
+        if !crate::api::ON_MAC {
+            let r = call_tool(&st, &a.id, "simulator_device", json!({})).await;
+            assert_eq!(said(&r), ("There is no iOS Simulator here: it needs a Mac.", true));
+        }
     }
 
     #[test]

@@ -493,8 +493,8 @@ pub async fn input(State(state): State<AppState>, Json(req): Json<InputReq>) -> 
 }
 
 #[cfg(test)]
-// Most of these fake commands with shell scripts, which run on Unix only.
-#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
+// Most of these fake commands with shell scripts; those through the agent's tool run on a Mac only, where it's offered.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
@@ -751,7 +751,7 @@ esac
         assert_eq!((log.what.as_str(), done), ("Simulator cleanup", vec![("Deleted Simulator device", "Gone (Loft)"), ("Shut down Simulator device", "Builder (Loft)")]));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_agent_gets_its_own_device_once_named_after_it_and_the_simulator_page_lists_agents_devices() {
         let mut st = crate::tasks::tests::state();
@@ -797,7 +797,7 @@ esac
         assert!(again["content"][0]["text"].as_str().unwrap().contains(&replaced));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn with_no_device_to_copy_the_newest_runtime_s_iphone_is_used_and_without_simctl_the_agent_is_told() {
         let mut st = crate::tasks::tests::state();
@@ -813,7 +813,7 @@ esac
         assert!(simctl_log(&st).contains("create Builder (Loft) com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-0"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn with_xcode_select_on_the_command_line_tools_simctl_runs_with_the_xcode_found_or_says_xcode_is_missing() {
         let mut st = crate::tasks::tests::state();
@@ -856,7 +856,7 @@ esac
         assert_eq!(find_xcode(&st.cfg.xcode).await, Xcode::At(nested));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_developer_dir_already_set_or_an_xcode_already_selected_is_used_as_is() {
         let mut st = crate::tasks::tests::state();
@@ -877,7 +877,7 @@ esac
         assert!(listed(&st).await["error"].is_null());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn repeated_simctl_calls_look_xcode_up_once_until_the_lookup_is_stale() {
         let mut st = crate::tasks::tests::state();
