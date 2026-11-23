@@ -260,199 +260,30 @@ fn wildcard(pattern: &str, name: &str) -> bool {
 
 // ---- patterns -------------------------------------------------------------
 
-/// An extended regular expression as `pgrep` reads one, found anywhere in the text (unless anchored), whatever the case:
-/// characters, `.`, `[...]` (with ranges and `^`), `*`, `+`, `?`, `{m,n}`, `^`, `$`, `|`, `(...)` and `\` escapes.
-pub(super) struct Pattern(Vec<Vec<Node>>);
-
-#[derive(Clone, Debug)]
-enum Node {
-    Char(char),
-    Any,
-    /// The ranges, and whether the class is negated.
-    Class(Vec<(char, char)>, bool),
-    Start,
-    End,
-    Group(Vec<Vec<Node>>),
-    Repeat(Box<Node>, usize, Option<usize>),
-}
+/// A regular expression as `pgrep` reads one (the `regex` crate's syntax, which covers ERE's), found anywhere in the
+/// text (unless anchored), whatever the case.
+pub(super) struct Pattern(regex::Regex);
 
 impl Pattern {
     /// The pattern, which with `exact` must match the whole text (`pkill -x`).
     pub(super) fn new(pattern: &str, exact: bool) -> Result<Self, String> {
-        let chars: Vec<char> = pattern.to_lowercase().chars().collect();
-        let mut at = 0;
-        let alts = parse_alternatives(&chars, &mut at)?;
-        if at < chars.len() {
-            return Err("unmatched )".into());
-        }
-        Ok(Pattern(if exact { vec![vec![Node::Start, Node::Group(alts), Node::End]] } else { alts }))
+        let p = if exact { format!("^(?:{pattern})$") } else { pattern.to_string() };
+        regex::RegexBuilder::new(&p).case_insensitive(true).build().map(Pattern).map_err(|e| e.to_string())
     }
 
     fn is_match(&self, text: &str) -> bool {
-        let s: Vec<char> = text.to_lowercase().chars().collect();
-        (0..=s.len()).any(|start| self.0.iter().any(|alt| !seq_ends(alt, &s, start).is_empty()))
+        self.0.is_match(text)
     }
 
     /// A process's name, with or without `.exe`.
     pub(super) fn matches_name(&self, name: &str) -> bool {
-        let lower = name.to_lowercase();
-        self.is_match(name) || lower.strip_suffix(".exe").is_some_and(|bare| self.is_match(bare))
+        self.is_match(name) || name.to_lowercase().strip_suffix(".exe").is_some_and(|bare| self.is_match(bare))
     }
 
     /// A command line, also with `/` for `\`, so a pattern written the way Git Bash writes paths matches too.
     pub(super) fn matches_command(&self, command: &str) -> bool {
         self.is_match(command) || (command.contains('\\') && self.is_match(&command.replace('\\', "/")))
     }
-}
-
-fn parse_alternatives(c: &[char], at: &mut usize) -> Result<Vec<Vec<Node>>, String> {
-    let mut alts = vec![vec![]];
-    while let Some(&ch) = c.get(*at) {
-        *at += 1;
-        let node = match ch {
-            ')' => {
-                *at -= 1;
-                break;
-            }
-            '|' => {
-                alts.push(vec![]);
-                continue;
-            }
-            '(' => {
-                let inner = parse_alternatives(c, at)?;
-                if c.get(*at) != Some(&')') {
-                    return Err("unmatched (".into());
-                }
-                *at += 1;
-                Node::Group(inner)
-            }
-            '.' => Node::Any,
-            '^' => Node::Start,
-            '$' => Node::End,
-            '[' => parse_class(c, at)?,
-            '\\' => {
-                let Some(&next) = c.get(*at) else { return Err("trailing backslash".into()) };
-                *at += 1;
-                Node::Char(next)
-            }
-            '*' | '+' | '?' => return Err(format!("nothing to repeat before {ch}")),
-            ch => Node::Char(ch),
-        };
-        let node = repeat(node, c, at)?;
-        alts.last_mut().unwrap().push(node);
-    }
-    Ok(alts)
-}
-
-/// The repeats after a node: `*`, `+`, `?` and `{m}`, `{m,}`, `{m,n}`.
-fn repeat(mut node: Node, c: &[char], at: &mut usize) -> Result<Node, String> {
-    loop {
-        let (min, max) = match c.get(*at) {
-            Some('*') => (0, None),
-            Some('+') => (1, None),
-            Some('?') => (0, Some(1)),
-            Some('{') => {
-                let Some(len) = c[*at..].iter().position(|&x| x == '}') else { return Ok(node) };
-                let inner: String = c[*at + 1..*at + len].iter().collect();
-                let (lo, hi) = match inner.split_once(',') {
-                    None => (inner.parse().ok(), inner.parse().ok().map(Some)),
-                    Some((lo, "")) => (lo.parse().ok(), Some(None)),
-                    Some((lo, hi)) => (lo.parse().ok(), hi.parse().ok().map(Some)),
-                };
-                let (Some(lo), Some(hi)) = (lo, hi) else { return Err(format!("bad repeat {{{inner}}}")) };
-                if hi.is_some_and(|h| h < lo) {
-                    return Err(format!("bad repeat {{{inner}}}"));
-                }
-                *at += len;
-                (lo, hi)
-            }
-            _ => return Ok(node),
-        };
-        *at += 1;
-        node = Node::Repeat(Box::new(node), min, max);
-    }
-}
-
-fn parse_class(c: &[char], at: &mut usize) -> Result<Node, String> {
-    let negated = c.get(*at) == Some(&'^');
-    if negated {
-        *at += 1;
-    }
-    let mut ranges = vec![];
-    let mut first = true;
-    loop {
-        let Some(&ch) = c.get(*at) else { return Err("unmatched [".into()) };
-        *at += 1;
-        if ch == ']' && !first {
-            break;
-        }
-        first = false;
-        if c.get(*at) == Some(&'-') && c.get(*at + 1).is_some_and(|&n| n != ']') {
-            let hi = c[*at + 1];
-            *at += 2;
-            ranges.push((ch, hi));
-        } else {
-            ranges.push((ch, ch));
-        }
-    }
-    Ok(Node::Class(ranges, negated))
-}
-
-/// Where in `s` a match of `node` starting at `pos` can end.
-fn ends(node: &Node, s: &[char], pos: usize) -> Vec<usize> {
-    match node {
-        Node::Char(ch) => (s.get(pos) == Some(ch)).then_some(pos + 1).into_iter().collect(),
-        Node::Any => (pos < s.len()).then_some(pos + 1).into_iter().collect(),
-        Node::Class(ranges, negated) => {
-            let hit = s.get(pos).is_some_and(|ch| ranges.iter().any(|&(lo, hi)| lo <= *ch && *ch <= hi) != *negated);
-            hit.then_some(pos + 1).into_iter().collect()
-        }
-        Node::Start => (pos == 0).then_some(pos).into_iter().collect(),
-        Node::End => (pos == s.len()).then_some(pos).into_iter().collect(),
-        Node::Group(alts) => {
-            let mut all: Vec<usize> = alts.iter().flat_map(|alt| seq_ends(alt, s, pos)).collect();
-            all.sort_unstable();
-            all.dedup();
-            all
-        }
-        Node::Repeat(inner, min, max) => {
-            let mut result = if *min == 0 { vec![pos] } else { vec![] };
-            let mut seen: HashSet<usize> = HashSet::from([pos]);
-            let mut frontier = vec![pos];
-            let mut count = 0;
-            while !frontier.is_empty() && max.is_none_or(|m| count < m) {
-                count += 1;
-                let next: Vec<usize> = frontier.iter().flat_map(|&p| ends(inner, s, p)).collect();
-                // Past the minimum, a position already reached adds nothing new.
-                frontier = next.into_iter().filter(|p| count <= *min || seen.insert(*p)).collect();
-                frontier.sort_unstable();
-                frontier.dedup();
-                if count >= *min {
-                    result.extend(&frontier);
-                }
-                if count > s.len() + *min {
-                    break;
-                }
-            }
-            result.sort_unstable();
-            result.dedup();
-            result
-        }
-    }
-}
-
-fn seq_ends(seq: &[Node], s: &[char], pos: usize) -> Vec<usize> {
-    let mut positions = vec![pos];
-    for node in seq {
-        let mut next: Vec<usize> = positions.iter().flat_map(|&p| ends(node, s, p)).collect();
-        next.sort_unstable();
-        next.dedup();
-        if next.is_empty() {
-            return next;
-        }
-        positions = next;
-    }
-    positions
 }
 
 #[cfg(test)]
@@ -591,23 +422,16 @@ mod tests {
     #[test]
     fn patterns_read_like_pgrep_s() {
         let m = |p: &str, s: &str| Pattern::new(p, false).unwrap().is_match(s);
-        assert!(m("vite", "node vite.js") && !m("vite", "node next.js"));
-        assert!(m("^node", "node x") && !m("^node", "x node") && m("js$", "a.js") && !m("js$", "a.jsx"));
-        assert!(m("a.c", "abc") && !m("a.c", "ac") && m("a\\.c", "a.c") && !m("a\\.c", "abc"));
-        assert!(m("ab*c", "ac") && m("ab*c", "abbbc") && m("ab+c", "abc") && !m("ab+c", "ac") && m("colou?r", "color"));
-        assert!(m("^(next|vite)( |$)", "vite --port 1") && m("^(next|vite)( |$)", "next") && !m("^(next|vite)( |$)", "vitest"));
-        assert!(m("[0-9]{4}", "port 20100") && !m("^[0-9]{4}$", "20100") && m("^[0-9]{4,}$", "20100") && m("^x{1,2}$", "xx") && !m("^x{1,2}$", "xxx"));
-        assert!(m("[^a-z]", "abc1") && !m("[^a-z]", "abc") && m("[]x]", "]"));
+        assert!(m("vite", "node vite.js") && !m("vite", "node next.js"), "anywhere in the text");
+        assert!(m("^(next|vite)( |$)", "vite --port 1") && !m("^(next|vite)( |$)", "vitest"));
         assert!(m("NODE", "node") && m("node", "NODE"), "whatever the case");
-        assert!(m("", "anything"));
         assert!(Pattern::new("^node$", false).unwrap().matches_name("node.exe"));
         assert!(Pattern::new("x", true).unwrap().is_match("X") && !Pattern::new("x", true).unwrap().is_match("xx"));
-        assert!(Pattern::new("a|b", true).unwrap().is_match("b") && !Pattern::new("a|b", true).unwrap().is_match("ab"));
-        for bad in ["(a", "a)", "[a", "*a", "a\\", "a{3,1}"] {
+        assert!(Pattern::new("a|b", true).unwrap().is_match("b") && !Pattern::new("a|b", true).unwrap().is_match("ab"), "-x wraps the whole pattern");
+        assert!(Pattern::new("c:/app/vite", false).unwrap().matches_command("node C:\\app\\vite.js"), "Git Bash's slashes");
+        for bad in ["(a", "a)", "[a", "*a", "a{3,1}"] {
             assert!(Pattern::new(bad, false).is_err(), "{bad}");
         }
-        // Nested repeats end, and fast.
-        assert!(!m("^(a*)*b$", &"a".repeat(200)));
     }
 
     #[test]

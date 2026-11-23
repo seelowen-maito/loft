@@ -27,6 +27,7 @@
 //! what `pkill`, `killall` and `taskkill` name itself (by_name.rs).
 
 // Windows uses it; every OS tests it.
+#[cfg(any(windows, test))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod by_name;
 
