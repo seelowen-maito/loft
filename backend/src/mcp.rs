@@ -1176,6 +1176,7 @@ mod tests {
         assert!(prompts(&st, &from)[0].contains("report back"), "{}", prompts(&st, &from)[0]);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn with_the_global_setting_off_nothing_is_refused() {
         let (st, to) = fake_claude_state();
