@@ -1,9 +1,11 @@
 //! Self-update: with auto-update on in Settings, poll the checkout's upstream branch and,
 //! once no agent is running, pull, rebuild and restart into the new binary.
 //!
-//! Loft restarts by exiting with `RESTART_CODE` on every system (Windows can't replace a running process with
-//! `exec`): whatever runs it starts it again. start.sh does (scripts/run-backend.sh), and so does the background
-//! service (launchd's KeepAlive on the Mac).
+//! On Windows, Loft restarts by exiting with `RESTART_CODE` (it can't replace a running process with `exec`): whatever
+//! runs it starts it again, the logon task's scripts/run-service.sh or start.sh's scripts/run-backend.sh. Both export
+//! `LOFT_RESTART_BY_EXIT=1`, and under them Loft exits that way on every system. Elsewhere it `exec`s the build on
+//! disk, as before: an older start.sh ran `exec cargo run`, with no loop to start Loft again, and launchd's service
+//! keeps its process.
 //!
 //! Windows can't write over a running binary either, but it can rename one: before building, an update sets the
 //! running build aside as `loft.old.exe` (always that name, replaced by the next update), so cargo can write the new
@@ -438,11 +440,28 @@ fn restart_status(head: &str, running_agents: usize) -> UpdateStatus {
     UpdateStatus { phase: Phase::Restart, current: short(head), running_agents, why, ..Default::default() }
 }
 
-/// Exit with `RESTART_CODE`, so whatever runs Loft starts the build on disk in its place: after an update, the new
-/// build, which signs its own copy again (a stale signed copy runs the build first, see signing.rs).
+/// Start the build on disk in this process's place: after an update, the new build, which signs its own copy again
+/// (a stale signed copy runs the build first, see signing.rs). Exits with `RESTART_CODE` for a script that runs Loft
+/// again, and otherwise `exec`s the build with the same arguments.
 pub fn restart() -> ! {
+    if !restarts_by_exit(cfg!(windows), std::env::var_os("LOFT_RESTART_BY_EXIT").as_deref()) {
+        tracing::info!("restarting: replacing this process with the build on disk");
+        match std::env::current_exe() {
+            Ok(exe) => {
+                let err = crate::sys::exec(std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)));
+                tracing::error!("restart failed: {err}");
+            }
+            Err(err) => tracing::error!("restart failed: {err}"),
+        }
+    }
     tracing::info!("restarting: exiting with code {RESTART_CODE}");
     std::process::exit(RESTART_CODE)
+}
+
+/// Whether a restart exits with `RESTART_CODE` rather than `exec`ing: always on Windows, and wherever
+/// scripts/run-backend.sh or scripts/run-service.sh run Loft (they set `LOFT_RESTART_BY_EXIT=1`).
+fn restarts_by_exit(windows: bool, var: Option<&std::ffi::OsStr>) -> bool {
+    windows || var.is_some_and(|v| v == "1")
 }
 
 #[cfg(test)]
@@ -476,6 +495,16 @@ mod tests {
         assert!(super::restart_status("abcdef012", 2).why.unwrap().starts_with("2 agents are"));
     }
 
+    #[test]
+    fn a_restart_execs_unless_windows_or_a_script_starts_loft_again() {
+        use std::ffi::OsStr;
+        assert!(!super::restarts_by_exit(false, None));
+        assert!(!super::restarts_by_exit(false, Some(OsStr::new("0"))));
+        assert!(super::restarts_by_exit(false, Some(OsStr::new("1"))));
+        assert!(super::restarts_by_exit(true, None));
+        assert!(super::restarts_by_exit(true, Some(OsStr::new("1"))));
+    }
+
     /// Runs `restart` in a copy of this test binary, since it ends the process.
     #[test]
     fn a_restart_exits_with_the_restart_code() {
@@ -485,14 +514,15 @@ mod tests {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "updater::tests::a_restart_exits_with_the_restart_code", "--test-threads=1"])
             .env("LOFT_TEST_RESTART", "1")
+            .env("LOFT_RESTART_BY_EXIT", "1")
             .stdout(std::process::Stdio::null())
             .status()
             .unwrap();
         assert_eq!(status.code(), Some(super::RESTART_CODE));
     }
 
-    /// start.sh's loop with a fake cargo that exits with the given codes in turn: how many times it ran, the args it
-    /// got, and the script's own exit code.
+    /// start.sh's loop with a fake cargo that exits with the given codes in turn: how many times it ran, the
+    /// `LOFT_RESTART_BY_EXIT` and args it got, and the script's own exit code.
     #[cfg(unix)]
     fn run_backend(codes: &[i32]) -> (usize, String, Option<i32>) {
         use std::os::unix::fs::PermissionsExt;
@@ -503,13 +533,13 @@ mod tests {
         let cargo = dir.join("cargo");
         std::fs::write(
             &cargo,
-            format!("#!/bin/sh\necho \"$*\" >> '{d}/runs'\nn=$(wc -l < '{d}/runs')\nset -- {codes}\nshift $((n - 1))\nexit \"$1\"\n", d = dir.display()),
+            format!("#!/bin/sh\necho \"$LOFT_RESTART_BY_EXIT $*\" >> '{d}/runs'\nn=$(wc -l < '{d}/runs')\nset -- {codes}\nshift $((n - 1))\nexit \"$1\"\n", d = dir.display()),
         )
         .unwrap();
         std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/run-backend.sh");
         let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
-        let status = std::process::Command::new("bash").arg(script).arg("--release").env("PATH", path).stderr(std::process::Stdio::null()).status().unwrap();
+        let status = std::process::Command::new("bash").arg(script).arg("--release").env("PATH", path).env_remove("LOFT_RESTART_BY_EXIT").stderr(std::process::Stdio::null()).status().unwrap();
         let runs = std::fs::read_to_string(dir.join("runs")).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&dir);
         (runs.lines().count(), runs.lines().next().unwrap_or_default().to_string(), status.code())
@@ -519,9 +549,9 @@ mod tests {
     #[test]
     fn start_sh_runs_loft_again_after_a_restart_and_ends_on_any_other_exit() {
         let code = super::RESTART_CODE;
-        assert_eq!(run_backend(&[code, code, 0]), (3, "run --release".into(), Some(0)));
-        assert_eq!(run_backend(&[1]), (1, "run --release".into(), Some(1)), "an error ends it instead of restarting");
-        assert_eq!(run_backend(&[code, 101, 0, 0]), (2, "run --release".into(), Some(101)));
+        assert_eq!(run_backend(&[code, code, 0]), (3, "1 run --release".into(), Some(0)));
+        assert_eq!(run_backend(&[1]), (1, "1 run --release".into(), Some(1)), "an error ends it instead of restarting");
+        assert_eq!(run_backend(&[code, 101, 0, 0]), (2, "1 run --release".into(), Some(101)));
     }
 
     /// A cargo output folder: `release/loft.exe`, hard-linked from `release/deps/loft-abc.exe` as cargo leaves it, and

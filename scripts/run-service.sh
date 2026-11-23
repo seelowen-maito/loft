@@ -5,6 +5,8 @@
 # Keep RESTART_CODE in step with backend/src/updater.rs.
 set -uo pipefail
 RESTART_CODE=75
+# Tells Loft to restart by exiting with that code, rather than replacing itself (exec), which leaves this loop.
+export LOFT_RESTART_BY_EXIT=1
 cd "$(dirname "$0")/.."
 # The task starts with Windows' own environment: this brings the PATH and port setup.sh ran with.
 . .loft/service.env

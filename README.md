@@ -72,7 +72,7 @@ The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), t
 
 Already have a clone? Run `./setup.sh` from it instead.
 
-To run loft in the foreground instead, use `./start.sh`. It starts loft again after an update or a restart, and stops when loft exits for any other reason. Loft restarts by exiting, so a loft started some other way (running its binary directly) stays stopped after one.
+To run loft in the foreground instead, use `./start.sh`. It starts loft again after an update or a restart, and stops when loft exits for any other reason. On Windows, Loft restarts by exiting, so a loft started some other way (running its binary directly) stays stopped after one; elsewhere it replaces itself with the new build.
 
 Then open http://localhost:7420 and check **Settings** (gear icon, top right). Settings are saved to `.loft/settings.json`:
 
