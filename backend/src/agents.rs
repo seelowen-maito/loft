@@ -731,9 +731,12 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
     });
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
     let for_user = matches!(trigger, "schedule" | "manual" | "scheduled") || (text.is_some() && meta["from_agent"].is_null());
+    // Only the user's own typed messages can be cancelled while they wait. Anything about a task (an issue's brief,
+    // its notices) stays: cancelling it would leave the issue in progress with nobody on it.
+    let cancellable = trigger == "user" && meta["task_id"].is_null();
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
     // Behind a running run it waits in the queue, where the user can still cancel it (`cancel_queued`).
-    start_with(state, agent_id, prompt, trigger, for_user, false, None, msg.as_ref().map(|m| m.id), false);
+    start_with(state, agent_id, prompt, trigger, for_user, false, None, msg.as_ref().filter(|_| cancellable).map(|m| m.id), false);
     if let Some(m) = &msg
         && state.rt.lock().unwrap().queued_messages.get(agent_id).is_some_and(|q| q.iter().any(|(i, _)| *i == m.id))
     {
@@ -1220,6 +1223,14 @@ pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> 
             && let Some(p) = q.iter().position(|x| *x == prompt)
         {
             q.remove(p);
+        }
+        // Nothing queued is for the user any more (every waiting prompt is a tracked message, none the user's own):
+        // the next run isn't an answer to them.
+        let rest: Vec<i64> = rt.queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+        if rt.queued.get(agent_id).map_or(0, |q| q.len()) == rest.len()
+            && !rest.iter().any(|i| state.db.get_message(agent_id, *i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()))
+        {
+            rt.queued_for_user.remove(agent_id);
         }
         // The ticket and context clear a hand-over set are left as they are: the worst case is one context clear
         // the agent didn't need on its next run.
@@ -2927,6 +2938,44 @@ esac
         assert_eq!(rt.queued[&a.id].len(), 1);
         assert!(rt.queued[&a.id][0].contains("first"));
         assert_eq!(st.db.get_message(&a.id, drop).unwrap().unwrap().meta["cancelled"], true);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_last_user_message_makes_the_next_run_not_for_the_user() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let for_user = |st: &AppState| st.rt.lock().unwrap().queued_for_user.contains(&a.id);
+        let agent_msg = message_on_ticket(&st, &from, &a, "FYI-ish ask", json!({}), None, false).unwrap();
+        assert!(!for_user(&st));
+        let u1 = enqueue_with(&st, &a.id, Some("mine".into()), json!({}), "user").unwrap().id;
+        let u2 = enqueue_with(&st, &a.id, Some("mine too".into()), json!({}), "user").unwrap().id;
+        assert!(for_user(&st));
+        assert!(cancel_queued(&st, &a.id, u1).unwrap());
+        assert!(for_user(&st), "another of the user's messages still waits");
+        assert!(cancel_queued(&st, &a.id, u2).unwrap());
+        assert!(!for_user(&st), "only the agent's message is left");
+        assert_eq!(st.rt.lock().unwrap().queued_messages[&a.id].len(), 1);
+        let _ = agent_msg;
+
+        // A user's task brief waits untracked: it keeps the run for the user.
+        enqueue_with(&st, &a.id, Some("Work on issue 12".into()), json!({ "task_id": "t1" }), "user");
+        let u3 = enqueue_with(&st, &a.id, Some("again".into()), json!({}), "user").unwrap().id;
+        assert!(cancel_queued(&st, &a.id, u3).unwrap());
+        assert!(for_user(&st));
+    }
+
+    #[tokio::test]
+    async fn a_message_about_a_task_waits_but_cannot_be_cancelled() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let brief = enqueue_with(&st, &a.id, Some("Work on issue 12".into()), json!({ "task_id": "t1" }), "user").unwrap().id;
+        assert!(st.rt.lock().unwrap().queued_messages.get(&a.id).is_none_or(|q| q.is_empty()));
+        assert!(!cancel_queued(&st, &a.id, brief).unwrap());
+        assert_eq!(st.rt.lock().unwrap().queued[&a.id].len(), 1, "it still runs next");
+        assert!(st.db.get_message(&a.id, brief).unwrap().unwrap().meta["cancelled"].is_null());
     }
 
     #[tokio::test]
