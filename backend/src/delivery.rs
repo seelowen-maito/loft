@@ -419,9 +419,10 @@ fn tell_lead(state: &AppState, d: &Delivery, tickets: &[i64], who: Option<&str>)
         format!(" {name} ended its run asking: \"{}\"", a.question)
     });
     let text = format!(
-        "[Loft Delivery: {}] The Delivery stalled{at}: {}.{asked} Only the user can resume it (Needs you → Resume): answer what the agent asked if you can, and tell the user what the Delivery waits on.",
+        "[Loft Delivery: {}] The Delivery stalled{at}: {}.{asked}{resume} Answer what the agent asked if you can, and tell the user what the Delivery waits on.",
         subject(d),
-        stall_why(&d.stall_reason, &d.stall_resets_at)
+        stall_why(&d.stall_reason, &d.stall_resets_at),
+        resume = lead_resume_hint(state, d).unwrap_or_else(|| " Only the user can resume it (Needs you → Resume).".into()),
     );
     crate::agents::needs_action_from_loft(state, &lead, &text);
 }
@@ -1441,6 +1442,120 @@ pub fn mcp_tools() -> Vec<Value> {
     })]
 }
 
+/// The Delivery tools only the Lead of a project with the option "the Lead can start and resume Deliveries"
+/// on gets (ADR 0006): they stay off the list of everyone else.
+pub fn lead_mcp_tools() -> Vec<Value> {
+    vec![json!({
+        "name": "resume_delivery",
+        "description": "As the Lead, where the project's option \"The Lead can start and resume Deliveries\" is on: resume a Delivery that stalled for a transient reason (usage limit, once it frees; API error; a failed or lost run; a run that ended without a question). Does what Resume does. Refused, with the reason, for a paused Delivery, anything that waits on the user, a stall that needs someone to fix something, and a usage limit that hasn't freed yet.",
+        "inputSchema": { "type": "object", "properties": {
+            "ticket": { "type": ["integer", "string"], "description": "The spec's (or standalone ticket's) GitHub issue number, or its Loft issue id in a plan kept in Loft." }
+        }, "required": ["ticket"] }
+    })]
+}
+
+/// Whether `me` is the Lead of a project whose option lets the Lead start and resume Deliveries.
+pub fn lead_has_tools(state: &AppState, me: &crate::db::Agent) -> bool {
+    me.role == "lead"
+        && std::iter::once(me.project.trim()).chain(me.projects.iter().map(|p| p.trim())).any(|p| !p.is_empty() && crate::lead_delivery::options(state, p).enabled)
+}
+
+/// Whether the Lead may resume stalled `d` at `now`, or why not, and from when for a usage limit.
+#[derive(Debug, PartialEq)]
+enum LeadResume {
+    Now,
+    After(DateTime<Utc>),
+    Never(String),
+}
+
+fn lead_resume_verdict(d: &Delivery, now: DateTime<Utc>) -> LeadResume {
+    let what = subject(d);
+    let never = |why: String| LeadResume::Never(format!("{what} {why}"));
+    if d.state == "paused" {
+        return never("is paused: the user paused it, and only the user resumes it.".into());
+    }
+    if waits_for_user(d) {
+        return never("waits for the user (too many rounds of changes): only the user resumes it.".into());
+    }
+    if d.state != "stalled" {
+        return LeadResume::Never(not_resumable(d));
+    }
+    match d.stall_reason.as_str() {
+        "usage_limit" => match DateTime::parse_from_rfc3339(&d.stall_resets_at) {
+            Ok(t) if t.with_timezone(&Utc) > now => LeadResume::After(t.with_timezone(&Utc)),
+            Ok(_) => LeadResume::Now,
+            Err(_) => never("stalled on the usage limit, and Loft doesn't know when it frees: only the user resumes it.".into()),
+        },
+        "api_error" | "run_failed" | "restart" => LeadResume::Now,
+        "no_call" if d.stall_ask.is_some() => never("stalled because an agent ended its run asking the user a question: only the user resumes it, after answering.".into()),
+        "no_call" => LeadResume::Now,
+        other => never(format!("stalled because {}: only the user resumes it.", stall_why_fixed(other))),
+    }
+}
+
+/// What the stall wake tells the Lead about resuming `d`: when the project's option is on, whether it can and from when.
+fn lead_resume_hint(state: &AppState, d: &Delivery) -> Option<String> {
+    if !crate::lead_delivery::options(state, d.project.trim()).enabled {
+        return None;
+    }
+    let arg = if d.local { format!("\"{}\"", d.spec_id) } else { d.spec.to_string() };
+    Some(match lead_resume_verdict(d, Utc::now()) {
+        LeadResume::Now => format!(" You can resume it now: call `mcp__loft__resume_delivery` with ticket {arg}."),
+        LeadResume::After(t) => format!(" You can resume it from {}: call `mcp__loft__resume_delivery` with ticket {arg} then, not before.", when(t)),
+        LeadResume::Never(why) => format!(" You can't resume it: {why}"),
+    })
+}
+
+/// `resume_delivery`: the Lead resumes a Delivery stalled for a transient reason.
+async fn resume_by_lead(state: &AppState, me: &crate::db::Agent, args: &Value, now: DateTime<Utc>) -> Result<String, String> {
+    if me.role != "lead" {
+        return Err("Only the team's Lead resumes a Delivery this way.".into());
+    }
+    let want = number_of(&args["ticket"]).ok_or("ticket is required: the spec's GitHub issue number or its Loft issue id")?;
+    let mine = |d: &Delivery| me.project.trim() == d.project.trim() || me.has_project(&d.project);
+    let mut found: Vec<Delivery> = state
+        .db
+        .all_deliveries()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|d| mine(d) && match &want {
+            TicketNumber::GitHub(n) => !d.local && d.spec == *n,
+            TicketNumber::Loft(id) => d.local && d.spec_id == *id,
+        })
+        .collect();
+    if found.len() > 1 {
+        return Err("That number is on more than one of your projects' Deliveries: name it by its Loft issue id.".into());
+    }
+    let d = found.pop().ok_or("That isn't the spec or standalone ticket of a Delivery on your team.")?;
+    if d.project.trim().is_empty() {
+        return Err("That Delivery has no project (it started before Deliveries had one), so Loft can't tell whose team it is.".into());
+    }
+    // Checked again on every call: turning the option off refuses the next call at once.
+    if !crate::lead_delivery::options(state, d.project.trim()).enabled {
+        return Err(format!("The Lead can't resume Deliveries in {}: the project's option \"The Lead can start and resume Deliveries\" is off.", d.project.trim()));
+    }
+    match lead_resume_verdict(&d, now) {
+        LeadResume::Now => {}
+        LeadResume::After(t) => return Err(format!("{} stalled on the plan's usage limit, which frees at {}: resume it then, not before.", subject(&d), when(t))),
+        LeadResume::Never(why) => return Err(why),
+    }
+    let (reason, why) = (d.stall_reason.clone(), stall_why(&d.stall_reason, &d.stall_resets_at));
+    let line = resume(state, &d.repo, d.spec).await?;
+    if let Some(t) = delivery_task(state, &d) {
+        let text = format!("Resumed by {} (Lead) at {}: the Delivery had stalled ({reason}) because {why}.", me.name, now.with_timezone(&chrono::Local).format("%b %-d, %H:%M"));
+        crate::tasks::log_status(state, &t, &me.id, &text);
+    }
+    Ok(line)
+}
+
+/// The Loft issue of `d`'s spec (or standalone ticket): the one whose thread shows what the Lead did.
+fn delivery_task(state: &AppState, d: &Delivery) -> Option<crate::db::Task> {
+    if d.local {
+        return state.db.get_task(&d.spec_id).ok().flatten();
+    }
+    state.db.list_tasks().ok()?.into_iter().find(|x| x.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && g.number == d.spec))
+}
+
 /// Handle the Delivery tools. None when `name` isn't one of them.
 pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args: &Value) -> Option<Result<String, String>> {
     match name {
@@ -1448,6 +1563,7 @@ pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args:
         "submit_ticket" => Some(submit(state, me, args).await),
         "wait_ticket" => Some(wait(state, me, args).await),
         "review_ticket" => Some(review(state, me, args).await),
+        "resume_delivery" => Some(resume_by_lead(state, me, args, Utc::now()).await),
         _ => None,
     }
 }
