@@ -963,6 +963,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   const longPress = useLongPress(() => onReply(m));
   const press = canReply ? longPress : {};
   const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} />;
+  const cancel = useAction();
   if (m.kind === "clear") {
     return (
       <div className="flex items-center gap-3 py-2">
@@ -1055,9 +1056,10 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
               <span className="flex items-center gap-1">
                 <Hourglass className="size-3" /> {QUEUED_MARK}
               </span>
-              <button type="button" className="text-accent hover:underline" onClick={() => void api.cancelQueued(agent.id, m.id).catch(() => {})}>
+              <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id))}>
                 Cancel
               </button>
+              {cancel.error && <span className="text-bad">{cancel.error}</span>}
             </div>
           )}
           {m.meta?.cancelled && <div className="mt-1 font-mono text-[10.5px] text-fg-3">{CANCELLED_MARK}</div>}
