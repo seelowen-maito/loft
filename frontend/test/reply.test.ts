@@ -50,7 +50,13 @@ test("the footer's Reply names the author", () => {
 });
 
 test("Copy to box keeps what the box already holds", () => {
-  assert.equal(copiedToBox("", "bump the build"), "bump the build");
-  assert.equal(copiedToBox("  ", "bump the build"), "bump the build");
-  assert.equal(copiedToBox("draft", "bump the build"), "draft\n\nbump the build");
+  const m = msg("user", "bump the build");
+  assert.equal(copiedToBox("", m), "bump the build");
+  assert.equal(copiedToBox("  ", m), "bump the build");
+  assert.equal(copiedToBox("draft", m), "draft\n\nbump the build");
+});
+
+test("Copy to box on a task brief copies what the bubble shows, without Loft's tag and instructions", () => {
+  const brief = msg("user", "[Task 0b6f6c1e-3c1a-4f0e-9c55-2a7d1f0b9e11] Fix the Mac icon.\n\n[Report progress on this task with update_issue.]", { task_id: "0b6f6c1e-3c1a-4f0e-9c55-2a7d1f0b9e11" });
+  assert.equal(copiedToBox("", brief), "Fix the Mac icon.");
 });

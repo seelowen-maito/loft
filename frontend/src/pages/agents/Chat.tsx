@@ -46,7 +46,7 @@ import { useMention } from "../../components/MentionMenu";
 import { useTagMenu } from "../../components/TagMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
-import { CANCELLED_MARK, QUEUED_MARK, sendState } from "../../lib/agentMessage";
+import { CANCELLED_MARK, QUEUED_MARK, sendState, taskText } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
@@ -458,7 +458,7 @@ export function Chat({
   }, [agent.name]);
   // Copy to box on a cancelled message: its text goes into the message box, after any draft.
   const onCopy = useCallback((m: Message) => {
-    setText((t) => copiedToBox(t, m.content));
+    setText((t) => copiedToBox(t, m));
     composer.current?.focus();
   }, [setText]);
 
@@ -885,15 +885,6 @@ export function Chat({
   );
 }
 
-/** A task message's text without the `[Task <id>]` tag and the bracketed instructions Loft adds for the agent. */
-function taskText(m: Message) {
-  if (!m.meta?.task_role && !m.meta?.task_id) return m.content;
-  return m.content
-    .replace(/^\[Task [0-9a-f-]{36}\]\s*/i, "")
-    .replace(/\n\n\[(Report progress on this task|Answer on the task)[\s\S]*$/, "")
-    .trim();
-}
-
 /** Chips for the tasks a message is about: attached, linked, or the task it briefs or reports on. */
 function MessageTasks({ m }: { m: Message }) {
   const ids: string[] = m.meta?.task_refs ?? (m.meta?.task_id ? [m.meta.task_id] : []);
@@ -955,7 +946,7 @@ function ChatLoading({ agent }: { agent: Agent }) {
   );
 }
 
-const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWith, onReply, onCopy, onJump }: {
+export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWith, onReply, onCopy, onJump }: {
   m: Message;
   agent: Agent;
   agents: Agent[];
@@ -1073,7 +1064,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
             ) : m.meta?.cancelled ? (
               <>
                 <span className="px-1">{CANCELLED_MARK}</span>
-                <button type="button" className="msg-act" aria-label="Copy this message back into the box" onClick={() => onCopy(m)}>
+                <button type="button" className="msg-act" title="Copy this message back into the box" onClick={() => onCopy(m)}>
                   <Copy className="size-3.5" aria-hidden /> Copy to box
                 </button>
               </>
