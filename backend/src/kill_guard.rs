@@ -2738,6 +2738,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
             '"' => {
                 l.in_word = true;
                 l.quoted = true;
+                let mut braces = 0; // open `${` in the string
                 while let Some(&q) = c.get(i) {
                     i += 1;
                     match q {
@@ -2756,7 +2757,23 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                             l.cmd(p);
                             let (body, next) = backtick_body(c, i, true);
                             lex(p, &body, 0, Some('\0'));
+                            // In `${…}` zsh unescapes `\"` and bash doesn't: the command is read both ways.
+                            if braces > 0 {
+                                let (plain, _) = backtick_body(c, i, false);
+                                if plain != body {
+                                    l.cmd(p);
+                                    lex(p, &plain, 0, Some('\0'));
+                                }
+                            }
                             i = next;
+                        }
+                        '$' if c.get(i) == Some(&'{') => {
+                            braces += 1;
+                            l.word.push(q);
+                        }
+                        '}' if braces > 0 => {
+                            braces -= 1;
+                            l.word.push(q);
                         }
                         _ => l.word.push(q),
                     }
@@ -5408,5 +5425,22 @@ mod tests {
         assert!(asks_all(&format!("echo \"`echo \\\"; {git}; echo \\\"`\""), CLONE).is_empty(), "the git is inside a string");
         assert!(asks_all(&format!("echo `echo \"x\\\"; {git}; echo \\\"y\"`"), CLONE).is_empty(), "outside quotes the git is inside the string");
         assert!(asks_all("echo \"`echo \\\"git status\\\"`\"", CLONE).is_empty());
+    }
+
+    /// Inside `${…}` in double quotes zsh unescapes `\"` in a backtick command and bash doesn't: a git in either reading asks.
+    #[test]
+    fn a_backtick_in_a_parameter_expansion_in_double_quotes_is_read_as_zsh_and_as_bash() {
+        let user = vec![PathBuf::from(USER)];
+        let git = format!("git -C {USER} reset --hard");
+        for cmd in [
+            // bash: the git runs; zsh: it is in a string.
+            format!("echo \"${{x:-`echo \\\"; {git}; echo \\\"`}}\""),
+            format!("bash -c 'echo \"${{x:-`echo \\\"; {git}; echo \\\"`}}\"'"),
+            format!("echo \"${{x:-`echo \\\"; cd {USER}; pnpm install; echo \\\"`}}\""),
+            // zsh: the git runs.
+            format!("echo \"${{x:-`echo \"x\\\"; {git}; echo \\\"y\"`}}\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
     }
 }
