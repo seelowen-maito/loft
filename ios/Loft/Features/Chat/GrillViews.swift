@@ -58,11 +58,6 @@ struct GrillRoundCard: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(open == nil ? "grillRound" : "grillOpenRound")
-        .confirmationDialog("End the interview?", isPresented: $confirmEnd, titleVisibility: .visible) {
-            Button("End", role: .destructive) { command(.end) }
-        } message: {
-            Text("\(agent.name) will sum up what you covered.")
-        }
     }
 
     /// "2 of 3 answered", Send round, and Pause · Summary so far · End; Resume while paused.
@@ -100,6 +95,11 @@ struct GrillRoundCard: View {
                 .disabled(!store.canWrite)
                 .accessibilityLabel("More interview actions")
                 .accessibilityIdentifier("grillMore")
+                .confirmationDialog("End the interview?", isPresented: $confirmEnd, titleVisibility: .visible) {
+                    Button("End", role: .destructive) { command(.end) }
+                } message: {
+                    Text("\(agent.name) will sum up what you covered.")
+                }
             }
         }
     }

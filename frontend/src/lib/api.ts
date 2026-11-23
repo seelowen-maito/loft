@@ -534,6 +534,8 @@ export type WorkspaceSizes = {
   agents: { id: string; name: string; bytes: number; busy: boolean; processes: number }[];
   free_bytes: number | null;
   low_disk_bytes: number;
+  /** The shared Rust build cache: whether sccache is installed, what its cache takes, and its cap. */
+  sccache: { installed: boolean; bytes: number; limit_bytes: number };
 };
 /** A process an idle agent left running, listed in Clean; `age_secs` is how long ago it started. */
 export type LeftProcess = { pid: number; command: string; age_secs: number };
@@ -787,6 +789,8 @@ export const api = {
   commands: (id: string) => req<AgentCommand[]>("GET", `/agents/${id}/commands`),
   /** The user has seen this chat: clears its Unread reply in every browser. */
   markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
+  /** Takes an agent's message back out of the queue before a run takes it; `ok` is false when one already did. */
+  cancelQueued: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/cancel`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
   /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */

@@ -94,7 +94,7 @@ pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     v["waiting_on"] = json!(info.map_or(&vec![], |i| &i.waiting_on));
     v["waiting_since"] = json!(info.and_then(|i| i.waiting_since.as_ref()));
     v["subagents"] = json!(info.map_or(&vec![], |i| &i.subagents));
-    v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(&vec![], |q| q));
+    v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(vec![], |q| q.iter().map(|(id, _)| *id).collect()));
     // A Redraw waiting behind the current run or drawing now: the Redraw button shows it's busy.
     v["redrawing"] = json!(rt.redraw_queued.contains(agent_id) || rt.redrawing.contains(agent_id));
 }
@@ -737,6 +737,18 @@ pub fn enqueue(state: &AppState, agent_id: &str, text: Option<String>, trigger: 
 
 /// `enqueue`, with `meta` stored on the user message (e.g. a client id or task id). Returns that message.
 pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str) -> Option<Message> {
+    enqueue_message(state, agent_id, text, meta, trigger, false)
+}
+
+/// `enqueue_with` for a message the user typed in a chat: while it waits behind a run, they can still cancel it
+/// (`cancel_queued`). Anything else Loft queues (a task's brief or notices, a setup message) can't be cancelled:
+/// cancelling it would leave work half-done.
+pub fn enqueue_chat(state: &AppState, agent_id: &str, text: String, meta: Value) -> Option<Message> {
+    let cancellable = meta["task_id"].is_null();
+    enqueue_message(state, agent_id, Some(text), meta, "user", cancellable)
+}
+
+fn enqueue_message(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str, cancellable: bool) -> Option<Message> {
     let prompt = text.as_ref().map(|t| {
         let p = crate::uploads::prompt(t, &meta);
         let p = match crate::reply::prompt_block(state, agent_id, &meta) {
@@ -755,7 +767,13 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
     let for_user = matches!(trigger, "schedule" | "manual" | "scheduled") || (text.is_some() && meta["from_agent"].is_null());
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
-    start(state, agent_id, prompt, trigger, for_user);
+    // Behind a running run it waits in the queue, where the user can still cancel it (`cancel_queued`).
+    start_with(state, agent_id, prompt, trigger, for_user, false, None, msg.as_ref().filter(|_| cancellable).map(|m| m.id), false);
+    if let Some(m) = &msg
+        && state.rt.lock().unwrap().queued_messages.get(agent_id).is_some_and(|q| q.iter().any(|(i, _)| *i == m.id))
+    {
+        emit_run(state, agent_id);
+    }
     msg
 }
 
@@ -964,7 +982,7 @@ pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str,
         ));
     }
     start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg, false);
-    let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.contains(id)));
+    let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.iter().any(|(i, _)| i == id)));
     if queued.is_some() {
         emit_run(state, &to.id);
     }
@@ -1060,10 +1078,10 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                     rt.queued_for_user.insert(agent_id.to_string());
                 }
                 if let Some(w) = delivery {
-                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt)));
+                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt.clone())));
                 }
                 if let Some(id) = msg {
-                    rt.queued_messages.entry(agent_id.to_string()).or_default().push(id);
+                    rt.queued_messages.entry(agent_id.to_string()).or_default().push((id, prompt));
                 }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
@@ -1230,6 +1248,40 @@ pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str
     }
 }
 
+/// Takes agent message `id` back out of `agent_id`'s queue before a run takes it, and marks it cancelled in the chat.
+/// The queue is read and changed under one lock, the one the run takes it under when it ends: a message is either
+/// cancelled or delivered, never both. False when it isn't queued (a run already took it).
+pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
+    {
+        let mut rt = state.rt.lock().unwrap();
+        let Some(at) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().position(|(i, _)| *i == id)) else {
+            return Ok(false);
+        };
+        let (_, prompt) = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
+        if let Some(q) = rt.queued.get_mut(agent_id)
+            && let Some(p) = q.iter().position(|x| *x == prompt)
+        {
+            q.remove(p);
+        }
+        // Nothing queued is for the user any more (every waiting prompt is a tracked message, none the user's own):
+        // the next run isn't an answer to them.
+        let rest: Vec<i64> = rt.queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+        if rt.queued.get(agent_id).map_or(0, |q| q.len()) == rest.len()
+            && !rest.iter().any(|i| state.db.get_message(agent_id, *i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()))
+        {
+            rt.queued_for_user.remove(agent_id);
+        }
+        // The ticket and context clear a hand-over set are left as they are: the worst case is one context clear
+        // the agent didn't need on its next run.
+    }
+    state.db.mark_cancelled(agent_id, id)?;
+    if let Some(m) = state.db.get_message(agent_id, id)? {
+        state.emit(Event::Message { message: serde_json::to_value(&m).unwrap() });
+    }
+    emit_run(state, agent_id);
+    Ok(true)
+}
+
 pub fn stop(state: &AppState, agent_id: &str) -> bool {
     let rt = state.rt.lock().unwrap();
     match rt.running.get(agent_id) {
@@ -1362,15 +1414,31 @@ fn loft_exe() -> Result<PathBuf> {
         if let Some(bin) = next_to_tests.filter(|b| b.exists()) {
             return Ok(bin);
         }
-        // With `CARGO_BUILD_BUILD_DIR` the test binary is built elsewhere; the loft binary stays in the target dir.
+        // With `build-dir` set the test binary is built elsewhere; the loft binary stays in the target dir.
         let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
         return Ok(target.join("debug/loft"));
     }
     Ok(exe)
 }
 
+/// Cargo keeps compiled dependencies in the workspace's `.cargo-build/`, shared by all the agent's clones; binaries
+/// stay in each clone's `target/`. It's set in the workspace's `.cargo/config.toml`, which every clone inside finds,
+/// and not in the environment: sccache hashes `CARGO_*` variables, so a build dir that differs per agent in the
+/// environment keeps agents from sharing cache hits.
+fn write_cargo_config(ws: &Path) -> Result<()> {
+    let dir = serde_json::to_string(&ws.join(".cargo-build").to_string_lossy())?;
+    let text = format!("[build]\nbuild-dir = {dir}\n");
+    let path = ws.join(".cargo/config.toml");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(&text) {
+        std::fs::create_dir_all(ws.join(".cargo"))?;
+        std::fs::write(path, text)?;
+    }
+    Ok(())
+}
+
 /// The claude command for a run. Writing its files fails the run rather than putting them on argv.
 fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
+    write_cargo_config(&workspace(state, &a.id))?;
     let mut servers = serde_json::Map::new();
     if let Value::Object(user) = &a.mcp_servers {
         for (k, v) in user {
@@ -1437,8 +1505,6 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
         .env("PORT", ports.start().to_string())
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
-        // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
-        .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
         // Workspaces live outside any repo (ADR 0005), but a home folder can be one: git in a workspace with no clone
         // stops here instead of finding it. Git ignores a relative ceiling.
         .env("GIT_CEILING_DIRECTORIES", std::path::absolute(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone()))
@@ -1448,6 +1514,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    crate::sccache::apply(&mut cmd, state.settings.dir());
     // Its own Simulator device, once it has one (an earlier run asked for it).
     match state.db.agent_device(&a.id)? {
         Some(udid) => cmd.env(crate::simulator::DEVICE_VAR, udid),
@@ -2431,7 +2498,6 @@ while [ $# -gt 0 ]; do
 done
 printf '%s %s\n' "$PORT" "$LOFT_PORT_RANGE" >> ports.log
 printf '%s\n' "${LOFT_SIMULATOR_UDID-none}" >> device.log
-printf '%s\n' "${CARGO_BUILD_BUILD_DIR-none}" >> cargo-build.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
 case "$prompt" in *"redraw your sticker"*) cost=0.25 sid=s-redraw;; esac
@@ -2674,9 +2740,8 @@ esac
         let b = crate::tasks::tests::agent(&st, "Other");
         run(&st, &a.id, "hello", 1).await;
         run(&st, &b.id, "hello", 1).await;
-        let seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join("cargo-build.log")).unwrap().trim().to_string();
-        assert_eq!(seen(&a.id), workspace(&st, &a.id).join(".cargo-build").to_string_lossy());
-        assert_eq!(seen(&b.id), workspace(&st, &b.id).join(".cargo-build").to_string_lossy());
+        let seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join(".cargo/config.toml")).unwrap();
+        assert_eq!(seen(&a.id), format!("[build]\nbuild-dir = {:?}\n", workspace(&st, &a.id).join(".cargo-build").to_string_lossy()));
         assert_ne!(seen(&a.id), seen(&b.id));
     }
 
@@ -2934,6 +2999,110 @@ esac
         let past = "0b4355f1-11b6-4668-809e-1dc392203ef7";
         crate::sessions::tests::write(&dir, past, &[r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"Fix the login bug"}}"#]);
         (dir, past.into())
+    }
+
+    #[tokio::test]
+    async fn a_queued_agent_message_can_be_cancelled_until_a_run_takes_it() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let to = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(to.id.clone(), Arc::new(Notify::new()));
+        let keep = message_on_ticket(&st, &from, &to, "keep me", json!({}), None, false).expect("queued behind the run");
+        let drop = message_on_ticket(&st, &from, &to, "never mind", json!({}), None, false).expect("queued behind the run");
+
+        assert!(cancel_queued(&st, &to.id, drop).unwrap());
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&to.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [keep]);
+            let q = &rt.queued[&to.id];
+            assert!(q.len() == 1 && q[0].contains("keep me") && !q.iter().any(|p| p.contains("never mind")), "{q:?}");
+        }
+        let m = st.db.get_message(&to.id, drop).unwrap().unwrap();
+        assert_eq!(m.meta["cancelled"], true);
+        assert!(st.db.get_message(&to.id, keep).unwrap().unwrap().meta["cancelled"].is_null());
+        assert!(!cancel_queued(&st, &to.id, drop).unwrap(), "twice: nothing left to cancel");
+
+        // The run ended and took the queue (it clears `queued_messages` under the same lock): too late.
+        st.rt.lock().unwrap().queued_messages.remove(&to.id);
+        assert!(!cancel_queued(&st, &to.id, keep).unwrap());
+        assert!(st.db.get_message(&to.id, keep).unwrap().unwrap().meta["cancelled"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_ticket_hand_over_leaves_the_ticket_state_alone() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let to = crate::tasks::tests::agent(&st, "Dev");
+        st.db.update_agent(&to.id, |a| a.fresh_context = "always".into()).unwrap();
+        st.rt.lock().unwrap().running.insert(to.id.clone(), Arc::new(Notify::new()));
+        let id = message_on_ticket(&st, &from, &to, "Build #12", json!({}), Some("o/r#12"), true).expect("queued");
+        assert!(cancel_queued(&st, &to.id, id).unwrap());
+        // Only the message left the queue; a clear the agent didn't need is the worst that can follow.
+        assert!(st.rt.lock().unwrap().fresh_before.contains(&to.id));
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#12"));
+        assert!(st.rt.lock().unwrap().queued.get(&to.id).is_none_or(|q| q.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_user_message_to_a_busy_agent_waits_in_the_queue_and_can_be_cancelled() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let keep = enqueue_chat(&st, &a.id, "first".into(), json!({})).unwrap().id;
+        let drop = enqueue_chat(&st, &a.id, "never mind".into(), json!({})).unwrap().id;
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&a.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [keep, drop]);
+            assert_eq!(rt.queued[&a.id].len(), 2);
+        }
+        assert!(cancel_queued(&st, &a.id, drop).unwrap());
+        let rt = st.rt.lock().unwrap();
+        assert_eq!(rt.queued[&a.id].len(), 1);
+        assert!(rt.queued[&a.id][0].contains("first"));
+        assert_eq!(st.db.get_message(&a.id, drop).unwrap().unwrap().meta["cancelled"], true);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_last_user_message_makes_the_next_run_not_for_the_user() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let for_user = |st: &AppState| st.rt.lock().unwrap().queued_for_user.contains(&a.id);
+        let agent_msg = message_on_ticket(&st, &from, &a, "FYI-ish ask", json!({}), None, false).unwrap();
+        assert!(!for_user(&st));
+        let u1 = enqueue_chat(&st, &a.id, "mine".into(), json!({})).unwrap().id;
+        let u2 = enqueue_chat(&st, &a.id, "mine too".into(), json!({})).unwrap().id;
+        assert!(for_user(&st));
+        assert!(cancel_queued(&st, &a.id, u1).unwrap());
+        assert!(for_user(&st), "another of the user's messages still waits");
+        assert!(cancel_queued(&st, &a.id, u2).unwrap());
+        assert!(!for_user(&st), "only the agent's message is left");
+        assert_eq!(st.rt.lock().unwrap().queued_messages[&a.id].len(), 1);
+        let _ = agent_msg;
+
+        // A user's task brief waits untracked: it keeps the run for the user.
+        enqueue_chat(&st, &a.id, "Work on issue 12".into(), json!({ "task_id": "t1" }));
+        let u3 = enqueue_chat(&st, &a.id, "again".into(), json!({})).unwrap().id;
+        assert!(cancel_queued(&st, &a.id, u3).unwrap());
+        assert!(for_user(&st));
+    }
+
+    #[tokio::test]
+    async fn a_message_about_a_task_waits_but_cannot_be_cancelled() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let brief = enqueue_chat(&st, &a.id, "Work on issue 12".into(), json!({ "task_id": "t1" })).unwrap().id;
+        assert!(st.rt.lock().unwrap().queued_messages.get(&a.id).is_none_or(|q| q.is_empty()));
+        assert!(!cancel_queued(&st, &a.id, brief).unwrap());
+        assert_eq!(st.rt.lock().unwrap().queued[&a.id].len(), 1, "it still runs next");
+        assert!(st.db.get_message(&a.id, brief).unwrap().unwrap().meta["cancelled"].is_null());
+
+        // What Loft queues itself (a task notice, the planning card's setup message) is no chat message to cancel.
+        let notice = enqueue_with(&st, &a.id, Some("[Task t1] was cancelled by the user. Stop working on it.".into()), json!({}), "user").unwrap().id;
+        assert!(!cancel_queued(&st, &a.id, notice).unwrap());
+        assert_eq!(st.rt.lock().unwrap().queued[&a.id].len(), 2);
     }
 
     #[tokio::test]

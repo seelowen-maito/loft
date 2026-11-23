@@ -258,7 +258,9 @@ pub async fn sizes(axum::extract::State(state): axum::extract::State<AppState>) 
     })
     .await
     .unwrap_or_default();
-    Ok(axum::Json(serde_json::json!({ "agents": rows, "free_bytes": free, "low_disk_bytes": LOW_DISK })))
+    let cache = crate::sccache::cache_dir(state.settings.dir());
+    let sccache = tokio::task::spawn_blocking(move || serde_json::json!({ "installed": crate::sccache::installed().is_some(), "bytes": size(&cache), "limit_bytes": crate::sccache::LIMIT_BYTES })).await.unwrap_or_default();
+    Ok(axum::Json(serde_json::json!({ "agents": rows, "free_bytes": free, "low_disk_bytes": LOW_DISK, "sccache": sccache })))
 }
 
 /// Each agent's projects by id, main first.
@@ -2035,6 +2037,8 @@ mod tests {
         assert!(before >= 5000, "{}", row(&v));
         assert_eq!(row(&v)["busy"], false);
         assert!(v["free_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(v["sccache"]["limit_bytes"], 10u64 << 30);
+        assert!(v["sccache"]["installed"].is_boolean() && v["sccache"]["bytes"].is_u64(), "{}", v["sccache"]);
         let r = clean_paths(&st, Some(&a.id), vec![ws.join("dev.log")]).await;
         let axum::Json(v) = sizes(axum::extract::State(st.clone())).await.unwrap();
         assert_eq!(row(&v)["bytes"].as_u64().unwrap(), before - r.freed_bytes, "sizes weren't refreshed");

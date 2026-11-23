@@ -551,6 +551,11 @@ struct ApprovalCard: View {
                         }
                         .buttonStyle(.bordered)
                         .accessibilityLabel("More options")
+                        .confirmationDialog("Always allow this?", isPresented: $confirmAlways, titleVisibility: .visible) {
+                            Button("Always allow") { decide("allow_always") }
+                        } message: {
+                            Text("\(request.rule ?? request.toolName) is added to the agent's allowed tools, so it won't ask again.")
+                        }
                     }
                 }
                 .disabled(busy || !store.canWrite)
@@ -560,11 +565,6 @@ struct ApprovalCard: View {
         .padding(12)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).stroke(Theme.attention.opacity(0.4), lineWidth: 1))
-        .confirmationDialog("Always allow this?", isPresented: $confirmAlways, titleVisibility: .visible) {
-            Button("Always allow") { decide("allow_always") }
-        } message: {
-            Text("\(request.rule ?? request.toolName) is added to the agent's allowed tools, so it won't ask again.")
-        }
         .errorAlert($error)
         .sensoryFeedback(.success, trigger: busy) { old, new in old && !new && error == nil }
         // A container with its own identifier: on a plain stack it would also replace the identifiers inside
