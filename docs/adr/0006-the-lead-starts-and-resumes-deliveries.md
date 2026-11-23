@@ -17,3 +17,7 @@ Only the user starts a Delivery (Start delivery) or resumes a stalled one (Needs
 ## Consequences
 - With the option off nothing changes for anyone.
 - The brakes the limits feed (per hour, per day, repeated failure, running Deliveries) are built in the tickets that add the tools; this one only holds the settings.
+
+## Brakes on the Lead's resumes
+
+The Delivery keeps the Lead's resumes of the last day. `resume_delivery` is refused, and the Delivery stays stalled, when the hour's or the day's limit is used up, or when it stopped again for the same reason within 10 minutes of a Lead's resume. A refusal sets the Delivery's `brake`: Needs you shows a new stalled item saying which brake (so it is pushed again) and the spec thread gets a line. A resume within the limits only adds a thread line with the counts; it pushes nothing. The user's Resume is never braked.

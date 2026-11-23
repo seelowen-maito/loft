@@ -60,6 +60,13 @@ pub struct Delivery {
     /// The question the stalling run ended with, when its reply asked the user to decide something.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall_ask: Option<StallAsk>,
+    /// The Lead's resumes of the last day (ADR 0006), for the brakes: how many in the hour and the day, and
+    /// whether the same stall came right back. Kept across stalls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_resumes: Vec<LeadResumed>,
+    /// While stalled: the brake that held the Lead's resume back (shown in Needs you), empty when none did.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub brake: String,
     /// When Loft marked its spec PR ready, or set a plan kept in Loft to ready (RFC 3339): the Delivery done
     /// item and the planner's wake, once. Empty before.
     #[serde(default)]
@@ -137,6 +144,7 @@ impl Delivery {
         (self.resume_to, self.stall_reason, self.stalled_at, self.stall_resets_at) = (String::new(), String::new(), String::new(), String::new());
         self.stalled_on.clear();
         self.stall_ask = None;
+        self.brake.clear();
     }
 
     /// Ticket #n's step went ahead (its call came, or it moved to another Dev): a stall goes only when no
@@ -152,6 +160,15 @@ impl Delivery {
             }
         }
     }
+}
+
+/// One resume of a Delivery by the Lead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeadResumed {
+    /// When the Lead resumed it (RFC 3339).
+    pub at: String,
+    /// The stall reason it resumed.
+    pub reason: String,
 }
 
 /// What the agent whose run stalled a Delivery asked at the end of that run: Needs you shows it with the stall.
@@ -1641,6 +1658,8 @@ impl Db {
                 stalled_at: String::new(),
                 stalled_on: vec![],
                 stall_ask: None,
+                lead_resumes: vec![],
+                brake: String::new(),
                 done_at: String::new(),
                 ready_retry: has(&retry),
                 tickets,

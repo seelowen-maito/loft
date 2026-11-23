@@ -66,6 +66,8 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             stalled_at: String::new(),
             stalled_on: vec![],
             stall_ask: None,
+            lead_resumes: vec![],
+            brake: String::new(),
             done_at: String::new(),
             ready_retry: false,
             tickets: vec![],
@@ -429,7 +431,9 @@ fn tell_lead(state: &AppState, d: &Delivery, tickets: &[i64], who: Option<&str>)
 
 /// The id of a stalled Delivery's Needs you item: a new stall is a new item, pushed again.
 pub(crate) fn stalled_item_id(d: &Delivery) -> String {
-    format!("stalled:{}:{}:{}", d.repo, d.spec, d.stalled_at)
+    // A brake that held the Lead back makes it a new item: pushed again, saying which brake.
+    let brake = if d.brake.is_empty() { "" } else { ":brake" };
+    format!("stalled:{}:{}:{}{brake}", d.repo, d.spec, d.stalled_at)
 }
 
 /// At start-up, before any run: runs and their queues live only in memory, so no agent is still working on
@@ -1513,8 +1517,36 @@ fn lead_resume_hint(state: &AppState, d: &Delivery) -> Option<String> {
     })
 }
 
+/// The Lead's resumes of `d` in the last hour and the last day before `now`.
+fn lead_resume_counts(d: &Delivery, now: DateTime<Utc>) -> (u32, u32) {
+    let ages: Vec<chrono::Duration> = d.lead_resumes.iter().filter_map(|r| DateTime::parse_from_rfc3339(&r.at).ok()).map(|t| now - t.with_timezone(&Utc)).collect();
+    let within = |w: chrono::Duration| ages.iter().filter(|a| **a < w).count() as u32;
+    (within(chrono::Duration::hours(1)), within(chrono::Duration::days(1)))
+}
+
+/// How soon after a Lead's resume the same stall counts as the resume not working.
+const REPEAT_STALL_MINUTES: i64 = 10;
+
+/// The brake that holds the Lead's resume of stalled `d` back at `now` (ADR 0006), or None: the hour's or the day's
+/// resumes used up, or the Delivery stopped again for the same reason within 10 minutes of the Lead's last resume.
+fn resume_brake(d: &Delivery, opts: &crate::lead_delivery::Options, now: DateTime<Utc>) -> Option<String> {
+    let (hour, day) = lead_resume_counts(d, now);
+    if hour >= opts.resumes_per_hour {
+        return Some(format!("the Lead already resumed it {hour} time(s) in the last hour (the project allows {})", opts.resumes_per_hour));
+    }
+    if day >= opts.resumes_per_day {
+        return Some(format!("the Lead already resumed it {day} time(s) in the last day (the project allows {})", opts.resumes_per_day));
+    }
+    let at = |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|t| t.with_timezone(&Utc));
+    let last = d.lead_resumes.iter().filter_map(|r| at(&r.at).map(|t| (t, r))).max_by_key(|(t, _)| *t)?;
+    let stalled = at(&d.stalled_at)?;
+    let gap = stalled - last.0;
+    (last.1.reason == d.stall_reason && gap >= chrono::Duration::zero() && gap <= chrono::Duration::minutes(REPEAT_STALL_MINUTES))
+        .then(|| format!("it stopped again for the same reason ({}) {} minute(s) after the Lead's resume, so resuming again would loop", d.stall_reason, gap.num_minutes()))
+}
+
 /// `resume_delivery`: the Lead resumes a Delivery stalled for a transient reason.
-async fn resume_by_lead(state: &AppState, me: &crate::db::Agent, args: &Value, now: DateTime<Utc>) -> Result<String, String> {
+pub(crate) async fn resume_by_lead(state: &AppState, me: &crate::db::Agent, args: &Value, now: DateTime<Utc>) -> Result<String, String> {
     if me.role != "lead" {
         return Err("Only the team's Lead resumes a Delivery this way.".into());
     }
@@ -1546,10 +1578,31 @@ async fn resume_by_lead(state: &AppState, me: &crate::db::Agent, args: &Value, n
         LeadResume::After(t) => return Err(format!("{} stalled on the plan's usage limit, which frees at {}: resume it then, not before.", subject(&d), when(t))),
         LeadResume::Never(why) => return Err(why),
     }
+    let opts = crate::lead_delivery::options(state, d.project.trim());
+    if let Some(brake) = resume_brake(&d, &opts, now) {
+        // The Delivery stays stalled; the user is told which brake held it (Needs you item, push) and the thread says so.
+        if d.brake != brake {
+            update(state, &d.repo, d.spec, |d| d.brake = brake.clone());
+            if let Some(t) = delivery_task(state, &d) {
+                let text = format!("Resume by {} (Lead) refused at {}: {brake}. The Delivery stays stalled ({}) for the user to resume.", me.name, now.with_timezone(&chrono::Local).format("%b %-d, %H:%M"), d.stall_reason);
+                crate::tasks::log_status(state, &t, &me.id, &text);
+            }
+        }
+        return Err(format!("{} stays stalled: {brake}. Only the user resumes it now (Needs you → Resume); Loft told them.", subject(&d)));
+    }
     let (reason, why) = (d.stall_reason.clone(), stall_why(&d.stall_reason, &d.stall_resets_at));
     let line = resume(state, &d.repo, d.spec).await?;
+    let kept = |r: &&crate::db::LeadResumed| DateTime::parse_from_rfc3339(&r.at).is_ok_and(|t| now - t.with_timezone(&Utc) < chrono::Duration::days(1));
+    let done = update(state, &d.repo, d.spec, |d| {
+        d.lead_resumes = d.lead_resumes.iter().filter(kept).cloned().chain([crate::db::LeadResumed { at: now.to_rfc3339(), reason: reason.clone() }]).collect();
+    });
     if let Some(t) = delivery_task(state, &d) {
-        let text = format!("Resumed by {} (Lead) at {}: the Delivery had stalled ({reason}) because {why}.", me.name, now.with_timezone(&chrono::Local).format("%b %-d, %H:%M"));
+        let (hour, day) = done.as_ref().map_or((1, 1), |d| lead_resume_counts(d, now));
+        let text = format!(
+            "Resumed by {} (Lead) at {}: the Delivery had stalled ({reason}) because {why}. Lead resumes on it: {hour} in the last hour, {day} in the last day.",
+            me.name,
+            now.with_timezone(&chrono::Local).format("%b %-d, %H:%M")
+        );
         crate::tasks::log_status(state, &t, &me.id, &text);
     }
     Ok(line)

@@ -6449,6 +6449,121 @@ pub(crate) mod tests {
         assert!(w.iter().any(|w| w.contains("You can't resume it") && w.contains("asking the user a question")), "{w:?}");
     }
 
+    // ---- The brakes on the Lead's resumes (ADR 0006) ----
+
+    /// A Delivery #40 stalled on `run_failed`, the Lead's earlier resumes `(minutes ago, reason)`, and the Lead.
+    async fn braked(name: &str, per_hour: u32, per_day: u32, earlier: &[(i64, &str)]) -> (AppState, Agent, crate::db::Task, String) {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = format!("octo/{name}");
+        let (dev, _) = building(&st, &fake, name, &["qa"]).await;
+        let lead = busy(&st, "Lofty", name, "lead");
+        let issue = spec_issue(&st, &fake, name, &slug);
+        lead_may_resume(&st, name, true).await;
+        crate::lead_delivery::put_route(State(st.clone()), Json(json!({ "project": name, "resumes_per_hour": per_hour, "resumes_per_day": per_day }))).await.ok().unwrap();
+        run_starts(&st, &dev);
+        crate::delivery::run_ended_with(&st, &dev.id, Some("boom")).await;
+        let stalled = chrono::DateTime::parse_from_rfc3339(&delivery(&st, &slug).stalled_at).unwrap().with_timezone(&chrono::Utc);
+        crate::delivery::update(&st, &slug, 40, |d| {
+            d.lead_resumes = earlier.iter().map(|(m, r)| crate::db::LeadResumed { at: (stalled - chrono::Duration::minutes(*m)).to_rfc3339(), reason: r.to_string() }).collect();
+        })
+        .unwrap();
+        (st, lead, issue, slug)
+    }
+
+    fn brake_lines(st: &AppState, issue: &crate::db::Task) -> Vec<String> {
+        st.db.list_task_comments(&issue.id, 100, None).unwrap().into_iter().filter(|c| c.kind == "status" && c.text.starts_with("Resume by")).map(|c| c.text).collect()
+    }
+
+    /// The Lead's call at a simulated `now`.
+    async fn resume_at(st: &AppState, lead: &Agent, now: chrono::DateTime<chrono::Utc>) -> Result<String, String> {
+        crate::delivery::resume_by_lead(st, lead, &json!({ "ticket": 40 }), now).await
+    }
+
+    #[tokio::test]
+    async fn the_hour_brake_refuses_the_lead_tells_the_user_and_the_user_can_still_resume() {
+        let (st, lead, issue, slug) = braked("br-hour", 1, 6, &[(20, "run_failed")]).await;
+        let before = stalled_items(&st);
+        assert_eq!(before.len(), 1);
+        let err = resume_at(&st, &lead, chrono::Utc::now()).await.unwrap_err();
+        assert!(err.contains("stays stalled") && err.contains("last hour"), "{err}");
+        let d = delivery(&st, &slug);
+        assert_eq!(d.state, "stalled");
+        // Needs you: a new item saying which brake; the thread has a line.
+        let items = stalled_items(&st);
+        assert_eq!(items.len(), 1);
+        assert_ne!(items[0]["id"], before[0]["id"], "a new item is pushed again");
+        assert!(items[0]["reason"].as_str().unwrap().contains("held back") && items[0]["reason"].as_str().unwrap().contains("last hour"), "{items:?}");
+        assert!(items[0]["push"]["body"].as_str().unwrap_or_default().contains("last hour") || items[0].to_string().contains("last hour"));
+        let lines = brake_lines(&st, &issue);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("last hour"), "{}", lines[0]);
+        // Asking again says no again, with no second line or item.
+        assert!(resume_at(&st, &lead, chrono::Utc::now()).await.is_err());
+        assert_eq!(brake_lines(&st, &issue).len(), 1);
+        assert_eq!(stalled_items(&st)[0]["id"], items[0]["id"]);
+        // The user's Resume still works.
+        resume_from_needs_you(&st).await.unwrap();
+        let d = delivery(&st, &slug);
+        assert_eq!((d.state.as_str(), d.brake.as_str()), ("running", ""));
+    }
+
+    #[tokio::test]
+    async fn the_hour_brake_lifts_when_the_clock_passes_the_hour() {
+        let (st, lead, issue, slug) = braked("br-hour-clock", 1, 6, &[(20, "run_failed")]).await;
+        assert!(resume_at(&st, &lead, chrono::Utc::now()).await.is_err());
+        resume_at(&st, &lead, chrono::Utc::now() + chrono::Duration::minutes(45)).await.unwrap();
+        assert_eq!(delivery(&st, &slug).state, "running");
+        assert_eq!(thread(&st, &issue).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_day_brake_refuses_after_the_days_resumes_and_lifts_a_day_later() {
+        let (st, lead, issue, slug) = braked("br-day", 6, 2, &[(180, "run_failed"), (300, "api_error")]).await;
+        let err = resume_at(&st, &lead, chrono::Utc::now()).await.unwrap_err();
+        assert!(err.contains("last day"), "{err}");
+        assert_eq!(delivery(&st, &slug).state, "stalled");
+        assert!(brake_lines(&st, &issue)[0].contains("last day"));
+        assert!(stalled_items(&st)[0]["reason"].as_str().unwrap().contains("last day"));
+        resume_at(&st, &lead, chrono::Utc::now() + chrono::Duration::hours(25)).await.unwrap();
+        assert_eq!(delivery(&st, &slug).state, "running");
+    }
+
+    #[tokio::test]
+    async fn a_stall_for_the_same_reason_within_ten_minutes_of_a_lead_resume_is_not_resumed_again() {
+        let (st, lead, issue, slug) = braked("br-repeat", 6, 24, &[(5, "run_failed")]).await;
+        let err = resume_at(&st, &lead, chrono::Utc::now()).await.unwrap_err();
+        assert!(err.contains("same reason") && err.contains("loop"), "{err}");
+        assert_eq!(delivery(&st, &slug).state, "stalled");
+        assert!(brake_lines(&st, &issue)[0].contains("same reason"));
+        assert!(stalled_items(&st)[0]["reason"].as_str().unwrap().contains("same reason"));
+        // The user's Resume still works.
+        resume_from_needs_you(&st).await.unwrap();
+        assert_eq!(delivery(&st, &slug).state, "running");
+    }
+
+    #[tokio::test]
+    async fn a_stall_more_than_ten_minutes_after_a_lead_resume_or_for_another_reason_is_resumed() {
+        for earlier in [(11, "run_failed"), (3, "api_error")] {
+            let (st, lead, _, slug) = braked(&format!("br-ok-{}", earlier.0), 6, 24, &[earlier]).await;
+            resume_at(&st, &lead, chrono::Utc::now()).await.unwrap();
+            assert_eq!(delivery(&st, &slug).state, "running", "{earlier:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resume_within_the_limits_says_the_counts_in_the_thread_and_raises_no_item() {
+        let (st, lead, issue, slug) = braked("br-counts", 2, 6, &[(30, "api_error"), (200, "run_failed")]).await;
+        resume_at(&st, &lead, chrono::Utc::now()).await.unwrap();
+        let d = delivery(&st, &slug);
+        assert_eq!((d.state.as_str(), d.brake.as_str()), ("running", ""));
+        let lines = thread(&st, &issue);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("2 in the last hour, 3 in the last day"), "{}", lines[0]);
+        assert!(brake_lines(&st, &issue).is_empty());
+        assert!(stalled_items(&st).is_empty(), "no stall item, so no push");
+    }
+
     /// The start thread lines of the issue.
     fn start_lines(st: &AppState, issue: &crate::db::Task) -> Vec<String> {
         st.db.list_task_comments(&issue.id, 100, None).unwrap().into_iter().filter(|c| c.kind == "status" && c.text.starts_with("Delivery started by")).map(|c| c.text).collect()
