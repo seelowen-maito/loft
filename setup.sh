@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install or check loft: requirements, first-run settings, build, and (macOS) a background service.
-# Safe to re-run; it reports what's missing and how to fix it.
+# Runs on macOS, Linux and Windows (in Git Bash). Safe to re-run; it reports what's missing and how to fix it.
 set -uo pipefail
 LAUNCH=$(pwd)
 cd "$(dirname "$0")"
@@ -13,6 +13,7 @@ LABEL=dev.loft
 PLIST=~/Library/LaunchAgents/$LABEL.plist
 BIN=$ROOT/backend/target/release/loft
 MACOS=$([ "$(uname)" = Darwin ] && echo 1 || echo 0)
+case "$(uname -s)" in MINGW*|MSYS*) WINDOWS=1 BIN=$BIN.exe ;; *) WINDOWS=0 ;; esac
 
 if [ -t 1 ]; then B=$'\e[1m' G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' D=$'\e[2m' N=$'\e[0m'; else B="" G="" Y="" R="" D="" N=""; fi
 failed=0
@@ -21,9 +22,10 @@ ok() { printf '  %s✓%s %s\n' "$G" "$N" "$1"; }
 warn() { printf '  %s!%s %s\n' "$Y" "$N" "$1"; }
 fail() { printf '  %s✗%s %s\n' "$R" "$N" "$1"; failed=1; }
 tip() { printf '    %s%s%s\n' "$D" "$1" "$N"; }
-# How to install a package here: Homebrew on macOS, else the distro's package manager.
+# How to install a package here: Homebrew on macOS, winget on Windows (its id is $2), else the distro's package manager.
 pkg() {
-  if [ "$MACOS" = 1 ]; then
+  if [ "$WINDOWS" = 1 ]; then echo "winget install -e --id $2"
+  elif [ "$MACOS" = 1 ]; then
     if command -v brew >/dev/null; then echo "brew install $1"; else echo "install Homebrew (https://brew.sh), then: brew install $1"; fi
   elif command -v apt-get >/dev/null; then echo "sudo apt-get install -y $1"
   elif command -v dnf >/dev/null; then echo "sudo dnf install -y $1"
@@ -57,8 +59,8 @@ spin() {
 show_log() { grep -v '^[[:space:]]*$' "$LOG" | tail -n "${1:-8}" | sed "s/^/    ${D}│${N} /"; }
 # Answers come from stdin (so they can be piped); at EOF the default is used.
 ask() { local a=""; read -r -p "  $1 " a || true; echo "${a:-$2}"; }
-# A string field from settings.json (flat or nested key, first match).
-setting() { [ -f "$SETTINGS" ] && sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" "$SETTINGS" | head -1; }
+# A string field from settings.json (flat or nested key, first match), with JSON's \\ read back as \ (C:\\Users).
+setting() { [ -f "$SETTINGS" ] && sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" "$SETTINGS" | head -1 | sed 's/\\\\/\\/g'; }
 # AXe, which lets the Simulator page tap and type. Same places the backend looks (simulator.rs).
 find_axe() {
   local p
@@ -89,25 +91,50 @@ running_agents() { curl -s -m 2 "http://127.0.0.1:$PORT/api/settings" | sed -n '
 
 section "Requirements"
 if command -v git >/dev/null; then ok "git"
-else fail "git is missing"; if [ "$MACOS" = 1 ]; then tip "Run: xcode-select --install   (Apple's command line tools, includes git)"; else tip "Run: $(pkg git)"; fi; fi
+else fail "git is missing"; if [ "$MACOS" = 1 ]; then tip "Run: xcode-select --install   (Apple's command line tools, includes git)"; else tip "Run: $(pkg git Git.Git)"; fi; fi
 
-if cargo_version=$(cargo --version 2>/dev/null); then ok "Rust ($(echo "$cargo_version" | cut -d' ' -f2))"
+if cargo_version=$(cargo --version 2>/dev/null); then
+  ok "Rust ($(echo "$cargo_version" | cut -d' ' -f2))"
+  # Loft builds with the MSVC toolchain on Windows (docs/adr/0005).
+  if [ "$WINDOWS" = 1 ] && ! rustc -vV 2>/dev/null | grep -q '^host: .*-msvc$'; then
+    fail "Rust's default toolchain isn't MSVC"; tip "Run: rustup default stable-x86_64-pc-windows-msvc"
+  fi
 elif command -v rustup >/dev/null; then
   fail "Rust is installed but has no toolchain"; tip "Run: rustup default stable"
 elif [ -x ~/.cargo/bin/cargo ]; then
   fail "Rust is installed but not on your PATH"
-  tip "Run: . \"\$HOME/.cargo/env\"   (or open a new terminal), then run setup again."
+  if [ "$WINDOWS" = 1 ]; then tip "Open a new Git Bash, then run setup again."
+  else tip "Run: . \"\$HOME/.cargo/env\"   (or open a new terminal), then run setup again."; fi
+elif [ "$WINDOWS" = 1 ]; then
+  fail "Rust (cargo) is missing"; tip "Run: $(pkg rustup Rustlang.Rustup)"
 else
   fail "Rust (cargo) is missing"
   tip "Run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
   tip "then open a new terminal so cargo is on your PATH."
 fi
 
+# Rust links with the Visual Studio Build Tools' C++ tools on Windows. vswhere comes with any Visual Studio install.
+if [ "$WINDOWS" = 1 ]; then
+  vc=""
+  for vswhere in "$(printenv 'ProgramFiles(x86)' 2>/dev/null)" "/c/Program Files (x86)"; do
+    vswhere="$vswhere/Microsoft Visual Studio/Installer/vswhere.exe"
+    [ -f "$vswhere" ] || continue
+    vc=$("$vswhere" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>/dev/null | tr -d '\r')
+    break
+  done
+  if [ -n "$vc" ]; then ok "Visual Studio C++ build tools"
+  else
+    fail "the Visual Studio C++ build tools are missing (Rust needs them to link)"
+    tip "Run: winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override \"--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\""
+  fi
+fi
+
 node_major=$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')
 if [ -n "$node_major" ] && [ "$node_major" -ge 22 ] && command -v node >/dev/null; then ok "Node $(node -v)"
 else
   if [ -n "$node_major" ]; then fail "Node 22 or newer is needed (found $(node -v))"; else fail "Node is missing (22 or newer)"; fi
-  if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then tip "Run: nvm install 22 && nvm alias default 22"
+  if [ "$WINDOWS" = 1 ]; then tip "Run: $(pkg node OpenJS.NodeJS.LTS)"
+  elif [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then tip "Run: nvm install 22 && nvm alias default 22"
   elif [ "$MACOS" = 1 ] && command -v brew >/dev/null; then tip "Run: brew install node   (or use nvm: https://github.com/nvm-sh/nvm)"
   else tip "Install nvm (https://github.com/nvm-sh/nvm), open a new terminal, then: nvm install 22"; fi
 fi
@@ -121,14 +148,32 @@ if command -v "$claude_bin" >/dev/null; then
   else fail "Claude Code isn't logged in"; tip "Run: $claude_bin   then log in (agents use this login)."; fi
 else
   fail "Claude Code ($claude_bin) not found"
-  tip "Run: curl -fsSL https://claude.ai/install.sh | bash   then run claude once to log in."
+  if [ "$WINDOWS" = 1 ]; then tip "Run: $(pkg claude Anthropic.ClaudeCode)   then run claude once to log in."
+  else tip "Run: curl -fsSL https://claude.ai/install.sh | bash   then run claude once to log in."; fi
   tip "Already installed somewhere else? Set its path under Settings → Claude command."
 fi
 
 if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then ok "GitHub CLI, logged in"
 elif command -v gh >/dev/null; then warn "GitHub CLI not logged in (optional: PRs, issues, private repos)"; tip "Run: gh auth login   or add a token under Settings → GitHub token"
-else warn "GitHub CLI not installed (optional: PRs, issues, private repos)"; tip "Run: $(pkg gh) && gh auth login   or add a token under Settings → GitHub token"; fi
-if [ "$failed" = 1 ]; then printf '\n  %sFix the items above, then run setup again:%s\n    %ssetup.sh\n\n' "$R" "$N" "$HERE"; exit 1; fi
+else warn "GitHub CLI not installed (optional: PRs, issues, private repos)"; tip "Run: $(pkg gh GitHub.cli) && gh auth login   or add a token under Settings → GitHub token"; fi
+
+# Agents' clones go deep (agent-local-storage/<id>/<repo>/…): past Windows' 260-character limit, git and builds fail
+# unless long paths are on, in Windows and in git.
+if [ "$WINDOWS" = 1 ]; then
+  if MSYS_NO_PATHCONV=1 reg query 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem' /v LongPathsEnabled 2>/dev/null | tr -d '\r' | grep -q 'REG_DWORD *0x1$'; then
+    ok "long paths on in Windows"
+  else
+    warn "long paths are off in Windows: agents' clones can fail past 260 characters"
+    tip "In PowerShell as administrator: New-ItemProperty -Path HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force"
+  fi
+  if [ "$(git config --get --type=bool core.longpaths 2>/dev/null)" = true ]; then ok "long paths on in git"
+  else warn "long paths are off in git"; tip "Run: git config --global core.longpaths true"; fi
+fi
+if [ "$failed" = 1 ]; then
+  printf '\n  %sFix the items above, then run setup again:%s\n    %ssetup.sh\n' "$R" "$N" "$HERE"
+  [ "$WINDOWS" = 1 ] && tip "Open a new Git Bash first, so it finds what winget installed."
+  printf '\n'; exit 1
+fi
 
 section "Restore a backup"
 . scripts/restore-backup.sh
@@ -190,8 +235,14 @@ fi
 
 section "Projects folder"
 if [ -f "$SETTINGS" ]; then
-  ok "$(setting projects_dir) ${D}(change it under Settings)${N}"
-  [ -d "$(setting projects_dir)" ] || warn "that folder isn't on this Mac: change it under Settings → Projects folder"
+  dir=$(setting projects_dir)
+  ok "$dir ${D}(change it under Settings)${N}"
+  if [ "$WINDOWS" = 1 ] && [[ $dir == /* ]]; then
+    # An older setup saved Git Bash's form (/c/Users/…), which Loft can't open.
+    warn "Loft can't open a Git Bash path: change it under Settings → Projects folder to $(cygpath -m "$dir" 2>/dev/null)"
+  elif [ ! -d "$dir" ]; then
+    warn "that folder isn't on this computer: change it under Settings → Projects folder"
+  fi
 else
   while :; do
     dir=$(ask "Folder with your git repos [~/projects]:" "~/projects")
@@ -201,6 +252,8 @@ else
     [ -t 0 ] || exit 1
   done
   dir=$(cd "$dir" && pwd)
+  # Loft on Windows reads C:/Users/…, not Git Bash's /c/Users/….
+  [ "$WINDOWS" = 1 ] && dir=$(cygpath -m "$dir")
   mkdir -p .loft
   printf '{\n  "projects_dir": "%s"\n}\n' "$(printf '%s' "$dir" | sed 's/\\/\\\\/g; s/"/\\"/g')" > "$SETTINGS"
   ok "$dir ${D}(saved to $SETTINGS)${N}"
@@ -208,7 +261,8 @@ fi
 
 section "Build"
 . scripts/frontend-pm.sh
-build_frontend() { cd frontend && { [ -d node_modules ] || fe_install; } && fe run build; }
+# A subshell: without a terminal, spin runs it in this shell, and the cd would stick.
+build_frontend() ( cd frontend && { [ -d node_modules ] || fe_install; } && fe run build )
 if spin "Building the web app" build_frontend; then ok "web app"
 else fail "web app build failed"; show_log; tip "To see everything: cd ${HERE}frontend && pnpm install && pnpm run build"; exit 1; fi
 [ -x "$BIN" ] && label="Building loft" || label="Building loft ${D}(the first build takes a few minutes)${N}"

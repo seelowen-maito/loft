@@ -52,6 +52,14 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 - [Claude Code](https://claude.com/claude-code) (`claude`), installed and logged in. Agents use your login.
 - Optional: [`gh`](https://cli.github.com), logged in, for GitHub pull requests and issues.
 
+loft runs on macOS, Linux and Windows (x64, Windows 10 22H2 or 11). On Windows it runs natively, with these on top:
+
+- [Git for Windows](https://gitforwindows.org): run the installer, `setup.sh` and `start.sh` in its Git Bash. Agents use Git Bash too.
+- The Visual Studio Build Tools with the C++ workload (Rust's MSVC toolchain links with them).
+- Long paths on, in Windows (`LongPathsEnabled`) and in git (`git config --global core.longpaths true`), so agents' clones don't hit the 260-character limit.
+
+`setup.sh` checks each of these and gives the `winget` command for whatever is missing. loft also runs inside WSL2, as on Linux.
+
 ## Install
 
 **One-line installer**
@@ -60,7 +68,7 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
 ```
 
-The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
+The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On Windows, run it in Git Bash: it saves the projects folder as `C:/…`, the form loft reads. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
 
 Already have a clone? Run `./setup.sh` from it instead.
 

@@ -1,0 +1,2 @@
+# Shell scripts keep LF line endings, even in a Windows checkout with core.autocrlf: bash in Git Bash chokes on CRLF.
+*.sh text eol=lf
