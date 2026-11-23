@@ -139,8 +139,10 @@ final class LoftUITests: XCTestCase {
         let load = app.buttons["Load earlier messages"]
         // Each tap: the item at the top before it, and one that only the newly drawn page has.
         for (path, top, new) in [("cached", "Step 46 of", "Step 26 of"), ("server", "Step 26 of", "Step 1 of")] {
-            for _ in 0..<30 where !load.isHittable { app.swipeDown(velocity: .fast) }
-            XCTAssertTrue(load.isHittable, path)
+            // A tap on the status bar scrolls the chat to its oldest loaded message in one go: swiping up through
+            // 100 messages took over a minute (#663).
+            app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 200, dy: 10)).tap()
+            XCTAssertTrue(wait { load.isHittable }, path)
             let item = text(containing: top, app)
             XCTAssertTrue(item.exists, path)
             let before = item.frame.minY
@@ -151,6 +153,22 @@ final class LoftUITests: XCTestCase {
             // tool calls) was: it moves up by about that much, not by the height of the page drawn above it.
             XCTAssertEqual(item.frame.minY, before, accuracy: 80, "\(path): \(top) stays where it was")
         }
+    }
+
+    /// A confirmation opens next to the button that asked for it (#661): on iPhone it's a popover, and attached to
+    /// the whole screen it pointed at an unrelated row near the top.
+    func testDeleteAgentConfirmationOpensNextToItsButton() {
+        let app = launch()
+        app.tabBars.buttons["Agents"].tap()
+        openAgent("QA Agent", app)
+        let delete = app.buttons["deleteAgent"]
+        XCTAssertTrue(app.buttons["chatWithAgent"].appears(timeout: 5))
+        // The bottom of a lazy list: swipe until the button is there and clear of the tab bar.
+        for _ in 0..<8 where !delete.exists || !delete.isHittable || delete.frame.maxY > app.tabBars.firstMatch.frame.minY - 8 { app.swipeUp() }
+        delete.tap()
+        let confirm = app.buttons["Delete agent and workspace"]
+        XCTAssertTrue(confirm.appears(timeout: 5))
+        XCTAssertLessThan(delete.frame.minY - confirm.frame.maxY, 150, "the confirmation sits just above Delete agent")
     }
 
     private func wait(_ done: () -> Bool) -> Bool {

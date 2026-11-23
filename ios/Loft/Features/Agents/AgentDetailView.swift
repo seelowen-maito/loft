@@ -160,6 +160,13 @@ struct AgentDetailView: View {
                     }
                     .disabled(!store.canWrite || busy)
                     .accessibilityIdentifier("deleteAgent")
+                    .confirmationDialog("Delete \(agent.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                        Button("Delete agent and workspace", role: .destructive) { delete(agent, purgeFiles: true) }
+                        Button("Delete agent, keep workspace") { delete(agent, purgeFiles: false) }
+                    } message: {
+                        Text("Its chat, memories and settings are deleted. Its workspace holds its clones and notes"
+                             + (workspaceBytes.map { "; deleting it frees \(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file))." } ?? "."))
+                    }
                 }
             }
         }
@@ -169,18 +176,6 @@ struct AgentDetailView: View {
             async let stats: Void = store.refreshStats()
             try? await store.refresh()
             await stats
-        }
-        .confirmationDialog("Stop \(agent.name)'s current run?", isPresented: $confirmStop, titleVisibility: .visible) {
-            Button("Stop run", role: .destructive) { act { try await store.stopRun(agent.id) } }
-        } message: {
-            Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its issues stay as they are; cancel them separately.")
-        }
-        .confirmationDialog("Delete \(agent.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete agent and workspace", role: .destructive) { delete(agent, purgeFiles: true) }
-            Button("Delete agent, keep workspace") { delete(agent, purgeFiles: false) }
-        } message: {
-            Text("Its chat, memories and settings are deleted. Its workspace holds its clones and notes"
-                 + (workspaceBytes.map { "; deleting it frees \(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file))." } ?? "."))
         }
         .errorAlert($error)
         .task { workspaceBytes = try? await store.workspaceSize(agent.id) }
@@ -215,6 +210,11 @@ struct AgentDetailView: View {
         if state == .working || state == .waitingApproval || agent.running == true {
             Button(role: .destructive) { confirmStop = true } label: { Label("Stop current run", systemImage: "stop.circle").foregroundStyle(Theme.failure) }
                 .disabled(!store.canWrite || busy)
+                .confirmationDialog("Stop \(agent.name)'s current run?", isPresented: $confirmStop, titleVisibility: .visible) {
+                    Button("Stop run", role: .destructive) { act { try await store.stopRun(agent.id) } }
+                } message: {
+                    Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its issues stay as they are; cancel them separately.")
+                }
         } else {
             Button { act { try await store.runNow(agent.id) } } label: { Label("Wake up now", systemImage: "play.circle") }
                 .disabled(!store.canWrite || busy)

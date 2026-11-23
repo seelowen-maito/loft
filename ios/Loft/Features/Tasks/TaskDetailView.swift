@@ -233,26 +233,17 @@ struct TaskDetailView: View {
                 } label: { Image(systemName: "ellipsis.circle") }
                 .disabled(!store.canWrite)
                 .accessibilityLabel("Issue options")
-            }
-        }
-        .confirmationDialog("Cancel this issue?", isPresented: $confirmCancel, titleVisibility: .visible) {
-            Button("Cancel issue", role: .destructive) { act { try await store.cancelTask(t.id, stopRun: false) } }
-            if let agent, agent.running == true {
-                Button("Cancel issue and stop \(agent.name)'s run", role: .destructive) { act { try await store.cancelTask(t.id, stopRun: true) } }
-            }
-            Button("Keep working", role: .cancel) {}
-        } message: {
-            Text(agent.map { "\($0.name) is told to drop it. Stopping the run also ends anything else it is doing right now." } ?? "")
-        }
-        .confirmationDialog("Delete this issue?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                act {
-                    try await store.deleteTask(t.id)
-                    dismiss()
+                .confirmationDialog("Delete this issue?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                    Button("Delete", role: .destructive) {
+                        act {
+                            try await store.deleteTask(t.id)
+                            dismiss()
+                        }
+                    }
+                } message: {
+                    Text(children.isEmpty ? "This can't be undone." : "Its sub-issues are kept as top-level issues.")
                 }
             }
-        } message: {
-            Text(children.isEmpty ? "This can't be undone." : "Its sub-issues are kept as top-level issues.")
         }
         .sheet(isPresented: $pickAgent) {
             NavigationStack {
@@ -269,6 +260,7 @@ struct TaskDetailView: View {
 
     @ViewBuilder private func actions(_ t: HBTask) -> some View {
         let writable = store.canWrite && !busy
+        let agent = store.agent(t.agentId)
         if t.state.canExecute {
             if let a = store.agent(t.agentId) {
                 Button { run(t, agentId: a.id) } label: {
@@ -293,6 +285,15 @@ struct TaskDetailView: View {
         if t.state.isActive {
             Button(role: .destructive) { confirmCancel = true } label: { Label("Cancel issue", systemImage: "xmark.circle").foregroundStyle(Theme.failure) }
                 .disabled(!writable)
+                .confirmationDialog("Cancel this issue?", isPresented: $confirmCancel, titleVisibility: .visible) {
+                    Button("Cancel issue", role: .destructive) { act { try await store.cancelTask(t.id, stopRun: false) } }
+                    if let agent, agent.running == true {
+                        Button("Cancel issue and stop \(agent.name)'s run", role: .destructive) { act { try await store.cancelTask(t.id, stopRun: true) } }
+                    }
+                    Button("Keep working", role: .cancel) {}
+                } message: {
+                    Text(agent.map { "\($0.name) is told to drop it. Stopping the run also ends anything else it is doing right now." } ?? "")
+                }
         }
         if !t.state.isActive && !t.state.isClosed {
             Button { act { try await store.updateTask(t.id, ["status": "done"]) } } label: {

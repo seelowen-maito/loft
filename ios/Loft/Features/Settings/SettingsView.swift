@@ -341,6 +341,11 @@ struct SettingsView: View {
             Section("About") {
                 LabeledContent("App version", value: Self.appVersion)
                 Button("Forget this server", role: .destructive) { confirmForget = true }
+                    .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
+                        Button("Forget", role: .destructive) { store.forgetServer() }
+                    } message: {
+                        Text("The saved address and cached data on this iPhone are removed. Nothing changes on the Mac.")
+                    }
             }
         }
         .navigationTitle("Settings")
@@ -359,11 +364,6 @@ struct SettingsView: View {
             // Leaving within the debounce cancels the save above, so send it now.
             if let h = idleHours, h != savedIdleHours { Task { try? await store.saveIdleTimeout(hours: h) } }
         }
-        .confirmationDialog("Back up to iCloud Drive?", isPresented: $confirmICloud, titleVisibility: .visible) {
-            Button("Use iCloud Drive") { if let d = backup?.icloud { saveBackupDir(d) } }
-        } message: {
-            Text(Self.iCloudWarning)
-        }
         .task { notificationStatus = await store.notifier.authorizationStatus() }
         .task {
             while !Task.isCancelled {
@@ -378,11 +378,6 @@ struct SettingsView: View {
             CleanSheet(start: start, names: Dictionary(disk?.agents.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })) {
                 await loadDisk()
             }
-        }
-        .confirmationDialog("Forget this server?", isPresented: $confirmForget, titleVisibility: .visible) {
-            Button("Forget", role: .destructive) { store.forgetServer() }
-        } message: {
-            Text("The saved address and cached data on this iPhone are removed. Nothing changes on the Mac.")
         }
     }
 
@@ -528,6 +523,11 @@ struct SettingsView: View {
                 if case .other(let d) = folder { Text((d as NSString).lastPathComponent).tag(folder) }
             }
             .accessibilityIdentifier("backupFolderPicker")
+            .confirmationDialog("Back up to iCloud Drive?", isPresented: $confirmICloud, titleVisibility: .visible) {
+                Button("Use iCloud Drive") { if let d = backup?.icloud { saveBackupDir(d) } }
+            } message: {
+                Text(Self.iCloudWarning)
+            }
             LabeledContent("Folder") {
                 Text(b.dir).font(.caption.monospaced()).lineLimit(2).truncationMode(.middle).textSelection(.enabled)
             }

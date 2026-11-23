@@ -24,3 +24,14 @@ export function sendState(result: string | undefined, agents: { queued_messages?
 
 /** The mark on an agent message still waiting for the recipient's current run to end. */
 export const QUEUED_MARK = "Queued until this run ends";
+/** The mark on an agent message the user cancelled while it waited: the agent never read it. */
+export const CANCELLED_MARK = "Cancelled, not sent to the agent";
+
+/** A task message's text without the `[Task <id>]` tag and the bracketed instructions Loft adds for the agent. */
+export function taskText(m: { content: string; meta: Record<string, any> | null }) {
+  if (!m.meta?.task_role && !m.meta?.task_id) return m.content;
+  return m.content
+    .replace(/^\[Task [0-9a-f-]{36}\]\s*/i, "")
+    .replace(/\n\n\[(Report progress on this task|Answer on the task)[\s\S]*$/, "")
+    .trim();
+}
