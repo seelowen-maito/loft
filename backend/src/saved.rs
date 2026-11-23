@@ -59,6 +59,33 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResul
     Ok(Json(v))
 }
 
+#[derive(Deserialize)]
+pub struct SavedEdit {
+    title: String,
+    #[serde(default)]
+    tag: String,
+    content: String,
+}
+
+/// Edits an item's title, tag and content; the item then says when it was edited (`updated_at`).
+pub async fn update(State(state): State<AppState>, Path(id): Path<i64>, Json(b): Json<SavedEdit>) -> ApiResult<SavedItem> {
+    let title = b.title.trim();
+    if title.is_empty() {
+        return Err(bad("A saved item needs a title."));
+    }
+    if b.content.trim().is_empty() {
+        return Err(bad("A saved item needs some text."));
+    }
+    Ok(Json(state.db.update_saved(id, title, b.tag.trim(), &b.content)?.ok_or_else(not_found)?))
+}
+
+pub async fn delete(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    if !state.db.delete_saved(id)? {
+        return Err(not_found());
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +176,62 @@ mod tests {
         let Json(v) = get(State(st.clone()), Path(i.id)).await.unwrap();
         assert_eq!((v["agent_name"].as_str(), v["source_exists"].as_bool()), (Some("Dev"), Some(false)));
         assert_eq!(titles(&listed(&st, "", "").await), ["Kept"]);
+    }
+
+    fn edit(title: &str, tag: &str, content: &str) -> Json<SavedEdit> {
+        Json(SavedEdit { title: title.into(), tag: tag.into(), content: content.into() })
+    }
+
+    #[tokio::test]
+    async fn edits_the_title_tag_and_content_and_stamps_the_edit() {
+        let st = state();
+        let a = agent(&st, "Dev");
+        let m = st.db.add_message(&a.id, None, "assistant", "text", "Run start.sh", json!({})).unwrap();
+        let i = save(&st, &a.id, m.id, "Deploy", "Tutorial").await.unwrap();
+        assert!(i.updated_at.is_none());
+
+        let Json(e) = update(State(st.clone()), Path(i.id), edit(" How to deploy ", " Decision ", "# Deploy\n\nRun `./start.sh`.")).await.unwrap();
+        assert_eq!((e.title.as_str(), e.tag.as_str(), e.content.as_str()), ("How to deploy", "Decision", "# Deploy\n\nRun `./start.sh`."));
+        assert!(e.updated_at.is_some());
+        // The source and creation time stay.
+        assert_eq!((e.agent_id.as_str(), e.message_id, e.created_at.as_str()), (a.id.as_str(), m.id, i.created_at.as_str()));
+        // The list and the page read the edit.
+        let Json(v) = get(State(st.clone()), Path(i.id)).await.unwrap();
+        assert_eq!((v["title"].as_str(), v["tag"].as_str()), (Some("How to deploy"), Some("Decision")));
+        assert_eq!(titles(&listed(&st, "start.sh", "Decision").await), ["How to deploy"]);
+        assert_eq!(listed(&st, "", "").await["tags"], json!(["Decision"]));
+        // The message in the chat is untouched.
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().content, "Run start.sh");
+    }
+
+    #[tokio::test]
+    async fn an_edit_needs_a_title_and_text_and_an_item() {
+        let st = state();
+        let a = agent(&st, "Dev");
+        let m = st.db.add_message(&a.id, None, "assistant", "text", "Keep", json!({})).unwrap();
+        let i = save(&st, &a.id, m.id, "Kept", "").await.unwrap();
+        assert_eq!(update(State(st.clone()), Path(i.id), edit("  ", "", "x")).await.unwrap_err().0, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(update(State(st.clone()), Path(i.id), edit("t", "", " \n")).await.unwrap_err().0, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(update(State(st.clone()), Path(99), edit("t", "", "x")).await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+        // A refused edit changes nothing.
+        let kept = st.db.get_saved(i.id).unwrap().unwrap();
+        assert_eq!((kept.title.as_str(), kept.content.as_str(), kept.updated_at), ("Kept", "Keep", None));
+    }
+
+    #[tokio::test]
+    async fn deletes_an_item_and_only_that_one() {
+        let st = state();
+        let a = agent(&st, "Dev");
+        let m = st.db.add_message(&a.id, None, "assistant", "text", "Keep", json!({})).unwrap();
+        let gone = save(&st, &a.id, m.id, "Gone", "").await.unwrap();
+        save(&st, &a.id, m.id, "Stays", "").await.unwrap();
+        let Json(v) = delete(State(st.clone()), Path(gone.id)).await.unwrap();
+        assert_eq!(v, json!({ "ok": true }));
+        assert_eq!(titles(&listed(&st, "", "").await), ["Stays"]);
+        assert_eq!(get(State(st.clone()), Path(gone.id)).await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(delete(State(st.clone()), Path(gone.id)).await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+        // The message it came from stays in the chat.
+        assert!(st.db.get_message(&a.id, m.id).unwrap().is_some());
     }
 
     #[tokio::test]

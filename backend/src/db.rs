@@ -1896,6 +1896,21 @@ impl Db {
         Ok(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row).optional()?)
     }
 
+    /// Sets the title, tag and content and stamps `updated_at`; None when there's no such item.
+    pub fn update_saved(&self, id: i64, title: &str, tag: &str, content: &str) -> Result<Option<SavedItem>> {
+        let c = self.0.lock().unwrap();
+        if c.execute("UPDATE saved_items SET title = ?2, tag = ?3, content = ?4, updated_at = ?5 WHERE id = ?1", params![id, title, tag, content, now()])? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row)?))
+    }
+
+    /// False when there was no such item.
+    pub fn delete_saved(&self, id: i64) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.execute("DELETE FROM saved_items WHERE id = ?1", [id])? > 0)
+    }
+
     // ---- permissions --------------------------------------------------
 
     pub fn save_permission(&self, p: &PermissionRequest) -> Result<()> {
