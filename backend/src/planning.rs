@@ -6449,6 +6449,179 @@ pub(crate) mod tests {
         assert!(w.iter().any(|w| w.contains("You can't resume it") && w.contains("asking the user a question")), "{w:?}");
     }
 
+    /// The start thread lines of the issue.
+    fn start_lines(st: &AppState, issue: &crate::db::Task) -> Vec<String> {
+        st.db.list_task_comments(&issue.id, 100, None).unwrap().into_iter().filter(|c| c.kind == "status" && c.text.starts_with("Delivery started by")).map(|c| c.text).collect()
+    }
+
+    /// A spec #40 on GitHub with these sub-issues, a Dev and a Lead on its project, the option on.
+    fn startable(st: &AppState, fake: &Fake, name: &str, subs: Value) -> (crate::db::Task, Agent, Agent) {
+        let slug = format!("octo/{name}");
+        planner_on(st, name, Some(&format!("git@github.com:{slug}.git")));
+        spec_pr_on(fake, &slug);
+        let dev = busy(st, "Builder", name, "dev");
+        let lead = busy(st, "Lofty", name, "lead");
+        let spec = spec_40_on(st, fake, name, &slug, subs);
+        (spec, dev, lead)
+    }
+
+    #[tokio::test]
+    async fn start_delivery_is_off_the_tool_list_and_refused_until_the_projects_option_is_on() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-off";
+        let (spec, dev, lead) = startable(&st, &fake, "sd-off", json!([gh_ticket(slug, 41, "open", "x")]));
+        let go = |a: &Agent| {
+            let (st, a) = (st.clone(), a.clone());
+            async move { tool(&st, &a, "start_delivery", json!({ "ticket": 40 })).await }
+        };
+
+        // Off (the default): nobody lists it and the Lead's call is refused; nothing started.
+        for a in [&lead, &dev] {
+            assert!(!lead_tool_names(&st, a).contains(&"start_delivery".into()));
+        }
+        let err = go(&lead).await.unwrap_err();
+        assert!(err.contains("option") && err.contains("off"), "{err}");
+        assert!(st.db.get_delivery(slug, 40).unwrap().is_none_or(|d| d.state == "planned"));
+
+        // On: only the Lead of that project lists it; a Dev and another project's Lead are refused.
+        lead_may_resume(&st, "sd-off", true).await;
+        let other = busy(&st, "Other Lead", "somewhere-else", "lead");
+        assert!(lead_tool_names(&st, &lead).contains(&"start_delivery".into()));
+        assert!(!lead_tool_names(&st, &dev).contains(&"start_delivery".into()));
+        assert!(!lead_tool_names(&st, &other).contains(&"start_delivery".into()));
+        assert!(go(&dev).await.unwrap_err().contains("Only the team's Lead"));
+        assert!(go(&other).await.unwrap_err().contains("project you lead"));
+
+        // Off again: the next call is refused at once.
+        lead_may_resume(&st, "sd-off", false).await;
+        assert!(go(&lead).await.unwrap_err().contains("off"));
+        assert!(st.db.get_delivery(slug, 40).unwrap().is_none_or(|d| d.state == "planned"));
+        let _ = spec;
+    }
+
+    #[tokio::test]
+    async fn the_lead_starts_a_spec_delivery_like_the_button_and_the_thread_says_who_when_and_why() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-spec";
+        let (spec, _dev, lead) = startable(&st, &fake, "sd-spec", json!([gh_ticket(slug, 41, "open", "x"), gh_ticket(slug, 42, "open", "x")]));
+        lead_may_resume(&st, "sd-spec", true).await;
+
+        let out = tool(&st, &lead, "start_delivery", json!({ "ticket": "#40", "reason": "the user approved it" })).await.unwrap();
+        assert!(out.starts_with("Started the Delivery of spec \"Rounds\""), "{out}");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.pr), ("running", Some(500)));
+        assert_eq!(posts(&fake, slug, "pulls")[0]["head"], "spec/40-rounds", "the spec branch and draft PR, as the button makes them");
+        assert!(woken(&st, &lead).iter().any(|w| w.contains("hand out its tickets")), "{:?}", woken(&st, &lead));
+        let lines = start_lines(&st, &spec);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("Delivery started by Lofty (Lead) at ") && lines[0].ends_with("the user approved it."), "{}", lines[0]);
+
+        // Already started: refused with the reason, no second line.
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+        assert!(err.contains("already started") && err.contains("running"), "{err}");
+        assert_eq!(start_lines(&st, &spec).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_lead_starts_a_standalone_ticket_delivery() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-solo";
+        planner_on(&st, "sd-solo", Some("git@github.com:octo/sd-solo.git"));
+        spec_pr_on(&fake, slug);
+        let dev = busy(&st, "Builder", "sd-solo", "dev");
+        let lead = busy(&st, "Lofty", "sd-solo", "lead");
+        let ticket = gh_ticket(slug, 41, "open", "## What to build\n\nStore.");
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, ticket.clone());
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        let (t, _) = crate::mirror::bring_in(&st, "sd-solo", slug, &ticket).unwrap();
+        lead_may_resume(&st, "sd-solo", true).await;
+
+        let out = tool(&st, &lead, "start_delivery", json!({ "ticket": 41 })).await.unwrap();
+        assert!(out.starts_with("Started the Delivery of ticket \"Ticket 41\""), "{out}");
+        assert_eq!(st.db.get_delivery(slug, 41).unwrap().unwrap().state, "running");
+        // The team has a Lead and a Dev, so the Lead hands the ticket out, as with the button.
+        assert!(woken(&st, &lead).iter().any(|w| w.contains("hand out")) || woken(&st, &dev).iter().any(|w| w.contains("#41")));
+        let lines = start_lines(&st, &t);
+        assert!(lines.len() == 1 && lines[0].contains("the Lead judged it ready"), "{lines:?}");
+        // A ticket that isn't labelled ready-for-agent is refused.
+        let mut plain = gh_ticket(slug, 43, "open", "x");
+        plain["labels"] = json!([]);
+        fake.route("GET", &format!("/repos/{slug}/issues/43"), 200, plain.clone());
+        crate::mirror::bring_in(&st, "sd-solo", slug, &plain).unwrap();
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 43 })).await.unwrap_err();
+        assert!(err.contains("ready-for-agent") && err.contains("Ticket 43"), "{err}");
+        assert!(st.db.get_delivery(slug, 43).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_lead_is_refused_a_spec_with_no_tickets_a_ticket_not_ready_for_agent_or_none_ready() {
+        // No ticket at all, or only closed ones.
+        for (name, subs, words) in [
+            ("sd-none", json!([]), "no open tickets"),
+            ("sd-closed", json!([gh_ticket("octo/sd-closed", 41, "closed", "x")]), "no open tickets"),
+        ] {
+            let st = state();
+            let fake = own_fake(&st);
+            let (_, _, lead) = startable(&st, &fake, name, subs);
+            lead_may_resume(&st, name, true).await;
+            let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+            assert!(err.contains(words), "{name}: {err}");
+            assert!(st.db.get_delivery(&format!("octo/{name}"), 40).unwrap().is_none_or(|d| d.state == "planned"), "{name}");
+        }
+        // One ticket out of ready-for-agent.
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-label";
+        let mut off = gh_ticket(slug, 42, "open", "x");
+        off["labels"] = json!([{ "name": "needs-triage" }]);
+        let (_, _, lead) = startable(&st, &fake, "sd-label", json!([gh_ticket(slug, 41, "open", "x"), off]));
+        lead_may_resume(&st, "sd-label", true).await;
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+        assert!(err.contains("#42") && err.contains("ready-for-agent"), "{err}");
+        assert!(st.db.get_delivery(slug, 40).unwrap().is_none_or(|d| d.state == "planned"));
+        // Every open ticket blocked: no ticket is ready.
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-blocked";
+        let mut blocked = gh_ticket(slug, 41, "open", "x");
+        blocked["issue_dependencies_summary"] = json!({ "blocked_by": 1 });
+        let (_, _, lead) = startable(&st, &fake, "sd-blocked", json!([blocked]));
+        fake.route("GET", &format!("/repos/{slug}/issues/41/dependencies/blocked_by"), 200, json!([{ "number": 99, "state": "open", "repository_url": format!("{}/repos/octo/other", crate::github::api_base()) }]));
+        lead_may_resume(&st, "sd-blocked", true).await;
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+        assert!(err.contains("no ticket ready"), "{err}");
+        assert_ne!(st.db.get_delivery(slug, 40).unwrap().map(|d| d.state), Some("running".into()));
+    }
+
+    #[tokio::test]
+    async fn the_lead_is_refused_above_the_maximum_of_running_deliveries_and_told_which_run() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-max";
+        let (_dev, _) = building(&st, &fake, "sd-max", &["qa"]).await;
+        assert_eq!(delivery(&st, slug).state, "running");
+        let lead = busy(&st, "Lofty", "sd-max", "lead");
+        let ticket = gh_ticket(slug, 50, "open", "x");
+        fake.route("GET", &format!("/repos/{slug}/issues/50"), 200, ticket.clone());
+        fake.route("POST", &format!("/repos/{slug}/issues/50/labels"), 200, json!([]));
+        let (t, _) = crate::mirror::bring_in(&st, "sd-max", slug, &ticket).unwrap();
+        lead_may_resume(&st, "sd-max", true).await;
+        crate::lead_delivery::put_route(State(st.clone()), Json(json!({ "project": "sd-max", "running_deliveries": 1 }))).await.ok().unwrap();
+
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 50 })).await.unwrap_err();
+        assert!(err.contains("already runs 1 of 1") && err.contains("spec #40"), "{err}");
+        assert!(st.db.get_delivery(slug, 50).unwrap().is_none(), "nothing started");
+        assert!(start_lines(&st, &t).is_empty());
+
+        // Room for a second one: it starts.
+        crate::lead_delivery::put_route(State(st.clone()), Json(json!({ "project": "sd-max", "running_deliveries": 2 }))).await.ok().unwrap();
+        tool(&st, &lead, "start_delivery", json!({ "ticket": 50 })).await.unwrap();
+        assert_eq!(st.db.get_delivery(slug, 50).unwrap().unwrap().state, "running");
+    }
+
     #[tokio::test]
     async fn a_delivery_wake_still_queued_keeps_the_delivery_from_stalling() {
         let st = state();

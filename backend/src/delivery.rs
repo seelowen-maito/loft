@@ -1446,6 +1446,13 @@ pub fn mcp_tools() -> Vec<Value> {
 /// on gets (ADR 0006): they stay off the list of everyone else.
 pub fn lead_mcp_tools() -> Vec<Value> {
     vec![json!({
+        "name": "start_delivery",
+        "description": "As the Lead, where the project's option \"The Lead can start and resume Deliveries\" is on: start the Delivery of a spec or standalone ticket already published, like Start delivery does. Refused, with the reason, when you aren't the project's Lead, the Delivery already started, the spec has no tickets, a ticket isn't labelled ready-for-agent, none is ready, or the project already runs its maximum of Deliveries (it lists them).",
+        "inputSchema": { "type": "object", "properties": {
+            "ticket": { "type": ["integer", "string"], "description": "The spec's (or standalone ticket's) GitHub issue number, or its Loft issue id." },
+            "reason": { "type": "string", "description": "Why you start it now: it goes in the spec's thread." }
+        }, "required": ["ticket"] }
+    }), json!({
         "name": "resume_delivery",
         "description": "As the Lead, where the project's option \"The Lead can start and resume Deliveries\" is on: resume a Delivery that stalled for a transient reason (usage limit, once it frees; API error; a failed or lost run; a run that ended without a question). Does what Resume does. Refused, with the reason, for a paused Delivery, anything that waits on the user, a stall that needs someone to fix something, and a usage limit that hasn't freed yet.",
         "inputSchema": { "type": "object", "properties": {
@@ -1548,6 +1555,82 @@ async fn resume_by_lead(state: &AppState, me: &crate::db::Agent, args: &Value, n
     Ok(line)
 }
 
+/// `start_delivery`: the Lead starts the Delivery of a spec or standalone ticket, as the button does, after the
+/// option and the rules of ADR 0006: its project's Lead, not started yet, tickets all `ready-for-agent` with one
+/// ready, and fewer Deliveries running than the project allows. Each start is a line in the thread.
+async fn start_by_lead(state: &AppState, me: &crate::db::Agent, args: &Value, now: DateTime<Utc>) -> Result<String, String> {
+    if me.role != "lead" {
+        return Err("Only the team's Lead starts a Delivery this way.".into());
+    }
+    let want = number_of(&args["ticket"]).ok_or("ticket is required: the spec's GitHub issue number or its Loft issue id")?;
+    let mine = |project: &str| !project.trim().is_empty() && (me.project.trim() == project.trim() || me.has_project(project));
+    let mut found: Vec<crate::db::Task> = match &want {
+        TicketNumber::GitHub(n) => state.db.list_tasks().map_err(|e| e.to_string())?.into_iter().filter(|t| mine(&t.project) && t.github.as_ref().is_some_and(|g| g.number == *n)).collect(),
+        TicketNumber::Loft(id) => state.db.get_task(id).map_err(|e| e.to_string())?.into_iter().filter(|t| mine(&t.project)).collect(),
+    };
+    if found.len() > 1 {
+        return Err("That number is on more than one of your projects' issues: name it by its Loft issue id.".into());
+    }
+    let t = found.pop().ok_or("That isn't a spec or ticket of a project you lead.")?;
+    let project = t.project.trim().to_string();
+    // Checked again on every call: turning the option off refuses the next call at once.
+    let opts = crate::lead_delivery::options(state, &project);
+    if !opts.enabled {
+        return Err(format!("The Lead can't start Deliveries in {project}: the project's option \"The Lead can start and resume Deliveries\" is off."));
+    }
+    let is_spec = t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec"));
+    let existing = match &t.github {
+        Some(g) if local_of_issue(state, &t.id).is_none() => state.db.get_delivery(&g.repo, g.number).map_err(|e| e.to_string())?,
+        _ => local_of_issue(state, &t.id),
+    };
+    if let Some(d) = existing.as_ref().filter(|d| d.state != "planned") {
+        return Err(format!("{} already started: it is {}. Nothing to start.", subject(d), d.state));
+    }
+    let not_ready = |titles: Vec<String>| format!("{} {} aren't labelled `ready-for-agent`: only a spec whose tickets all are can start.", if is_spec { "Tickets" } else { "Ticket" }, titles.join(", "));
+    if !is_spec {
+        if !t.labels.iter().any(|l| l == "ready-for-agent") {
+            return Err(not_ready(vec![format!("\"{}\"", t.title)]));
+        }
+    } else if let Some(d) = existing.as_ref().filter(|d| d.local) {
+        let open: Vec<&DeliveryTicket> = d.tickets.iter().filter(|k| k.state == "open").collect();
+        if open.is_empty() {
+            return Err(format!("{} has no tickets to deliver: publish its tickets first.", subject(d)));
+        }
+        let off: Vec<String> = open.iter().filter(|k| !state.db.get_task(&k.id).ok().flatten().is_some_and(|x| x.labels.iter().any(|l| l == "ready-for-agent"))).map(|k| format!("\"{}\"", k.title)).collect();
+        if !off.is_empty() {
+            return Err(not_ready(off));
+        }
+    } else if let Some(g) = t.github.as_ref().filter(|_| is_spec) {
+        let subs = crate::github::get(state, &format!("/repos/{}/issues/{}/sub_issues?per_page=100", g.repo, g.number)).await.map_err(|e| format!("Couldn't read spec #{} on {}: {e}", g.number, g.repo))?;
+        let open: Vec<&Value> = subs.as_array().into_iter().flatten().filter(|x| x.get("pull_request").is_none() && x["state"] == "open").collect();
+        if open.is_empty() {
+            return Err(format!("Spec #{} has no open tickets: publish its tickets first.", g.number));
+        }
+        let off: Vec<String> = open.iter().filter(|x| !x["labels"].as_array().into_iter().flatten().any(|l| l["name"] == "ready-for-agent")).map(|x| format!("#{}", x["number"])).collect();
+        if !off.is_empty() {
+            return Err(not_ready(off));
+        }
+    }
+    let running: Vec<String> = state
+        .db
+        .all_deliveries()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|d| d.project.trim() == project && matches!(d.state.as_str(), "running" | "final_review" | "final_fixes"))
+        .map(subject)
+        .collect();
+    if running.len() as u32 >= opts.running_deliveries {
+        return Err(format!("{project} already runs {} of {} Deliveries at once: {}. Start this one when one of them is done.", running.len(), opts.running_deliveries, running.join(", ")));
+    }
+    let started = start_from_issue(State(state.clone()), Path(t.id.clone())).await.map_err(|e| e.1)?.0;
+    let why = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("the Lead judged it ready");
+    let what = if is_spec { "spec" } else { "ticket" };
+    let text = format!("Delivery started by {} (Lead) at {}: {why}.", me.name, now.with_timezone(&chrono::Local).format("%b %-d, %H:%M"));
+    crate::tasks::log_status(state, &t, &me.id, &text);
+    let agent = started["agent_name"].as_str().unwrap_or("the team");
+    Ok(format!("Started the Delivery of {what} \"{}\": {agent} has its first step.", t.title))
+}
+
 /// The Loft issue of `d`'s spec (or standalone ticket): the one whose thread shows what the Lead did.
 fn delivery_task(state: &AppState, d: &Delivery) -> Option<crate::db::Task> {
     if d.local {
@@ -1563,6 +1646,7 @@ pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args:
         "submit_ticket" => Some(submit(state, me, args).await),
         "wait_ticket" => Some(wait(state, me, args).await),
         "review_ticket" => Some(review(state, me, args).await),
+        "start_delivery" => Some(start_by_lead(state, me, args, Utc::now()).await),
         "resume_delivery" => Some(resume_by_lead(state, me, args, Utc::now()).await),
         _ => None,
     }
