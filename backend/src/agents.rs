@@ -736,7 +736,11 @@ fn enqueue_message(state: &AppState, agent_id: &str, text: Option<String>, meta:
         let p = if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) };
         // A task that is both attached and tagged is described once, by its reference header.
         let tags: Vec<Value> = meta["tags"].as_array().into_iter().flatten().filter(|t| !t["task_id"].as_str().is_some_and(|id| refs.iter().any(|r| r == id))).cloned().collect();
-        match crate::tags::block(&Value::Array(tags)) {
+        let p = match crate::tags::block(&Value::Array(tags)) {
+            b if b.is_empty() => p,
+            b => format!("{p}\n\n{b}"),
+        };
+        match crate::tags::saved_block(state, &meta["tags"]) {
             b if b.is_empty() => p,
             b => format!("{p}\n\n{b}"),
         }

@@ -909,7 +909,7 @@ function MessageTasks({ m }: { m: Message }) {
 
 /** Chips for the specs and issues a message tags with `#`: kind and title, opening the item. Its PRs get cards (MessagePrs). */
 function MessageTags({ m }: { m: Message }) {
-  const tags: { tag: string; kind: "spec" | "issue"; title: string; url?: string | null; task_id?: string }[] = (m.meta?.tags ?? []).filter((t: { kind: string }) => t.kind !== "pr");
+  const tags: { tag: string; kind: "spec" | "issue" | "saved"; title: string; url?: string | null; task_id?: string; saved_id?: number }[] = (m.meta?.tags ?? []).filter((t: { kind: string }) => t.kind !== "pr");
   if (!tags.length) return null;
   const cls = "chip max-w-full gap-1.5 text-[12px] hover:bg-white/[0.08]";
   return (
@@ -921,7 +921,9 @@ function MessageTags({ m }: { m: Message }) {
             <span className="truncate">{t.title}</span>
           </>
         );
-        return t.task_id ? (
+        return t.kind === "saved" ? (
+          <Link key={t.tag} to={`/saved/${t.saved_id}`} title={t.tag} className={cls}>{inner}</Link>
+        ) : t.task_id ? (
           <Link key={t.tag} to={`/issues/${t.task_id}`} title={t.tag} className={cls}>{inner}</Link>
         ) : (
           <a key={t.tag} href={t.url ?? undefined} target="_blank" rel="noopener noreferrer" title={t.tag} className={cls}>{inner}</a>

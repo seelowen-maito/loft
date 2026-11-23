@@ -43,3 +43,18 @@ export function excerpt(content: string, chars = 160): string {
   const c = [...words];
   return c.length > chars ? `${c.slice(0, chars).join("")}…` : words;
 }
+
+/** What an agent's message mentions a saved item as: `#saved-<id>-<title words>`, which the backend reads by the id. */
+export function savedTag(i: { id: number; title: string }): string {
+  const slug = i.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
+  return slug ? `#saved-${i.id}-${slug}` : `#saved-${i.id}`;
+}
+
+/** The items the `#` menu offers for what's typed after the `#`: nothing unless it starts with `saved`, then the
+ * words after `saved-` narrow the titles (or the tag). */
+export function savedMatches<T extends { id: number; title: string; tag: string }>(items: T[], query: string, limit = 8): T[] {
+  const m = /^saved(?:-(.*))?$/i.exec(query);
+  if (!m) return [];
+  const words = (m[1] ?? "").toLowerCase().split("-").filter(Boolean);
+  return items.filter((i) => words.every((w) => `${i.title} ${i.tag}`.toLowerCase().includes(w))).slice(0, limit);
+}

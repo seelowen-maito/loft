@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { defaultTitle, excerpt, linkedMessage, sourceHref, tagOptions } from "../src/lib/saved.ts";
+import { defaultTitle, excerpt, linkedMessage, savedMatches, savedTag, sourceHref, tagOptions } from "../src/lib/saved.ts";
 
 test("the Save form's title is the message's first line, without Markdown's marks", () => {
   assert.equal(defaultTitle("\n\n## How to deploy\n\nRun it."), "How to deploy");
@@ -37,4 +37,18 @@ test("the list's preview drops Markdown marks and is cut", () => {
 test("the preview leaves out a table's separator row and horizontal rules", () => {
   assert.equal(excerpt("| Step | Time |\n|---|:---:|\n| build | 2 min |\n\n---\n\nDone"), "Step Time build 2 min Done");
   assert.equal(excerpt("Step | Time\n--- | ---\nbuild | 2"), "Step Time build 2");
+});
+
+test("a saved item is mentioned as #saved-<id>-<slug>, and the # menu lists them only after `saved`", () => {
+  const items = [
+    { id: 12, title: "Deploy steps: v2!", tag: "Tutorial" },
+    { id: 3, title: "Pick Postgres", tag: "Decision" },
+  ];
+  assert.equal(savedTag(items[0]), "#saved-12-deploy-steps-v2");
+  assert.equal(savedTag({ id: 4, title: "…" }), "#saved-4");
+  assert.deepEqual(savedMatches(items, "saved").map((i) => i.id), [12, 3]);
+  assert.deepEqual(savedMatches(items, "saved-dep").map((i) => i.id), [12]);
+  assert.deepEqual(savedMatches(items, "SAVED-decision").map((i) => i.id), [3]);
+  assert.deepEqual(savedMatches(items, "18"), [], "an issue number");
+  assert.deepEqual(savedMatches(items, "savedx"), []);
 });
