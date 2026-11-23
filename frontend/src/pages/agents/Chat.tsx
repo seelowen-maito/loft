@@ -1056,7 +1056,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
               <span className="flex items-center gap-1">
                 <Hourglass className="size-3" /> {QUEUED_MARK}
               </span>
-              <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id))}>
+              <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id)).then((r) => r && !r.ok && cancel.setError("The agent already took this message"))}>
                 Cancel
               </button>
               {cancel.error && <span className="text-bad">{cancel.error}</span>}

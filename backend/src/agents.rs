@@ -1204,6 +1204,7 @@ pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str
 /// The queue is read and changed under one lock, the one the run takes it under when it ends: a message is either
 /// cancelled or delivered, never both. False when it isn't queued (a run already took it).
 pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
+    let ticket = state.db.get_message(agent_id, id)?.and_then(|m| m.meta["ticket"].as_str().map(String::from));
     {
         let mut rt = state.rt.lock().unwrap();
         let Some(at) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().position(|(i, _)| *i == id)) else {
@@ -1215,6 +1216,18 @@ pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> 
         {
             q.remove(p);
         }
+        // Nothing left to start a new ticket: the agent doesn't clear its context for one it never got.
+        if rt.queued.get(agent_id).is_none_or(|q| q.is_empty()) {
+            rt.fresh_before.remove(agent_id);
+        }
+    }
+    if let Some(t) = ticket {
+        // The ticket was never handed over: its next message is a boundary again.
+        let _ = state.db.update_agent(agent_id, |a| {
+            if a.delivery_ticket.as_deref() == Some(t.as_str()) {
+                a.delivery_ticket = None;
+            }
+        });
     }
     state.db.mark_cancelled(agent_id, id)?;
     if let Some(m) = state.db.get_message(agent_id, id)? {
@@ -2885,6 +2898,23 @@ esac
         st.rt.lock().unwrap().queued_messages.remove(&to.id);
         assert!(!cancel_queued(&st, &to.id, keep).unwrap());
         assert!(st.db.get_message(&to.id, keep).unwrap().unwrap().meta["cancelled"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_ticket_hand_over_forgets_the_ticket_and_the_context_clear_it_asked_for() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let to = crate::tasks::tests::agent(&st, "Dev");
+        st.db.update_agent(&to.id, |a| a.fresh_context = "always".into()).unwrap();
+        st.rt.lock().unwrap().running.insert(to.id.clone(), Arc::new(Notify::new()));
+        let id = message_on_ticket(&st, &from, &to, "Build #12", json!({}), Some("o/r#12"), true).expect("queued");
+        assert!(st.rt.lock().unwrap().fresh_before.contains(&to.id));
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#12"));
+
+        assert!(cancel_queued(&st, &to.id, id).unwrap());
+        assert!(!st.rt.lock().unwrap().fresh_before.contains(&to.id), "no context clear for a ticket it never got");
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket, None);
+        assert!(st.rt.lock().unwrap().queued.get(&to.id).is_none_or(|q| q.is_empty()));
     }
 
     #[tokio::test]
