@@ -20,6 +20,15 @@
 //! request. Only a caller running in one of the agent's sessions has any own: from anywhere else (a command holding
 //! another agent's URL), every target goes to the user. Unanswered, it is refused. Kills that skip the functions (by path, through `sudo` or `builtin`, or a
 //! `kill` in another shell) are the Bash hook's (kill_guard.rs): it refuses them and says to kill by name.
+//!
+//! On Windows the agent's processes are those in its Job Object (job.rs), and the caller speaks for the agent when it
+//! is in the agent's job. The script, in Git Bash, also makes `taskkill` a function and a command first on PATH, and
+//! turns the Git Bash PIDs `kill` is given (`$!`) into Windows ones. Windows has no `pgrep` or `killall`, so Loft finds
+//! what `pkill`, `killall` and `taskkill` name itself (by_name.rs).
+
+// Windows uses it; every OS tests it.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod by_name;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -41,7 +50,12 @@ pub const ARG: &str = "kill-as";
 pub const URL_VAR: &str = "LOFT_KILL_URL";
 
 /// The tools Loft scopes, and the real command each stands for.
-const TOOLS: [(&str, &str); 3] = [("kill", "/bin/kill"), ("pkill", "/usr/bin/pkill"), ("killall", "/usr/bin/killall")];
+#[cfg(unix)]
+const TOOLS: &[(&str, &str)] = &[("kill", "/bin/kill"), ("pkill", "/usr/bin/pkill"), ("killall", "/usr/bin/killall")];
+/// On Windows only taskkill is a real command (in System32): Git Bash's kill is its builtin, and it has no pkill or
+/// killall, which Loft emulates.
+#[cfg(windows)]
+const TOOLS: &[(&str, &str)] = &[("kill", ""), ("pkill", ""), ("killall", ""), ("taskkill", "taskkill.exe")];
 
 /// How long a kill of someone else's process waits for the user.
 #[cfg(not(test))]
@@ -255,22 +269,47 @@ fn signal(pid: i32, signal: i32) -> std::io::Result<()> {
 /// shell's session (Claude Code makes the shell a session leader, so `$$` is its id) and sends kills through Loft.
 /// A job (`kill %1`) is the shell's own child, so a call naming only jobs (after the signal option) stays with the
 /// builtin; one that mixes jobs and PIDs is refused, or the builtin would signal the PIDs too. On Windows the shell is
-/// already in the agent's job (see job.rs), so nothing is recorded, and the paths are Git Bash's.
+/// already in the agent's job (see job.rs), so nothing is recorded, the paths are Git Bash's, `taskkill` goes through
+/// Loft too, and Git Bash leaves the arguments as they are (`MSYS_NO_PATHCONV`: it would read `/PID` as a path).
 pub fn env_script(storage: &Path, agent_id: &str, exe: &Path) -> String {
     env_script_on(storage, agent_id, exe, cfg!(windows))
 }
 
+/// On Windows, the shell code that turns each Git Bash PID among the arguments (`$!`, what Git Bash's `ps` shows
+/// first) into the Windows PID Loft knows, the way Git Bash's own kill reads a PID: a number that is a Git Bash PID is
+/// that process. `local` declares its variables, in a function.
+fn windows_pids(local: &str) -> String {
+    format!(
+        r#"{local}p= w= n=$#
+for a in "$@"; do
+  case "$p:$a" in
+    -s:*|-n:*|*:*[!0-9]*|*:) ;;
+    *) [ -r "/proc/$a/winpid" ] && read -r w < "/proc/$a/winpid" && a=$w ;;
+  esac
+  set -- "$@" "$a"; p=$a
+done
+shift "$n"
+"#
+    )
+}
+
 fn env_script_on(storage: &Path, agent_id: &str, exe: &Path, windows: bool) -> String {
     let loft = quote(&crate::sys::bash_path(exe));
-    let record = if windows {
-        "# Loft: sends kills through Loft.".to_string()
+    let (record, run, to_windows, taskkill) = if windows {
+        let run = format!("MSYS_NO_PATHCONV=1 {loft}");
+        let pids = windows_pids("local a ").lines().map(|l| format!("    {l}\n")).collect::<String>();
+        let taskkill = format!("taskkill() {{ {run} {ARG} taskkill \"$@\"; }}\n");
+        ("# Loft: sends kills through Loft.".to_string(), run, pids, taskkill)
     } else {
-        format!("# Loft: records this shell's process session as the agent's, and sends kills through Loft.\n: > {}/\"$$\" 2>/dev/null", quote(&sessions_dir(storage, agent_id).to_string_lossy()))
+        let record = format!("# Loft: records this shell's process session as the agent's, and sends kills through Loft.\n: > {}/\"$$\" 2>/dev/null", quote(&sessions_dir(storage, agent_id).to_string_lossy()));
+        (record, loft, String::new(), String::new())
     };
     format!(
         r#"{record}
 kill() {{
-  case " $* " in *" %"*) ;; *) {loft} {ARG} kill "$@"; return ;; esac
+  case " $* " in *" %"*) ;; *)
+{to_windows}    {run} {ARG} kill "$@"; return ;;
+  esac
   local a s=f
   for a in "$@"; do
     case "$s:$a" in
@@ -284,9 +323,9 @@ kill() {{
   done
   builtin kill "$@"
 }}
-pkill() {{ {loft} {ARG} pkill "$@"; }}
-killall() {{ {loft} {ARG} killall "$@"; }}
-PATH={bin}:"$PATH"
+pkill() {{ {run} {ARG} pkill "$@"; }}
+killall() {{ {run} {ARG} killall "$@"; }}
+{taskkill}PATH={bin}:"$PATH"
 export PATH
 "#,
         bin = quote(&crate::sys::bash_path(&shims_dir(storage))),
@@ -297,20 +336,31 @@ fn shims_dir(storage: &Path) -> PathBuf {
     storage.join(crate::agents::AGENT_FILES).join("bin")
 }
 
-/// Writes the commands that stand in for `kill`, `pkill` and `killall` where the shell functions don't reach
-/// (`xargs kill`, `find -exec kill`), and returns their folder.
+/// Writes the commands that stand in for `kill`, `pkill` and `killall` (and on Windows `taskkill`) where the shell
+/// functions don't reach (`xargs kill`, `find -exec kill`), and returns their folder.
 pub fn write_shims(storage: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
     let dir = shims_dir(storage);
     std::fs::create_dir_all(&dir)?;
     for (tool, _) in TOOLS {
         let path = dir.join(tool);
-        let text = format!("#!/bin/sh\nexec {} {ARG} {tool} \"$@\"\n", quote(&crate::sys::bash_path(exe)));
+        let text = shim(tool, exe, cfg!(windows));
         if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
             std::fs::write(&path, text)?;
         }
         crate::owner_only::executable(&path)?;
     }
     Ok(dir)
+}
+
+/// The shim for `tool`: on Windows it turns Git Bash PIDs into Windows ones for `kill`, and keeps Git Bash from
+/// reading the arguments as paths (see [`env_script`]).
+fn shim(tool: &str, exe: &Path, windows: bool) -> String {
+    let loft = quote(&crate::sys::bash_path(exe));
+    if !windows {
+        return format!("#!/bin/sh\nexec {loft} {ARG} {tool} \"$@\"\n");
+    }
+    let pids = if tool == "kill" { windows_pids("") } else { String::new() };
+    format!("#!/bin/sh\n{pids}MSYS_NO_PATHCONV=1\nexport MSYS_NO_PATHCONV\nexec {loft} {ARG} {tool} \"$@\"\n")
 }
 
 /// `s` as one shell word: quoted when it holds anything but plain characters.
@@ -508,6 +558,9 @@ struct Proc {
     under_app: bool,
     /// The sessions of the processes it runs under, nearest first, up to Loft or a GUI app (or launchd).
     sessions_above: Vec<i32>,
+    /// Its executable's path (`command` is its command line).
+    #[cfg(windows)]
+    exe: String,
 }
 
 /// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
@@ -519,14 +572,15 @@ fn etime(s: &str) -> Option<u64> {
 }
 
 /// Every process on Windows, from the system's snapshot: no terminals, user ids or sessions there, and ownership is by
-/// job.
+/// job. Its command is its command line, or its executable when Loft may not read that.
 #[cfg(windows)]
 fn table() -> Vec<Proc> {
     crate::job::table()
         .into_iter()
         .map(|e| {
             let browser = is_test_browser(&e.exe.replace('\\', "/"));
-            Proc { pid: e.pid as i32, ppid: e.ppid as i32, uid: 0, age_secs: e.age_secs, command: e.exe, helper: false, browser, tty: false, under_app: false, sessions_above: vec![] }
+            let command = e.command.filter(|c| !c.trim().is_empty()).unwrap_or_else(|| e.exe.clone());
+            Proc { pid: e.pid as i32, ppid: e.ppid as i32, uid: 0, age_secs: e.age_secs, command, helper: false, browser, tty: false, under_app: false, sessions_above: vec![], exe: e.exe }
         })
         .collect()
 }
@@ -682,21 +736,17 @@ fn signal_of(s: &str) -> Option<i32> {
 
 // ---- the agent's side: `loft kill-as <tool> <args>` --------------------
 
-/// Runs as an agent's `kill`, `pkill` or `killall`: asks Loft, prints its answer and exits with its code. Outside an
-/// agent (no `LOFT_KILL_URL`) it is the real command.
+/// Runs as an agent's `kill`, `pkill`, `killall` (or on Windows `taskkill`): asks Loft, prints its answer and exits with
+/// its code. Outside an agent (no `LOFT_KILL_URL`) it is the real command.
 pub fn cli() -> ! {
     let mut argv = std::env::args().skip(2);
     let tool = argv.next().unwrap_or_default();
     let args: Vec<String> = argv.collect();
     let Some((_, real)) = TOOLS.iter().find(|(t, _)| *t == tool) else {
-        eprintln!("loft {ARG}: expected kill, pkill or killall");
+        eprintln!("loft {ARG}: expected {}", TOOLS.iter().map(|(t, _)| *t).collect::<Vec<_>>().join(", "));
         std::process::exit(2);
     };
-    let Ok(url) = std::env::var(URL_VAR) else {
-        let e = crate::sys::exec(std::process::Command::new(real).args(&args));
-        eprintln!("{tool}: {e}");
-        std::process::exit(126);
-    };
+    let Ok(url) = std::env::var(URL_VAR) else { real_command(&tool, real, &args) };
     // Where the command runs: a relative path in an option (`pkill -F server.pid`) is read from there.
     let cwd = std::env::current_dir().ok();
     let body = json!({ "tool": tool, "args": args, "caller": std::process::id(), "cwd": cwd });
@@ -709,6 +759,32 @@ pub fn cli() -> ! {
         Err(e) => {
             eprintln!("{tool}: nothing was stopped: Loft, which checks that the processes are yours, didn't answer ({e}).");
             std::process::exit(1);
+        }
+    }
+}
+
+/// Runs the real command, outside an agent.
+#[cfg(unix)]
+fn real_command(tool: &str, real: &str, args: &[String]) -> ! {
+    let e = crate::sys::exec(std::process::Command::new(real).args(args));
+    eprintln!("{tool}: {e}");
+    std::process::exit(126);
+}
+
+/// Runs the real command, outside an agent: Windows' taskkill, from System32 (not the shim of that name on PATH). There
+/// is none for the others.
+#[cfg(windows)]
+fn real_command(tool: &str, real: &str, args: &[String]) -> ! {
+    if real.is_empty() {
+        eprintln!("{tool}: Loft's {tool} works only in an agent's command.");
+        std::process::exit(126);
+    }
+    let root = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    match std::process::Command::new(root.join("System32").join(real)).args(args).status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!("{tool}: {e}");
+            std::process::exit(126);
         }
     }
 }
@@ -867,14 +943,13 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
     let me = std::process::id() as i32;
     let by_pid: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
     let owner = |pid: i32| by_pid.get(&pid).and_then(|p| owners.of(p));
-    // The URL names the agent, but only a caller in one of its sessions speaks for it: a command holding another
-    // agent's kill URL (a stale environment, a hand-written curl, a shell in its workspace) gets none of that
-    // agent's processes as its own.
-    let inside = caller > 0 && session_of(caller).and_then(|sid| owners.sessions.get(&sid)) == Some(&a.id);
+    // The URL names the agent, but only a caller in one of its sessions (on Windows, in its job) speaks for it: a
+    // command holding another agent's kill URL (a stale environment, a hand-written curl, a shell in its workspace)
+    // gets none of that agent's processes as its own.
+    let inside = caller > 0 && caller_agent(&owners, caller) == Some(&a.id);
     // Signal 0 only checks the process exists. A PID with no process gets the tool's own error.
-    let (own, foreign): (Vec<i32>, Vec<i32>) = pids
-        .into_iter()
-        .partition(|&pid| signal == 0 || session_of(pid).is_none() || (inside && pid != me && owner(pid) == Some(&a.id)));
+    let (own, foreign): (Vec<i32>, Vec<i32>) =
+        pids.into_iter().partition(|&pid| signal == 0 || gone(pid, &by_pid) || (inside && pid != me && owner(pid) == Some(&a.id)));
     send(&own, signal, &tool, &mut out);
     if foreign.is_empty() {
         return out;
@@ -932,24 +1007,53 @@ async fn kill(state: &AppState, a: &Agent, req: KillRequest) -> Output {
     out
 }
 
+/// The agent a kill's caller runs for: the one whose session it is in, on Windows whose job.
+fn caller_agent(owners: &Owners, caller: i32) -> Option<&String> {
+    #[cfg(windows)]
+    return owners.jobs.get(&caller);
+    #[cfg(not(windows))]
+    session_of(caller).and_then(|sid| owners.sessions.get(&sid))
+}
+
+/// Whether no process has the PID. On Windows, one that isn't in the table taken and isn't running either (it may
+/// have started since).
+fn gone(pid: i32, table: &HashMap<i32, &Proc>) -> bool {
+    #[cfg(windows)]
+    return !table.contains_key(&pid) && signal(pid, 0).is_err();
+    #[cfg(not(windows))]
+    {
+        let _ = table;
+        session_of(pid).is_none()
+    }
+}
+
 fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s.to_string() } else { format!("{}…", s.chars().take(max).collect::<String>()) }
 }
 
-/// Sends `signal` to each PID, noting failures the way kill does.
+/// Sends `signal` to each PID, noting failures the way kill does, and the way taskkill does its successes too.
 fn send(pids: &[i32], signal: i32, tool: &str, out: &mut Output) {
     for &pid in pids {
-        if let Err(e) = self::signal(pid, signal) {
-            let why = match e.raw_os_error() {
-                #[cfg(unix)]
-                Some(libc::ESRCH) => "No such process".to_string(),
-                #[cfg(unix)]
-                Some(libc::EPERM) => "Operation not permitted".to_string(),
-                _ => e.to_string(),
-            };
-            out.stderr += &format!("{tool}: {pid}: {why}\n");
-            out.code = 1;
-        }
+        let Err(e) = self::signal(pid, signal) else {
+            if tool == "taskkill" {
+                out.stdout += &format!("SUCCESS: The process with PID {pid} has been terminated.\n");
+            }
+            continue;
+        };
+        let why = match e.raw_os_error() {
+            #[cfg(unix)]
+            Some(libc::ESRCH) => "No such process".to_string(),
+            #[cfg(unix)]
+            Some(libc::EPERM) => "Operation not permitted".to_string(),
+            // ERROR_INVALID_PARAMETER: OpenProcess has no such process. ERROR_ACCESS_DENIED.
+            #[cfg(windows)]
+            Some(87) => "No such process".to_string(),
+            #[cfg(windows)]
+            Some(5) => "Operation not permitted".to_string(),
+            _ => e.to_string(),
+        };
+        out.stderr += &if tool == "taskkill" { format!("ERROR: The process with PID {pid} could not be terminated.\nReason: {why}.\n") } else { format!("{tool}: {pid}: {why}\n") };
+        out.code = 1;
     }
 }
 
@@ -957,6 +1061,22 @@ fn plan(req: &KillRequest, procs: &[Proc]) -> Plan {
     let caller_side = ancestors(procs, req.caller);
     // Without a directory that exists, Loft's own, as before.
     let cwd = req.cwd.as_deref().filter(|d| d.is_absolute() && d.is_dir());
+    #[cfg(windows)]
+    {
+        let _ = cwd;
+        let named: Vec<by_name::Named> = procs
+            .iter()
+            .map(|p| by_name::Named { pid: p.pid, ppid: p.ppid, age_secs: p.age_secs, name: p.exe.rsplit(['\\', '/']).next().unwrap_or_default(), command: &p.command })
+            .collect();
+        match req.tool.as_str() {
+            "kill" => plan_kill(&req.args, req.caller, procs),
+            "pkill" => by_name::pkill(&req.args, &named, &caller_side),
+            "killall" => by_name::killall(&req.args, &named, &caller_side),
+            "taskkill" => by_name::taskkill(&req.args, &named, &caller_side),
+            t => Plan::Done(Output::error(2, format!("{t}: not a kill command\n"))),
+        }
+    }
+    #[cfg(not(windows))]
     match req.tool.as_str() {
         "kill" => plan_kill(&req.args, req.caller, procs),
         "pkill" => plan_pkill(&req.args, &caller_side, cwd),
@@ -975,6 +1095,8 @@ fn plan_kill(args: &[String], caller: i32, procs: &[Proc]) -> Plan {
     let mut rest = args;
     match args.first().map(String::as_str) {
         None => return Plan::Done(Output::error(2, KILL_USAGE.into())),
+        // Windows has no /bin/kill to list its signals: Loft's few.
+        Some("-l" | "-L") if cfg!(windows) => return Plan::Done(Output { stdout: format!("{}\n", names()), ..Default::default() }),
         Some("-l" | "-L") => return Plan::Done(run("/bin/kill", args, None)),
         Some("-s" | "-n") => {
             let Some(s) = args.get(1) else { return Plan::Done(Output::error(2, KILL_USAGE.into())) };
@@ -1000,6 +1122,12 @@ fn plan_kill(args: &[String], caller: i32, procs: &[Proc]) -> Plan {
     for a in rest {
         let found = match a.parse::<i32>() {
             Ok(pid) if pid > 0 => vec![pid],
+            // Windows has no process groups, and every process there would count as the user's.
+            Ok(_) if cfg!(windows) => {
+                out.stderr += &format!("kill: {a}: Windows has no process groups: name each process by its PID\n");
+                out.code = 1;
+                continue;
+            }
             Ok(0) => group(group_of(caller)),
             Ok(-1) => procs.iter().filter(|p| p.uid == uid && p.pid != caller && p.pid > 1).map(|p| p.pid).collect(),
             Ok(n) => group(Some(-n)),
@@ -1024,6 +1152,7 @@ fn names() -> String {
 
 /// `pkill [-signal] <pgrep options> pattern`: the processes `pgrep` finds with the same options, but the caller and
 /// what it runs under, which pkill leaves out too.
+#[cfg_attr(windows, allow(dead_code))]
 fn plan_pkill(args: &[String], caller_side: &HashSet<i32>, cwd: Option<&Path>) -> Plan {
     let (signal, rest) = match args.first().and_then(|a| signal_of(a.strip_prefix('-')?)) {
         Some(sig) => (sig, &args[1..]),
@@ -1041,6 +1170,7 @@ fn plan_pkill(args: &[String], caller_side: &HashSet<i32>, cwd: Option<&Path>) -
 
 /// `killall [-signal] [options] name...`: what `killall -s` (show only) lists with the same options, but the caller
 /// and what it runs under. `-s` and `-l` themselves only print.
+#[cfg_attr(windows, allow(dead_code))]
 fn plan_killall(args: &[String], caller_side: &HashSet<i32>, cwd: Option<&Path>) -> Plan {
     if args.iter().any(|a| a == "-s" || a == "-l") {
         return Plan::Done(run("/usr/bin/killall", args, cwd));
@@ -2021,10 +2151,251 @@ mod job_tests {
         let (storage, exe) = (Path::new("/data/storage"), Path::new("/opt/loft/loft"));
         let unix = env_script_on(storage, "a1", exe, false);
         assert!(unix.contains(": > '/data/storage/.agent-files/a1.sessions'/\"$$\""), "{unix}");
+        assert!(unix.contains("pkill() { '/opt/loft/loft' kill-as pkill \"$@\"; }") && !unix.contains("taskkill"), "{unix}");
         let windows = env_script_on(storage, "a1", exe, true);
         assert!(!windows.contains("sessions") && !windows.contains("$$"), "{windows}");
-        // The kills still go through Loft.
-        assert!(windows.contains("pkill() { '/opt/loft/loft' kill-as pkill \"$@\"; }"), "{windows}");
+        // The kills still go through Loft, taskkill too, with their arguments as written (`//PID`, `/IM`).
+        for tool in ["pkill", "killall", "taskkill"] {
+            assert!(windows.contains(&format!("{tool}() {{ MSYS_NO_PATHCONV=1 '/opt/loft/loft' kill-as {tool} \"$@\"; }}")), "{windows}");
+        }
+        // kill turns Git Bash PIDs into Windows ones.
+        assert!(windows.contains("/proc/$a/winpid"), "{windows}");
+    }
+
+    /// Runs `script` with `args` in a POSIX shell, and returns what it prints.
+    #[cfg(unix)]
+    fn sh(script: &str, args: &[&str]) -> String {
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).arg("sh").args(args).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_bash_pids_become_windows_pids_but_signals_and_other_words_stay() {
+        // Git Bash's /proc/<pid>/winpid, faked in a folder of the test's.
+        let dir = crate::testdir::for_this_test("winpids");
+        std::fs::create_dir_all(dir.join("1234")).unwrap();
+        std::fs::write(dir.join("1234/winpid"), "9876\n").unwrap();
+        std::fs::create_dir_all(dir.join("9")).unwrap();
+        std::fs::write(dir.join("9/winpid"), "5555\n").unwrap();
+        let script = windows_pids("").replace("/proc/", &format!("{}/", dir.display())) + "printf '%s,' \"$@\"";
+        assert_eq!(sh(&script, &["-9", "1234", "77"]), "-9,9876,77,", "a number with no Git Bash process stays");
+        assert_eq!(sh(&script, &["-s", "9", "1234"]), "-s,9,9876,", "the signal after -s is no PID");
+        assert_eq!(sh(&script, &["-n", "9", "--", "9", ""]), "-n,9,--,5555,,");
+        assert_eq!(sh(&script, &["-l"]), "-l,");
+
+        // The whole kill function, with a fake loft that prints what it gets.
+        let fake = dir.join("loft");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s,' \"$MSYS_NO_PATHCONV\" \"$@\"\n").unwrap();
+        crate::owner_only::executable(&fake).unwrap();
+        let env = env_script_on(Path::new("/data/storage"), "a1", &fake, true).replace("/proc/", &format!("{}/", dir.display()));
+        let out = std::process::Command::new("/bin/bash").arg("-c").arg(format!("{env}\nkill -9 1234 77; taskkill //PID 1234")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "1,kill-as,kill,-9,9876,77,1,kill-as,taskkill,//PID,1234,", "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn on_windows_the_shims_keep_their_arguments_and_kill_s_turns_git_bash_pids() {
+        let exe = Path::new("/c/loft/loft.exe");
+        assert_eq!(shim("pkill", exe, false), "#!/bin/sh\nexec '/c/loft/loft.exe' kill-as pkill \"$@\"\n");
+        let taskkill = shim("taskkill", exe, true);
+        assert!(taskkill.ends_with("MSYS_NO_PATHCONV=1\nexport MSYS_NO_PATHCONV\nexec '/c/loft/loft.exe' kill-as taskkill \"$@\"\n"), "{taskkill}");
+        assert!(!taskkill.contains("winpid"));
+        assert!(shim("kill", exe, true).contains("/proc/$a/winpid"));
+    }
+
+    /// On Windows: the agent's own processes are those in its job, and a kill stops them without asking, while any other
+    /// waits for the user. The processes are pings (a console program every Windows has) that wait 30 s, each at a
+    /// loopback address no other test uses, which makes its command line unique.
+    #[cfg(windows)]
+    mod windows {
+        use super::*;
+        use crate::agents::tests::until;
+        use std::os::windows::process::CommandExt;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        fn ping() -> PathBuf {
+            PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join("System32").join("PING.EXE")
+        }
+
+        fn unique_ip() -> String {
+            static N: AtomicU32 = AtomicU32::new(1);
+            let n = N.fetch_add(1, Ordering::SeqCst).wrapping_add(std::process::id().wrapping_mul(7919));
+            format!("127.{}.{}.{}", (n >> 16) & 255, (n >> 8) & 255, (n & 255).max(1))
+        }
+
+        /// A ping in no agent's job, ended when dropped.
+        struct Outsider(std::process::Child);
+
+        impl Outsider {
+            fn start(exe: &Path, ip: &str) -> Self {
+                let child = std::process::Command::new(exe).args(["-n", "30", ip]).stdout(std::process::Stdio::null()).creation_flags(CREATE_NO_WINDOW).spawn().unwrap();
+                Outsider(child)
+            }
+
+            fn pid(&self) -> i32 {
+                self.0.id() as i32
+            }
+        }
+
+        impl Drop for Outsider {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        /// A ping in the agent's job, as a run's command starts one.
+        fn in_job(storage: &Path, agent_id: &str, exe: &Path, ip: &str) -> tokio::process::Child {
+            let mut cmd = tokio::process::Command::new(exe);
+            cmd.args(["-n", "30", ip]).stdout(std::process::Stdio::null()).creation_flags(crate::job::CREATION_FLAGS).kill_on_drop(true);
+            let child = cmd.spawn().unwrap();
+            crate::job::join(storage, agent_id, &child).unwrap();
+            child
+        }
+
+        fn pid_of(child: &tokio::process::Child) -> i32 {
+            child.id().unwrap() as i32
+        }
+
+        fn alive(pid: i32) -> bool {
+            crate::job::alive(pid as u32)
+        }
+
+        async fn ask(st: &AppState, agent_id: &str, caller: i32, tool: &str, args: &[&str]) -> Value {
+            let req = KillRequest { tool: tool.into(), args: args.iter().map(|a| a.to_string()).collect(), caller, cwd: None };
+            handle(State(st.clone()), UrlPath(agent_id.into()), Json(req)).await.0
+        }
+
+        fn pending(st: &AppState, agent_id: &str) -> Vec<crate::db::PermissionRequest> {
+            st.db.list_permissions(Some(agent_id)).unwrap().into_iter().filter(|p| p.status == "pending").collect()
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn an_agent_stops_what_its_job_holds_without_asking_and_another_process_once_the_user_allows() {
+            let st = crate::tasks::tests::state();
+            let a = crate::tasks::tests::agent(&st, "Builder");
+            let storage = st.cfg.storage_dir.clone();
+            // Where `loft kill-as` runs: the agent's command, in its job.
+            let shell = in_job(&storage, &a.id, &ping(), &unique_ip());
+            let caller = pid_of(&shell);
+            let server = in_job(&storage, &a.id, &ping(), &unique_ip());
+            let pid = pid_of(&server).to_string();
+            // Checking it is there stops nothing.
+            let v = ask(&st, &a.id, caller, "kill", &["-0", &pid]).await;
+            assert_eq!(v["code"], 0, "{v}");
+            assert!(alive(pid_of(&server)));
+            let v = ask(&st, &a.id, caller, "kill", &["-9", &pid]).await;
+            assert_eq!(v["code"], 0, "{v}");
+            until("the server to end", 10, || !alive(pid_of(&server))).await;
+            assert!(st.db.list_permissions(Some(&a.id)).unwrap().is_empty(), "it asked the user");
+            // A PID with no process gets kill's own error; a process group isn't a thing on Windows.
+            let v = ask(&st, &a.id, caller, "kill", &[&pid]).await;
+            assert!(v["code"] == 1 && v["stderr"].as_str().unwrap().contains("No such process"), "{v}");
+            for group in ["0", "-1", &format!("-{caller}")] {
+                let v = ask(&st, &a.id, caller, "kill", &["--", group]).await;
+                assert!(v["code"] == 1 && v["stderr"].as_str().unwrap().contains("no process groups"), "{group}: {v}");
+            }
+            assert!(alive(caller));
+
+            // A process no agent started: asked about, and stopped only once allowed.
+            let other = Outsider::start(&ping(), &unique_ip());
+            let pid = other.pid().to_string();
+            for answer in ["deny", "allow"] {
+                let asking = tokio::spawn({
+                    let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
+                    async move { ask(&st, &id, caller, "kill", &[&pid]).await }
+                });
+                until("a permission request", 10, || pending(&st, &a.id).len() == 1).await;
+                let req = pending(&st, &a.id).remove(0);
+                assert_eq!((req.tool_name.as_str(), req.input["command"].as_str()), ("Kill", Some(format!("kill {pid}").as_str())));
+                assert!(req.reason.contains(&format!("{pid} (not an agent's: ")) && req.reason.contains("PING.EXE"), "{}", req.reason);
+                assert!(alive(other.pid()), "it was stopped before the user answered");
+                crate::agents::decide(&st, &req.id, answer, None, None, None).unwrap();
+                let v = asking.await.unwrap();
+                if answer == "deny" {
+                    assert!(v["code"] == 1 && v["stderr"].as_str().unwrap().contains(&format!("Loft didn't stop {pid}")), "{v}");
+                    assert!(alive(other.pid()));
+                } else {
+                    assert_eq!(v["code"], 0, "{v}");
+                    until("the other process to end", 10, || !alive(other.pid())).await;
+                }
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_kill_from_outside_the_agents_job_asks_even_about_its_own_processes() {
+            let st = crate::tasks::tests::state();
+            let a = crate::tasks::tests::agent(&st, "Builder");
+            let b = crate::tasks::tests::agent(&st, "Other");
+            let storage = st.cfg.storage_dir.clone();
+            let server = in_job(&storage, &a.id, &ping(), &unique_ip());
+            let pid = pid_of(&server).to_string();
+            // A command in another agent's job holding this one's kill URL, Loft itself, and no caller.
+            let elsewhere = in_job(&storage, &b.id, &ping(), &unique_ip());
+            for caller in [pid_of(&elsewhere), std::process::id() as i32, 0] {
+                let asking = tokio::spawn({
+                    let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
+                    async move { ask(&st, &id, caller, "taskkill", &["//F", "//PID", &pid]).await }
+                });
+                until("a permission request", 10, || pending(&st, &a.id).len() == 1).await;
+                let req = pending(&st, &a.id).remove(0);
+                assert!(req.reason.contains(&format!("A command outside {}'s runs (PID {caller})", a.name)), "{}", req.reason);
+                assert!(req.reason.contains(&format!("{pid} ({}'s:", a.name)), "{}", req.reason);
+                crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
+                let v = asking.await.unwrap();
+                assert!(v["code"] == 1 && v["stderr"].as_str().unwrap().contains("doesn't run in one of your runs"), "{v}");
+                assert!(alive(pid_of(&server)), "caller {caller} stopped the agent's server");
+            }
+            // From its own job, taskkill stops it unasked and says so the way taskkill does.
+            let shell = in_job(&storage, &a.id, &ping(), &unique_ip());
+            let v = ask(&st, &a.id, pid_of(&shell), "taskkill", &["//F", "//PID", &pid]).await;
+            assert_eq!(v["code"], 0, "{v}");
+            assert_eq!(v["stdout"], format!("SUCCESS: The process with PID {pid} has been terminated.\n"));
+            until("the server to end", 10, || !alive(pid_of(&server))).await;
+            crate::job::terminate(&storage, &b.id);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn pkill_and_killall_find_by_name_or_command_line_and_stop_unasked_only_the_agents_own() {
+            let st = crate::tasks::tests::state();
+            let a = crate::tasks::tests::agent(&st, "Builder");
+            let storage = st.cfg.storage_dir.clone();
+            // A program by a name no other process has: a copy of ping.
+            let dir = crate::testdir::for_this_test("windows-by-name");
+            std::fs::create_dir_all(&dir).unwrap();
+            let name = format!("ks{}", unique_ip().replace('.', ""));
+            let exe = dir.join(format!("{name}.exe"));
+            std::fs::copy(ping(), &exe).unwrap();
+            let shell = in_job(&storage, &a.id, &ping(), &unique_ip());
+            let caller = pid_of(&shell);
+
+            // pkill -f by the command line: the agent's, unasked; the other's, left alone.
+            let (mine, theirs) = (unique_ip(), unique_ip());
+            let server = in_job(&storage, &a.id, &exe, &mine);
+            let other = Outsider::start(&exe, &theirs);
+            let v = ask(&st, &a.id, caller, "pkill", &["-f", &mine.replace('.', "\\.")]).await;
+            assert_eq!(v["code"], 0, "{v}");
+            until("the server to end", 10, || !alive(pid_of(&server))).await;
+            assert!(alive(other.pid()) && st.db.list_permissions(Some(&a.id)).unwrap().is_empty());
+            // Nothing matches: pkill's own answer.
+            let v = ask(&st, &a.id, caller, "pkill", &["-f", "ks-no-such-process"]).await;
+            assert_eq!(v["code"], 1, "{v}");
+
+            // killall by the name, with or without .exe: the agent's stops unasked, the other's waits for the user, who
+            // doesn't answer.
+            let again = in_job(&storage, &a.id, &exe, &unique_ip());
+            let v = ask(&st, &a.id, caller, "killall", &[&format!("{name}.EXE")]).await;
+            assert_eq!(v["code"], 1, "{v}");
+            assert!(v["stderr"].as_str().unwrap().contains(&format!("Loft didn't stop {}", other.pid())), "{v}");
+            until("the agent's copy to end", 10, || !alive(pid_of(&again))).await;
+            assert!(alive(other.pid()));
+            let req = &st.db.list_permissions(Some(&a.id)).unwrap()[0];
+            assert_eq!(req.input["pids"], json!([other.pid()]), "only the other's process was asked about");
+            // Never the caller's own command.
+            assert!(alive(caller));
+        }
     }
 
     #[cfg(windows)]

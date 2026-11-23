@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT};
+use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
     Thread32Next,
@@ -254,6 +255,8 @@ pub struct Entry {
     pub ppid: u32,
     /// Its executable's full path, or only its file name when Loft may not open the process.
     pub exe: String,
+    /// Its command line, when Loft may read it.
+    pub command: Option<String>,
     pub age_secs: u64,
 }
 
@@ -266,16 +269,16 @@ pub fn table() -> Vec<Entry> {
     while more {
         let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
         let file = String::from_utf16_lossy(&e.szExeFile[..len]);
-        let (exe, age_secs) = details(e.th32ProcessID);
-        list.push(Entry { pid: e.th32ProcessID, ppid: e.th32ParentProcessID, exe: exe.unwrap_or(file), age_secs });
+        let (exe, command, age_secs) = details(e.th32ProcessID);
+        list.push(Entry { pid: e.th32ProcessID, ppid: e.th32ParentProcessID, exe: exe.unwrap_or(file), command, age_secs });
         more = unsafe { Process32NextW(snap.0, &mut e) } != 0;
     }
     list
 }
 
-/// The full path of `pid`'s executable and how long it has run, when Loft may open it.
-fn details(pid: u32) -> (Option<String>, u64) {
-    let Some(p) = Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) }) else { return (None, 0) };
+/// The full path of `pid`'s executable, its command line and how long it has run, when Loft may open it.
+fn details(pid: u32) -> (Option<String>, Option<String>, u64) {
+    let Some(p) = Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) }) else { return (None, None, 0) };
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
     let exe = (unsafe { QueryFullProcessImageNameW(p.0, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) } != 0).then(|| String::from_utf16_lossy(&buf[..len as usize]));
@@ -284,7 +287,32 @@ fn details(pid: u32) -> (Option<String>, u64) {
         let at = SystemTime::UNIX_EPOCH + Duration::from_nanos(ticks.saturating_sub(116_444_736_000_000_000).saturating_mul(100));
         at.elapsed().map_or(0, |d| d.as_secs())
     });
-    (exe, age)
+    (exe, command_line(&p), age)
+}
+
+/// The command line of the process `p` (opened for limited queries): a UNICODE_STRING whose text follows it in the
+/// buffer, which grows once to the size the first call asks for.
+fn command_line(p: &Handle) -> Option<String> {
+    let mut room = 1024usize;
+    for _ in 0..2 {
+        let mut buf = vec![0usize; room.div_ceil(std::mem::size_of::<usize>())];
+        let size = (buf.len() * std::mem::size_of::<usize>()) as u32;
+        let mut needed = 0u32;
+        let status = unsafe { NtQueryInformationProcess(p.0, ProcessCommandLineInformation, buf.as_mut_ptr().cast(), size, &mut needed) };
+        if status >= 0 {
+            let text: &UNICODE_STRING = unsafe { &*buf.as_ptr().cast() };
+            if text.Buffer.is_null() {
+                return None;
+            }
+            let chars = unsafe { std::slice::from_raw_parts(text.Buffer, text.Length as usize / 2) };
+            return Some(String::from_utf16_lossy(chars));
+        }
+        if needed as usize <= room {
+            return None;
+        }
+        room = needed as usize;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -380,6 +408,10 @@ pub(crate) mod tests {
         let t = table();
         let p = t.iter().find(|p| p.pid == me).unwrap();
         assert!(p.exe.ends_with(".exe"), "{}", p.exe);
+        // The test binary runs with arguments of its own (the test filter, `--test-threads`) or at least its path.
+        let command = p.command.as_deref().unwrap_or_default();
+        let file = p.exe.rsplit('\\').next().unwrap();
+        assert!(command.contains(file.trim_end_matches(".exe")), "{command:?} vs {}", p.exe);
         assert!(alive(me));
     }
 
