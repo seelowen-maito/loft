@@ -1184,7 +1184,21 @@ fn reads_state(all: &[String]) -> (bool, bool) {
 
 /// The texts `$( … )` and `` ` … ` `` in `s` run (a here-document body), each as written between its brackets.
 fn substitutions(s: &str) -> Vec<String> {
-    let c: Vec<char> = s.chars().collect();
+    // A backslash before a newline joins the lines first (`$\<newline>(` is `$(`); an escaped backslash stays as it is.
+    let mut c: Vec<char> = vec![];
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match (ch, chars.peek()) {
+            ('\\', Some('\n')) => {
+                chars.next();
+            }
+            ('\\', Some(_)) => {
+                c.push(ch);
+                c.extend(chars.next());
+            }
+            _ => c.push(ch),
+        }
+    }
     let mut out = vec![];
     let mut i = 0;
     while i < c.len() {
@@ -5350,5 +5364,11 @@ mod tests {
             assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
         }
         assert!(asks_all("cat <<E\n\\`git status\\` and `echo hi`\nE", CLONE).is_empty());
+        // A backslash-newline joins the lines first, so `$\<newline>(` is a substitution; `\\<newline>` is not.
+        for body in [format!("$\\\n({git})"), format!("`\\\n{git}`"), format!("$\\\n\\\n({git})")] {
+            let cmd = format!("cat <<E\n{body}\nE");
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+        assert!(asks_all(&format!("cat <<E\n$\\\\\n({git})\nE"), CLONE).is_empty());
     }
 }
