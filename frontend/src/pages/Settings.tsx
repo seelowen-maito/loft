@@ -18,9 +18,10 @@ import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
 import { cleanLineText, cx, fmtBytes, oneLine } from "../lib/format";
 import { fmtClock, fmtDateTime, relTime } from "../lib/time";
-import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
+import { comboFromEvent, fixedShortcuts, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 import { usePoll } from "../hooks/usePoll";
+import { useOffered } from "../hooks/useOffered";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
@@ -369,6 +370,7 @@ function Spend() {
 
 /** The keyboard shortcuts: ⌘K and ⌘J can be recorded anew or reset, kept in this browser and used at once (no Save needed); the rest are fixed. */
 function ShortcutSettings() {
+  const offers = useOffered();
   const [combos, setCombos] = useState(loadCombos);
   const [listening, setListening] = useState<Rebindable | null>(null);
   const [hint, setHint] = useState<string | null>(null);
@@ -423,7 +425,7 @@ function ShortcutSettings() {
         {hint ?? "These two work from any page, even while typing. Press Record, then the new keys; they need ⌘, Ctrl or Alt. Kept in this browser."}
       </span>
       <ul className="space-y-2 border-t border-line pt-3">
-        {FIXED.map((f) => (
+        {fixedShortcuts(offers.simulator).map((f) => (
           <li key={f.keys} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0 text-fg-2">{f.label}</span>
             <Keys keys={f.keys} />
@@ -436,6 +438,7 @@ function ShortcutSettings() {
 }
 
 export default function SettingsPage() {
+  const offers = useOffered();
   const [view, setView] = useState<SettingsView | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   // Write-only: undefined keeps the saved token, "" clears it.
@@ -604,29 +607,31 @@ export default function SettingsPage() {
           />
         </SettingsCard>
 
-        <SettingsCard title="Navigation">
-          <Toggle
-            on={draft.show_simulator}
-            onChange={(v) => set("show_simulator", v)}
-            label="Show Simulator"
-            hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
-          />
-        </SettingsCard>
+        {offers.simulator && (
+          <SettingsCard title="Navigation">
+            <Toggle
+              on={draft.show_simulator}
+              onChange={(v) => set("show_simulator", v)}
+              label="Show Simulator"
+              hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
+            />
+          </SettingsCard>
+        )}
 
         <SettingsCard title="Keyboard shortcuts">
           <ShortcutSettings />
         </SettingsCard>
 
-        <HerdrSetup />
+        {offers.herdr && <HerdrSetup />}
 
         <PushSettings />
 
         <HttpsAccess />
-        <VoiceOnThisMac />
+        {offers.voice && <VoiceOnThisMac />}
 
         <ClaudeLoginSection />
 
-        <MacAccess />
+        {offers.mac_access && <MacAccess />}
 
         {(dirty || err || save.error || restartAsk.error) && (
           <FloatingBar at="bottom">

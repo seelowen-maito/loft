@@ -5,11 +5,13 @@ import { useCheck } from "../lib/useCheck";
 import { SettingsCard } from "../components/SettingsCard";
 import { ActionButton } from "../components/ActionButton";
 import { usePoll } from "../hooks/usePoll";
+import { useOffered } from "../hooks/useOffered";
 
-/** Settings → Claude login: whether the claude CLI is logged in and as whom, with Open Terminal to log in. */
+/** Settings → Claude login: whether the claude CLI is logged in and as whom, with Open Terminal to log in on a Mac. */
 export function ClaudeLoginSection() {
   const { data: s, err, run, loading } = useCheck(api.claudeLogin);
   const open = useAction();
+  const { terminal_login } = useOffered();
   // Read again while the page is open, so the status turns once the login in Terminal is done.
   usePoll(run, 5000);
   return (
@@ -18,9 +20,11 @@ export function ClaudeLoginSection() {
       title="Claude login"
       description="The claude CLI every agent runs on. Loft can't log in by itself: logging in needs a browser and a terminal."
       action={
+        terminal_login && (
         <ActionButton variant="secondary" className="shrink-0" icon={<Terminal className="size-3.5" />} pending={open.busy} pendingLabel="Opening…" onClick={() => open.run(api.claudeLoginTerminal)}>
           Open Terminal
         </ActionButton>
+        )
       }
       error={open.error ?? err}
       loading={loading}

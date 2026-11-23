@@ -279,14 +279,18 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(needs_you::watcher(state.clone()));
     tokio::spawn(agents::quiet_watcher(state.clone()));
     tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
-    tokio::spawn(mac_access::watcher(state.clone()));
+    if api::ON_MAC {
+        tokio::spawn(mac_access::watcher(state.clone()));
+    }
     let port = state.cfg.port;
     tokio::task::spawn_blocking(move || tailnet::check_https(port));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(delivery::ci_poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
-    tokio::spawn(simulator::tidier(state.clone()));
+    if api::ON_MAC {
+        tokio::spawn(simulator::tidier(state.clone()));
+    }
     tokio::spawn(processes::idle_stopper(state.clone()));
 
     // Serve the built frontend when present (production mode).
@@ -402,6 +406,9 @@ mod tests {
             assert_eq!(encoding(&r), None, "{path}");
         }
         assert!(get("/api/info", "").send().await.unwrap().content_length().unwrap() < 1024, "/api/info isn't small any more");
+        let info: serde_json::Value = get("/api/info", "").send().await.unwrap().json().await.unwrap();
+        assert_eq!(info["platform"], std::env::consts::OS);
+        assert_eq!(info["features"].as_array().unwrap().iter().any(|f| f == "simulator"), cfg!(target_os = "macos"), "{info}");
 
         // The event stream's first message arrives right away, uncompressed.
         let mut r = get("/api/events", "gzip, br").send().await.unwrap();

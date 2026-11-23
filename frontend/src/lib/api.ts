@@ -638,7 +638,7 @@ export type SystemReading = {
   sampled_at: string | null;
 };
 
-export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
+export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string; platform: string; features: string[] };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {

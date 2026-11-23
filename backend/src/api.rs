@@ -57,6 +57,22 @@ fn agent_json(state: &AppState, a: &Agent) -> Value {
 
 // ---- meta -------------------------------------------------------------
 
+/// What this server supports, for clients (the iOS app, the web) to tell.
+const FEATURES: [&str; 19] = ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply"];
+
+/// The Mac-only features: the web app hides each one the server doesn't list.
+pub const MAC_ONLY: [&str; 5] = ["simulator", "voice", "mac_access", "terminal_login", "herdr"];
+
+/// Whether Loft runs on a Mac: the Mac-only features and their background work (Mac access's watcher, the Simulator's
+/// tidier) exist only then.
+pub const ON_MAC: bool = cfg!(target_os = "macos");
+
+/// The features a server on `os` (as `std::env::consts::OS` names it) offers.
+pub fn features(os: &str) -> Vec<&'static str> {
+    let mac_only = if os == "macos" { &MAC_ONLY[..] } else { &[] };
+    FEATURES.iter().chain(mac_only).copied().collect()
+}
+
 pub async fn info(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "projects_dir": state.settings.boot().projects_dir,
@@ -64,8 +80,9 @@ pub async fn info(State(state): State<AppState>) -> Json<Value> {
         "github_token": crate::github::token(&state).is_some(),
         "version": env!("CARGO_PKG_VERSION"),
         "host": crate::tailnet::host(),
-        // Lets clients (the iOS app) tell what this server supports.
-        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply"],
+        // `macos`, `linux` or `windows`.
+        "platform": std::env::consts::OS,
+        "features": features(std::env::consts::OS),
     }))
 }
 
@@ -1086,6 +1103,17 @@ pub async fn open_editor(
 // Most of these fake commands with shell scripts, which run on Unix only.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub(crate) mod tests {
+    #[test]
+    fn mac_only_features_are_offered_on_a_mac_only() {
+        let mac = super::features("macos");
+        assert!(super::MAC_ONLY.iter().all(|f| mac.contains(f)), "{mac:?}");
+        for os in ["linux", "windows"] {
+            let elsewhere = super::features(os);
+            assert!(super::MAC_ONLY.iter().all(|f| !elsewhere.contains(f)), "{os}: {elsewhere:?}");
+            assert!(elsewhere.contains(&"tasks") && elsewhere.contains(&"reply"), "{os}: the rest stays");
+        }
+    }
+
     #[tokio::test]
     async fn a_lagging_subscriber_gets_a_resync() {
         let (tx, rx) = tokio::sync::broadcast::channel(2);

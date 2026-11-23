@@ -74,6 +74,8 @@ Then open http://localhost:7420 and check **Settings** (gear icon, top right). S
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
 - **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (and `npm` when pnpm and corepack are missing) on `PATH`.
 
+Some features exist only when loft runs on a Mac: the iOS Simulator tab, Talk (voice), Mac access, Open Terminal in Settings › Claude login, and Herdr setup. Elsewhere the web app doesn't show them.
+
 ### Use it from other devices
 
 loft is a web app on port `7420`, so it works with whatever network setup you already have: a reverse proxy, a VPN, or your local network. Set **SSH host** to this machine's name so `/code` opens VS Code over Remote-SSH.

@@ -24,12 +24,19 @@ export const GO: Record<string, { path: string; label: string }> = {
   m: { path: "/simulator", label: "Simulator" },
 };
 
+/** The `g` pages offered here: the Simulator is a Mac-only feature, so it's left out where the server doesn't offer it. */
+export function goPages(simulator: boolean): Record<string, { path: string; label: string }> {
+  return Object.fromEntries(Object.entries(GO).filter(([, g]) => simulator || g.path !== "/simulator"));
+}
+
 /** The fixed shortcuts, for the sheet and Settings. */
-export const FIXED: { keys: string; label: string }[] = [
-  ...Object.entries(GO).map(([k, g]) => ({ keys: `g ${k}`, label: `Go to ${g.label}` })),
-  { keys: "/", label: "Focus the chat box" },
-  { keys: "?", label: "Show shortcuts" },
-];
+export function fixedShortcuts(simulator: boolean): { keys: string; label: string }[] {
+  return [
+    ...Object.entries(goPages(simulator)).map(([k, g]) => ({ keys: `g ${k}`, label: `Go to ${g.label}` })),
+    { keys: "/", label: "Focus the chat box" },
+    { keys: "?", label: "Show shortcuts" },
+  ];
+}
 
 /** Sent on `window` when Settings saves a combination, so the shortcuts use it at once. */
 export const SHORTCUTS_CHANGED = "loft:shortcuts-changed";
@@ -128,14 +135,15 @@ export type Action =
   | { type: "sheet" };
 
 /** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field.
- * `afterG` is true when the previous key was a lone `g`: the next letter picks the page, any other key cancels it. */
-export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; mac?: boolean }): Action | null {
+ * `afterG` is true when the previous key was a lone `g`: the next letter picks the page, any other key cancels it.
+ * `simulator` is whether the server offers the Simulator (default: it does). */
+export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; mac?: boolean; simulator?: boolean }): Action | null {
   const mac = o.mac ?? isMac();
   if (matchesCombo(e, o.combos.switcher, mac)) return { type: "switcher" };
   if (matchesCombo(e, o.combos.next, mac)) return { type: "next" };
   if (e.ctrlKey || e.metaKey || e.altKey || o.typing) return null;
   if (o.afterG) {
-    const go = GO[e.key.toLowerCase()];
+    const go = goPages(o.simulator ?? true)[e.key.toLowerCase()];
     return go ? { type: "go", path: go.path } : null;
   }
   if (e.key === "g") return { type: "g" };

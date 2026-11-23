@@ -24,6 +24,7 @@ import { Shortcuts } from "./components/Shortcuts";
 import { Toaster } from "./components/FloatingBar";
 import { Talk } from "./components/Talk";
 import { openTalk } from "./lib/talk";
+import { useOffered } from "./hooks/useOffered";
 import { fmtClock } from "./lib/time";
 import { useNow } from "./lib/useNow";
 
@@ -190,7 +191,8 @@ function issuesLink(path: string): string {
 export default function App() {
   const location = useLocation();
   const live = useLiveConnection();
-  const showSimulator = useShowSimulator();
+  const offers = useOffered();
+  const showSimulator = useShowSimulator() && offers.simulator;
   const tab = ({ isActive }: { isActive: boolean }) =>
     cx(
       "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors",
@@ -226,9 +228,11 @@ export default function App() {
             )}
           </nav>
           <div className="ml-auto flex items-center gap-4 max-md:gap-3 max-[21rem]:gap-2">
-            <button className="rounded-full p-1.5 text-fg-3 transition-colors hover:text-fg" title="Talk to an agent" aria-label="Talk" onClick={() => openTalk()}>
-              <Mic className="size-4" />
-            </button>
+            {offers.voice && (
+              <button className="rounded-full p-1.5 text-fg-3 transition-colors hover:text-fg" title="Talk to an agent" aria-label="Talk" onClick={() => openTalk()}>
+                <Mic className="size-4" />
+              </button>
+            )}
             <PendingBadge />
             <NeedsYouBadge live={live} />
             {/* The meters and the clock don't fit on a phone; the live dot and settings do. */}

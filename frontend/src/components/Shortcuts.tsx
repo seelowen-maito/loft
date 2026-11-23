@@ -7,13 +7,14 @@ import { isSpec, specProgress } from "../lib/issueOrder";
 import { cx } from "../lib/format";
 import { teamOf } from "../lib/team";
 import {
-  FIXED, formatCombo, isTyping, loadCombos, loadRecent, nextNeedsYou, OPEN_SHORTCUT, REBINDABLE, recording, shortcutAction,
+  fixedShortcuts, formatCombo, isTyping, loadCombos, loadRecent, nextNeedsYou, OPEN_SHORTCUT, REBINDABLE, recording, shortcutAction,
   searchRows, SHORTCUTS_CHANGED, switcherAgents, type Combos, type Openable,
 } from "../lib/shortcuts";
 import { statusOf } from "../pages/agents/Status";
 import { Dialog } from "./Dialog";
 import { toast } from "./FloatingBar";
 import { Sticker } from "./Sticker";
+import { useOffered } from "../hooks/useOffered";
 
 const G_WINDOW_MS = 1500;
 
@@ -22,6 +23,8 @@ export function Shortcuts() {
   const navigate = useNavigate();
   const [open, setOpen] = useState<"switcher" | "sheet" | null>(null);
   const combos = useRef<Combos>(loadCombos());
+  const simulator = useRef(false);
+  simulator.current = useOffered().simulator;
   const gAt = useRef(0);
   const close = useCallback(() => setOpen(null), []);
 
@@ -35,7 +38,7 @@ export function Shortcuts() {
       if (recording.on || e.isComposing) return;
       const afterG = Date.now() - gAt.current < G_WINDOW_MS;
       gAt.current = 0;
-      const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG });
+      const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG, simulator: simulator.current });
       if (!a) return;
       const shown = document.querySelector<HTMLElement>('[role="dialog"][data-shortcuts]');
       // Plain keys don't act on the page behind an open dialog.
@@ -81,8 +84,8 @@ export function Shortcuts() {
 }
 
 /** Every shortcut with its current keys, for the sheet and Settings. */
-export function shortcutRows(combos: Combos): { keys: string; label: string }[] {
-  return [...REBINDABLE.map((r) => ({ keys: formatCombo(combos[r.id]), label: r.label })), ...FIXED];
+export function shortcutRows(combos: Combos, simulator: boolean): { keys: string; label: string }[] {
+  return [...REBINDABLE.map((r) => ({ keys: formatCombo(combos[r.id]), label: r.label })), ...fixedShortcuts(simulator)];
 }
 
 export function Keys({ keys }: { keys: string }) {
@@ -96,6 +99,7 @@ export function Keys({ keys }: { keys: string }) {
 }
 
 function Sheet({ combos, onClose }: { combos: Combos; onClose: () => void }) {
+  const { simulator } = useOffered();
   return (
     <Dialog title="Keyboard shortcuts" data-shortcuts="" top onClose={onClose} className="p-5">
       <div className="mb-3 flex items-center justify-between">
@@ -103,7 +107,7 @@ function Sheet({ combos, onClose }: { combos: Combos; onClose: () => void }) {
         <button autoFocus className="btn-ghost" onClick={onClose} aria-label="Close"><X className="size-4" /></button>
       </div>
       <ul className="space-y-2">
-        {shortcutRows(combos).map((r) => (
+        {shortcutRows(combos, simulator).map((r) => (
           <li key={r.label} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0 text-fg-2">{r.label}</span>
             <Keys keys={r.keys} />
