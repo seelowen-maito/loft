@@ -1,5 +1,6 @@
 # Builds and tests the backend and the web app on Linux and Windows, side by side, for pull requests into develop
-# (spec PRs included) that touch them. No macOS: the team's agents test on a Mac already.
+# (spec PRs included) that touch them. No macOS: the team's agents test on a Mac already. Alongside, a fresh Windows
+# checkout runs setup.sh in Git Bash, answered through stdin, and start.sh (scripts/test-setup.sh).
 #
 # The Rust cache is keyed by Cargo.lock and saved only on pushes to develop, so pull requests only read it; after
 # such a push, only the newest cache of each system is kept.
@@ -106,6 +107,26 @@ jobs:
             ~/.cargo/git/db
             backend/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+  setup:
+    name: Windows setup
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Rust stable
+        run: rustup update stable --no-self-update && rustup default stable
+
+      # setup.sh's release build and start.sh; no Rust cache: the test job's holds debug builds.
+      - name: setup.sh and start.sh
+        run: bash scripts/test-setup.sh
 
   prune-caches:
     name: Keep the newest Rust caches
