@@ -275,6 +275,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(prs::backfill(state.clone()));
     tokio::spawn(delivery::track_open_prs(state.clone()));
     tokio::spawn(agents::backfill_context(state.clone()));
+    tokio::spawn(updater::clear_set_aside());
     tokio::spawn(updater::updater(state.clone(), root.clone()));
     tokio::spawn(system::sampler(state.clone()));
     tokio::spawn(grill::sweeper(state.clone()));

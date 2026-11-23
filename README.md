@@ -72,7 +72,7 @@ Then open http://localhost:7420 and check **Settings** (gear icon, top right). S
 - **Claude command**: the command agents run.
 - **GitHub token**: needed for private repos and merging pull requests. Without one, loft uses `gh auth token`.
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
-- **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (and `npm` when pnpm and corepack are missing) on `PATH`.
+- **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (and `npm` when pnpm and corepack are missing) on `PATH`. On Windows the running build is renamed to `loft.old.exe` while the new one builds; the new Loft deletes it (the daily sweep retries if it was still in use), so only one is ever kept, and a failed build leaves the running one in place.
 
 Some features exist only when loft runs on a Mac: the iOS Simulator tab, Talk (voice), Mac access, Open Terminal in Settings › Claude login, and Herdr setup. Elsewhere the web app doesn't show them.
 

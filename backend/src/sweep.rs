@@ -17,6 +17,8 @@
 //! runs once a day, before Loft restarts into an update, and on a workspace whose agent was deleted with its
 //! files kept, and skips agents in a run. A process an idle agent left running (a dev server) doesn't keep its
 //! build output: the idle timeout (4 h by default) stops such processes long before output is 3 days old.
+//! The daily sweep also removes Loft's own `loft.old.exe` an update set aside on Windows, if it was still in use
+//! when the new Loft started ([`crate::updater`]).
 //!
 //! Agents keep debug and test output in `scratch/<ticket>/` and reports in `notes/`. The sweep removes
 //! `scratch/<n>/` once issue or PR `<n>` of the agent's main project is closed or merged and the folder has been
@@ -497,6 +499,7 @@ pub async fn scheduler(state: AppState) {
     let mut tick = tokio::time::interval(EVERY);
     loop {
         tick.tick().await;
+        crate::updater::sweep_set_aside();
         run(&state, Some("Daily sweep"), None, IDLE).await;
     }
 }
