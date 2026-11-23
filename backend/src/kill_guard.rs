@@ -441,11 +441,16 @@ fn missing(folder: &Path) -> bool {
 /// The ceiling counts only for a command that is plain git (`plain_git`); any other can move it, so it has none.
 pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<Change> {
     let mut found = vec![];
+    WORK.with(|w| *w.borrow_mut() = Work::new());
     let start = Some(cwd.to_path_buf());
     let ceiling: Vec<PathBuf> = ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect();
     let storage = ceiling.first().cloned().unwrap_or_default();
     let ceiling = if plain_git(command, cwd, &ceiling) { ceiling } else { vec![] };
-    changes(command, &mut Dirs { start: start.clone(), cwd: start, ceiling, storage, ..Default::default() }, 0, &mut found);
+    changes(command, &mut Dirs { start: start.clone(), cwd: start.clone(), ceiling, storage, ..Default::default() }, 0, &mut found);
+    // A command too big to check in time asks, in the folder it starts in.
+    if WORK.with(|w| w.borrow().spent_up) {
+        found.push(Change { folder: start.as_deref().map(outermost_checkout).unwrap_or_default(), command: "(too complex for Loft to check)".into() });
+    }
     let mut out: Vec<Change> = vec![];
     for c in found {
         // A symlink into a user's checkout counts as that checkout.
@@ -457,8 +462,39 @@ pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<C
     out
 }
 
+/// What checking one command may spend: texts examined and time. Nested texts (a heredoc's substitutions, `eval`,
+/// repeated passes) can multiply, and past this the command asks instead of the guard running on.
+const MAX_WORK: usize = 2000;
+const MAX_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+
+struct Work {
+    left: usize,
+    started: std::time::Instant,
+    spent_up: bool,
+}
+
+impl Work {
+    fn new() -> Self {
+        Work { left: MAX_WORK, started: std::time::Instant::now(), spent_up: false }
+    }
+
+    /// Whether one more text may be examined.
+    fn spend(&mut self) -> bool {
+        if self.left == 0 || self.started.elapsed() > MAX_TIME {
+            self.spent_up = true;
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
+}
+
+thread_local! {
+    static WORK: std::cell::RefCell<Work> = std::cell::RefCell::new(Work::new());
+}
+
 fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
-    if depth > MAX_DEPTH {
+    if depth > MAX_DEPTH || !WORK.with(|w| w.borrow_mut().spend()) {
         return;
     }
     // The whole text, so a mention inside a `<(…)` or a subshell counts too.
@@ -1139,13 +1175,21 @@ fn substitutions(s: &str) -> Vec<String> {
     let mut out = vec![];
     let mut i = 0;
     while i < c.len() {
-        if c[i] == '$' && c.get(i + 1) == Some(&'(') {
+        if c[i] == '\\' {
+            // `\`` and `\$(` are literal text.
+            i += 2;
+        } else if c[i] == '$' && c.get(i + 1) == Some(&'(') {
             // To the end of the body: a `)` in a quote, a pattern or after a backslash can't end it early.
             out.push(c[i + 2..].iter().collect());
             i += 2;
         } else if c[i] == '`' {
-            out.push(c[i + 1..].iter().collect());
-            i += 1;
+            // To the next backtick that isn't escaped: the commands after it are the body's own, found on their own.
+            let mut end = i + 1;
+            while end < c.len() && c[end] != '`' {
+                end += if c[end] == '\\' { 2 } else { 1 };
+            }
+            out.push(c[i + 1..end.min(c.len())].iter().collect());
+            i = end + 1;
         } else {
             i += 1;
         }
@@ -5177,5 +5221,42 @@ mod tests {
         let v = asking.await.unwrap().0;
         assert_eq!(v["allow"], false);
         assert!(v["message"].as_str().unwrap().contains(&two.display().to_string()), "{v}");
+    }
+
+    /// An unquoted heredoc with many escaped backticks (a PR body with `\`code\``) made each one a command whose text held
+    /// the others, so the work doubled with each and a run grew past 10 GB.
+    #[test]
+    fn a_heredoc_full_of_backticks_is_checked_in_no_time() {
+        let start = std::time::Instant::now();
+        // Escaped, they're text; unescaped, each pair is one command.
+        for tick in ["\\`", "`"] {
+            let body = format!("- the {tick}one{tick} and {tick}two{tick} words and $(three)\n").repeat(40);
+            let command = format!("cd /tmp && cat > body.md <<EOF\n{body}EOF\ngh pr edit 1 --body-file body.md");
+            checkout_changes(&command, Path::new("/tmp"), &[]);
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+    }
+
+    /// A command that multiplies its own work anyway stops at the budget, and the command asks.
+    #[test]
+    fn work_stops_at_its_budget() {
+        let mut w = Work::new();
+        assert!((0..MAX_WORK).all(|_| w.spend()));
+        assert!(!w.spent_up);
+        assert!(!w.spend() && w.spent_up);
+        let mut late = Work { left: 5, started: std::time::Instant::now() - MAX_TIME * 2, spent_up: false };
+        assert!(!late.spend() && late.spent_up);
+    }
+
+    #[test]
+    fn a_command_that_spends_its_budget_asks_in_its_folder() {
+        WORK.with(|w| *w.borrow_mut() = Work::new());
+        // checkout_changes resets the budget, so spend it from inside: a deeply nested text is cut at MAX_DEPTH, not here.
+        let mut dirs = Dirs::default();
+        let mut out = vec![];
+        WORK.with(|w| w.borrow_mut().left = 0);
+        changes("git checkout main", &mut dirs, 0, &mut out);
+        assert!(out.is_empty());
+        assert!(WORK.with(|w| w.borrow().spent_up));
     }
 }
