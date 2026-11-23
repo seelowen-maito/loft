@@ -53,8 +53,9 @@ test("a recorded combination replaces the old one and reads nicely", () => {
 test("each combination survives a reload; a broken one falls back to its default", () => {
   const s = memory();
   assert.deepEqual(loadCombos(s), defaults);
-  saveCombo("next", "Ctrl+Shift+N", s);
-  assert.deepEqual(loadCombos(s), { switcher: "Mod+K", next: "Ctrl+Shift+N" });
+  // Free on every system: Ctrl+Shift+N is a new private window off the Mac.
+  saveCombo("next", "Ctrl+Alt+N", s);
+  assert.deepEqual(loadCombos(s), { switcher: "Mod+K", next: "Ctrl+Alt+N" });
   saveCombo("switcher", comboFromEvent(key("KeyP", { metaKey: true, shiftKey: true }))!, s);
   assert.equal(loadCombo("switcher", s), "Shift+Meta+P", "⇧⌘P is stored with Shift first and must survive");
   saveCombo("switcher", "Shift+K", s);
