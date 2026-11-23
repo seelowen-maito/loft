@@ -4,14 +4,14 @@ import remarkGfm from "remark-gfm";
 import { Link, useLocation } from "react-router";
 import { permCard } from "../../lib/pending";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Copy, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench, X,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
 import { Callout, ErrorLine, ResultLine } from "../../components/Callout";
 import { ActionButton } from "../../components/ActionButton";
 import { errorText, useAction } from "../../lib/useAction";
-import { fmtClock, fmtDate, fmtDuration, fmtDayTime, nextRunText } from "../../lib/time";
+import { fmtClock, fmtDate, fmtDateTime, fmtDuration, fmtDayTime, nextRunText } from "../../lib/time";
 import { useNow } from "../../lib/useNow";
 import { Sticker } from "../../components/Sticker";
 import { PermissionCard } from "./PermissionCard";
@@ -46,14 +46,14 @@ import { useMention } from "../../components/MentionMenu";
 import { useTagMenu } from "../../components/TagMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
-import { CANCELLED_MARK, QUEUED_MARK, sendState } from "../../lib/agentMessage";
+import { CANCELLED_MARK, QUEUED_MARK, sendState, taskText } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
 import { QuoteBlock, QuoteChip, ReplyButton, useLongPress } from "./Quote";
 import { AnswerCard } from "./AnswerCard";
 import { answerCard } from "../../lib/answerCard";
-import { QUOTE_GONE_NOTE, jumpStep, messageAnchor, quotable, quoteGone, quoteOf, replyOf } from "../../lib/reply";
+import { QUOTE_GONE_NOTE, jumpStep, messageAnchor, quotable, quoteGone, quoteOf, replyLabel, replyOf, copiedToBox } from "../../lib/reply";
 
 type Item =
   | { t: "msg"; m: Message }
@@ -456,6 +456,11 @@ export function Chat({
     setReply(quoteOf(m, agent.name));
     composer.current?.focus();
   }, [agent.name]);
+  // Copy to box on a cancelled message: its text goes into the message box, after any draft.
+  const onCopy = useCallback((m: Message) => {
+    setText((t) => copiedToBox(t, m));
+    composer.current?.focus();
+  }, [setText]);
 
   // A reply's quote, clicked: the original in view, highlighted. One from before /clear shows the earlier items first.
   const jumpTo = useRef<number | null>(null);
@@ -607,7 +612,7 @@ export function Chat({
             }
             // Only round cards read the session: other rows get null and skip re-rendering on grill events.
             const session = it.m.meta?.grill?.role === "round" ? grill : null;
-            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={session} onClearWith={clearWith} onReply={onReply} onJump={onJump} />;
+            return <MessageRow key={it.m.id} m={it.m} agent={agent} agents={agents} grill={session} onClearWith={clearWith} onReply={onReply} onCopy={onCopy} onJump={onJump} />;
           })}
           </PrsContext.Provider>
           {loading && items.length === 0 && <ChatLoading agent={agent} />}
@@ -880,15 +885,6 @@ export function Chat({
   );
 }
 
-/** A task message's text without the `[Task <id>]` tag and the bracketed instructions Loft adds for the agent. */
-function taskText(m: Message) {
-  if (!m.meta?.task_role && !m.meta?.task_id) return m.content;
-  return m.content
-    .replace(/^\[Task [0-9a-f-]{36}\]\s*/i, "")
-    .replace(/\n\n\[(Report progress on this task|Answer on the task)[\s\S]*$/, "")
-    .trim();
-}
-
 /** Chips for the tasks a message is about: attached, linked, or the task it briefs or reports on. */
 function MessageTasks({ m }: { m: Message }) {
   const ids: string[] = m.meta?.task_refs ?? (m.meta?.task_id ? [m.meta.task_id] : []);
@@ -950,20 +946,42 @@ function ChatLoading({ agent }: { agent: Agent }) {
   );
 }
 
-const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWith, onReply, onJump }: {
+export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWith, onReply, onCopy, onJump }: {
   m: Message;
   agent: Agent;
   agents: Agent[];
   grill: GrillSession | null;
   onClearWith: (next: string) => Promise<void>;
   onReply: (m: Message) => void;
+  onCopy: (m: Message) => void;
   onJump: (id: number) => void;
 }) {
-  const canReply = quotable(m);
+  const canReply = quotable(m) && !m.meta?.cancelled;
   const longPress = useLongPress(() => onReply(m));
   const press = canReply ? longPress : {};
-  const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} />;
+  const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} label={replyLabel(m, agent.name)} />;
   const cancel = useAction();
+  // The footer's status on a message waiting in the queue, yours or another agent's: Cancel, or Copy to box once cancelled.
+  const sender = m.meta?.from_agent ? (findAgent(agents, m.meta.from_agent.id)?.name ?? m.meta.from_agent.name) : null;
+  const status =
+    agent.queued_messages?.includes(m.id) ? (
+      <>
+        <span className="flex items-center gap-1 px-1 text-warn">
+          <Hourglass className="size-3" aria-hidden /> {QUEUED_MARK}
+        </span>
+        <button type="button" className="msg-act text-warn hover:bg-warn/[0.12] hover:text-warn" aria-label={sender ? `Cancel this queued message from ${sender}` : "Cancel this queued message"} disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id)).then((r) => r && !r.ok && cancel.setError("The agent already took this message"))}>
+          <X className="size-3.5" aria-hidden /> Cancel
+        </button>
+        {cancel.error && <span className="px-1 text-bad">{cancel.error}</span>}
+      </>
+    ) : m.meta?.cancelled ? (
+      <>
+        <span className="px-1">{CANCELLED_MARK}</span>
+        <button type="button" className="msg-act" title="Copy this message back into the box" onClick={() => onCopy(m)}>
+          <Copy className="size-3.5" aria-hidden /> Copy to box
+        </button>
+      </>
+    ) : null;
   if (m.kind === "clear") {
     return (
       <div className="flex items-center gap-3 py-2">
@@ -1047,25 +1065,13 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
             <FyiMark m={m} agentName={agent.name} />
             {from?.name ?? m.meta.from_agent.name} → {agent.name}
           </div>
-          <div id={messageAnchor(m.id)} className="group flex items-center gap-1" {...press}>
-            {replyButton}
+          <div id={messageAnchor(m.id)} {...press}>
             <div className={cx("whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]", m.meta?.cancelled && "text-fg-3 line-through")}>{taskText(m)}</div>
           </div>
-          {agent.queued_messages?.includes(m.id) && (
-            <div className="mt-1 flex items-center gap-2 font-mono text-[10.5px] text-warn">
-              <span className="flex items-center gap-1">
-                <Hourglass className="size-3" /> {QUEUED_MARK}
-              </span>
-              <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id)).then((r) => r && !r.ok && cancel.setError("The agent already took this message"))}>
-                Cancel
-              </button>
-              {cancel.error && <span className="text-bad">{cancel.error}</span>}
-            </div>
-          )}
-          {m.meta?.cancelled && <div className="mt-1 font-mono text-[10.5px] text-fg-3">{CANCELLED_MARK}</div>}
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
+          <MessageFooter m={m} side="right" reply={replyButton} status={status} />
         </div>
         {from && <Sticker avatar={from.avatar} lead={from.role === "lead"} size={26} className="mt-5" />}
       </div>
@@ -1075,7 +1081,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
     const images: string[] = m.meta?.images ?? [];
     const quote = replyOf(m.meta);
     return (
-      <div id={messageAnchor(m.id)} className="group flex flex-col items-end gap-1.5 pt-2" {...press}>
+      <div id={messageAnchor(m.id)} className="flex flex-col items-end gap-1.5 pt-2" {...press}>
         {quote && <QuoteBlock q={quote} onJump={onJump} />}
         {images.length > 0 && (
           <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
@@ -1092,10 +1098,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
           </div>
         )}
         {m.content && (
-          <div className="flex max-w-[80%] items-center gap-1">
-            {replyButton}
-            <div className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
-          </div>
+          <div className={cx("min-w-0 max-w-[80%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-md bg-white/[0.07] px-4 py-2.5 text-[14px]", m.meta?.cancelled && "text-fg-3 line-through")}>{taskText(m)}</div>
         )}
         <MessageTasks m={m} />
         <MessageTags m={m} />
@@ -1104,13 +1107,14 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
           <div className="font-mono text-[10.5px] text-fg-3">→ {m.meta.mentions_only ? "sent to" : "also sent to"} {m.meta.mentions.map((x: { name: string }) => x.name).join(", ")}</div>
         )}
         {m.meta?.mentioned_in && <div className="font-mono text-[10.5px] text-fg-3">mentioned in {m.meta.mentioned_in.name}'s chat</div>}
+        <MessageFooter m={m} side="right" reply={replyButton} status={status} />
       </div>
     );
   }
   if (m.meta?.grill?.end_card) {
     return (
       <div className="space-y-2">
-        <MessageRow m={{ ...m, meta: { ...m.meta, grill: { ...m.meta.grill, end_card: null } } }} agent={agent} agents={agents} grill={grill} onClearWith={onClearWith} onReply={onReply} onJump={onJump} />
+        <MessageRow m={{ ...m, meta: { ...m.meta, grill: { ...m.meta.grill, end_card: null } } }} agent={agent} agents={agents} grill={grill} onClearWith={onClearWith} onReply={onReply} onCopy={onCopy} onJump={onJump} />
         <EndCard agentId={m.agent_id} messageId={m.id} card={m.meta.grill.end_card} onClear={onClearWith} />
       </div>
     );
@@ -1118,8 +1122,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   // A mentioned agent's reply, copied into this chat.
   const replier = m.meta?.mention_reply ? findAgent(agents, m.meta.from_agent?.id) : undefined;
   return (
-    <div id={messageAnchor(m.id)} className="group relative flex gap-3 pt-1" {...press}>
-      {canReply && <div className="absolute -top-1 right-0"><ReplyButton onReply={() => onReply(m)} className="border border-line bg-ink-850 shadow" /></div>}
+    <div id={messageAnchor(m.id)} className="flex gap-3 pt-1" {...press}>
       <Sticker avatar={(replier ?? agent).avatar} lead={(replier ?? agent).role === "lead"} size={26} className="mt-0.5" />
       <div className="min-w-0 flex-1">
       <div className={cx("prose-chat min-w-0", m.meta?.subagent && "border-l border-line pl-3 text-fg-2", replier && "border-l-2 border-accent/30 pl-3")}>
@@ -1129,10 +1132,23 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
         <Markdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{m.content}</Markdown>
       </div>
       <MessagePrs text={m.content ?? ""} project={agent.project} className="mt-2" />
+      <MessageFooter m={m} side="left" reply={replyButton} />
       </div>
     </div>
   );
 });
+
+/** A message's footer, its last line: its status with an action, the time, and Reply. Yours (right) end with Reply,
+ * so it stays on the last line when the footer wraps; the agent's (left) start with it. */
+function MessageFooter({ m, side, reply, status }: { m: Message; side: "left" | "right"; reply: React.ReactNode; status?: React.ReactNode }) {
+  const time = <time dateTime={m.created_at} title={fmtDateTime(m.created_at)} className="px-1 tabular-nums">{fmtClock(m.created_at)}</time>;
+  const sep = status && <span aria-hidden className="mx-1 h-3 w-px bg-line-strong max-sm:hidden" />;
+  return (
+    <div className={cx("flex min-h-7 flex-wrap items-center gap-x-1 gap-y-0.5 font-mono text-[10.5px] text-fg-3", side === "right" ? "justify-end" : "mt-1")}>
+      {side === "right" ? <>{status}{sep}{time}{reply}</> : <>{reply}{time}{sep}{status}</>}
+    </div>
+  );
+}
 
 function SentToAgent({ use, result, agent, agents }: { use: Message; result?: Message; agent: Agent; agents: Agent[] }) {
   const to = findAgent(agents, use.meta?.input?.agent);

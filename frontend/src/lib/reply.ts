@@ -1,3 +1,5 @@
+import { taskText } from "./agentMessage.ts";
+
 /** Replying to a message: the composer's quote, and the one a sent message carries in `meta.reply_to`. */
 
 /** A quoted message: its id, who wrote it (null for the user) and a one-line excerpt. */
@@ -28,6 +30,18 @@ export function replyOf(meta: Record<string, any> | null | undefined): Quote | n
 
 /** A quote's author as shown: the user is "You". */
 export const authorLabel = (q: Quote) => q.author ?? "You";
+
+/** The footer's Reply label: it names who wrote the message. */
+export function replyLabel(m: Quotable, agentName: string): string {
+  const author = quoteOf(m, agentName).author;
+  return author ? `Reply to ${author}` : "Reply to your message";
+}
+
+/** The box after Copy to box on a cancelled message: its text as the bubble shows it, after any draft already there. */
+export function copiedToBox(draft: string, m: { content: string; meta: Record<string, any> | null }): string {
+  const text = taskText(m);
+  return draft.trim() ? `${draft}\n\n${text}` : text;
+}
 
 /** The DOM id of a message's row, which a quote jumps to. */
 export const messageAnchor = (id: number) => `msg-${id}`;

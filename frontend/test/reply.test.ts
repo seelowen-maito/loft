@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { authorLabel, jumpStep, quotable, quoteGone, quoteOf, replyOf } from "../src/lib/reply.ts";
+import { authorLabel, copiedToBox, jumpStep, quotable, quoteGone, quoteOf, replyLabel, replyOf } from "../src/lib/reply.ts";
 
 const msg = (role: string, content: string, meta: object | null = null) => ({ id: 3, role, content, meta });
 
@@ -41,4 +41,22 @@ test("only the gone-quote refusal drops the composer's quote", () => {
   assert.equal(quoteGone("The quoted message isn't in this chat."), true);
   assert.equal(quoteGone("Only chat messages can be quoted."), false);
   assert.equal(quoteGone("empty message"), false);
+});
+
+test("the footer's Reply names the author", () => {
+  assert.equal(replyLabel(msg("user", "hi"), "Dev"), "Reply to your message");
+  assert.equal(replyLabel(msg("assistant", "hi"), "Dev"), "Reply to Dev");
+  assert.equal(replyLabel(msg("user", "hi", { from_agent: { id: "l", name: "Loft Lead" } }), "Dev"), "Reply to Loft Lead");
+});
+
+test("Copy to box keeps what the box already holds", () => {
+  const m = msg("user", "bump the build");
+  assert.equal(copiedToBox("", m), "bump the build");
+  assert.equal(copiedToBox("  ", m), "bump the build");
+  assert.equal(copiedToBox("draft", m), "draft\n\nbump the build");
+});
+
+test("Copy to box on a task brief copies what the bubble shows, without Loft's tag and instructions", () => {
+  const brief = msg("user", "[Task 0b6f6c1e-3c1a-4f0e-9c55-2a7d1f0b9e11] Fix the Mac icon.\n\n[Report progress on this task with update_issue.]", { task_id: "0b6f6c1e-3c1a-4f0e-9c55-2a7d1f0b9e11" });
+  assert.equal(copiedToBox("", brief), "Fix the Mac icon.");
 });
