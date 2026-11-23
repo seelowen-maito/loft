@@ -158,3 +158,73 @@ test("a missing item or a bad id says the item doesn't exist", async () => {
   assert.equal(calls.length, 0);
   r.unmount();
 });
+
+function typeArea(area: HTMLTextAreaElement, value: string) {
+  const set = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")!.set!;
+  act(() => {
+    set.call(area, value);
+    area.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  });
+}
+
+test("Edit changes the title, tag and content, previews the Markdown as the page reads, and shows the edit time", async () => {
+  answer = (url) => ({ body: url === "/api/saved/5" && calls.at(-1)!.method === "PUT"
+    ? { ...item(5, "Deploy v2", "Decision"), content: "# Steps\n\n**Run** it", updated_at: "2026-11-23T12:30:00Z" }
+    : { ...item(5, "Deploy", "Tutorial"), source_exists: true } });
+  const r = page("/saved/5");
+  await settle();
+  assert.doesNotMatch(r.div.textContent!, /Edited/);
+  click(button(r.div, "Edit"));
+  const form = r.div.querySelector("form")!;
+  type(form.querySelector<HTMLInputElement>('input[aria-label="Title"]')!, "Deploy v2");
+  click(button(form, "Decision"));
+  typeArea(form.querySelector<HTMLTextAreaElement>('textarea[aria-label="Content"]')!, "# Steps\n\n**Run** it");
+  // The preview renders like the page: the same Markdown in the same frame.
+  click(button(form, "Preview"));
+  assert.equal(form.querySelector("textarea"), null);
+  assert.equal(form.querySelector(".prose-chat h1")!.textContent, "Steps");
+  assert.equal(form.querySelector(".prose-chat strong")!.textContent, "Run");
+  click(button(form, "Write"));
+  await act(async () => form.requestSubmit());
+  assert.deepEqual(calls.at(-1), { method: "PUT", url: "/api/saved/5", body: { title: "Deploy v2", tag: "Decision", content: "# Steps\n\n**Run** it" } });
+  await settle();
+  assert.equal(r.div.querySelector("form"), null);
+  assert.equal(r.div.querySelector("h1")!.textContent, "Deploy v2");
+  assert.equal(r.div.querySelector(".prose-chat h1")!.textContent, "Steps");
+  assert.match(r.div.textContent!, /Edited Nov 23, 2026/);
+  // The source link stays after an edit.
+  assert.ok([...r.div.querySelectorAll("a")].some((a) => a.textContent!.includes("Open in chat")));
+  r.unmount();
+});
+
+test("Edit keeps the form open with the error when saving fails, and Cancel leaves the item as it was", async () => {
+  answer = (url) => (calls.at(-1)!.method === "PUT" ? { status: 400, body: { error: "A saved item needs a title." } } : { body: { ...item(6, "Ports", "Good to know"), source_exists: true } });
+  const r = page("/saved/6");
+  await settle();
+  click(button(r.div, "Edit"));
+  type(r.div.querySelector<HTMLInputElement>('input[aria-label="Title"]')!, "Ports!");
+  await act(async () => r.div.querySelector("form")!.requestSubmit());
+  assert.match(r.div.querySelector('[role="alert"]')!.textContent!, /needs a title/);
+  click(button(r.div, "Cancel"));
+  assert.equal(r.div.querySelector("h1")!.textContent, "Ports");
+  r.unmount();
+});
+
+test("Delete asks first, then removes the item and goes back to the list", async () => {
+  answer = (url) => (url.startsWith("/api/saved?") ? { body: { items: [], tags: [] } } : calls.at(-1)!.method === "DELETE" ? { body: { ok: true } } : { body: { ...item(7, "Old", "Tutorial"), source_exists: true } });
+  const r = page("/saved/7");
+  await settle();
+  click(button(r.div, "Delete"));
+  // Nothing is deleted until the confirm.
+  assert.equal(calls.some((c) => c.method === "DELETE"), false);
+  assert.match(document.body.textContent!, /Delete this saved item\?/);
+  click(button(document.body, "Keep it"));
+  assert.equal(calls.some((c) => c.method === "DELETE"), false);
+  click(button(r.div, "Delete"));
+  const dialog = document.querySelector('[role="dialog"]')!;
+  await act(async () => (button(dialog, "Delete") as HTMLElement).click());
+  await settle();
+  assert.deepEqual(calls.find((c) => c.method === "DELETE"), { method: "DELETE", url: "/api/saved/7", body: null });
+  assert.match(r.div.textContent!, /Nothing saved yet/);
+  r.unmount();
+});

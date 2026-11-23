@@ -884,6 +884,8 @@ export const api = {
   savedList: (q = "", tag = "") => req<{ items: SavedItem[]; tags: string[] }>("GET", `/saved?${new URLSearchParams({ q, tag })}`),
   /** `source_exists`: the message it came from is still in its agent's chat. */
   savedItem: (id: number) => req<SavedItem & { source_exists: boolean }>("GET", `/saved/${id}`),
+  updateSaved: (id: number, title: string, tag: string, content: string) => req<SavedItem>("PUT", `/saved/${id}`, { title, tag, content }),
+  deleteSaved: (id: number) => req<{ ok: boolean }>("DELETE", `/saved/${id}`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
   addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),
