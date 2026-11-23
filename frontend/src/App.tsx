@@ -273,7 +273,7 @@ export default function App() {
           <Route path="/tasks" element={<OldTask />} />
           <Route path="/tasks/:id" element={<OldTask />} />
           <Route path="/needs-you" element={<NeedsYouPage />} />
-          <Route path="/simulator" element={<SimulatorPage />} />
+          {offers.simulator && <Route path="/simulator" element={<SimulatorPage />} />}
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/clean" element={<CleanPage />} />
         </Routes>

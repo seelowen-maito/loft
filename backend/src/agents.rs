@@ -572,7 +572,7 @@ These rules are Loft's and apply to every message you send another agent with `m
 7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
-    system_prompt_on(state, a, cfg!(windows))
+    system_prompt_on(state, a, std::env::consts::OS)
 }
 
 /// The prompt line saying where the agent runs, on Windows.
@@ -595,9 +595,10 @@ fn simulator_line(state: &AppState, a: &Agent) -> String {
     )
 }
 
-/// The agent's system prompt, for Loft on Windows or not: on Windows it says so, shows paths with forward slashes and
-/// leaves out the Mac's Simulator.
-fn system_prompt_on(state: &AppState, a: &Agent, windows: bool) -> String {
+/// The agent's system prompt for Loft on `os` (as `std::env::consts::OS` names it): on Windows it says so and shows
+/// paths with forward slashes; off the Mac it leaves out the Simulator and calls the host "this computer".
+fn system_prompt_on(state: &AppState, a: &Agent, os: &str) -> String {
+    let (windows, mac) = (os == "windows", os == "macos");
     let ws = workspace(state, &a.id);
     let mem_block = a.memory_index.clone().unwrap_or_else(|| memory_block(state, &a.id));
     let schedule = if a.interval_minutes > 0 {
@@ -697,8 +698,8 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         ws = shown(&ws),
         at = shown(&at_base(state, a)),
         projects = shown(&state.settings.boot().projects_dir),
-        simulator = if windows { String::new() } else { simulator_line(state, a) },
-        host = crate::tailnet::host().unwrap_or_else(|| if windows { "<this computer's Tailscale or LAN host name>" } else { "<this Mac's Tailscale or LAN host name>" }.into()),
+        simulator = if mac { simulator_line(state, a) } else { String::new() },
+        host = crate::tailnet::host().unwrap_or_else(|| if mac { "<this Mac's Tailscale or LAN host name>" } else { "<this computer's Tailscale or LAN host name>" }.into()),
         ports = crate::ports::range(state, &a.id).map(|r| format!("{}–{}", r.start(), r.end())).unwrap_or_else(|_| "your port range".into()),
         range_var = crate::ports::RANGE_VAR,
         tool_wait = TOOL_WAIT.as_millis(),
@@ -2215,15 +2216,23 @@ pub(crate) mod tests {
     fn on_windows_the_prompt_says_git_bash_and_leaves_out_the_mac() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
-        let mac = system_prompt_on(&st, &a, false);
+        let mac = system_prompt_on(&st, &a, "macos");
         assert!(mac.contains("in the Simulator on this Mac") && !mac.contains("Git Bash"), "{mac}");
-        let win = system_prompt_on(&st, &a, true);
+        let win = system_prompt_on(&st, &a, "windows");
         assert!(win.contains("This computer runs Windows. Your Bash tool is Git Bash") && win.contains("There is no PowerShell tool."), "{win}");
-        for gone in ["Simulator", "simctl", "Mac"] {
-            assert!(!win.contains(gone), "{gone} in {win}");
+        // Linux has no Simulator either, and isn't Windows.
+        let linux = system_prompt_on(&st, &a, "linux");
+        assert!(!linux.contains("Git Bash") && !linux.contains("runs Windows"), "{linux}");
+        for p in [&win, &linux] {
+            for gone in ["Simulator", "simctl", "simulator_device", "Mac"] {
+                assert!(!p.contains(gone), "{gone} in {p}");
+            }
+            // The rest is the same prompt.
+            assert!(p.contains("# Showing your work") && p.contains("# Long-term memory") && p.contains("Dev servers (web apps"));
         }
-        // The rest is the same prompt.
-        assert!(win.contains("# Showing your work") && win.contains("# Long-term memory") && win.contains("Dev servers (web apps"));
+        if crate::tailnet::host().is_none() {
+            assert!(linux.contains("<this computer's Tailscale or LAN host name>") && mac.contains("<this Mac's Tailscale"));
+        }
     }
 
     #[test]
@@ -2347,8 +2356,8 @@ pub(crate) mod tests {
     #[test]
     fn ios_builds_use_xcodes_derived_data_not_the_workspace() {
         let st = crate::tasks::tests::state();
-        // The Simulator line is the Mac's: Windows leaves it out.
-        let p = system_prompt_on(&st, &crate::tasks::tests::agent(&st, "Worker"), false);
+        // The Simulator line is the Mac's: Windows and Linux leave it out.
+        let p = system_prompt_on(&st, &crate::tasks::tests::agent(&st, "Worker"), "macos");
         assert!(p.contains("-showBuildSettings") && p.contains("-IDEBuildLocationStyle=Unique") && p.contains("$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"));
         assert!(!p.contains("-derivedDataPath build"));
     }
@@ -2748,7 +2757,7 @@ esac
         assert_ne!(seen(&a.id), seen(&b.id));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_agent_runs_on_its_own_simulator_device_from_the_run_after_it_asks_and_it_goes_with_the_agent() {
         use crate::simulator::tests::{ask_for_device, boot, fake_devices, fake_xcrun, simctl_log};
