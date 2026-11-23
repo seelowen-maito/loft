@@ -446,6 +446,7 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 .filter_map(|m| {
                     let who = match (m.role.as_str(), m.kind.as_str()) {
                         ("user", "text") => match m.meta["from_agent"]["name"].as_str() {
+                            Some(n) if m.meta["cancelled"] == true => format!("agent {n} (cancelled before it was read)"),
                             Some(n) => format!("agent {n}"),
                             None => "user".into(),
                         },
@@ -520,7 +521,7 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
             // A report on a ticket the recipient handed the sender (a message that asked for a report back) answers that hand-over:
             // it hands nothing back. An answer to a plain question on the ticket is not one.
             let report = ticket.as_deref().is_some_and(|t| {
-                state.db.list_messages(&from.id, 1000, None).unwrap_or_default().iter().any(|m| m.meta["from_agent"]["id"] == to.id.as_str() && m.meta["ticket"] == t && m.meta["report_back"] == true)
+                state.db.list_messages(&from.id, 1000, None).unwrap_or_default().iter().any(|m| m.meta["from_agent"]["id"] == to.id.as_str() && m.meta["ticket"] == t && m.meta["report_back"] == true && m.meta["cancelled"] != true)
             });
             text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref(), !report) {
                 Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),
@@ -1148,6 +1149,21 @@ mod tests {
         message(&st, &from, json!({ "agent": to.id, "text": "Which branch?", "kind": "needs_action" })).await;
         until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
         assert!(!prompts(&st, &to)[2].contains("report back"), "{}", prompts(&st, &to)[2]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_hand_over_is_not_answered_by_a_report() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        message(&st, &from, json!({ "agent": to.id, "text": "Build #12", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        let handed = st.db.list_messages(&to.id, 10, None).unwrap().into_iter().find(|m| m.meta["report_back"] == true).unwrap();
+        st.db.mark_cancelled(&to.id, handed.id).unwrap();
+
+        // The Dev never read it, so this isn't a report back: the Lead is asked to report back in turn.
+        message(&st, &to, json!({ "agent": from.id, "text": "#12 done: PR #13 ready", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the Lead's run", 10, || !is_running(&st, &from.id) && !prompts(&st, &from).is_empty()).await;
+        assert!(prompts(&st, &from)[0].contains("report back"), "{}", prompts(&st, &from)[0]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

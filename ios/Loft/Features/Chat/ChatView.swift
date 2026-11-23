@@ -397,19 +397,19 @@ struct ChatView: View {
                         .symbolRenderingMode(.hierarchical)
                 }
                 .accessibilityLabel("Conversation options")
+                .confirmationDialog("Stop \(agent.name)'s current run?", isPresented: $confirmStop, titleVisibility: .visible) {
+                    Button("Stop run", role: .destructive) {
+                        Task { do { try await store.stopRun(agent.id) } catch { actionError = APIError.from(error) } }
+                    }
+                } message: {
+                    Text("This ends the Claude process running now and drops messages waiting for it.")
+                }
+                .confirmationDialog("End the interview?", isPresented: $confirmEndGrill, titleVisibility: .visible) {
+                    Button("End", role: .destructive) { grillCommand(.end) }
+                } message: {
+                    Text("\(agent.name) will sum up what you covered.")
+                }
             }
-        }
-        .confirmationDialog("Stop \(agent.name)'s current run?", isPresented: $confirmStop, titleVisibility: .visible) {
-            Button("Stop run", role: .destructive) {
-                Task { do { try await store.stopRun(agent.id) } catch { actionError = APIError.from(error) } }
-            }
-        } message: {
-            Text("This ends the Claude process running now and drops messages waiting for it.")
-        }
-        .confirmationDialog("End the interview?", isPresented: $confirmEndGrill, titleVisibility: .visible) {
-            Button("End", role: .destructive) { grillCommand(.end) }
-        } message: {
-            Text("\(agent.name) will sum up what you covered.")
         }
         .errorAlert($actionError)
         .task(id: agentId) {

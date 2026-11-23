@@ -1764,6 +1764,13 @@ impl Db {
         Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
     }
 
+    /// Marks a message cancelled (an agent message taken back out of a queue).
+    pub fn mark_cancelled(&self, agent_id: &str, id: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("UPDATE messages SET meta = json_set(meta, '$.cancelled', json('true')) WHERE agent_id = ?1 AND id = ?2", params![agent_id, id])?;
+        Ok(())
+    }
+
     /// Records on an end-of-planning card that its Delivery started: who got which ticket.
     pub fn mark_delivery_started(&self, agent_id: &str, id: i64, entry: Option<usize>, started: &Value) -> Result<()> {
         let c = self.0.lock().unwrap();
