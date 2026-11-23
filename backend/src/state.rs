@@ -108,6 +108,18 @@ pub struct Subagent {
     pub launched: bool,
 }
 
+/// An agent message waiting in `Runtime::queued`: its id in the chat, the prompt it added, and what it changed
+/// on the agent when it was queued, which a cancel undoes.
+#[derive(Default)]
+pub struct QueuedMessage {
+    pub id: i64,
+    pub prompt: String,
+    /// The ticket it made the agent's current one, and the one before it.
+    pub ticket_set: Option<(String, Option<String>)>,
+    /// It asked for a context clear before the run (`fresh_before`) that wasn't already asked for.
+    pub set_fresh: bool,
+}
+
 #[derive(Default)]
 pub struct Runtime {
     /// agent id -> kill switch for the currently running claude process
@@ -116,7 +128,7 @@ pub struct Runtime {
     pub queued: HashMap<String, Vec<String>>,
     /// agent id -> the agent messages (their ids in its chat, with the prompt each added to `queued`) waiting
     /// for the current run to end
-    pub queued_messages: HashMap<String, Vec<(i64, String)>>,
+    pub queued_messages: HashMap<String, Vec<QueuedMessage>>,
     /// agents whose queued work includes the user's own message or a schedule: the run it starts counts
     /// for an Unread reply
     pub queued_for_user: std::collections::HashSet<String>,

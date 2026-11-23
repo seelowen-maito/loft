@@ -93,7 +93,7 @@ pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     v["waiting_on"] = json!(info.map_or(&vec![], |i| &i.waiting_on));
     v["waiting_since"] = json!(info.and_then(|i| i.waiting_since.as_ref()));
     v["subagents"] = json!(info.map_or(&vec![], |i| &i.subagents));
-    v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(vec![], |q| q.iter().map(|(id, _)| *id).collect()));
+    v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(vec![], |q| q.iter().map(|m| m.id).collect()));
     // A Redraw waiting behind the current run or drawing now: the Redraw button shows it's busy.
     v["redrawing"] = json!(rt.redraw_queued.contains(agent_id) || rt.redrawing.contains(agent_id));
 }
@@ -917,6 +917,8 @@ pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text:
 /// tickets itself when its team has no Dev. Returns the message's id when it waits for a run to end.
 /// With `report_back`, an agent's needs-action message hands `ticket` over: the recipient is told to report back.
 pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>, report_back: bool) -> Option<i64> {
+    let prev_ticket = state.db.get_agent(&to.id).ok().flatten().and_then(|a| a.delivery_ticket);
+    let fresh_was = state.rt.lock().unwrap().fresh_before.contains(&to.id);
     let fresh = ticket.is_some_and(|t| ticket_boundary(state, &to.id, t, crate::delivery::fresh_context_applies(state, to)));
     if let Some(t) = ticket {
         meta["ticket"] = json!(t);
@@ -940,7 +942,14 @@ pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str,
         ));
     }
     start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg, false);
-    let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.iter().any(|(i, _)| i == id)));
+    let queued = msg.filter(|id| {
+        let mut rt = state.rt.lock().unwrap();
+        let Some(q) = rt.queued_messages.get_mut(&to.id).and_then(|q| q.iter_mut().find(|m| m.id == *id)) else { return false };
+        // What a cancel undoes.
+        q.ticket_set = ticket.filter(|t| prev_ticket.as_deref() != Some(*t)).map(|t| (t.to_string(), prev_ticket.clone()));
+        q.set_fresh = fresh && !fresh_was;
+        true
+    });
     if queued.is_some() {
         emit_run(state, &to.id);
     }
@@ -1039,7 +1048,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                     rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt.clone())));
                 }
                 if let Some(id) = msg {
-                    rt.queued_messages.entry(agent_id.to_string()).or_default().push((id, prompt));
+                    rt.queued_messages.entry(agent_id.to_string()).or_default().push(crate::state::QueuedMessage { id, prompt, ..Default::default() });
                 }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
@@ -1204,30 +1213,28 @@ pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str
 /// The queue is read and changed under one lock, the one the run takes it under when it ends: a message is either
 /// cancelled or delivered, never both. False when it isn't queued (a run already took it).
 pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
-    let ticket = state.db.get_message(agent_id, id)?.and_then(|m| m.meta["ticket"].as_str().map(String::from));
+    let undo;
     {
         let mut rt = state.rt.lock().unwrap();
-        let Some(at) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().position(|(i, _)| *i == id)) else {
+        let Some(at) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().position(|m| m.id == id)) else {
             return Ok(false);
         };
-        let (_, prompt) = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
+        let m = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
         if let Some(q) = rt.queued.get_mut(agent_id)
-            && let Some(p) = q.iter().position(|x| *x == prompt)
+            && let Some(p) = q.iter().position(|x| *x == m.prompt)
         {
             q.remove(p);
         }
-        // Nothing left to start a new ticket: the agent doesn't clear its context for one it never got.
-        if rt.queued.get(agent_id).is_none_or(|q| q.is_empty()) {
+        // Undo exactly what it changed: the context clear it asked for, and the ticket it made current.
+        if m.set_fresh {
             rt.fresh_before.remove(agent_id);
         }
+        undo = m.ticket_set;
     }
-    // Unless an earlier message already handed the ticket over: then it is still the one in progress.
-    let handed = |t: &str| state.db.list_messages(agent_id, 1000, None).unwrap_or_default().iter().any(|m| m.id != id && m.meta["ticket"] == t && m.meta["cancelled"] != true);
-    if let Some(t) = ticket.filter(|t| !handed(t)) {
-        // The ticket was never handed over: its next message is a boundary again.
+    if let Some((ticket, prev)) = undo {
         let _ = state.db.update_agent(agent_id, |a| {
-            if a.delivery_ticket.as_deref() == Some(t.as_str()) {
-                a.delivery_ticket = None;
+            if a.delivery_ticket.as_deref() == Some(ticket.as_str()) {
+                a.delivery_ticket = prev;
             }
         });
     }
@@ -2887,7 +2894,7 @@ esac
         assert!(cancel_queued(&st, &to.id, drop).unwrap());
         {
             let rt = st.rt.lock().unwrap();
-            assert_eq!(rt.queued_messages[&to.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [keep]);
+            assert_eq!(rt.queued_messages[&to.id].iter().map(|m| m.id).collect::<Vec<_>>(), [keep]);
             let q = &rt.queued[&to.id];
             assert!(q.len() == 1 && q[0].contains("keep me") && !q.iter().any(|p| p.contains("never mind")), "{q:?}");
         }
@@ -2918,11 +2925,20 @@ esac
         assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket, None);
         assert!(st.rt.lock().unwrap().queued.get(&to.id).is_none_or(|q| q.is_empty()));
 
-        // A second message on the ticket, cancelled, leaves it handed over by the first.
-        message_on_ticket(&st, &from, &to, "Build #12", json!({}), Some("o/r#12"), true).unwrap();
-        let again = message_on_ticket(&st, &from, &to, "Also the lint", json!({}), Some("o/r#12"), true).unwrap();
-        assert!(cancel_queued(&st, &to.id, again).unwrap());
+        // The agent was on another ticket: cancelling puts that one back, not nothing.
+        st.db.update_agent(&to.id, |a| a.delivery_ticket = Some("o/r#7".into())).unwrap();
+        let id = message_on_ticket(&st, &from, &to, "Build #12", json!({}), Some("o/r#12"), true).unwrap();
         assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#12"));
+        assert!(cancel_queued(&st, &to.id, id).unwrap());
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#7"));
+
+        // Another message still queued keeps the context clear it asked for; cancelling a later one doesn't touch it.
+        let first = message_on_ticket(&st, &from, &to, "Build #20", json!({}), Some("o/r#20"), true).unwrap();
+        let second = message_on_ticket(&st, &from, &to, "Build #21", json!({}), Some("o/r#21"), true).unwrap();
+        assert!(cancel_queued(&st, &to.id, second).unwrap());
+        assert!(st.rt.lock().unwrap().fresh_before.contains(&to.id), "the first still wants it");
+        assert!(cancel_queued(&st, &to.id, first).unwrap());
+        assert!(!st.rt.lock().unwrap().fresh_before.contains(&to.id));
     }
 
     #[tokio::test]
