@@ -65,21 +65,38 @@ struct SpecRow: View {
         return SpecViews.onIt(d) + [SpecViews.waitingOnYouLine(d.waitingOnYou), SpecViews.waitingLine(d.waitingForLead)].compactMap { $0 }
     }
 
+    /// Truncates in the middle, so its `#n` always shows.
+    private var refText: some View {
+        Text(SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1).truncationMode(.middle)
+    }
+
+    @ViewBuilder private var projectText: some View {
+        if let project = SpecViews.project(spec) {
+            Text(project).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                .accessibilityLabel("Project \(project)")
+        }
+    }
+
+    @ViewBuilder private var badgeView: some View {
+        if let badge {
+            Text(badge).font(.caption2.weight(.medium))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Theme.accent.opacity(0.15), in: Capsule())
+                .foregroundStyle(Theme.accent)
+                .fixedSize()
+        }
+    }
+
     var body: some View {
         let p = SpecViews.progress(of: spec, delivery, tasks: store.tasks)
         VStack(alignment: .leading, spacing: 5) {
             Text(spec.title).font(.body).readableLineLimit(2)
-            HStack(spacing: 6) {
-                Text(SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
-                if let project = SpecViews.project(spec) {
-                    Text(project).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
-                        .accessibilityLabel("Project \(project)")
-                }
-                if let badge {
-                    Text(badge).font(.caption2.weight(.medium))
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Theme.accent.opacity(0.15), in: Capsule())
-                        .foregroundStyle(Theme.accent)
+            // All on one line when it fits; else the project moves to its own line, so it never pushes out the ref's `#n`.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) { refText.fixedSize(); projectText.fixedSize(); badgeView }
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) { refText; badgeView }
+                    projectText
                 }
             }
             if let p {

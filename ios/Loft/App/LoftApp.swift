@@ -16,7 +16,10 @@ struct LoftApp: App {
         OldPairing.clear()
         let store = LoftStore(api: Self.makeAPI())
         _store = State(initialValue: store)
-        _voice = State(initialValue: VoiceSession(store: store))
+        let voice = VoiceSession(store: store)
+        // On the Talk screen, an agent named in what you say is who it goes to (#343).
+        voice.picksRecipient = true
+        _voice = State(initialValue: voice)
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-fixture-digest") {
             UserDefaults.standard.set(Date().addingTimeInterval(-2 * 3600).timeIntervalSince1970, forKey: Prefs.digestLastLooked)
@@ -35,8 +38,9 @@ struct LoftApp: App {
         }
         if ProcessInfo.processInfo.arguments.contains("-ui-onboarding") { return nil }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
-            // Each UI test starts from nothing, not from the last test's cached state.
-            SnapshotStore.standard.clear()
+            // Each UI test starts from nothing, not from the last test's cached state (`-keep-cache`: a relaunch
+            // that opens on what the last launch cached, as a cold start does).
+            if !args.contains("-keep-cache") { SnapshotStore.standard.clear() }
             return FixtureAPI.fromLaunchArguments()
         }
         #endif

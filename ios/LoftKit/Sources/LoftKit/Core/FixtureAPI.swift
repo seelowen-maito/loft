@@ -256,6 +256,15 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             perms.append(PermissionRequest(id: "p2", agentId: "be", source: "prompt", toolName: "Bash", input: ["command": "git push origin main"],
                                            reason: "Ship the settings endpoints", rule: "Bash(git push *)", status: "pending", createdAt: ago(2)))
         }
+        if args.contains("-fixture-questions") {
+            // AskUserQuestion, once allowed: the questions themselves, one single-choice and one multi-choice.
+            perms.append(PermissionRequest(id: "q1", agentId: "qa", source: "questions", toolName: "AskUserQuestion", input: ["questions": .array([
+                ["question": "Which store should the backups go to?", "header": "Store", "multiSelect": false, "options": .array([
+                    ["label": "B2", "description": "Backblaze, cheapest per GB"], ["label": "S3", "description": "AWS, what prod uses"]])],
+                ["question": "Which regions?", "header": "Regions", "multiSelect": true, "options": .array([
+                    ["label": "EU"], ["label": "US"], ["label": "Asia"]])],
+            ])], reason: nil, rule: nil, status: "pending", createdAt: ago(1)))
+        }
         if args.contains("-fixture-kill-permission") {
             // A kill with a program to name (Always allow offered), and one with none (Allow once and Deny only).
             perms.append(PermissionRequest(id: "k1", agentId: "be", source: "prompt", toolName: "Kill", input: ["command": "pkill -x Loft"],
@@ -266,6 +275,21 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         if args.contains("-fixture-agent-asks") {
             // The Orchestrator's last word is a question: suggested replies show under it.
             msgs["orch"]?.append(m(20, "orch", "assistant", "text", "Tests are green on the settings PR. Should I merge it now or wait for QA?", 1))
+        }
+        if args.contains("-fixture-long-chat") {
+            // The Backend Agent's chat is longer than a page: "Load earlier messages" is far above its newest reply
+            // (and, with `-fixture-risky-permission`, the approval card in its chat). A run of tool calls straddles
+            // the first page's oldest message, as a live chat's often does: its collapsed row grows once the
+            // earlier page comes.
+            msgs["be"] = (1...150).map { (i: Int) -> ChatMessage in
+                if (49...51).contains(i) {
+                    return m(Int64(1000 + i), "be", "assistant", "tool_use", "Running the settings tests", Double(300 - i), meta: ["name": "Bash"])
+                }
+                let reply = i % 2 == 0
+                let text = !reply ? "Carry on with the next step."
+                    : "Step \(i / 2) of the settings screen is done." + String(repeating: "\n\n- Built the **row** and its `toggle`, with a test for each state it can be in.", count: i % 7)
+                return m(Int64(1000 + i), "be", reply ? "assistant" : "user", "text", text, Double(300 - i))
+            }
         }
         if args.contains("-fixture-run-silent") {
             // Nothing new in the chat either: the last message is older than the silence.
@@ -471,13 +495,15 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     public func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply"] + (grill ? ["grill"] : []))
     }
 
     public func agents() async throws -> [Agent] { try check(); return locked { agentList } }
 
     public func messages(agentId: String, limit: Int, before: Int64?) async throws -> [ChatMessage] {
         try check()
+        // An earlier page takes a moment, as over the network.
+        if before != nil { try? await Task.sleep(for: .milliseconds(500)) }
         return locked { (msgs[agentId] ?? []).filter { before == nil || $0.id < before! }.suffix(limit) }
     }
 
@@ -536,6 +562,15 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
                 guard taskList.contains(where: { $0.id == t }) else { throw APIError.server(status: 400, message: "The attached issue doesn't exist.") }
                 tags["task_id"] = .string(t)
                 tags["task_refs"] = .array([.string(t)])
+            }
+            // A reply, as the backend stores it (spec #572): only a chat message of this chat can be quoted.
+            if let r = meta?["reply_to"]?.numberValue {
+                let agentName = agentList.first { $0.id == agentId }?.name ?? ""
+                guard let q = msgs[agentId]?.first(where: { $0.id == Int64(r) }), q.isQuotable else {
+                    throw APIError.server(status: 400, message: "The quoted message isn't in this chat.")
+                }
+                let quote = MessageQuote(of: q, agentName: agentName)
+                tags["reply_to"] = ["id": .number(Double(quote.id)), "role": .string(q.role), "author": .optional(quote.author), "excerpt": .string(quote.excerpt)]
             }
             let m = ChatMessage(id: nextId, agentId: agentId, runId: nil, role: "user", kind: "text", content: text,
                                 meta: .object(tags), createdAt: Date())
@@ -836,6 +871,17 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         if ProcessInfo.processInfo.arguments.contains("-fixture-disk-low") {
             list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.diskLow.utf8)), at: 0)
         }
+        // `-fixture-questions`: the questions request's item, as the server words it.
+        if ProcessInfo.processInfo.arguments.contains("-fixture-questions"), var q = list.items.first(where: { $0.id == "permission:p1" }) {
+            q = NeedsYouItem(id: "permission:q1", type: q.type, urgency: 3, agent: .init(id: "qa", name: "QA Agent"), taskId: nil,
+                             title: "QA Agent has questions for you", reason: "Answer them in the chat.",
+                             text: "Which store should the backups go to?\nWhich regions?", createdAt: q.createdAt, ageSeconds: q.ageSeconds,
+                             links: [], actions: [
+                                NeedsYouAction(kind: "open", label: "Open chat", target: .init(screen: "chat", agentId: "qa")),
+                                NeedsYouAction(kind: "deny", label: "Skip", method: "POST", path: "/api/permissions/q1", body: ["decision": "deny"])],
+                             project: q.project, pr: nil)
+            list.items.insert(q, at: 0)
+        }
         // The demo (and the App Store shots) read like real work, not the redaction and line-limit tests' text.
         if scripted {
             for n in list.items.indices {
@@ -1017,7 +1063,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
     public func permissions() async throws -> [PermissionRequest] { try check(); return locked { perms } }
 
-    public func decidePermission(id: String, decision: String) async throws {
+    public func decidePermission(id: String, decision: String, answers: [String: String]?) async throws {
         try check()
         locked { if let i = perms.firstIndex(where: { $0.id == id }) { perms[i].status = decision == "deny" ? "denied" : "allowed_once" } }
     }

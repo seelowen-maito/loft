@@ -10,6 +10,10 @@ final class DigestTests: XCTestCase {
         ActivityItem(id: UUID().uuidString, type: type, at: now.addingTimeInterval(-minutesAgo * 60), agentId: agent, taskId: nil,
                      messageId: nil, summary: summary, severity: "info")
     }
+    private func ask(_ agent: String, _ status: String, minutesAgo: Double = 5) -> PermissionRequest {
+        PermissionRequest(id: UUID().uuidString, agentId: agent, source: "prompt", toolName: "Bash", input: nil, reason: nil, rule: nil,
+                          status: status, createdAt: now.addingTimeInterval(-minutesAgo * 60))
+    }
 
     func testOnlyWhatMattersSinceYouLooked() {
         let d = Digest.build(since: now.addingTimeInterval(-3600), activity: [
@@ -18,7 +22,7 @@ final class DigestTests: XCTestCase {
             a("agent.message", "qa", "QA Agent messaged Backend Agent: hi", minutesAgo: 20),
             a("task.blocked", "qa", "QA Agent is blocked on task “Test the integrated flow”", minutesAgo: 10),
             a("agent.failed", "docs", "Docs Agent failed: link checker crashed", minutesAgo: 90), // before you left
-        ], pullRequests: [], agents: agents)
+        ], pullRequests: [], agents: agents, permissions: [])
         XCTAssertEqual(d.lines.map(\.agentName), ["QA Agent", "Backend Agent"], "problems first; started/messaged and old items left out")
         XCTAssertEqual(d.lines.first?.text, "Issue blocked: “Test the integrated flow”")
         XCTAssertTrue(d.lines.first!.needsYou)
@@ -31,7 +35,7 @@ final class DigestTests: XCTestCase {
         let d = Digest.build(since: now.addingTimeInterval(-3600), activity: [
             a("agent.failed", "docs", "Docs Agent failed: link checker crashed", minutesAgo: 10),
             a("approval.required", "qa", "QA Agent needs approval", minutesAgo: 5),
-        ], pullRequests: [], agents: agents)
+        ], pullRequests: [], agents: agents, permissions: [ask("qa", "pending")])
         XCTAssertEqual(d.lines.first { $0.agentId == "docs" }?.failed, true)
         XCTAssertEqual(d.lines.first { $0.agentId == "qa" }?.failed, false)
     }
@@ -41,13 +45,36 @@ final class DigestTests: XCTestCase {
             a("task.completed", "be", "Backend Agent finished task “Endpoints”", minutesAgo: 30),
             a("approval.required", "be", "Backend Agent asked for approval: Bash", minutesAgo: 5),
         ], pullRequests: [PullRequest(id: "p", agentId: "be", slug: "x/y", number: 7, url: "u", title: "Settings endpoints", state: "open",
-                                      draft: false, createdAt: now.addingTimeInterval(-600))], agents: agents)
+                                      draft: false, createdAt: now.addingTimeInterval(-600))], agents: agents,
+                             permissions: [ask("be", "pending")])
         XCTAssertEqual(d.lines.count, 1)
         XCTAssertEqual(d.lines[0].facts, ["Waiting for your approval", "Opened a PR: Settings endpoints", "Finished “Endpoints”"])
         XCTAssertEqual(d.lines[0].text, "Waiting for your approval · Opened a PR: Settings endpoints · +1 more")
     }
 
+    func testAPendingAskWaitsForYou() {
+        let d = Digest.build(since: now.addingTimeInterval(-3600), activity: [
+            a("task.completed", "be", "Backend Agent finished task “Endpoints”", minutesAgo: 30),
+            a("approval.required", "qa", "QA Agent asked for approval: Bash", minutesAgo: 5),
+        ], pullRequests: [], agents: agents, permissions: [ask("qa", "expired", minutesAgo: 50), ask("qa", "pending")])
+        XCTAssertEqual(d.lines.first?.agentName, "QA Agent")
+        XCTAssertEqual(d.lines.first?.text, "Waiting for your approval")
+        XCTAssertTrue(d.lines.first!.needsYou)
+    }
+
+    func testAResolvedAskNoLongerWaits() {
+        let d = Digest.build(since: now.addingTimeInterval(-3600), activity: [
+            a("approval.required", "qa", "QA Agent asked for approval: Checkout", minutesAgo: 20),
+            a("approval.required", "be", "Backend Agent asked for approval: Bash", minutesAgo: 10),
+            a("approval.required", "docs", "Docs Agent asked for approval: Bash", minutesAgo: 5),
+        ], pullRequests: [], agents: agents, permissions: [ask("qa", "expired"), ask("be", "denied"), ask("be", "allowed_once", minutesAgo: 30)])
+        XCTAssertEqual(d.lines.first { $0.agentId == "qa" }?.text, "Approval expired")
+        XCTAssertEqual(d.lines.first { $0.agentId == "be" }?.text, "Approval denied", "the latest ask decides")
+        XCTAssertNil(d.lines.first { $0.agentId == "docs" }, "no ask known: nothing to say")
+        XCTAssertFalse(d.lines.contains { $0.needsYou || $0.facts.contains("Waiting for your approval") })
+    }
+
     func testNothingNewMeansNoCard() {
-        XCTAssertTrue(Digest.build(since: now, activity: [a("task.completed", "be", "x", minutesAgo: 5)], pullRequests: [], agents: agents).lines.isEmpty)
+        XCTAssertTrue(Digest.build(since: now, activity: [a("task.completed", "be", "x", minutesAgo: 5)], pullRequests: [], agents: agents, permissions: []).lines.isEmpty)
     }
 }

@@ -102,8 +102,19 @@ final class QuickSearchController {
         // Needs no window: a directly launched app may not open one.
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-render-chat-note"), i + 1 < args.count { Task { renderChatNote(to: args[i + 1]) } }
+        if let i = args.firstIndex(of: "-render-reply"), i + 1 < args.count { Task { await renderReply(to: args[i + 1]) } }
         if let i = args.firstIndex(of: "-render-quick-search"), i + 2 < args.count {
             Task { await renderQuickSearch(self, query: args[i + 1], to: args[i + 2]) }
+        }
+        // UI tests: a synthesized ⌥Space reaches the app, not the global hot key, so open it as the hot key does,
+        // once the main window is up (opened at launch, it's gone when the window opens).
+        if args.contains("-show-quick-search") {
+            Task {
+                for _ in 0..<100 where !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                self.toggle()
+            }
         }
         #endif
     }

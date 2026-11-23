@@ -11,6 +11,9 @@ struct ChatView: View {
     @State private var loading = true
     @State private var loadError: APIError?
     @State private var loadingOlder = false
+    /// The item that was at the top when you tapped "Load earlier messages": it goes back to the top once the
+    /// earlier ones are drawn above it.
+    @State private var keepTop: String?
     /// How many of the latest chat items are drawn; "Load earlier messages" shows more.
     @State private var shown = Self.page
     private static let page = 60
@@ -43,6 +46,8 @@ struct ChatView: View {
     @State private var routeSuggestion: RouteSuggestion?
     /// A task picked in "Attach an issue", sent with the next message (`meta.task_id`).
     @State private var attached: HBTask?
+    /// The message picked with Reply, quoted above the message box and sent with the next message (spec #572).
+    @State private var replyingTo: MessageQuote?
     /// Photos and a video picked in the composer, uploading or up, until they go with a message.
     @State private var attachments: [AttachmentDraft] = []
     @State private var pickingTask = false
@@ -97,16 +102,19 @@ struct ChatView: View {
                     if all.count > shown || store.historyHasMore[agentId] == true {
                         Button {
                             // Keep your place: the item at the top stays at the top once the earlier ones are in.
-                            let keep = items.first?.id
+                            // Not a row of tool calls: one cut by the page boundary takes a new id once the
+                            // earlier calls in its run arrive.
                             func reveal() {
+                                keepTop = items.first { if case .tools = $0 { false } else { true } }?.id
                                 shown += Self.page
-                                if let keep { DispatchQueue.main.async { proxy.scrollTo(keep, anchor: .top) } }
                             }
                             if all.count > shown { reveal(); return }
                             Task {
                                 loadingOlder = true
                                 try? await store.loadOlder(agentId)
-                                reveal()
+                                // Nothing new (or the fetch failed): no earlier page will be drawn to scroll back
+                                // from, and a kept item left set would pull you up later, once new messages arrive.
+                                if ChatItem.build(store.conversation(agentId)).count > all.count { reveal() }
                                 loadingOlder = false
                             }
                         } label: {
@@ -123,7 +131,17 @@ struct ChatView: View {
                             .padding(.top, 40)
                     }
                     ForEach(items) { item in
-                        ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand, clearWith: clearWith).id(item.id)
+                        ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand, clearWith: clearWith,
+                                     reply: store.info?.supports(.reply) == true ? { replyingTo = MessageQuote(of: $0, agentName: agent.name) } : nil,
+                                     jump: { id in
+                                         // The original may be loaded but not drawn yet: draw down to it first.
+                                         let key = ChatItem.key(message: id)
+                                         guard let i = all.firstIndex(where: { $0.id == key }) else { return }
+                                         keepTop = nil
+                                         shown = max(shown, all.count - i)
+                                         DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
+                                     })
+                            .id(item.id)
                     }
                     ForEach(store.pending(for: agentId)) { p in
                         PendingBubble(message: p).id(p.id)
@@ -146,12 +164,22 @@ struct ChatView: View {
                 .padding(.horizontal, Theme.gutter)
                 .padding(.vertical, 12)
             }
+            // Open on the newest messages. On a cold launch the cached chat is there before the first layout, and a
+            // scrollTo then lands nowhere (#625).
+            .defaultScrollAnchor(.bottom)
             // Jump to the bottom once it has messages; new ones scroll it down below.
             .task(id: !items.isEmpty) {
                 guard !items.isEmpty else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
             .scrollDismissesKeyboard(.interactively)
+            // Scroll back to the kept item once the earlier page is in the view, not right after the tap: after a
+            // server fetch a scroll queued then runs before the new page is laid out, and you land on its top (#630).
+            .onChange(of: items.first?.id) {
+                guard let keep = keepTop else { return }
+                keepTop = nil
+                DispatchQueue.main.async { proxy.scrollTo(keep, anchor: .top) }
+            }
             .onChange(of: items.last?.id) { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: store.pending(for: agentId).count) { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             // The questions card replaces the permission card: keep it in view.
@@ -223,6 +251,24 @@ struct ChatView: View {
                     .padding(.top, 6)
                     .background(.bar)
                 }
+                if let q = replyingTo {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrowshape.turn.up.left").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Replying to \(q.authorLabel)").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+                            Text(verbatim: q.excerpt).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        Button { replyingTo = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Remove the quote")
+                    }
+                    .padding(.horizontal, Theme.gutter)
+                    .background(.bar)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Replying to \(q.authorLabel): \(q.excerpt)")
+                    .accessibilityIdentifier("replyQuote")
+                }
                 if let t = attached {
                     HStack(spacing: 6) {
                         Image(systemName: "paperclip").foregroundStyle(.secondary)
@@ -239,16 +285,21 @@ struct ChatView: View {
                     .accessibilityIdentifier("attachedTask")
                 }
                 if let t = talkText, !t.isEmpty {
-                    TalkConfirmBar(text: t, current: draft, startAsking: Self.fixtureAsks, send: {
+                    TalkConfirmBar(text: t, current: draft, note: VoicePresentation.shared.recipientNote, startAsking: Self.fixtureAsks, send: {
                         talkText = nil
                         draft = ""
                         VoicePresentation.shared.statusAgentId = nil
+                        VoicePresentation.shared.recipientNote = nil
                         voice.sendWithStatus(t, to: agentId)
                     }, cancel: {
                         talkText = nil
                         draft = ""
                         VoicePresentation.shared.statusAgentId = nil
-                    }, done: { talkText = nil })
+                        VoicePresentation.shared.recipientNote = nil
+                    }, done: {
+                        talkText = nil
+                        VoicePresentation.shared.recipientNote = nil
+                    })
                     .id(t)
                 }
                 ComposerView(text: $draft, recipient: agent.name, agentId: agentId, isOrchestrator: store.orchestratorId == agent.id,
@@ -268,9 +319,10 @@ struct ChatView: View {
                         runCommand(action, text: text)
                     } else if !attachments.isEmpty {
                         // A message with photos or a video is always plain chat.
-                        let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
+                        let meta = MessageQuote.meta(attached.map { .object(["task_id": .string($0.id)]) }, replyingTo: replyingTo)
                         let files = attachments.compactMap(\.uploaded)
                         attached = nil
+                        replyingTo = nil
                         attachments = []
                         Task { await store.send(text, to: agentId, meta: meta, images: files) }
                     // While a round waits, a voice turn answers the question the voice is on (tagged so it can't land
@@ -283,8 +335,9 @@ struct ChatView: View {
                         voice.sendWithStatus(text, to: agentId)
                     } else {
                         quickReply(to: text)
-                        let meta: JSONValue? = attached.map { .object(["task_id": .string($0.id)]) }
+                        let meta = MessageQuote.meta(attached.map { .object(["task_id": .string($0.id)]) }, replyingTo: replyingTo)
                         attached = nil
+                        replyingTo = nil
                         Task { await store.send(text, to: agentId, meta: meta) }
                     }
                 }
@@ -704,11 +757,13 @@ enum ChatItem: Identifiable, Hashable {
 
     var id: String {
         switch self {
-        case .message(let m): "m\(m.id)"
+        case .message(let m): Self.key(message: m.id)
         case .tools(let id, _): "t\(id)"
         case .divider(let id, _, _): "d\(id)"
         }
     }
+
+    static func key(message id: Int64) -> String { "m\(id)" }
 
     static func build(_ messages: [ChatMessage]) -> [ChatItem] {
         var out: [ChatItem] = []
@@ -763,6 +818,9 @@ private struct ChatItemView: View {
     var currentQuestionId: String?
     var command: (GrillCommand) -> Void = { _ in }
     var clearWith: (String) async -> Void = { _ in }
+    /// Reply to a message (nil on a server without replies), and jump to a quoted one.
+    var reply: ((ChatMessage) -> Void)?
+    var jump: (Int64) -> Void = { _ in }
 
     var body: some View {
         switch item {
@@ -778,7 +836,7 @@ private struct ChatItemView: View {
                 MessageBubble(message: m, agent: agent)
                 if let card = m.grill?.endCard { EndCardView(message: m, card: card, clearWith: clearWith) }
             }
-        case .message(let m): MessageBubble(message: m, agent: agent)
+        case .message(let m): MessageBubble(message: m, agent: agent, reply: m.isQuotable ? reply : nil, jump: jump)
         case .tools(_, let calls): ToolGroup(calls: calls)
         case .divider(_, let text, let date):
             HStack {
@@ -796,6 +854,8 @@ private struct MessageBubble: View {
     @Environment(Speaker.self) private var speaker
     let message: ChatMessage
     let agent: Agent
+    var reply: ((ChatMessage) -> Void)?
+    var jump: (Int64) -> Void = { _ in }
 
     private var isUser: Bool { message.role == "user" && message.fromAgentName == nil }
 
@@ -876,14 +936,25 @@ private struct MessageBubble: View {
                         }
                         .accessibilityIdentifier("tagChips")
                     }
+                    if let q = message.replyQuote {
+                        QuoteBlock(quote: q) { jump(q.id) }
+                    }
                     if message.videos.isEmpty && message.photos.isEmpty || !message.displayContent.isEmpty {
-                        CollapsibleText(text: message.displayContent)
+                        CollapsibleText(text: message.displayContent, linkColor: isUser ? Theme.onAccent : nil)
                             .font(.body)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                             .foregroundStyle(isUser ? Theme.onAccent : .primary)
                             .background(isUser ? AnyShapeStyle(Theme.accent.gradient) : AnyShapeStyle(Theme.card),
                                         in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .contextMenu {
+                                if let reply {
+                                    Button { reply(message) } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
+                                }
+                                // The long press opens this menu instead of text selection: keep Copy in it.
+                                Button { UIPasteboard.general.string = message.displayContent } label: { Label("Copy", systemImage: "doc.on.doc") }
+                            }
                     }
                     HStack(spacing: 6) {
                         Text(isUser ? message.createdAt.formatted(date: .omitted, time: .shortened)
@@ -906,7 +977,33 @@ private struct MessageBubble: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(isUser ? "You" : message.fromAgentName ?? agent.name)\(message.isFYI ? ", FYI" : ""): \(message.displayContent)")
             .accessibilityAction(named: "Read aloud") { if !isUser { speaker.speak(message) } }
+            .accessibilityAction(named: "Reply") { reply?(message) }
+            .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
         }
+    }
+}
+
+/// The message a reply quotes, above its bubble: who wrote it and a line of it, as plain text. A tap jumps to it.
+private struct QuoteBlock: View {
+    let quote: MessageQuote
+    let jump: () -> Void
+
+    var body: some View {
+        Button(action: jump) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2).fill(Theme.accent).frame(width: 3)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(quote.authorLabel).font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+                    Text(verbatim: quote.excerpt).font(.footnote).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.leading)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("messageQuote")
     }
 }
 

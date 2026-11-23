@@ -1155,7 +1155,7 @@ pub(crate) mod tests {
     /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
     pub(crate) fn state() -> AppState {
         let st = state_with_token();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let projects = dir.join("projects");
         std::fs::create_dir_all(&projects).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects, "github_token": "test-token" }).to_string()).unwrap();
@@ -1310,7 +1310,7 @@ pub(crate) mod tests {
         fake.route("GET", &format!("/repos/{slug}/commits/abc1234def/status"), 200, json!({ "statuses": [] }));
         fake.route("POST", &format!("/repos/{slug}/issues/500/labels"), 200, json!([{ "name": "qa:passed" }]));
         fake.route("DELETE", &format!("/repos/{slug}/issues/500/labels/qa%3Afailed"), 404, json!({ "message": "Label does not exist" }));
-        let said = crate::prs::set_verdict(&st, &qa, &format!("https://github.com/{slug}/pull/500"), "qa", true, "abc1234").await.unwrap();
+        let said = crate::prs::set_verdict(&st, &qa, &format!("https://github.com/{slug}/pull/500"), "qa", true, "abc1234", "").await.unwrap();
         assert!(said.contains("qa:passed"), "{said}");
     }
 
@@ -2977,12 +2977,13 @@ pub(crate) mod tests {
         let (_a, _m) = planned(&st, &fake, "dl-hand", vec![ticket("API", &["octo/ext-hand#9"])]).await;
         crate::delivery::retry(&st, slug).await;
         assert_eq!(delivery(&st, slug).tickets[0].waiting_on, ["octo/ext-hand#9"], "still open");
-        read_issue(&fake, "octo/ext-hand", 9, "closed");
         // Another repo's lock is held by a step: its Delivery is left for the poll.
         let busy = st.publish_locks.of(slug).lock_owned().await;
         crate::delivery::blocker_closed(&st, "octo/ext-hand", 9, "octo/elsewhere").await;
         drop(busy);
         assert_eq!(delivery(&st, slug).tickets[0].waiting_on, ["octo/ext-hand#9"]);
+        // GitHub says closed only now: the mirror sync publishing started can run late, and would clear it above.
+        read_issue(&fake, "octo/ext-hand", 9, "closed");
         crate::delivery::retry(&st, slug).await;
         assert!(delivery(&st, slug).tickets[0].waiting_on.is_empty());
     }
@@ -3466,18 +3467,11 @@ pub(crate) mod tests {
         let p = crate::needs_you::to_push(all.iter().find(|i| i.kind == "delivery_stalled").unwrap());
         assert_eq!((p.title.as_str(), p.body.as_str()), ("Delivery stalled", "First asks you something"));
 
-        // The Lead's FYI, shown in its chat as from Loft, waits for its next run: it isn't woken.
-        let fyis = st.db.take_pending_fyis(&lead.id).unwrap();
-        assert_eq!(fyis.len(), 1, "{fyis:?}");
-        assert!(fyis[0].1.starts_with("[FYI from Loft, not from the user."), "{}", fyis[0].1);
-        assert!(fyis[0].1.contains("[Loft Delivery: spec #40] The Delivery stalled at #41: the run Loft woke for its step ended without its call. First ended its run asking: \"Should the API keep the old route or drop it?\""), "{}", fyis[0].1);
-        let shown = st.db.list_messages(&lead.id, 5, None).unwrap().pop().unwrap();
-        assert_eq!((shown.meta["from_agent"]["name"].as_str(), shown.meta["fyi"].as_bool()), (Some("Loft"), Some(true)));
-        // Not the guide agent's id ("loft"), nor any agent's: the chat would name that agent as the sender.
-        crate::setup::ensure_loft(&st);
-        let from = shown.meta["from_agent"]["id"].as_str().unwrap();
-        assert!(st.db.get_agent(crate::setup::LOFT_ID).unwrap().is_some() && st.db.get_agent(from).unwrap().is_none(), "{from}");
-        assert!(!woken(&st, &lead).iter().any(|w| w.contains("stalled")), "an FYI wakes nobody");
+        // The Lead is woken with a needs-action message naming the ticket and the question.
+        let w = woken(&st, &lead);
+        assert!(w.iter().any(|w| w.contains("[Loft Delivery: spec #40] The Delivery stalled at #41: the run Loft woke for its step ended without its call. First ended its run asking: \"Should the API keep the old route or drop it?\"")), "{w:?}");
+        assert!(st.db.take_pending_fyis(&lead.id).unwrap().is_empty(), "not an FYI");
+        assert!(st.rt.lock().unwrap().queued_for_user.contains(&lead.id), "its reply tells the user: an Unread reply");
 
         // Its call comes after all (the user replied): the question goes with the stall.
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
@@ -4608,6 +4602,7 @@ pub(crate) mod tests {
         let limit = "but they can't change the Delivery's tools, its branch or how the work closes or merges.";
         let only = |w: &str, mine: Option<&str>| {
             assert!(w.contains(limit), "no limits in {w}");
+            assert!(w.contains("don't end your run on a question") && w.contains("mark the ticket blocked with the question"), "no decide-or-block in {w}");
             for r in roles {
                 assert_eq!(w.contains(r), Some(r) == mine, "{r:?} in {w}");
             }
@@ -7148,6 +7143,72 @@ pub(crate) mod tests {
         assert_eq!(id, format!("done:{slug}:40"));
         let _ = crate::needs_you::dismiss_item(State(st.clone()), Path(id)).await.unwrap();
         assert!(done_items(&st).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_closed_ticket_wakes_the_lead_even_with_nothing_ready() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/close-lead";
+        let (dev, _) = building_both(&st, &fake, "close-lead", &[]).await;
+        let lead = busy(&st, "Lead", "close-lead", "lead");
+        // API is blocked by Store and already with someone: closing Store leaves nothing to hand out.
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(42).unwrap().agent = dev.id.clone());
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let w = woken(&st, &lead);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("#41 closed. Still open: #42") && w[0].contains("Nothing is ready to hand out yet."), "{}", w[0]);
+    }
+
+    #[tokio::test]
+    async fn a_close_that_readies_a_ticket_wakes_the_lead_even_when_every_dev_is_busy() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/close-busy";
+        let (dev, _) = building_both(&st, &fake, "close-busy", &[]).await;
+        let lead = busy(&st, "Lead", "close-busy", "lead");
+        // The Dev is building another ticket, so nobody is free when Store closes and API becomes ready.
+        crate::delivery::update(&st, slug, 40, |d| {
+            let mut t = d.ticket(42).unwrap().clone();
+            (t.number, t.state, t.agent, t.blocked_by) = (43, "started".into(), dev.id.clone(), vec![]);
+            d.tickets.push(t);
+        });
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let w = woken(&st, &lead);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("#41 closed.") && w[0].contains("Ready, but every Dev is busy: #42."), "{}", w[0]);
+    }
+
+    #[tokio::test]
+    async fn a_finished_delivery_wakes_the_planner_and_the_lead() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/done-both";
+        let (dev, _) = building_both(&st, &fake, "done-both", &[]).await;
+        let planner = planner_of(&st, slug);
+        let lead = busy(&st, "Lead", "done-both", "lead");
+        assert_ne!(planner.id, lead.id);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Builder" })).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let is_done = |a: &Agent| woken(&st, a).iter().filter(|w| w.contains("is done.")).count();
+        assert_eq!((is_done(&planner), is_done(&lead)), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_lead_that_planned_the_spec_is_woken_once_when_it_is_done() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/done-planner-lead";
+        let (dev, _) = building_both(&st, &fake, "done-planner-lead", &[]).await;
+        let mut lead = planner_of(&st, slug);
+        (lead.project, lead.role) = ("done-planner-lead".into(), "lead".into());
+        st.db.save_agent(&lead).unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &lead, "assign_ticket", json!({ "ticket": 42, "dev": "Builder" })).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let done = woken(&st, &lead).iter().filter(|w| w.contains("is done.")).count();
+        assert_eq!(done, 1);
     }
 
     #[tokio::test]

@@ -147,6 +147,8 @@ public final class LoftStore {
         // as connected, and a slow notification service (seen on a busy Simulator) held it at "Connecting…".
         // Only what hasn't been seen, here or on the web.
         let count = list.unseen
+        // `swift test` runs without an app bundle, where the notification center aborts.
+        guard Bundle.main.bundleURL.pathExtension.hasPrefix("app") else { return }
         Task.detached { try? await UNUserNotificationCenter.current().setBadgeCount(count) }
     }
 
@@ -555,6 +557,8 @@ public final class LoftStore {
                 Task { try? await loadDelivery(id) }
             }
             if deliveryWatchers > 0 { loadDeliveries(soon: true) }
+        case .resync:
+            Task { try? await refresh() }
         case .other:
             break
         }
@@ -688,7 +692,7 @@ public final class LoftStore {
             // update can be missed (a reconnect, the app in the background), and the reply was then never read.
             let after = conversation(agentId).filter { $0.id > id }
             let runEnded = after.firstIndex { $0.kind == "run_start" }.map { start in after[start...].contains { $0.kind == "run_end" } } ?? false
-            let running = !runEnded && (a?.running == true || a?.status == "running")
+            let running = !runEnded && a?.running == true
             let replies = after.filter { $0.role == "assistant" && $0.kind == "text" }
             // The whole reply: once the run is over and nothing in it has changed (a new piece, an edit) for a moment.
             let candidate = replies.isEmpty || running ? nil : replies.map(\.displayContent).joined(separator: "\n\n")
@@ -954,8 +958,9 @@ public final class LoftStore {
         return api
     }
 
-    public func decide(_ p: PermissionRequest, decision: String) async throws {
-        try await requireWrite().decidePermission(id: p.id, decision: decision)
+    /// `answers` answers a `questions` request (sent with `allow_once`).
+    public func decide(_ p: PermissionRequest, decision: String, answers: [String: String]? = nil) async throws {
+        try await requireWrite().decidePermission(id: p.id, decision: decision, answers: answers)
         // The server emits the updated request; mark it locally only once it confirmed.
         if let i = permissions.firstIndex(where: { $0.id == p.id }), permissions[i].isPending {
             permissions[i].status = decision == "deny" ? "denied" : (decision == "allow_always" ? "allowed_always" : "allowed_once")

@@ -429,7 +429,7 @@ pub(crate) mod tests {
     pub(crate) fn state_with_token() -> AppState {
         let st = crate::tasks::tests::state();
         let mut s = st.settings.get();
-        s.projects_dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        s.projects_dir = st.cfg.root.as_path().to_path_buf();
         s.github_token = "test-token".into();
         st.settings.save(s).unwrap();
         st

@@ -8,7 +8,7 @@ public protocol LoftAPI: Sendable {
     func agents() async throws -> [Agent]
     func messages(agentId: String, limit: Int, before: Int64?) async throws -> [ChatMessage]
     func sendMessage(agentId: String, text: String, clientId: String) async throws -> SendMessageResponse
-    /// `meta` carries only what the server accepts from clients (today `grill`).
+    /// `meta` carries only what the server accepts from clients (`grill`, `task_id`, and `reply_to`, sent as its own field).
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?) async throws -> SendMessageResponse
     /// A message with uploads (`images`: names from `upload`).
     func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse
@@ -59,7 +59,8 @@ public protocol LoftAPI: Sendable {
     /// Makes a past Session the agent's own: its next run resumes it. Fails while the agent works.
     func resumeSession(agentId: String, sessionId: String) async throws -> Agent
     func permissions() async throws -> [PermissionRequest]
-    func decidePermission(id: String, decision: String) async throws
+    /// `answers` answers a `questions` request: the answer text per question text.
+    func decidePermission(id: String, decision: String, answers: [String: String]?) async throws
     func pullRequests() async throws -> [PullRequest]
     /// Every spec's Delivery in one read (the web board's source).
     func deliverySummaries() async throws -> [DeliverySummary]
@@ -263,6 +264,8 @@ public struct LiveLoftAPI: LoftAPI {
     public func sendMessage(agentId: String, text: String, clientId: String, meta: JSONValue?, images: [String]) async throws -> SendMessageResponse {
         var body: [String: JSONValue] = ["text": .string(text), "client_id": .string(clientId)]
         if let meta { body["meta"] = meta }
+        // A reply (spec #572): the quoted message's id goes up as `reply_to`, not inside meta.
+        if let r = meta?["reply_to"] { body["reply_to"] = r }
         if !images.isEmpty { body["images"] = .array(images.map(JSONValue.string)) }
         return try decode(SendMessageResponse.self, try await send("POST", "/agents/\(agentId)/messages", body: .object(body)))
     }
@@ -354,8 +357,10 @@ public struct LiveLoftAPI: LoftAPI {
     }
     public func permissions() async throws -> [PermissionRequest] { try await get("/permissions") }
 
-    public func decidePermission(id: String, decision: String) async throws {
-        _ = try await send("POST", "/permissions/\(id)", body: ["decision": .string(decision)])
+    public func decidePermission(id: String, decision: String, answers: [String: String]?) async throws {
+        var body: [String: JSONValue] = ["decision": .string(decision)]
+        if let answers { body["answers"] = .object(answers.mapValues { .string($0) }) }
+        _ = try await send("POST", "/permissions/\(id)", body: .object(body))
     }
 
     public func pullRequests() async throws -> [PullRequest] { try await get("/pull-requests") }

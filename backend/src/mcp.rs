@@ -129,12 +129,13 @@ fn base_tools() -> Value {
         },
         {
             "name": "set_pr_verdict",
-            "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
+            "description": "For a reviewer (tests, QA or security checker): set your verdict on a pull request as a GitHub label (tests:green / tests:failing, qa:passed / qa:failed, security:passed / security:findings). One call sets the label and removes its opposite. A fail wakes the agent that opened the PR; once every verdict the PR needs has passed on its head, the team's Lead is woken to tell the user it's ready to merge. `sha` is the head commit you checked; a new commit clears the passed labels, so check again. Only reviewer agents of the project that opened the PR may.",
             "inputSchema": { "type": "object", "properties": {
                 "pr": { "type": "string", "description": "https://github.com/<owner>/<repo>/pull/<number>" },
                 "kind": { "type": "string", "enum": ["tests", "qa", "security"] },
                 "verdict": { "type": "string", "enum": ["pass", "fail"] },
-                "sha": { "type": "string", "description": "The PR's head commit you checked (at least 7 characters)." }
+                "sha": { "type": "string", "description": "The PR's head commit you checked (at least 7 characters)." },
+                "comment": { "type": "string", "description": "Optional: the link to your comment on the PR that explains the verdict. A fail wakes the PR's opener with it." }
             }, "required": ["pr", "kind", "verdict", "sha"] }
         },
         {
@@ -357,7 +358,7 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
         },
         "set_pr_verdict" => match state.db.get_agent(agent_id) {
             Ok(Some(me)) => match s("verdict").as_str() {
-                v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha")).await {
+                v @ ("pass" | "fail") => match crate::prs::set_verdict(state, &me, &s("pr"), &s("kind"), v == "pass", &s("sha"), &s("comment")).await {
                     Ok(t) => text(t),
                     Err(e) => tool_error(e),
                 },
@@ -505,7 +506,12 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 return woke(w);
             }
             // The dashboard reads the message id off a queued result to show when it's delivered.
-            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref()) {
+            // A report on a ticket the recipient handed the sender (a message that asked for a report back) answers that hand-over:
+            // it hands nothing back. An answer to a plain question on the ticket is not one.
+            let report = ticket.as_deref().is_some_and(|t| {
+                state.db.list_messages(&from.id, 1000, None).unwrap_or_default().iter().any(|m| m.meta["from_agent"]["id"] == to.id.as_str() && m.meta["ticket"] == t && m.meta["report_back"] == true)
+            });
+            text(match agents::message_on_ticket(state, &from, &to, body.trim(), json!({}), ticket.as_deref(), !report) {
                 Some(id) => format!("Queued: {} is busy and will read it when its current run ends (message {id}).", to.name),
                 None => format!("Delivered. {} is reading it now.", to.name),
             })
@@ -812,7 +818,7 @@ mod tests {
     async fn run(st: &AppState, a: &Agent, text: &str) -> String {
         let n = prompts(st, a).len();
         enqueue(st, &a.id, Some(text.into()), "user");
-        until("the run", 10, || !is_running(st, &a.id) && prompts(st, a).len() > n).await;
+        until("the run", 60, || !is_running(st, &a.id) && prompts(st, a).len() > n).await;
         prompts(st, a).pop().unwrap()
     }
 
@@ -876,10 +882,10 @@ mod tests {
         let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #12", "kind": "needs_action" })).await;
         assert!(said(&r).0.starts_with("Delivered."), "{r}");
         assert_eq!(queued(&st).await, json!([]));
-        until("the run", 10, || !is_running(&st, &to.id)).await;
+        until("the run", 60, || !is_running(&st, &to.id)).await;
 
         enqueue(&st, &to.id, Some("busy".into()), "user");
-        until("the run to start", 10, || is_running(&st, &to.id)).await;
+        until("the run to start", 60, || is_running(&st, &to.id)).await;
         let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #13", "kind": "needs_action" })).await;
         let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().rfind(|m| m.content == "Review PR #13").unwrap();
         assert_eq!(said(&r).0, format!("Queued: Worker is busy and will read it when its current run ends (message {}).", m.id));
@@ -890,7 +896,7 @@ mod tests {
 
         // The busy run ends: the next run takes the message.
         crate::agents::stop(&st, &to.id);
-        until("the next run to take it", 10, || prompts(&st, &to).iter().any(|p| p.contains("Review PR #13"))).await;
+        until("the next run to take it", 60, || prompts(&st, &to).iter().any(|p| p.contains("Review PR #13"))).await;
         assert_eq!(queued(&st).await, json!([]));
     }
 
@@ -1086,7 +1092,7 @@ mod tests {
         // The resumed claude has the prompt but no session; the fresh retry can't start.
         let n = prompts(&st, &to).len();
         enqueue(&st, &to.id, Some("session-gone".into()), "user");
-        until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
+        until("the run to fail", 60, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
         assert!(prompts(&st, &to)[n].contains("Merged #12"));
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
         let bin = st.settings.get().claude_bin;
@@ -1117,12 +1123,40 @@ mod tests {
     async fn a_message_with_substance_goes_through_even_with_thanks() {
         let (st, to) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Lead");
-        let texts = ["Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12", "Wait.", "OK, wait.", "Wait here.", "You wait", "Next.", "Great, next task", "Next task"];
+        let texts = ["#582 done: PR #588 ready, tests pass", "Thanks, tests pass at abc123", "Got it. One question: should #12 target main?", "OK, PR #12 needs a fix in mcp.rs", "Approved", "Done: merged #12", "Wait.", "OK, wait.", "Wait here.", "You wait", "Next.", "Great, next task", "Next task"];
         for text in texts {
             let r = message(&st, &from, json!({ "agent": to.id, "text": text, "kind": "fyi" })).await;
             assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered"), "{text}: {r}");
         }
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), texts.len());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handed_over_ticket_asks_the_recipient_to_report_back_to_the_sender() {
+        let (st, to) = fake_claude_state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let line = format!("[When this work is done, or blocked, report back to Lead: call `mcp__loft__message_agent` with agent \"{}\", kind \"needs_action\" and ticket \"#12\", saying what you did and where it is.]", from.id);
+        message(&st, &from, json!({ "agent": to.id, "text": "Build #12", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        let p = &prompts(&st, &to)[0];
+        assert!(p.contains("Build #12") && p.contains(&line), "{p}");
+
+        // The report back answers that hand-over: the Lead isn't asked to report back in turn.
+        message(&st, &to, json!({ "agent": from.id, "text": "#12 done: PR #13 ready", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the Lead's run", 10, || !is_running(&st, &from.id) && !prompts(&st, &from).is_empty()).await;
+        let p = &prompts(&st, &from)[0];
+        assert!(p.contains("#12 done: PR #13 ready") && !p.contains("report back"), "{p}");
+
+        // The Dev's report was no hand-over: the Lead's follow-up on the same ticket is one, and asks for a report back.
+        message(&st, &from, json!({ "agent": to.id, "text": "Also fix the lint", "kind": "needs_action", "ticket": "#12" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
+        assert!(prompts(&st, &to)[1].contains("Also fix the lint") && prompts(&st, &to)[1].contains("report back"), "{}", prompts(&st, &to)[1]);
+
+        // A message about no ticket hands nothing over.
+        message(&st, &from, json!({ "agent": to.id, "text": "Which branch?", "kind": "needs_action" })).await;
+        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
+        assert!(!prompts(&st, &to)[2].contains("report back"), "{}", prompts(&st, &to)[2]);
     }
 
     #[cfg(unix)]
