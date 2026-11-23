@@ -235,11 +235,16 @@ pub fn kill_tree(storage: &Path, agent_id: &str, root: u32) {
     }
 }
 
-/// Ends `pid`.
+/// Ends `pid`. A process that has already ended, which a handle someone holds keeps in the table's place, is no
+/// process (ERROR_INVALID_PARAMETER, as OpenProcess says), not a refusal: TerminateProcess says access denied.
 pub fn kill(pid: u32) -> std::io::Result<()> {
-    let p = Handle::new(unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) }).ok_or_else(std::io::Error::last_os_error)?;
+    let p = Handle::new(unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) }).ok_or_else(std::io::Error::last_os_error)?;
     if unsafe { TerminateProcess(p.0, STOPPED) } == 0 {
-        return Err(std::io::Error::last_os_error());
+        let e = std::io::Error::last_os_error();
+        if unsafe { WaitForSingleObject(p.0, 0) } != WAIT_TIMEOUT {
+            return Err(std::io::Error::from_raw_os_error(87));
+        }
+        return Err(e);
     }
     Ok(())
 }
