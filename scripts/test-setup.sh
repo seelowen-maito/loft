@@ -41,6 +41,11 @@ remove_checkout() { [ -n "$B" ] && git worktree remove --force "$B" >/dev/null 2
 trap 'stop_loft; remove_task; remove_checkout; rm -rf "$T"' EXIT
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3], got [$2]"; fails=1; fi; }
+# Lines of file $1 that start with $2.
+lines() { grep -c "^$2" "$1" 2>/dev/null; }
+# Waits up to $3 seconds for file $1 to have more than $4 lines starting with $2. Loft comes back too fast to catch it
+# down, so what logs its exit tells that it stopped.
+grows() { for _ in $(seq 1 "$3"); do [ "$(lines "$1" "$2")" -gt "$4" ] && return 0; sleep 1; done; return 1; }
 
 # A machine without Claude Code (the CI) gets a stand-in that is logged in.
 if ! command -v claude >/dev/null; then
@@ -130,19 +135,18 @@ if [ "$WINDOWS" = 1 ] && [ "$rc" = 0 ]; then
   check "a second run reinstalls it (the default)" "$(grep -c '✓ installed (task "Loft"' "$T/task2.log")" 1
   check "still one task" "$(MSYS_NO_PATHCONV=1 schtasks /Query /FO CSV /NH 2>/dev/null | tr -d '\r' | grep -c '^"\\Loft"')" 1
   if answers; then
-    # What run-service.sh last logged about how Loft ended (its "loft: starting" lines left out).
-    ended() { grep '^loft: ' "$LOCALAPPDATA/Loft/loft.log" 2>/dev/null | grep -v '^loft: starting' | tail -n 1; }
+    log=$LOCALAPPDATA/Loft/loft.log
     # A restart from the web app exits with the restart code: the task starts Loft again right away.
+    n=$(lines "$log" 'loft: restarting')
     curl -s -m 5 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/api/restart"
-    check "a restart stops Loft" "$(wait_for 20 0 && echo 1 || echo 0)" 1
+    check "a restart stops Loft with the restart code" "$(grows "$log" 'loft: restarting' 20 "$n" && echo 1 || echo 0)" 1
     check "after a restart, Loft is back" "$(wait_for 60 1 && echo 1 || echo 0)" 1
-    check "through the restart code" "$(ended)" "loft: restarting"
     # A crash (killed): back after run-service.sh's 10 seconds.
+    n=$(lines "$log" 'loft: exited with code')
     for pid in $(netstat -ano | tr -d '\r' | awk -v p=":$PORT" '$2 ~ p"$" && $4 == "LISTENING" {print $5}' | sort -u); do taskkill //F //PID "$pid" >/dev/null 2>&1; done
-    check "a crash stops Loft" "$(wait_for 20 0 && echo 1 || echo 0)" 1
+    check "a crash stops Loft, not as a restart" "$(grows "$log" 'loft: exited with code' 20 "$n" && echo 1 || echo 0)" 1
     check "after a crash, Loft is back" "$(wait_for 60 1 && echo 1 || echo 0)" 1
-    check "as a crash" "$(ended | sed 's/^\(loft: exited with code\) .*/\1/')" "loft: exited with code"
-    grep '^loft: ' "$LOCALAPPDATA/Loft/loft.log" 2>/dev/null | sed 's/^/    log | /'
+    grep '^loft: ' "$log" 2>/dev/null | sed 's/^/    log | /'
 
     # A second checkout (a worktree, with this one's release build so it doesn't start from scratch) takes the task
     # over: this checkout's Loft stops and the other one's serves the port.
@@ -191,10 +195,10 @@ if [ "$rc" = 0 ]; then
   [ "$up" = 1 ] || sed 's/^/    | /' "$T/start.log" | tail -n 30
   if [ "$up" = 1 ]; then
     curl -s -m 5 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/api/restart"
-    check "a restart stops start.sh's Loft" "$(serves 20 0 && echo 1 || echo 0)" 1
+    stopped=$(grows "$T/start.log" 'loft: restarting' 20 0 && echo 1 || echo 0)
+    check "a restart stops start.sh's Loft with the restart code" "$stopped" 1
     check "and start.sh runs it again" "$(serves 120 1 && echo 1 || echo 0)" 1
-    check "through the restart code" "$(grep -c '^loft: restarting' "$T/start.log")" 1
-    [ "$(grep -c '^loft: restarting' "$T/start.log")" = 1 ] || sed 's/^/    | /' "$T/start.log" | tail -n 30
+    [ "$stopped" = 1 ] || sed 's/^/    | /' "$T/start.log" | tail -n 30
   fi
   stop_loft
 fi
