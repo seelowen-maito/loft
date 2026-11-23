@@ -110,17 +110,19 @@ function ItemPage({ id }: { id: number }) {
       {item && editing && <EditForm item={item} onSaved={(i) => (setItem({ ...item, ...i }), setEditing(false))} onCancel={() => setEditing(false)} />}
       {item && !editing && (
         <article className="flex flex-col gap-3">
-          <div className="flex items-start gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
             <h1 className="min-w-0 flex-1 text-[20px] font-medium tracking-tight [overflow-wrap:anywhere]">{item.title}</h1>
-            <button type="button" className="btn-ghost" onClick={() => setExporting(true)}>
-              <FileUp className="size-3.5" aria-hidden /> Export to docs
-            </button>
-            <button type="button" className="btn-ghost" onClick={() => setEditing(true)}>
-              <Pencil className="size-3.5" aria-hidden /> Edit
-            </button>
-            <button type="button" className="btn-ghost" onClick={() => setDeleting(true)}>
-              <Trash2 className="size-3.5" aria-hidden /> Delete
-            </button>
+            <div className="-ml-2.5 flex flex-wrap items-center gap-1 sm:ml-0">
+              <button type="button" className="btn-ghost" onClick={() => setExporting(true)}>
+                <FileUp className="size-3.5" aria-hidden /> Export to docs
+              </button>
+              <button type="button" className="btn-ghost" onClick={() => setEditing(true)}>
+                <Pencil className="size-3.5" aria-hidden /> Edit
+              </button>
+              <button type="button" className="btn-ghost" onClick={() => setDeleting(true)}>
+                <Trash2 className="size-3.5" aria-hidden /> Delete
+              </button>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-fg-3">
             {item.tag && <span className="chip">{item.tag}</span>}
