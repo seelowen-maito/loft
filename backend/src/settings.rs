@@ -221,7 +221,8 @@ mod tests {
     fn store(json: &str) -> Store {
         let dir = crate::testdir::for_this_test("settings");
         std::fs::create_dir_all(dir.join("projects")).unwrap();
-        let json = json.replace("PROJECTS", &dir.join("projects").to_string_lossy());
+        // Inside a JSON string: a Windows path's backslashes escaped.
+        let json = json.replace("PROJECTS", &dir.join("projects").to_string_lossy().replace('\\', "\\\\"));
         std::fs::write(dir.join("settings.json"), json).unwrap();
         Store::load(&dir).unwrap()
     }

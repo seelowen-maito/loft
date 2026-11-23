@@ -1853,7 +1853,7 @@ mod tests {
         // Size, last change (the newest file), path and command.
         let log = by("dev.log");
         assert!(log.bytes >= 5000 && log.path == ws.join("dev.log") && log.rel == "dev.log", "{log:?}");
-        assert_eq!(log.command, format!("rm -rf {}", ws.join("dev.log").display()));
+        assert_eq!(log.command, rm_command(&ws.join("dev.log")));
         let age = Local::now() - by("scratch/out.json").changed;
         assert!(age.num_minutes() > 4 * 60 && age.num_minutes() < 6 * 60, "{age}");
         // Biggest first.
@@ -1902,7 +1902,7 @@ mod tests {
             assert!(ws.join(kept).exists(), "{kept} removed");
         }
         assert!(l.freed_bytes >= 5000);
-        assert!(l.lines.iter().any(|x| x.rel == "dev.log" && x.command == format!("rm -rf {}", ws.join("dev.log").display())));
+        assert!(l.lines.iter().any(|x| x.rel == "dev.log" && x.command == rm_command(&ws.join("dev.log"))));
         // Unticked items can be ticked: notes goes when asked.
         let l = clean_paths(&st, Some(&a.id), vec![ws.join("notes")]).await;
         assert_eq!(l.removed, 1);
@@ -1924,7 +1924,7 @@ mod tests {
         assert!(top.iter().all(|i| !i.ticked && i.kind != "file"), "{top:?}");
         let inner = folders_of(&st, &a.id, "loft/backend").await.unwrap();
         let target = inner.iter().find(|i| i.name == "target").unwrap();
-        assert!(target.bytes > 0 && target.command == format!("rm -rf {}", ws.join("loft/backend/target").display()));
+        assert!(target.bytes > 0 && target.command == rm_command(&ws.join("loft/backend/target")));
 
         // Only a main clone opens.
         for rel in ["notes", "loft-old", "loft/.git", "../x", "loft/../notes"] {
@@ -2083,6 +2083,8 @@ mod tests {
         assert_eq!((l.what.as_str(), l.removed), ("Clean", 1));
     }
 
+    // Windows names can't hold a newline.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_name_with_a_newline_stays_on_one_line_in_the_log_and_in_copy_commands() {
         let st = crate::tasks::tests::state();
@@ -2104,6 +2106,7 @@ mod tests {
         assert_eq!(rm_command(Path::new("/w/it's\n\\x")), r"rm -rf $'/w/it\'s\n\\x'");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_workspace_folder_with_a_newline_in_its_name_is_neither_listed_swept_nor_cleaned() {
         let st = crate::tasks::tests::state();
@@ -2263,7 +2266,7 @@ mod tests {
         fs::create_dir_all(&deps).unwrap();
         for (name, hours) in [("a.o", 72), ("b.o", 48), ("c.o", 36), ("d.o", 0)] {
             fs::write(deps.join(name), vec![0u8; 64 * 1024]).unwrap();
-            fs::File::open(deps.join(name)).unwrap().set_modified(SystemTime::now() - Duration::from_secs(hours * 3600)).unwrap();
+            crate::testdir::set_modified(&deps.join(name), SystemTime::now() - Duration::from_secs(hours * 3600));
         }
         deps
     }
@@ -2399,7 +2402,7 @@ mod tests {
         file(&ws.join("loft/src/main.rs"));
         file(&ws.join("loft/.git/FETCH_HEAD"));
         for d in [".cargo-build", "loft/target", "loft"] {
-            fs::File::open(ws.join(d)).unwrap().set_modified(SystemTime::now()).unwrap();
+            crate::testdir::set_modified(&ws.join(d), SystemTime::now());
         }
         // But a file written just now inside node_modules keeps it.
         file(&ws.join("loft/frontend/node_modules/fresh/index.js"));
@@ -2423,9 +2426,9 @@ mod tests {
             if e.file_type().unwrap().is_dir() {
                 age_by(&e.path(), by);
             }
-            fs::File::open(e.path()).unwrap().set_modified(then).unwrap();
+            crate::testdir::set_modified(&e.path(), then);
         }
-        fs::File::open(dir).unwrap().set_modified(then).unwrap();
+        crate::testdir::set_modified(dir, then);
     }
 
     /// An agent whose main project is octo/loft, a fake GitHub that knows #412 (merged PR), #413 (open), #414 (closed
@@ -2737,6 +2740,8 @@ mod tests {
         let r = sweep(&storage, None, &|_| false, later(), IDLE);
         let line = r.lines.iter().find(|l| l.path.ends_with("loft/target")).unwrap();
         assert_eq!(line.bytes, before);
+        // NTFS keeps a file this small in its file table, with no cluster of its own.
+        #[cfg(unix)]
         assert!(before >= 4096, "a 1-byte file takes a block: {before}");
     }
 
@@ -2779,6 +2784,8 @@ mod tests {
         let p = plan(&storage, None, &|_| false, later(), IDLE);
         let f = p.folders.iter().find(|f| f.rel == "loft/target").unwrap();
         assert!(f.path.is_absolute());
+        assert_eq!(f.command, rm_command(&f.path));
+        #[cfg(unix)]
         assert_eq!(f.command, format!("rm -rf {}", f.path.display()));
         assert_eq!(rm_command(Path::new("/w/it's here/target")), r"rm -rf '/w/it'\''s here/target'");
     }
@@ -2991,8 +2998,10 @@ mod tests {
         use super::*;
         use std::os::windows::fs::OpenOptionsExt;
 
+        /// mklink reads a `/` in a path as an option, so the paths go with backslashes.
         fn junction(link: &Path, target: &Path) {
-            let out = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
+            let back = |p: &Path| p.to_string_lossy().replace('/', "\\");
+            let out = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(back(link)).arg(back(target)).output().unwrap();
             assert!(out.status.success(), "mklink: {}", String::from_utf8_lossy(&out.stderr));
         }
 

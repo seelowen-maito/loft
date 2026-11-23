@@ -2339,7 +2339,7 @@ pub(crate) mod tests {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
         let p = system_prompt(&st, &a);
-        assert!(p.contains(&format!("Run git only inside your clone (`git -C {}/<repo>`), never from the workspace root", workspace(&st, &a.id).display())), "{p}");
+        assert!(p.contains(&format!("Run git only inside your clone (`git -C {}/<repo>`), never from the workspace root", crate::sys::forward_slashes(&workspace(&st, &a.id)))), "{p}");
         assert!(p.contains("Write git commands with the literal absolute path: no shell variables, `cd` chains or `$(…)` in them."), "{p}");
         assert!(p.contains("Name the program you run literally (a path or a command name), never a variable like `$BIN` or `$A` as the command"), "{p}");
     }
@@ -2347,7 +2347,8 @@ pub(crate) mod tests {
     #[test]
     fn ios_builds_use_xcodes_derived_data_not_the_workspace() {
         let st = crate::tasks::tests::state();
-        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        // The Simulator line is the Mac's: Windows leaves it out.
+        let p = system_prompt_on(&st, &crate::tasks::tests::agent(&st, "Worker"), false);
         assert!(p.contains("-showBuildSettings") && p.contains("-IDEBuildLocationStyle=Unique") && p.contains("$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"));
         assert!(!p.contains("-derivedDataPath build"));
     }
@@ -2475,8 +2476,9 @@ pub(crate) mod tests {
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
     /// A Redraw costs 0.25 on session "s-redraw" and waits for a `go` file before it replies.
-    /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command, in a process session of
-    /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
+    /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command (in zsh, or bash where
+    /// there is no zsh, as on Linux), in a process session of its own after `CLAUDE_ENV_FILE`, and appends what it
+    /// printed and its exit status to `bash.out`.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
@@ -2580,7 +2582,8 @@ case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
 esac
 case "$prompt" in *bash-cmd*)
-  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/zsh -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
+  shell=/bin/zsh; [ -x "$shell" ] || shell=/bin/bash
+  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "$ARGV[0]: $!\n"' "$shell" -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
   echo "exit $?" >> bash.out;;
 esac
 reply=started

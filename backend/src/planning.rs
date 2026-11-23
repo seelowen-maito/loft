@@ -5387,7 +5387,8 @@ pub(crate) mod tests {
         let before = user_copy(&dir);
 
         crate::delivery::merge(&st, &d.repo, d.spec).await.unwrap();
-        assert_eq!(std::fs::read_to_string(clone.join("store.rs")).unwrap(), "fn store() {}\n", "the Dev's files follow its main");
+        // Git for Windows checks text out with CRLF (core.autocrlf).
+        assert_eq!(std::fs::read_to_string(clone.join("store.rs")).unwrap().replace("\r\n", "\n"), "fn store() {}\n", "the Dev's files follow its main");
         assert_eq!(git_in(&clone, &["status", "--porcelain"]), "");
         assert_eq!(user_copy(&dir), before);
     }

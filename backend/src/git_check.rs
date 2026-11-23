@@ -508,10 +508,12 @@ mod tests {
         packed.set_len(MAX_FILE + 1).unwrap();
         assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its refs"));
         fs::remove_file(loft.join(".git/packed-refs")).unwrap();
-        fs::OpenOptions::new().append(true).open(loft.join(".git/HEAD")).unwrap().set_len(MAX_FILE + 1).unwrap();
+        // Windows sets no length through a handle that may only append.
+        fs::OpenOptions::new().write(true).open(loft.join(".git/HEAD")).unwrap().set_len(MAX_FILE + 1).unwrap();
         assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its HEAD"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fifo_for_a_git_file_is_unknown_without_hanging() {
         let (storage, loft) = setup();
@@ -537,12 +539,14 @@ mod tests {
         fs::write(outside.join("g/commondir"), "../g\n").unwrap();
         fs::create_dir_all(storage.join("a/far")).unwrap();
         fs::write(storage.join("a/far/.git"), format!("gitdir: {}\n", outside.join("g").display())).unwrap();
+        // On a disk that tells case apart (Linux), another case is another name, one that isn't there.
+        let other_case = if storage.join("a/LOFT").exists() { "not the name on disk" } else { "no longer there" };
         for (agent, rel, why) in [
             ("a", "link", "not a folder"),
-            ("a", "LOFT", "not the name on disk"),
+            ("a", "LOFT", other_case),
             ("a", "../a/loft", "not in a workspace"),
             ("a", "..", "not in a workspace"),
-            ("A", "loft", "not the name on disk"),
+            ("A", "loft", other_case),
             (".x", "loft", "not in a workspace"),
             ("a", "plain", "not a git repo"),
             ("a", "away", "not a git repo"),

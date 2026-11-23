@@ -620,7 +620,8 @@ mod tests {
         std::fs::write(release.join("deps/loft-abc.exe"), "new").unwrap();
         std::fs::write(&exe, "new").unwrap();
         assert!(!super::remove_set_aside(&exe), "still running: left for the sweep");
-        assert!(release.join("loft.old.exe").exists());
+        // Windows may let one name of the running file go, never both.
+        assert!(release.join("loft.old.exe").exists() || release.join("deps/loft.old.exe").exists());
         child.kill().unwrap();
         child.wait().unwrap();
         // The process can take a moment to let go of its file.
@@ -662,7 +663,7 @@ mod tests {
         // Untouched for 4 days.
         let then = SystemTime::now() - Duration::from_secs(4 * 24 * 60 * 60);
         for p in ["loft/Cargo.toml", "loft/target/debug/app", "loft/target", "loft/.git", "loft"] {
-            std::fs::File::open(ws.join(p)).unwrap().set_modified(then).unwrap();
+            crate::testdir::set_modified(&ws.join(p), then);
         }
         super::before_restart(&st).await;
         assert!(!ws.join("loft/target").exists(), "the update restarted with its build output");

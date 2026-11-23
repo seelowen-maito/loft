@@ -3464,7 +3464,9 @@ mod tests {
         assert_eq!(hook["hooks"][0]["timeout"], crate::agents::TOOL_WAIT.as_secs());
     }
 
-    // A user's checkout and an agent's clone of it, as the Loft workspace sits inside the user's repo.
+    // A user's checkout and an agent's clone of it, as the Loft workspace sits inside the user's repo. Unix paths:
+    // Windows reads `/nowhere` as a folder on the current drive (`D:\nowhere`), so the tests that compare the folders
+    // found run on Unix only.
     const USER: &str = "/nowhere/dev/loft";
     const STORAGE: &str = "/nowhere/dev/loft/agent-local-storage";
     const CLONE: &str = "/nowhere/dev/loft/agent-local-storage/abc/loft";
@@ -3475,6 +3477,7 @@ mod tests {
         outside_changes(&input, &[PathBuf::from(STORAGE)]).into_iter().map(|c| c.folder).collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn only_the_storage_folder_loft_uses_is_trusted_not_any_of_that_name() {
         // A folder an agent made, or the old one in the checkout, named like the storage folder.
@@ -3496,6 +3499,7 @@ mod tests {
         all.into_iter().next()
     }
 
+    #[cfg(unix)]
     #[test]
     fn changes_to_a_users_checkout_go_to_loft_with_the_folder() {
         let user = Some(PathBuf::from(USER));
@@ -3575,6 +3579,7 @@ mod tests {
         assert!(outside_changes("not json", &[]).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn every_folder_a_command_changes_is_asked_about() {
         let (other, user) = (PathBuf::from("/nowhere/dev/other"), PathBuf::from(USER));
@@ -3584,6 +3589,7 @@ mod tests {
         assert_eq!(asks_all("cd /nowhere/dev/loft; git pull; cargo build; pnpm install", CLONE), [user]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cd_dash_pushd_and_popd_follow_the_folder() {
         let user = Some(PathBuf::from(USER));
@@ -4167,6 +4173,7 @@ mod tests {
         assert!(!asks_all(&format!("x=$[ 1 << 2 ]\ngit -C {u} reset --hard"), CLONE).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shift_in_arithmetic_is_no_heredoc_and_a_continued_delimiter_is_unquoted() {
         let u = USER;
@@ -4529,6 +4536,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn git_commands_that_make_nothing_dont_hide_the_folder_of_the_next() {
         const WS: &str = "/nowhere/dev/loft/agent-local-storage/abc";
@@ -4608,6 +4616,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_option_with_a_variable_asks_and_chdir_is_cd() {
         const WORKSPACE: &str = "/nowhere/dev/loft/agent-local-storage/abc";
@@ -4766,6 +4775,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn autopushd_and_failed_cds_in_longer_forms_ask() {
         let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
@@ -4810,6 +4820,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_subshells_cd_stays_in_it() {
         let user = Some(PathBuf::from(USER));
@@ -4821,6 +4832,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn git_dir_and_work_tree_name_the_checkout() {
         let user = Some(PathBuf::from(USER));
@@ -4840,6 +4852,7 @@ mod tests {
         assert_eq!(asks("git --git-dir=/nowhere/dev/loft/agent-local-storage/abc/loft/.git pull", USER), user);
     }
 
+    #[cfg(unix)]
     #[test]
     fn build_tools_folder_options_name_the_folder() {
         let user = Some(PathBuf::from(USER));
@@ -4860,6 +4873,7 @@ mod tests {
         assert_eq!(asks("pnpm -C frontend install", CLONE), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn every_git_subcommand_asks_but_the_ones_that_only_read() {
         let user = Some(PathBuf::from(USER));

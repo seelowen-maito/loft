@@ -1515,6 +1515,8 @@ mod tests {
         assert!(!is_test_browser("/usr/local/bin/node"));
     }
 
+    // macOS's ps, killall and pkill: Linux's `ps -o comm` shows no path and its killall has no `-s` to only show.
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_s_end_stops_only_its_test_browsers_and_the_next_run_hears_of_it() {
         let (st, a) = fake_claude_state();
@@ -1616,6 +1618,8 @@ mod tests {
         assert_eq!([etime("00:07"), etime("12:34"), etime("3:04:05"), etime("2-03:04:05"), etime("x")], [Some(7), Some(754), Some(11045), Some(183845), None]);
     }
 
+    // macOS's ps, killall and pkill: Linux's `ps -o comm` shows no path and its killall has no `-s` to only show.
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn clean_locks_only_an_agent_in_a_run_lists_what_an_idle_one_left_and_stops_it_but_never_xcode_s_helpers() {
         let st = crate::tasks::tests::state();
@@ -1768,6 +1772,8 @@ mod tests {
         until("the server to stop", 5, || !server.alive()).await;
     }
 
+    // macOS's ps, killall and pkill: Linux's `ps -o comm` shows no path and its killall has no `-s` to only show.
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kill_of_a_process_the_agent_does_not_own_runs_once_the_user_approves() {
         let (st, a) = fake_claude_state();
@@ -1941,6 +1947,7 @@ mod tests {
     }
 
     /// A link to sleep with a name no process outside this test has, for killall.
+    #[cfg(target_os = "macos")]
     fn unique_sleep(st: &AppState) -> (PathBuf, String) {
         let name = format!("ks{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
         let path = st.cfg.root.as_path().join(&name);
@@ -1948,6 +1955,8 @@ mod tests {
         (path, name)
     }
 
+    // macOS's ps, killall and pkill: Linux's `ps -o comm` shows no path and its killall has no `-s` to only show.
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn killall_stops_the_agents_own_process_by_name_and_asks_about_another() {
         let (st, a) = fake_claude_state();
@@ -1976,6 +1985,8 @@ mod tests {
         assert_eq!(v["code"], 1, "{v}");
     }
 
+    // macOS's ps, killall and pkill: Linux's `ps -o comm` shows no path and its killall has no `-s` to only show.
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn pkill_reads_a_relative_pidfile_from_the_callers_folder_or_else_loft_s() {
         let st = crate::tasks::tests::state();
@@ -2150,7 +2161,7 @@ mod job_tests {
     fn on_windows_the_env_script_records_no_session() {
         let (storage, exe) = (Path::new("/data/storage"), Path::new("/opt/loft/loft"));
         let unix = env_script_on(storage, "a1", exe, false);
-        assert!(unix.contains(": > '/data/storage/.agent-files/a1.sessions'/\"$$\""), "{unix}");
+        assert!(unix.contains(&format!(": > '{}'/\"$$\"", sessions_dir(storage, "a1").display())), "{unix}");
         assert!(unix.contains("pkill() { '/opt/loft/loft' kill-as pkill \"$@\"; }") && !unix.contains("taskkill"), "{unix}");
         let windows = env_script_on(storage, "a1", exe, true);
         assert!(!windows.contains("sessions") && !windows.contains("$$"), "{windows}");

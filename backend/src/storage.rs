@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn only_the_configured_storage_folder_holds_workspaces() {
-        let storage = Path::new("/data/loft/loft-1a2b3c4d/agent-local-storage");
+        let storage = Path::new(if cfg!(windows) { "C:/data/loft/loft-1a2b3c4d/agent-local-storage" } else { "/data/loft/loft-1a2b3c4d/agent-local-storage" });
         assert!(holds_in(&storage.join("agent-1/loft"), storage));
         assert!(holds_in(storage, storage));
         // The old folder, or any other of that name, isn't trusted.

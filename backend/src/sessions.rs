@@ -248,7 +248,7 @@ pub mod tests {
         let ws = dir.join("agent.local_1");
         std::fs::create_dir_all(&ws).unwrap();
         let name = transcripts_dir(&ws).file_name().unwrap().to_string_lossy().into_owned();
-        let real = ws.canonical().unwrap().to_string_lossy().replace(['/', '.', '_'], "-");
+        let real = ws.canonical().unwrap().to_string_lossy().replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         assert_eq!(name, real);
         assert!(name.ends_with("-agent-local-1"));
     }
