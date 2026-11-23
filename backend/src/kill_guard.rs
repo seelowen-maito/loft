@@ -457,10 +457,6 @@ fn checkout_changes_within(command: &str, cwd: &Path, ceiling: &[PathBuf], work:
     let storage = ceiling.first().cloned().unwrap_or_default();
     let ceiling = if plain_git(command, cwd, &ceiling) { ceiling } else { vec![] };
     changes(command, &mut Dirs { start: start.clone(), cwd: start.clone(), ceiling, storage, ..Default::default() }, 0, &mut found);
-    // A command too big to check in time asks, in the folder it starts in.
-    if WORK.with(|w| w.borrow().spent_up) {
-        found.push(Change { folder: start.as_deref().map(outermost_checkout).unwrap_or_default(), command: TOO_COMPLEX.into() });
-    }
     let mut out: Vec<Change> = vec![];
     for c in found {
         // A symlink into a user's checkout counts as that checkout.
@@ -468,6 +464,10 @@ fn checkout_changes_within(command: &str, cwd: &Path, ceiling: &[PathBuf], work:
         if !out.iter().any(|o| o.folder == folder) {
             out.push(Change { folder, ..c });
         }
+    }
+    // A command too big to check in time asks, in the folder it starts in, whatever else it changes there.
+    if WORK.with(|w| w.borrow().spent_up) {
+        out.push(Change { folder: start.as_deref().map(outermost_checkout).unwrap_or_default(), command: TOO_COMPLEX.into() });
     }
     out
 }
@@ -2811,7 +2811,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     // `${x:-`cmd`}` too.
                     if n == '`' {
                         l.cmd(p);
-                        i = lex(p, c, i, Some('`'));
+                        let (body, next) = backtick_body(c, i);
+                        lex(p, &body, 0, Some('\0'));
+                        i = next;
                     }
                 }
             }
@@ -5344,8 +5346,14 @@ mod tests {
         let spent = Work { left: 0, started: std::time::Instant::now(), spent_up: false };
         let found = outside_changes_within(&input("echo hello"), &[PathBuf::from(STORAGE)], spent);
         assert_eq!(found, vec![Change { folder: CLONE.into(), command: TOO_COMPLEX.into() }]);
-        let hidden = format!("{}eval 'git -C {USER} reset --hard'", "eval true;".repeat(2100));
-        assert!(!asks_all(&hidden, CLONE).is_empty());
+        // Another change of its own in the clone doesn't take the ask's place.
+        for first in ["git checkout -b x;", "pnpm install;"] {
+            let hidden = format!("{first}{}eval 'git -C {USER} reset --hard'", "eval true;".repeat(2100));
+            let found = outside_changes(&input(&hidden), &[PathBuf::from(STORAGE)]);
+            assert!(found.iter().any(|c| c.command == TOO_COMPLEX), "{first}: {found:?}");
+        }
+        let after = format!("{}eval 'git -C {USER} reset --hard'; git commit -m x", "eval true;".repeat(2100));
+        assert!(outside_changes(&input(&after), &[PathBuf::from(STORAGE)]).iter().any(|c| c.command == TOO_COMPLEX));
     }
 
     /// Each real backtick in a heredoc body is found, however the ones around it pair up or nest.
@@ -5370,5 +5378,17 @@ mod tests {
             assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
         }
         assert!(asks_all(&format!("cat <<E\n$\\\\\n({git})\nE"), CLONE).is_empty());
+    }
+
+    /// A backtick command inside `${…}` ends at its closing backtick: the commands after it still follow the `cd` before.
+    #[test]
+    fn a_backtick_in_a_parameter_expansion_doesnt_swallow_the_rest() {
+        let user = vec![PathBuf::from(USER)];
+        for cmd in [
+            format!("echo ${{x:-`true`}}; cd {USER}; echo `true`; pnpm install"),
+            format!("echo ${{x:-`true`}}; cd {USER}; echo \"`true`\"; git reset --hard"),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
     }
 }
