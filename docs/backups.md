@@ -7,7 +7,8 @@ folder, with its settings in `.loft/settings.json`. It backs both up on its own 
   (after 36 hours it stops waiting for a quiet moment). Settings → Backups → **Back up now** makes one at once.
 - **How:** SQLite's `VACUUM INTO`, a consistent copy while Loft writes, then `PRAGMA integrity_check` on the copy.
 - **Where:** `Loft/backups` in the system's data folder (`~/Library/Application Support` on a Mac, `%APPDATA%` on
-  Windows, `$XDG_DATA_HOME` or `~/.local/share` on Linux), or the folder set in Settings → Backups (a full
+  Windows, `$XDG_DATA_HOME` or `~/.local/share` on Linux; Linux used `~/Library/Application Support` before, and
+  Loft moves that folder to the new place on its first start when the new one doesn't exist yet), or the folder set in Settings → Backups (a full
   path outside the Loft folder and outside any git repository, symlinks resolved, such as an external disk or an iCloud Drive folder). Settings offers
   **iCloud Drive** in one click, on the web and the iPhone: `~/Library/Mobile Documents/com~apple~CloudDocs/Loft backups`,
   when iCloud Drive is on (`GET /api/backups`'s `icloud`). Each backup is a folder
@@ -25,8 +26,8 @@ folder, with its settings in `.loft/settings.json`. It backs both up on its own 
 Setup restores a backup for you. Run `./setup.sh` (or the one-line installer). On an install with no
 `.loft/loft.db` yet (a new Mac, or a new Loft folder) it offers one straight away. On an install that already has
 data it asks "Restore from a backup? [y/N]" first; No (the default) keeps everything as it is. With no terminal it
-never restores over an existing database. It lists the backups it finds in the default folder and in
-iCloud Drive's "Loft backups", newest first with their date, size and the folder they are in (so an iCloud or typed folder is easy to tell from a local one; symlinked files and folders dated in the future are skipped), and asks which to restore. You can also type
+never restores over an existing database. It lists the backups it finds in the default folder, in
+iCloud Drive's "Loft backups" and, on Linux, in the old default folder if Loft hasn't moved it yet, newest first with their date, size and the folder they are in (so an iCloud or typed folder is easy to tell from a local one; symlinked files and folders dated in the future are skipped), and asks which to restore. You can also type
 another folder (an external disk), or press Enter to start a fresh Loft.
 
 Choosing one stops Loft if it runs as this folder's background service (and starts it again afterwards, also if the

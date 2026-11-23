@@ -67,6 +67,32 @@ pub fn dir(s: &crate::settings::Settings) -> PathBuf {
     }
 }
 
+/// Where Linux kept the default backups folder before it moved to the system's data folder (under the home folder).
+const OLD_LINUX_DIR: &str = "Library/Application Support/Loft/backups";
+
+/// On Linux, moves the default backups folder from where it used to be to where it is now, once: when the old one
+/// exists and the new one doesn't yet, so retention and restore-backup.sh see the backups made before.
+fn move_old_default(settings: &crate::settings::Settings) {
+    if !cfg!(target_os = "linux") || !settings.backup_dir.trim().is_empty() {
+        return;
+    }
+    if let Some(home) = dirs::home_dir() {
+        move_old(&home.join(OLD_LINUX_DIR), &dir(settings));
+    }
+}
+
+/// Moves the folder `old` to `new` when `old` is a folder and nothing is at `new` yet.
+fn move_old(old: &Path, new: &Path) {
+    if !old.is_dir() || std::fs::symlink_metadata(new).is_ok() {
+        return;
+    }
+    let moved = new.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::rename(old, new));
+    match moved {
+        Ok(()) => tracing::info!("moved the backups folder from {} to {}", old.display(), new.display()),
+        Err(e) => tracing::warn!("couldn't move the backups folder from {} to {}: {e}", old.display(), new.display()),
+    }
+}
+
 /// The iCloud Drive choice for this Mac's user: iCloud Drive is Mac-only.
 fn icloud() -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
@@ -272,6 +298,8 @@ fn due(s: &Status, now: DateTime<Local>, quiet: bool) -> bool {
 /// The day's backup. Looks at the backups folder at start and whenever Settings points elsewhere;
 /// otherwise each tick reads only what the last backup recorded.
 pub async fn scheduler(state: AppState) {
+    let settings = state.settings.get();
+    let _ = tokio::task::spawn_blocking(move || move_old_default(&settings)).await;
     let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
     loop {
         tick.tick().await;
@@ -325,6 +353,25 @@ mod tests {
         let d = crate::testdir::for_this_test("backup");
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn the_old_default_folder_moves_to_the_new_one_once() {
+        let d = temp();
+        let (old, new) = (d.join("home/Library/Application Support/Loft/backups"), d.join("data/Loft/backups"));
+        std::fs::create_dir_all(old.join("2026-11-08_031500")).unwrap();
+        std::fs::write(old.join("2026-11-08_031500/loft.db"), "db").unwrap();
+        move_old(&old, &new);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read_to_string(new.join("2026-11-08_031500/loft.db")).unwrap(), "db");
+        // A new folder already there (backups made since) is left alone, as is the old one then.
+        std::fs::create_dir_all(old.join("2026-11-01_031500")).unwrap();
+        move_old(&old, &new);
+        assert!(old.join("2026-11-01_031500").is_dir() && !new.join("2026-11-01_031500").exists());
+        // No old folder: nothing happens.
+        let none = d.join("nothing");
+        move_old(&none, &d.join("other"));
+        assert!(!d.join("other").exists());
     }
 
     /// A state whose backups go to a temp folder, never the real one.
