@@ -155,10 +155,13 @@ task_install() {
   </Actions>
 </Task>
 EOF
+  # The running loft stops first: once re-created, the task names this checkout, and another checkout's
+  # run-service.sh (which keeps the port) could no longer be found. If schtasks fails, the old task starts again.
+  local was=0; task_pid >/dev/null && was=1
+  task_stop
   win schtasks /Create /F /TN "$TASK" /XML "$(cygpath -w "$ROOT/$xml")" >"$LOG" 2>&1; local rc=$?
   rm -f "$xml"
-  [ $rc = 0 ] || return 1
-  task_stop
+  [ $rc = 0 ] || { [ $was = 1 ] && task_start; return 1; }
   task_start
 }
 
