@@ -734,6 +734,20 @@ CREATE TABLE IF NOT EXISTS port_ranges (
     slot INTEGER PRIMARY KEY,
     agent_id TEXT NOT NULL UNIQUE
 );
+-- The per-project option "the Lead can start and resume Deliveries" (lead_delivery.rs): one row once changed, else defaults.
+CREATE TABLE IF NOT EXISTS lead_delivery_options (
+    project TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+-- Every change to it: who, when, and the values before and after.
+CREATE TABLE IF NOT EXISTS lead_delivery_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    at TEXT NOT NULL,
+    by TEXT NOT NULL,
+    before TEXT NOT NULL,
+    after TEXT NOT NULL
+);
 -- Paired clients are gone: drop the table, and the token hashes in it, where an earlier build made it.
 DROP TABLE IF EXISTS paired_clients;
 -- Each agent's own Simulator device (simulator.rs); deleting the agent deletes it, and its row goes once the device has.
@@ -1643,6 +1657,33 @@ impl Db {
         tx.execute("DELETE FROM published_issues WHERE kind IN ('spec_pr', 'spec_pr_settled', 'spec_pr_retry')", [])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The saved options of a project as JSON text, if it was ever changed.
+    pub fn lead_delivery_options(&self, project: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT data FROM lead_delivery_options WHERE project = ?1", params![project], |r| r.get(0)).optional()?)
+    }
+
+    /// Save a project's options and the log line for the change, together.
+    pub fn save_lead_delivery_options(&self, project: &str, by: &str, before: &str, after: &str) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        tx.execute("INSERT OR REPLACE INTO lead_delivery_options (project, data) VALUES (?1, ?2)", params![project, after])?;
+        tx.execute(
+            "INSERT INTO lead_delivery_log (project, at, by, before, after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project, now(), by, before, after],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The latest changes to a project's options, newest first: (at, by, before, after) as stored.
+    pub fn lead_delivery_log(&self, project: &str, limit: usize) -> Result<Vec<(String, String, String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT at, by, before, after FROM lead_delivery_log WHERE project = ?1 ORDER BY id DESC LIMIT ?2")?;
+        let rows = st.query_map(params![project, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn get_delivery(&self, repo: &str, spec: i64) -> Result<Option<Delivery>> {

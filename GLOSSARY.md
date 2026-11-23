@@ -33,7 +33,7 @@ Loft running a spec's tickets from published to merged: it starts each unblocked
 _Avoid_: Build, run, pipeline
 
 **Stalled**:
-A Delivery waiting on a step no agent is working on: the run woken for it ended, failed or was lost to a restart without the call its step expects. It stays stalled, and tells only the user, until the user resumes it.
+A Delivery waiting on a step no agent is working on: the run woken for it ended, failed or was lost to a restart without the call its step expects. It stays stalled until the user resumes it, or until the Lead does where the project's option "The Lead can start and resume Deliveries" is on and the stall is transient (usage limit, API error, a failed or lost run, or a run that ended without a question): it then tells the Lead as well as the user. A stall that waits on the user's decision, or one the limits held back, is never resumed by the Lead.
 _Avoid_: Stuck, failed, paused
 
 **Waiting** (ticket):
@@ -49,7 +49,7 @@ A Delivery the user paused: Loft stopped the run in flight and sends no more wak
 _Avoid_: Stopped, cancelled, on hold
 
 **Resume**:
-The user's action that restarts a stalled or paused Delivery, or a ticket that needs the user after too many change rounds: Loft first checks GitHub for what is already done, then wakes only the agent the step still waits on.
+The action that restarts a stalled or paused Delivery, or a ticket that needs the user after too many change rounds: Loft first checks GitHub for what is already done, then wakes only the agent the step still waits on. The user may always resume; the Lead may resume a transient stall, never a paused Delivery or one waiting on the user, and only within the project's limits (ADR 0006).
 _Avoid_: Retry, restart
 
 **Role brief**:

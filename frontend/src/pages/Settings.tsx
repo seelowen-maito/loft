@@ -16,6 +16,7 @@ import { FloatingBar } from "../components/FloatingBar";
 import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
+import { LeadDeliveryOption } from "./LeadDeliveryOption";
 import { cleanLineText, cx, fmtBytes, oneLine } from "../lib/format";
 import { fmtClock, fmtDateTime, relTime } from "../lib/time";
 import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
@@ -610,6 +611,8 @@ export default function SettingsPage() {
             hint="Each new Loft issue in a project with a GitHub repo becomes a GitHub issue right away. Off: it stays in Loft until you press Publish to GitHub."
           />
         </SettingsCard>
+
+        <LeadDeliveryOption />
 
         <SettingsCard title="Navigation">
           <Toggle
