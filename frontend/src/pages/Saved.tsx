@@ -2,16 +2,17 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft, Bookmark, MessageSquare, Pencil, Search, Trash2 } from "lucide-react";
-import { api, type SavedItem } from "../lib/api";
+import { ArrowLeft, Bookmark, FileUp, MessageSquare, Pencil, Search, Trash2 } from "lucide-react";
+import { api, type PullRequest, type Repo, type SavedItem } from "../lib/api";
 import { cx } from "../lib/format";
 import { fmtDate, fmtDateTime } from "../lib/time";
 import { errorText, useAction } from "../lib/useAction";
 import { excerpt, sourceHref, SUGGESTED_TAGS, tagOptions } from "../lib/saved";
 import { ErrorLine } from "../components/Callout";
 import { ActionButton } from "../components/ActionButton";
-import { ConfirmDialog } from "../components/Dialog";
+import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { MD_COMPONENTS } from "./agents/Chat";
+import { PullRequestCard } from "./agents/PullRequestCard";
 
 const MISSING = "This saved item doesn't exist.";
 
@@ -82,7 +83,7 @@ function ListPage() {
   );
 }
 
-type Item = SavedItem & { source_exists: boolean };
+type Item = SavedItem & { source_exists: boolean; pr: PullRequest | null };
 
 function ItemPage({ id }: { id: number }) {
   const navigate = useNavigate();
@@ -90,6 +91,7 @@ function ItemPage({ id }: { id: number }) {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const remove = useAction();
   useEffect(() => {
     let live = true;
@@ -110,6 +112,9 @@ function ItemPage({ id }: { id: number }) {
         <article className="flex flex-col gap-3">
           <div className="flex items-start gap-2">
             <h1 className="min-w-0 flex-1 text-[20px] font-medium tracking-tight [overflow-wrap:anywhere]">{item.title}</h1>
+            <button type="button" className="btn-ghost" onClick={() => setExporting(true)}>
+              <FileUp className="size-3.5" aria-hidden /> Export to docs
+            </button>
             <button type="button" className="btn-ghost" onClick={() => setEditing(true)}>
               <Pencil className="size-3.5" aria-hidden /> Edit
             </button>
@@ -129,9 +134,18 @@ function ItemPage({ id }: { id: number }) {
               <span>· The source message is gone</span>
             )}
           </div>
+          {item.pr && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[12px] text-fg-3">
+                Exported to docs: <a href={item.pr.url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">{item.pr.slug}#{item.pr.number}</a>
+              </span>
+              <PullRequestCard pr={item.pr} />
+            </div>
+          )}
           <Body content={item.content} />
         </article>
       )}
+      {item && exporting && <ExportDialog id={item.id} onDone={(pr) => (setItem({ ...item, pr, export_pr: pr.id }), setExporting(false))} onClose={() => setExporting(false)} />}
       {item && deleting && (
         <ConfirmDialog
           title="Delete this saved item?"
@@ -213,5 +227,54 @@ function EditForm({ item, onSaved, onCancel }: { item: SavedItem; onSaved: (i: S
         </ActionButton>
       </div>
     </form>
+  );
+}
+
+/** Export to docs: pick a project; Loft opens a pull request on its repo adding `docs/<slug>.md`. */
+function ExportDialog({ id, onDone, onClose }: { id: number; onDone: (pr: PullRequest) => void; onClose: () => void }) {
+  const [repos, setRepos] = useState<Repo[] | null>(null);
+  const [project, setProject] = useState("");
+  const load = useAction();
+  const send = useAction();
+  useEffect(() => {
+    load.run(() => api.repos()).then((r) => {
+      if (!r) return;
+      setRepos(r);
+      setProject((r.find((x) => x.github) ?? r[0])?.name ?? "");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const chosen = repos?.find((r) => r.name === project);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const pr = await send.run(() => api.exportSaved(id, project));
+    if (pr) onDone(pr);
+  };
+  return (
+    <Dialog title="Export to docs" onClose={onClose} size="sm">
+      <form onSubmit={submit} className="flex flex-col gap-3 p-5">
+        <h2 className="text-[15px] font-medium">Export to docs</h2>
+        <p className="text-[12.5px] text-fg-3">Loft opens a pull request on the project's repo adding this item as a page in its <code>docs/</code> folder, or updating it if it's there.</p>
+        <label className="flex flex-col gap-1 text-[12px] text-fg-3">
+          Project
+          <select className="input" value={project} onChange={(e) => (setProject(e.target.value), send.setError(null))} aria-label="Project" disabled={!repos?.length}>
+            {repos?.map((r) => (
+              <option key={r.name} value={r.name}>{r.github ? `${r.name} (${r.github})` : `${r.name} (no GitHub repo)`}</option>
+            ))}
+          </select>
+        </label>
+        {repos && !repos.length && <p className="text-[12.5px] text-fg-3">No projects yet.</p>}
+        {chosen && !chosen.github && (
+          <p className="text-[12.5px] text-fg-3" role="note">{chosen.name} has no GitHub repo, so Loft can't open a pull request there. Pick another project, or push it to GitHub first.</p>
+        )}
+        <ErrorLine error={load.error ?? send.error} />
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+          <ActionButton type="submit" pending={send.busy} pendingLabel="Opening PR…" disabled={!chosen?.github} icon={<FileUp className="size-3.5" />}>
+            Open PR
+          </ActionButton>
+        </div>
+      </form>
+    </Dialog>
   );
 }

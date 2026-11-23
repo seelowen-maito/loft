@@ -167,6 +167,7 @@ fn api_routes() -> Router<AppState> {
         .route("/push/signin", post(signin::start))
         .route("/saved", get(saved::list).post(saved::create))
         .route("/saved/{id}", get(saved::get).put(saved::update).delete(saved::delete))
+        .route("/saved/{id}/export", post(saved::export))
         .route("/permissions", get(api::list_permissions))
         .route("/permissions/{id}", post(api::decide_permission))
         .route("/pull-requests", get(api::list_pull_requests))

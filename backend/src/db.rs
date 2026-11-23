@@ -406,6 +406,8 @@ pub struct SavedItem {
     pub message_id: i64,
     pub created_at: String,
     pub updated_at: Option<String>,
+    /// The pull request of its last export to a project's docs (`pull_requests.id`), if any.
+    pub export_pr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -767,7 +769,8 @@ CREATE TABLE IF NOT EXISTS saved_items (
     agent_name TEXT NOT NULL,
     message_id INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT
+    updated_at TEXT,
+    export_pr TEXT
 );
 "#;
 
@@ -878,7 +881,7 @@ fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
     })
 }
 
-const SAVED_COLS: &str = "id, title, tag, content, agent_id, agent_name, message_id, created_at, updated_at";
+const SAVED_COLS: &str = "id, title, tag, content, agent_id, agent_name, message_id, created_at, updated_at, export_pr";
 
 fn saved_from_row(r: &Row) -> rusqlite::Result<SavedItem> {
     Ok(SavedItem {
@@ -891,6 +894,7 @@ fn saved_from_row(r: &Row) -> rusqlite::Result<SavedItem> {
         message_id: r.get(6)?,
         created_at: r.get(7)?,
         updated_at: r.get(8)?,
+        export_pr: r.get(9)?,
     })
 }
 
@@ -939,6 +943,11 @@ impl Db {
         let has_updated: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'updated_at'", [], |r| r.get(0))?;
         if !has_updated {
             conn.execute("ALTER TABLE memories ADD COLUMN updated_at TEXT", [])?;
+        }
+        // Saved items made before export had no PR of their own.
+        let has_export: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('saved_items') WHERE name = 'export_pr'", [], |r| r.get(0))?;
+        if !has_export {
+            conn.execute("ALTER TABLE saved_items ADD COLUMN export_pr TEXT", [])?;
         }
         // FYIs used to wait in the agent's `data`; move any still there to their table, once.
         conn.execute_batch(
@@ -1903,6 +1912,13 @@ impl Db {
             return Ok(None);
         }
         Ok(Some(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row)?))
+    }
+
+    /// Records the pull request of the item's latest export.
+    pub fn set_saved_export(&self, id: i64, pr_id: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("UPDATE saved_items SET export_pr = ?2 WHERE id = ?1", params![id, pr_id])?;
+        Ok(())
     }
 
     /// False when there was no such item.
