@@ -4,13 +4,14 @@ import {
   AlertTriangle, ArrowDown, ArrowUp, CircleDot, ExternalLink, FolderGit2, GitCommitHorizontal,
   GitPullRequest, Globe, KeyRound, Lock, RefreshCw, Search, Star, X,
 } from "lucide-react";
-import { api, type Commit, type GithubInfo, type GithubItem, type Info, type Repo, type Site } from "../lib/api";
+import { api, type Commit, type GithubInfo, type GithubItem, type Repo, type Site } from "../lib/api";
 import { cx, fmtNum } from "../lib/format";
 import { Callout, ErrorLine } from "../components/Callout";
 import { ActionButton } from "../components/ActionButton";
 import { useAction } from "../lib/useAction";
 import { relTime } from "../lib/time";
 import { reposList, useRepos } from "../hooks/lists";
+import { reloadInfo, useInfo } from "../hooks/useOffered";
 import { Dialog } from "../components/Dialog";
 import { Heatmap, ShareBars, WeeklyBars } from "../components/Charts";
 import { AgentActivity } from "./AgentActivity";
@@ -36,7 +37,7 @@ export default function ReposPage() {
   const repos = useRepos().items;
   const [gh, setGh] = useState<Record<string, GithubInfo>>({});
   const [ghLoading, setGhLoading] = useState(true);
-  const [info, setInfo] = useState<Info | null>(null);
+  const info = useInfo();
   const refreshing = useAction();
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -62,7 +63,8 @@ export default function ReposPage() {
 
   useEffect(() => {
     loadGithub(false);
-    api.info().then(setInfo).catch(() => {});
+    // Whether a GitHub token is set can have changed in Settings since it was read.
+    reloadInfo();
   }, []);
 
   const totals = useMemo(() => {
