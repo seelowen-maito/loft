@@ -583,7 +583,7 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     let msg = if leading {
         agents::add_msg(&state, &id, None, "user", "text", &text, meta)
     } else {
-        agents::enqueue_with(&state, &id, Some(text.clone()), meta, "user")
+        agents::enqueue_chat(&state, &id, text.clone(), meta)
     };
     crate::mentions::deliver(&state, &agent, &mentioned, &text, msg.as_ref().map(|m| m.id));
     Ok(Json(json!({ "ok": true, "queued": queued && !leading, "message": msg, "mentioned": crate::mentions::meta(&mentioned) })))

@@ -714,6 +714,18 @@ pub fn enqueue(state: &AppState, agent_id: &str, text: Option<String>, trigger: 
 
 /// `enqueue`, with `meta` stored on the user message (e.g. a client id or task id). Returns that message.
 pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str) -> Option<Message> {
+    enqueue_message(state, agent_id, text, meta, trigger, false)
+}
+
+/// `enqueue_with` for a message the user typed in a chat: while it waits behind a run, they can still cancel it
+/// (`cancel_queued`). Anything else Loft queues (a task's brief or notices, a setup message) can't be cancelled:
+/// cancelling it would leave work half-done.
+pub fn enqueue_chat(state: &AppState, agent_id: &str, text: String, meta: Value) -> Option<Message> {
+    let cancellable = meta["task_id"].is_null();
+    enqueue_message(state, agent_id, Some(text), meta, "user", cancellable)
+}
+
+fn enqueue_message(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str, cancellable: bool) -> Option<Message> {
     let prompt = text.as_ref().map(|t| {
         let p = crate::uploads::prompt(t, &meta);
         let p = match crate::reply::prompt_block(state, agent_id, &meta) {
@@ -731,9 +743,6 @@ pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta
     });
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
     let for_user = matches!(trigger, "schedule" | "manual" | "scheduled") || (text.is_some() && meta["from_agent"].is_null());
-    // Only the user's own typed messages can be cancelled while they wait. Anything about a task (an issue's brief,
-    // its notices) stays: cancelling it would leave the issue in progress with nobody on it.
-    let cancellable = trigger == "user" && meta["task_id"].is_null();
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
     // Behind a running run it waits in the queue, where the user can still cancel it (`cancel_queued`).
     start_with(state, agent_id, prompt, trigger, for_user, false, None, msg.as_ref().filter(|_| cancellable).map(|m| m.id), false);
@@ -2926,8 +2935,8 @@ esac
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Dev");
         st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
-        let keep = enqueue_with(&st, &a.id, Some("first".into()), json!({}), "user").unwrap().id;
-        let drop = enqueue_with(&st, &a.id, Some("never mind".into()), json!({}), "user").unwrap().id;
+        let keep = enqueue_chat(&st, &a.id, "first".into(), json!({})).unwrap().id;
+        let drop = enqueue_chat(&st, &a.id, "never mind".into(), json!({})).unwrap().id;
         {
             let rt = st.rt.lock().unwrap();
             assert_eq!(rt.queued_messages[&a.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [keep, drop]);
@@ -2949,8 +2958,8 @@ esac
         let for_user = |st: &AppState| st.rt.lock().unwrap().queued_for_user.contains(&a.id);
         let agent_msg = message_on_ticket(&st, &from, &a, "FYI-ish ask", json!({}), None, false).unwrap();
         assert!(!for_user(&st));
-        let u1 = enqueue_with(&st, &a.id, Some("mine".into()), json!({}), "user").unwrap().id;
-        let u2 = enqueue_with(&st, &a.id, Some("mine too".into()), json!({}), "user").unwrap().id;
+        let u1 = enqueue_chat(&st, &a.id, "mine".into(), json!({})).unwrap().id;
+        let u2 = enqueue_chat(&st, &a.id, "mine too".into(), json!({})).unwrap().id;
         assert!(for_user(&st));
         assert!(cancel_queued(&st, &a.id, u1).unwrap());
         assert!(for_user(&st), "another of the user's messages still waits");
@@ -2960,8 +2969,8 @@ esac
         let _ = agent_msg;
 
         // A user's task brief waits untracked: it keeps the run for the user.
-        enqueue_with(&st, &a.id, Some("Work on issue 12".into()), json!({ "task_id": "t1" }), "user");
-        let u3 = enqueue_with(&st, &a.id, Some("again".into()), json!({}), "user").unwrap().id;
+        enqueue_chat(&st, &a.id, "Work on issue 12".into(), json!({ "task_id": "t1" }));
+        let u3 = enqueue_chat(&st, &a.id, "again".into(), json!({})).unwrap().id;
         assert!(cancel_queued(&st, &a.id, u3).unwrap());
         assert!(for_user(&st));
     }
@@ -2971,11 +2980,16 @@ esac
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Dev");
         st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
-        let brief = enqueue_with(&st, &a.id, Some("Work on issue 12".into()), json!({ "task_id": "t1" }), "user").unwrap().id;
+        let brief = enqueue_chat(&st, &a.id, "Work on issue 12".into(), json!({ "task_id": "t1" })).unwrap().id;
         assert!(st.rt.lock().unwrap().queued_messages.get(&a.id).is_none_or(|q| q.is_empty()));
         assert!(!cancel_queued(&st, &a.id, brief).unwrap());
         assert_eq!(st.rt.lock().unwrap().queued[&a.id].len(), 1, "it still runs next");
         assert!(st.db.get_message(&a.id, brief).unwrap().unwrap().meta["cancelled"].is_null());
+
+        // What Loft queues itself (a task notice, the planning card's setup message) is no chat message to cancel.
+        let notice = enqueue_with(&st, &a.id, Some("[Task t1] was cancelled by the user. Stop working on it.".into()), json!({}), "user").unwrap().id;
+        assert!(!cancel_queued(&st, &a.id, notice).unwrap());
+        assert_eq!(st.rt.lock().unwrap().queued[&a.id].len(), 2);
     }
 
     #[tokio::test]
