@@ -20,6 +20,7 @@ mod ports;
 mod guard;
 mod herdr;
 mod kill_guard;
+mod lead_delivery;
 mod chat_commands;
 mod login;
 mod loops;
@@ -96,6 +97,7 @@ fn api_routes() -> Router<AppState> {
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
+        .route("/projects/lead-delivery", get(lead_delivery::get_route).put(lead_delivery::put_route))
         .route("/projects", post(new_project::create))
         .route("/projects/check", get(new_project::check))
         .route("/agents", get(api::list_agents).post(api::create_agent))

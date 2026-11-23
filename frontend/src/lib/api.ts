@@ -120,8 +120,10 @@ export type WaitsOn = { blocker: string; delivery: { repo: string; spec: number;
 export type IssueDelivery = {
   /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
-  /** Why it stalled: "run_failed", "no_call", "restart" or "ci_missing"; null unless stalled. */
+  /** Why it stalled: "usage_limit", "api_error", "run_failed", "no_call", "restart" or "ci_missing"; null unless stalled. */
   stall_reason?: string | null;
+  /** When a "usage_limit" stall frees (RFC 3339); null otherwise. */
+  stall_resets_at?: string | null;
   /** The card's state line as the server words it; null before it started. An older server doesn't send it. */
   state_line?: { tone: string; text: string } | null;
   /** Pause applies: the Delivery is running (its final review and fixes included), and no ticket waits for the user. */
@@ -351,6 +353,16 @@ export type Commit = {
   timestamp: number;
   insertions: number | null;
   deletions: number | null;
+};
+
+export type LeadDeliveryOptions = { enabled: boolean; resumes_per_hour: number; resumes_per_day: number; running_deliveries: number };
+export type LeadDeliveryView = {
+  project: string;
+  options: LeadDeliveryOptions;
+  /** The most each limit can be set to; the least is 1. */
+  ceilings: Omit<LeadDeliveryOptions, "enabled">;
+  /** Changes to the options, newest first. */
+  log: { at: string; by: string; before: LeadDeliveryOptions; after: LeadDeliveryOptions }[];
 };
 
 export type Repo = {
@@ -715,6 +727,9 @@ export const api = {
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
+  /** The project's option "the Lead can start and resume Deliveries", its limits and the log of changes. */
+  leadDelivery: (project: string) => req<LeadDeliveryView>("GET", `/projects/lead-delivery?project=${encodeURIComponent(project)}`),
+  saveLeadDelivery: (project: string, change: Partial<LeadDeliveryOptions>) => req<LeadDeliveryView>("PUT", "/projects/lead-delivery", { project, ...change }),
   restart: () => req<{ ok: boolean }>("POST", "/restart"),
   herdrStatus: () => req<HerdrStatus>("GET", "/herdr"),
   /** Builds the client, links Loft's plugin into this machine's Herdr and opens the agents' tabs. */

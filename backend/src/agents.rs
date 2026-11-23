@@ -1082,7 +1082,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let full = with_fyis(&fyis, &prompt);
             let mut delivered = false;
             let failed = match run_once(&state, &agent_id, &full, trigger, for_user, throwaway, kill.clone(), &mut delivered).await {
-                Ok(failed) => failed,
+                Ok(error) => error,
                 Err(e) => {
                     state.rt.lock().unwrap().runs.remove(&agent_id);
                     // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
@@ -1094,10 +1094,10 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                     if for_user {
                         mark_replied(&state, &agent_id);
                     }
-                    true
+                    Some(e.to_string())
                 }
             };
-            crate::delivery::run_ended(&state, &agent_id, failed).await;
+            crate::delivery::run_ended_with(&state, &agent_id, failed.as_deref()).await;
             // Test browsers the run left open hold gigabytes of memory: stop them, and say so in the next run.
             let closed = crate::processes::stop_test_browsers(&state.cfg.storage_dir, &agent_id).await;
             if closed > 0
@@ -1469,11 +1469,11 @@ fn set_session(state: &AppState, agent_id: &str, sid: &str) -> Result<()> {
 /// Whether the run failed: claude reported an error, or exited without a result when nobody stopped it.
 /// `throwaway`: run on a new session that isn't saved, leaving the agent's own Session as it was.
 #[allow(clippy::too_many_arguments)]
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, throwaway: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<bool> {
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, throwaway: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<Option<String>> {
     let mut resume = !throwaway;
     loop {
         match run_process(state, agent_id, prompt, trigger, for_user, throwaway, kill.clone(), resume, delivered).await? {
-            RunOutcome::Done { failed } => return Ok(failed),
+            RunOutcome::Done { error } => return Ok(error),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
                 *delivered = false;
@@ -1501,7 +1501,8 @@ async fn terminate(child: &mut tokio::process::Child) {
 }
 
 enum RunOutcome {
-    Done { failed: bool },
+    /// `error`: what the run ended with when it failed.
+    Done { error: Option<String> },
     StaleSession,
 }
 
@@ -1989,7 +1990,7 @@ async fn run_process(
     if !mirrors.is_empty() && !killed {
         crate::mentions::mirror(state, &agent, &mirrors, &last_text, run_error.is_some());
     }
-    Ok(RunOutcome::Done { failed: run_error.is_some() })
+    Ok(RunOutcome::Done { error: run_error })
 }
 
 // ---- scheduler --------------------------------------------------------

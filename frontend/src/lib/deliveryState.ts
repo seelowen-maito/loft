@@ -9,6 +9,10 @@ const TONES: DeliveryTone[] = ["running", "ci", "stalled", "paused", "needs_you"
 /** Why a Delivery stalled, as the card says it (only for an older server that sends no `state_line`). */
 function stallWhy(reason: string | null | undefined): string {
   switch (reason) {
+    case "usage_limit":
+      return "the plan's usage limit was reached";
+    case "api_error":
+      return "the Claude API failed (overloaded, 529 or a server error) while the run Loft woke for its step was working";
     case "run_failed":
       return "the run Loft woke for its step failed";
     case "restart":

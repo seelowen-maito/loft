@@ -552,6 +552,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             ),
             None => (crate::delivery::stalled_reason(state, &d), String::new(), title.clone()),
         };
+        // A brake held the Lead's resume back: it leads, and the push says which.
+        let (reason, push) = if d.brake.is_empty() { (reason, push) } else { (format!("The Lead's resume was held back: {}. {reason}", d.brake), format!("The Lead can't resume it: {}", d.brake)) };
         let mut actions = vec![action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec }))];
         if let Some(((agent_id, _), _)) = &ask {
             actions.push(action("answer", "Reply", "POST", format!("/api/agents/{agent_id}/messages"), json!({ "text": "" })));

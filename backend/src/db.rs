@@ -41,10 +41,15 @@ pub struct Delivery {
     /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes").
     #[serde(default)]
     pub resume_to: String,
-    /// Why it stalled: "run_failed", "no_call" (the run ended without its call) or "restart" (the run was
-    /// lost when Loft restarted).
+    /// Why it stalled: "usage_limit" (the plan's usage limit; see `stall_resets_at`), "api_error" (529, overloaded
+    /// or a 5xx from the API), "run_failed" (any other error), "no_call" (the run ended without its call) or
+    /// "restart" (the run was lost when Loft restarted).
     #[serde(default)]
     pub stall_reason: String,
+    /// For a "usage_limit" stall: when the limit frees (RFC 3339), read from the run's error or, failing that,
+    /// from the plan's 5-hour window. Empty for any other reason.
+    #[serde(default)]
+    pub stall_resets_at: String,
     /// When it stalled (RFC 3339): a new stall is a new Needs you item.
     #[serde(default)]
     pub stalled_at: String,
@@ -55,6 +60,13 @@ pub struct Delivery {
     /// The question the stalling run ended with, when its reply asked the user to decide something.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall_ask: Option<StallAsk>,
+    /// The Lead's resumes of the last day (ADR 0006), for the brakes: how many in the hour and the day, and
+    /// whether the same stall came right back. Kept across stalls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_resumes: Vec<LeadResumed>,
+    /// While stalled: the brake that held the Lead's resume back (shown in Needs you), empty when none did.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub brake: String,
     /// When Loft marked its spec PR ready, or set a plan kept in Loft to ready (RFC 3339): the Delivery done
     /// item and the planner's wake, once. Empty before.
     #[serde(default)]
@@ -129,9 +141,10 @@ impl Delivery {
         if matches!(self.state.as_str(), "stalled" | "paused") {
             self.state = std::mem::take(&mut self.resume_to);
         }
-        (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());
+        (self.resume_to, self.stall_reason, self.stalled_at, self.stall_resets_at) = (String::new(), String::new(), String::new(), String::new());
         self.stalled_on.clear();
         self.stall_ask = None;
+        self.brake.clear();
     }
 
     /// Ticket #n's step went ahead (its call came, or it moved to another Dev): a stall goes only when no
@@ -147,6 +160,15 @@ impl Delivery {
             }
         }
     }
+}
+
+/// One resume of a Delivery by the Lead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeadResumed {
+    /// When the Lead resumed it (RFC 3339).
+    pub at: String,
+    /// The stall reason it resumed.
+    pub reason: String,
 }
 
 /// What the agent whose run stalled a Delivery asked at the end of that run: Needs you shows it with the stall.
@@ -733,6 +755,20 @@ CREATE TABLE IF NOT EXISTS all_time_spend (
 CREATE TABLE IF NOT EXISTS port_ranges (
     slot INTEGER PRIMARY KEY,
     agent_id TEXT NOT NULL UNIQUE
+);
+-- The per-project option "the Lead can start and resume Deliveries" (lead_delivery.rs): one row once changed, else defaults.
+CREATE TABLE IF NOT EXISTS lead_delivery_options (
+    project TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+-- Every change to it: who, when, and the values before and after.
+CREATE TABLE IF NOT EXISTS lead_delivery_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    at TEXT NOT NULL,
+    by TEXT NOT NULL,
+    before TEXT NOT NULL,
+    after TEXT NOT NULL
 );
 -- Paired clients are gone: drop the table, and the token hashes in it, where an earlier build made it.
 DROP TABLE IF EXISTS paired_clients;
@@ -1618,9 +1654,12 @@ impl Db {
                 state: if has(&settled) { "settled" } else { "planned" }.into(),
                 resume_to: String::new(),
                 stall_reason: String::new(),
+                stall_resets_at: String::new(),
                 stalled_at: String::new(),
                 stalled_on: vec![],
                 stall_ask: None,
+                lead_resumes: vec![],
+                brake: String::new(),
                 done_at: String::new(),
                 ready_retry: has(&retry),
                 tickets,
@@ -1643,6 +1682,33 @@ impl Db {
         tx.execute("DELETE FROM published_issues WHERE kind IN ('spec_pr', 'spec_pr_settled', 'spec_pr_retry')", [])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The saved options of a project as JSON text, if it was ever changed.
+    pub fn lead_delivery_options(&self, project: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT data FROM lead_delivery_options WHERE project = ?1", params![project], |r| r.get(0)).optional()?)
+    }
+
+    /// Save a project's options and the log line for the change, together.
+    pub fn save_lead_delivery_options(&self, project: &str, by: &str, before: &str, after: &str) -> Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        tx.execute("INSERT OR REPLACE INTO lead_delivery_options (project, data) VALUES (?1, ?2)", params![project, after])?;
+        tx.execute(
+            "INSERT INTO lead_delivery_log (project, at, by, before, after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project, now(), by, before, after],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The latest changes to a project's options, newest first: (at, by, before, after) as stored.
+    pub fn lead_delivery_log(&self, project: &str, limit: usize) -> Result<Vec<(String, String, String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT at, by, before, after FROM lead_delivery_log WHERE project = ?1 ORDER BY id DESC LIMIT ?2")?;
+        let rows = st.query_map(params![project, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn get_delivery(&self, repo: &str, spec: i64) -> Result<Option<Delivery>> {

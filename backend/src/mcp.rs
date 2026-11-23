@@ -66,6 +66,17 @@ pub(crate) fn tools(state: &AppState) -> Value {
     all
 }
 
+/// `tools`, plus the ones only a Lead whose project turned on "the Lead can start and resume Deliveries" gets.
+pub(crate) fn tools_for(state: &AppState, agent_id: &str) -> Value {
+    let mut all = tools(state);
+    if let Ok(Some(me)) = state.db.get_agent(agent_id)
+        && crate::delivery::lead_has_tools(state, &me)
+    {
+        all.as_array_mut().unwrap().extend(crate::delivery::lead_mcp_tools());
+    }
+    all
+}
+
 fn base_tools() -> Value {
     json!([
         {
@@ -566,7 +577,7 @@ pub async fn handle(State(state): State<AppState>, Path(agent_id): Path<String>,
             "instructions": "Loft: your memory, status, avatar, and permission tools."
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools(&state) }),
+        "tools/list" => json!({ "tools": tools_for(&state, &agent_id) }),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));

@@ -5,6 +5,7 @@
 //! first one. A spec published earlier gets its record from GitHub there.
 
 use axum::Json;
+use chrono::{DateTime, Utc};
 use axum::extract::{Path, State};
 use serde_json::{Value, json};
 
@@ -61,9 +62,12 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             state: "planned".into(),
             resume_to: String::new(),
             stall_reason: String::new(),
+            stall_resets_at: String::new(),
             stalled_at: String::new(),
             stalled_on: vec![],
             stall_ask: None,
+            lead_resumes: vec![],
+            brake: String::new(),
             done_at: String::new(),
             ready_retry: false,
             tickets: vec![],
@@ -222,7 +226,14 @@ fn wake_for(d: &Delivery, step: Step) -> Wake {
 /// A run of `agent_id` ended (`failed`: claude reported an error, or exited without a result nobody asked
 /// for). Each Delivery step it was woken for that still waits on its call stalls its Delivery, unless
 /// another Delivery wake for the agent is still queued: the run that takes it carries on.
+#[cfg(test)]
 pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
+    run_ended_with(state, agent_id, failed.then_some("")).await
+}
+
+/// Like `run_ended`, with the error the failed run ended with (None when it didn't fail): a stall says whether
+/// it was the plan's usage limit, an API error or any other failure.
+pub async fn run_ended_with(state: &AppState, agent_id: &str, error: Option<&str>) {
     let ended = {
         let mut rt = state.rt.lock().unwrap();
         let ended = rt.delivery_running.remove(agent_id).unwrap_or_default();
@@ -249,7 +260,86 @@ pub async fn run_ended(state: &AppState, agent_id: &str, failed: bool) {
                 _ => None,
             };
             let ask = last_ask(state, agent_id, ticket);
-            stall(state, &d, if failed { "run_failed" } else { "no_call" }, ticket.into_iter().collect(), Some(agent_id), ask);
+            let (reason, resets_at) = match error {
+                Some(e) => classify_run_error(state, e).await,
+                None => ("no_call", None),
+            };
+            stall_for(state, &d, reason, resets_at, ticket.into_iter().collect(), Some(agent_id), ask);
+        }
+    }
+}
+
+/// Why a failed run stalled its Delivery, from the error it ended with: "usage_limit" (Claude Code's plan limit
+/// message, with when it frees), "api_error" (529, overloaded or another 5xx from the API) or "run_failed".
+async fn classify_run_error(state: &AppState, error: &str) -> (&'static str, Option<DateTime<Utc>>) {
+    let now = Utc::now();
+    let (reason, resets_at) = classify_error_text(error, now);
+    if reason != "usage_limit" || resets_at.is_some() {
+        return (reason, resets_at);
+    }
+    // The error names no time: the plan's 5-hour window says, else five hours from now.
+    let usage = crate::usage::get(state).await;
+    let window = usage["windows"].as_array().and_then(|w| w.iter().find(|w| w["key"] == "five_hour"));
+    let from_plan = window.and_then(|w| w["resets_at"].as_str()).and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|t| t.with_timezone(&Utc)).filter(|t| *t > now);
+    (reason, Some(from_plan.unwrap_or(now + chrono::Duration::hours(5))))
+}
+
+/// The pure part of `classify_run_error`: the reason, and the reset time when the message carries one.
+fn classify_error_text(error: &str, now: DateTime<Utc>) -> (&'static str, Option<DateTime<Utc>>) {
+    let m = error.to_lowercase();
+    let limit = m.contains("usage limit") || m.contains("hit your limit") || m.contains("hit your session limit") || m.contains("hit your weekly limit") || (m.contains("limit reached") && !m.contains("rate"));
+    if limit {
+        return ("usage_limit", limit_resets_at(error, now));
+    }
+    let server = m.contains("overloaded") || m.contains("529") || m.contains("internal server error") || m.contains("service unavailable") || m.contains("bad gateway") || m.contains("gateway timeout")
+        || m.find("api error: 5").is_some_and(|i| m[i + 11..].starts_with(|c: char| c.is_ascii_digit()));
+    if server {
+        return ("api_error", None);
+    }
+    ("run_failed", None)
+}
+
+/// When a usage limit frees, from Claude Code's message: "Claude AI usage limit reached|1760000000" (Unix seconds),
+/// or "You've hit your limit · resets 3pm (America/Sao_Paulo)" / "resets 3:30pm" / "resets Nov 24, 9am", on this Mac's clock.
+fn limit_resets_at(error: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    use chrono::{Local, NaiveDate, TimeZone};
+    if let Some((_, tail)) = error.split_once('|') {
+        let digits: String = tail.trim_start().chars().take_while(char::is_ascii_digit).collect();
+        if (10..=13).contains(&digits.len()) {
+            let n: i64 = digits.parse().ok()?;
+            return DateTime::from_timestamp(if digits.len() == 13 { n / 1000 } else { n }, 0);
+        }
+    }
+    let lower = error.to_lowercase();
+    let rest = lower.split_once("resets")?.1.trim_start().trim_start_matches("at").trim_start();
+    let rest = rest.split('(').next()?.trim();
+    // An optional "Nov 24," before the time.
+    let (date, clock) = match rest.split_once(',') {
+        Some((d, c)) => (Some(d.trim()), c.trim()),
+        None => (None, rest),
+    };
+    let clock = clock.split_whitespace().collect::<String>();
+    let (num, pm) = clock.strip_suffix("pm").map(|n| (n, Some(true))).or_else(|| clock.strip_suffix("am").map(|n| (n, Some(false)))).unwrap_or((clock.as_str(), None));
+    let (h, min) = num.split_once(':').map_or((num, "0"), |(h, m)| (h, m));
+    let (mut h, min): (u32, u32) = (h.parse().ok()?, min.parse().ok()?);
+    match pm {
+        Some(true) if h < 12 => h += 12,
+        Some(false) if h == 12 => h = 0,
+        _ => {}
+    }
+    let today = now.with_timezone(&Local).date_naive();
+    let at = |day: NaiveDate| Local.from_local_datetime(&day.and_hms_opt(h, min, 0)?).earliest().map(|t| t.with_timezone(&Utc));
+    match date {
+        None => {
+            let t = at(today)?;
+            if t > now { Some(t) } else { at(today.succ_opt()?) }
+        }
+        Some(d) => {
+            let (mon, day) = d.split_once(' ')?;
+            let month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].iter().position(|m| mon.starts_with(m))? as u32 + 1;
+            let day: u32 = day.trim().parse().ok()?;
+            let t = at(NaiveDate::from_ymd_opt(chrono::Datelike::year(&today), month, day)?)?;
+            if t > now { Some(t) } else { at(NaiveDate::from_ymd_opt(chrono::Datelike::year(&today) + 1, month, day)?) }
         }
     }
 }
@@ -280,6 +370,12 @@ fn asked(reply: &str) -> Option<String> {
 /// agent should be working on: never a paused one, nor one waiting for the user (`needs_human`). `who` is
 /// the agent whose run ended, and `ask` what that run asked the user. The team's Lead is woken with it.
 fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>, who: Option<&str>, ask: Option<crate::db::StallAsk>) -> Option<Delivery> {
+    stall_for(state, d, reason, None, tickets, who, ask)
+}
+
+/// `stall`, with the time a "usage_limit" stall frees.
+#[allow(clippy::too_many_arguments)]
+fn stall_for(state: &AppState, d: &Delivery, reason: &str, resets_at: Option<DateTime<Utc>>, tickets: Vec<i64>, who: Option<&str>, ask: Option<crate::db::StallAsk>) -> Option<Delivery> {
     // Already stalled: another ticket's step joins the ones that stall it.
     if d.state == "stalled" && !tickets.is_empty() {
         let new: Vec<i64> = tickets.iter().copied().filter(|n| !d.stalled_on.contains(n)).collect();
@@ -290,7 +386,7 @@ fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>, who: O
             }
         })?;
         if !new.is_empty() {
-            tell_lead(state, &d, reason, &new, who);
+            tell_lead(state, &d, &new, who);
         }
         return Some(d);
     }
@@ -301,16 +397,17 @@ fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>, who: O
     let d = update(state, &d.repo, d.spec, |d| {
         d.resume_to = std::mem::replace(&mut d.state, "stalled".into());
         (d.stall_reason, d.stalled_at) = (reason.into(), crate::db::now());
+        d.stall_resets_at = resets_at.map(|t| t.to_rfc3339()).unwrap_or_default();
         d.stalled_on = tickets.clone();
         d.stall_ask = ask;
     })?;
-    tell_lead(state, &d, reason, &tickets, who);
+    tell_lead(state, &d, &tickets, who);
     Some(d)
 }
 
 /// A needs-action wake to the team's Lead that `d` stalled, naming the tickets and why: it can't resume it (only
 /// the user can), but it answers the question or tells the user. Not when the run that stalled it was the Lead's own.
-fn tell_lead(state: &AppState, d: &Delivery, reason: &str, tickets: &[i64], who: Option<&str>) {
+fn tell_lead(state: &AppState, d: &Delivery, tickets: &[i64], who: Option<&str>) {
     let Some(lead) = with_role(state, d, "lead") else { return };
     if who == Some(lead.id.as_str()) {
         return;
@@ -324,16 +421,19 @@ fn tell_lead(state: &AppState, d: &Delivery, reason: &str, tickets: &[i64], who:
         format!(" {name} ended its run asking: \"{}\"", a.question)
     });
     let text = format!(
-        "[Loft Delivery: {}] The Delivery stalled{at}: {}.{asked} Only the user can resume it (Needs you → Resume): answer what the agent asked if you can, and tell the user what the Delivery waits on.",
+        "[Loft Delivery: {}] The Delivery stalled{at}: {}.{asked}{resume} Answer what the agent asked if you can, and tell the user what the Delivery waits on.",
         subject(d),
-        stall_why(reason)
+        stall_why(&d.stall_reason, &d.stall_resets_at),
+        resume = lead_resume_hint(state, d).unwrap_or_else(|| " Only the user can resume it (Needs you → Resume).".into()),
     );
     crate::agents::needs_action_from_loft(state, &lead, &text);
 }
 
 /// The id of a stalled Delivery's Needs you item: a new stall is a new item, pushed again.
 pub(crate) fn stalled_item_id(d: &Delivery) -> String {
-    format!("stalled:{}:{}:{}", d.repo, d.spec, d.stalled_at)
+    // A brake that held the Lead back makes it a new item: pushed again, saying which brake.
+    let brake = if d.brake.is_empty() { "" } else { ":brake" };
+    format!("stalled:{}:{}:{}{brake}", d.repo, d.spec, d.stalled_at)
 }
 
 /// At start-up, before any run: runs and their queues live only in memory, so no agent is still working on
@@ -722,9 +822,27 @@ pub(crate) fn title_of(d: &Delivery, issue_title: Option<&str>) -> String {
     title.filter(|t| !t.trim().is_empty()).map_or_else(|| subject(d), str::to_string)
 }
 
-/// Why a Delivery stalled, mid-sentence.
-fn stall_why(reason: &str) -> &'static str {
+/// Why a Delivery stalled, mid-sentence. `resets_at` is when a usage limit frees (RFC 3339).
+fn stall_why(reason: &str, resets_at: &str) -> String {
+    if reason == "usage_limit" {
+        return match DateTime::parse_from_rfc3339(resets_at) {
+            Ok(t) => format!("the plan's usage limit was reached; it frees at {}", when(t.with_timezone(&Utc))),
+            Err(_) => "the plan's usage limit was reached".into(),
+        };
+    }
+    stall_why_fixed(reason).to_string()
+}
+
+/// A time for a stall's text: the hour on this Mac's clock, with the date when it isn't today.
+fn when(t: DateTime<Utc>) -> String {
+    let t = t.with_timezone(&chrono::Local);
+    let fmt = if t.date_naive() == chrono::Local::now().date_naive() { "%H:%M" } else { "%b %-d, %H:%M" };
+    t.format(fmt).to_string()
+}
+
+fn stall_why_fixed(reason: &str) -> &'static str {
     match reason {
+        "api_error" => "the Claude API failed (overloaded, 529 or a server error) while the run Loft woke for its step was working",
         "run_failed" => "the run Loft woke for its step failed",
         "restart" => "its run was lost when Loft restarted",
         "wait_gone" => "a ticket waited on an issue or agent that is gone (deleted, or Loft can no longer read it): tell its Dev what to do, then Resume",
@@ -763,7 +881,7 @@ fn list_of(items: &[String]) -> String {
 
 /// Why a Delivery stalled and what waits, for Needs you: names and titles only.
 pub(crate) fn stalled_reason(state: &AppState, d: &Delivery) -> String {
-    let why = stall_why(&d.stall_reason);
+    let why = stall_why(&d.stall_reason, &d.stall_resets_at);
     let why = format!("{}{}", why[..1].to_uppercase(), &why[1..]);
     // Every ticket in flight, with the agent on it.
     let in_flight: Vec<&DeliveryTicket> = d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "closing")).collect();
@@ -1328,6 +1446,252 @@ pub fn mcp_tools() -> Vec<Value> {
     })]
 }
 
+/// The Delivery tools only the Lead of a project with the option "the Lead can start and resume Deliveries"
+/// on gets (ADR 0006): they stay off the list of everyone else.
+pub fn lead_mcp_tools() -> Vec<Value> {
+    vec![json!({
+        "name": "start_delivery",
+        "description": "As the Lead, where the project's option \"The Lead can start and resume Deliveries\" is on: start the Delivery of a spec or standalone ticket already published, like Start delivery does. Refused, with the reason, when you aren't the project's Lead, the Delivery already started, the spec has no tickets, a ticket isn't labelled ready-for-agent, none is ready, or the project already runs its maximum of Deliveries (it lists them).",
+        "inputSchema": { "type": "object", "properties": {
+            "ticket": { "type": ["integer", "string"], "description": "The spec's (or standalone ticket's) GitHub issue number, or its Loft issue id." },
+            "reason": { "type": "string", "description": "Why you start it now: it goes in the spec's thread." }
+        }, "required": ["ticket"] }
+    }), json!({
+        "name": "resume_delivery",
+        "description": "As the Lead, where the project's option \"The Lead can start and resume Deliveries\" is on: resume a Delivery that stalled for a transient reason (usage limit, once it frees; API error; a failed or lost run; a run that ended without a question). Does what Resume does. Refused, with the reason, for a paused Delivery, anything that waits on the user, a stall that needs someone to fix something, and a usage limit that hasn't freed yet.",
+        "inputSchema": { "type": "object", "properties": {
+            "ticket": { "type": ["integer", "string"], "description": "The spec's (or standalone ticket's) GitHub issue number, or its Loft issue id in a plan kept in Loft." }
+        }, "required": ["ticket"] }
+    })]
+}
+
+/// Whether `me` is the Lead of a project whose option lets the Lead start and resume Deliveries.
+pub fn lead_has_tools(state: &AppState, me: &crate::db::Agent) -> bool {
+    me.role == "lead"
+        && std::iter::once(me.project.trim()).chain(me.projects.iter().map(|p| p.trim())).any(|p| !p.is_empty() && crate::lead_delivery::options(state, p).enabled)
+}
+
+/// Whether the Lead may resume stalled `d` at `now`, or why not, and from when for a usage limit.
+#[derive(Debug, PartialEq)]
+enum LeadResume {
+    Now,
+    After(DateTime<Utc>),
+    Never(String),
+}
+
+fn lead_resume_verdict(d: &Delivery, now: DateTime<Utc>) -> LeadResume {
+    let what = subject(d);
+    let never = |why: String| LeadResume::Never(format!("{what} {why}"));
+    if d.state == "paused" {
+        return never("is paused: the user paused it, and only the user resumes it.".into());
+    }
+    if waits_for_user(d) {
+        return never("waits for the user (too many rounds of changes): only the user resumes it.".into());
+    }
+    if d.state != "stalled" {
+        return LeadResume::Never(not_resumable(d));
+    }
+    match d.stall_reason.as_str() {
+        "usage_limit" => match DateTime::parse_from_rfc3339(&d.stall_resets_at) {
+            Ok(t) if t.with_timezone(&Utc) > now => LeadResume::After(t.with_timezone(&Utc)),
+            Ok(_) => LeadResume::Now,
+            Err(_) => never("stalled on the usage limit, and Loft doesn't know when it frees: only the user resumes it.".into()),
+        },
+        "api_error" | "run_failed" | "restart" => LeadResume::Now,
+        "no_call" if d.stall_ask.is_some() => never("stalled because an agent ended its run asking the user a question: only the user resumes it, after answering.".into()),
+        "no_call" => LeadResume::Now,
+        other => never(format!("stalled because {}: only the user resumes it.", stall_why_fixed(other))),
+    }
+}
+
+/// What the stall wake tells the Lead about resuming `d`: when the project's option is on, whether it can and from when.
+fn lead_resume_hint(state: &AppState, d: &Delivery) -> Option<String> {
+    if !crate::lead_delivery::options(state, d.project.trim()).enabled {
+        return None;
+    }
+    let arg = if d.local { format!("\"{}\"", d.spec_id) } else { d.spec.to_string() };
+    Some(match lead_resume_verdict(d, Utc::now()) {
+        LeadResume::Now => format!(" You can resume it now: call `mcp__loft__resume_delivery` with ticket {arg}."),
+        LeadResume::After(t) => format!(" You can resume it from {}: call `mcp__loft__resume_delivery` with ticket {arg} then, not before.", when(t)),
+        LeadResume::Never(why) => format!(" You can't resume it: {why}"),
+    })
+}
+
+/// The Lead's resumes of `d` in the last hour and the last day before `now`.
+fn lead_resume_counts(d: &Delivery, now: DateTime<Utc>) -> (u32, u32) {
+    let ages: Vec<chrono::Duration> = d.lead_resumes.iter().filter_map(|r| DateTime::parse_from_rfc3339(&r.at).ok()).map(|t| now - t.with_timezone(&Utc)).collect();
+    let within = |w: chrono::Duration| ages.iter().filter(|a| **a < w).count() as u32;
+    (within(chrono::Duration::hours(1)), within(chrono::Duration::days(1)))
+}
+
+/// How soon after a Lead's resume the same stall counts as the resume not working.
+const REPEAT_STALL_MINUTES: i64 = 10;
+
+/// The brake that holds the Lead's resume of stalled `d` back at `now` (ADR 0006), or None: the hour's or the day's
+/// resumes used up, or the Delivery stopped again for the same reason within 10 minutes of the Lead's last resume.
+fn resume_brake(d: &Delivery, opts: &crate::lead_delivery::Options, now: DateTime<Utc>) -> Option<String> {
+    let (hour, day) = lead_resume_counts(d, now);
+    if hour >= opts.resumes_per_hour {
+        return Some(format!("the Lead already resumed it {hour} time(s) in the last hour (the project allows {})", opts.resumes_per_hour));
+    }
+    if day >= opts.resumes_per_day {
+        return Some(format!("the Lead already resumed it {day} time(s) in the last day (the project allows {})", opts.resumes_per_day));
+    }
+    let at = |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|t| t.with_timezone(&Utc));
+    let last = d.lead_resumes.iter().filter_map(|r| at(&r.at).map(|t| (t, r))).max_by_key(|(t, _)| *t)?;
+    let stalled = at(&d.stalled_at)?;
+    let gap = stalled - last.0;
+    (last.1.reason == d.stall_reason && gap >= chrono::Duration::zero() && gap <= chrono::Duration::minutes(REPEAT_STALL_MINUTES))
+        .then(|| format!("it stopped again for the same reason ({}) {} minute(s) after the Lead's resume, so resuming again would loop", d.stall_reason, gap.num_minutes()))
+}
+
+/// `resume_delivery`: the Lead resumes a Delivery stalled for a transient reason.
+pub(crate) async fn resume_by_lead(state: &AppState, me: &crate::db::Agent, args: &Value, now: DateTime<Utc>) -> Result<String, String> {
+    if me.role != "lead" {
+        return Err("Only the team's Lead resumes a Delivery this way.".into());
+    }
+    let want = number_of(&args["ticket"]).ok_or("ticket is required: the spec's GitHub issue number or its Loft issue id")?;
+    let mine = |d: &Delivery| me.project.trim() == d.project.trim() || me.has_project(&d.project);
+    let mut found: Vec<Delivery> = state
+        .db
+        .all_deliveries()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|d| mine(d) && match &want {
+            TicketNumber::GitHub(n) => !d.local && d.spec == *n,
+            TicketNumber::Loft(id) => d.local && d.spec_id == *id,
+        })
+        .collect();
+    if found.len() > 1 {
+        return Err("That number is on more than one of your projects' Deliveries: name it by its Loft issue id.".into());
+    }
+    let d = found.pop().ok_or("That isn't the spec or standalone ticket of a Delivery on your team.")?;
+    if d.project.trim().is_empty() {
+        return Err("That Delivery has no project (it started before Deliveries had one), so Loft can't tell whose team it is.".into());
+    }
+    // Checked again on every call: turning the option off refuses the next call at once.
+    if !crate::lead_delivery::options(state, d.project.trim()).enabled {
+        return Err(format!("The Lead can't resume Deliveries in {}: the project's option \"The Lead can start and resume Deliveries\" is off.", d.project.trim()));
+    }
+    match lead_resume_verdict(&d, now) {
+        LeadResume::Now => {}
+        LeadResume::After(t) => return Err(format!("{} stalled on the plan's usage limit, which frees at {}: resume it then, not before.", subject(&d), when(t))),
+        LeadResume::Never(why) => return Err(why),
+    }
+    let opts = crate::lead_delivery::options(state, d.project.trim());
+    if let Some(brake) = resume_brake(&d, &opts, now) {
+        // The Delivery stays stalled; the user is told which brake held it (Needs you item, push) and the thread says so.
+        if d.brake != brake {
+            update(state, &d.repo, d.spec, |d| d.brake = brake.clone());
+            if let Some(t) = delivery_task(state, &d) {
+                let text = format!("Resume by {} (Lead) refused at {}: {brake}. The Delivery stays stalled ({}) for the user to resume.", me.name, now.with_timezone(&chrono::Local).format("%b %-d, %H:%M"), d.stall_reason);
+                crate::tasks::log_status(state, &t, &me.id, &text);
+            }
+        }
+        return Err(format!("{} stays stalled: {brake}. Only the user resumes it now (Needs you → Resume); Loft told them.", subject(&d)));
+    }
+    let (reason, why) = (d.stall_reason.clone(), stall_why(&d.stall_reason, &d.stall_resets_at));
+    let line = resume(state, &d.repo, d.spec).await?;
+    let kept = |r: &&crate::db::LeadResumed| DateTime::parse_from_rfc3339(&r.at).is_ok_and(|t| now - t.with_timezone(&Utc) < chrono::Duration::days(1));
+    let done = update(state, &d.repo, d.spec, |d| {
+        d.lead_resumes = d.lead_resumes.iter().filter(kept).cloned().chain([crate::db::LeadResumed { at: now.to_rfc3339(), reason: reason.clone() }]).collect();
+    });
+    if let Some(t) = delivery_task(state, &d) {
+        let (hour, day) = done.as_ref().map_or((1, 1), |d| lead_resume_counts(d, now));
+        let text = format!(
+            "Resumed by {} (Lead) at {}: the Delivery had stalled ({reason}) because {why}. Lead resumes on it: {hour} in the last hour, {day} in the last day.",
+            me.name,
+            now.with_timezone(&chrono::Local).format("%b %-d, %H:%M")
+        );
+        crate::tasks::log_status(state, &t, &me.id, &text);
+    }
+    Ok(line)
+}
+
+/// `start_delivery`: the Lead starts the Delivery of a spec or standalone ticket, as the button does, after the
+/// option and the rules of ADR 0006: its project's Lead, not started yet, tickets all `ready-for-agent` with one
+/// ready, and fewer Deliveries running than the project allows. Each start is a line in the thread.
+async fn start_by_lead(state: &AppState, me: &crate::db::Agent, args: &Value, now: DateTime<Utc>) -> Result<String, String> {
+    if me.role != "lead" {
+        return Err("Only the team's Lead starts a Delivery this way.".into());
+    }
+    let want = number_of(&args["ticket"]).ok_or("ticket is required: the spec's GitHub issue number or its Loft issue id")?;
+    let mine = |project: &str| !project.trim().is_empty() && (me.project.trim() == project.trim() || me.has_project(project));
+    let mut found: Vec<crate::db::Task> = match &want {
+        TicketNumber::GitHub(n) => state.db.list_tasks().map_err(|e| e.to_string())?.into_iter().filter(|t| mine(&t.project) && t.github.as_ref().is_some_and(|g| g.number == *n)).collect(),
+        TicketNumber::Loft(id) => state.db.get_task(id).map_err(|e| e.to_string())?.into_iter().filter(|t| mine(&t.project)).collect(),
+    };
+    if found.len() > 1 {
+        return Err("That number is on more than one of your projects' issues: name it by its Loft issue id.".into());
+    }
+    let t = found.pop().ok_or("That isn't a spec or ticket of a project you lead.")?;
+    let project = t.project.trim().to_string();
+    // Checked again on every call: turning the option off refuses the next call at once.
+    let opts = crate::lead_delivery::options(state, &project);
+    if !opts.enabled {
+        return Err(format!("The Lead can't start Deliveries in {project}: the project's option \"The Lead can start and resume Deliveries\" is off."));
+    }
+    let is_spec = t.labels.iter().any(|l| l.eq_ignore_ascii_case("spec"));
+    let existing = match &t.github {
+        Some(g) if local_of_issue(state, &t.id).is_none() => state.db.get_delivery(&g.repo, g.number).map_err(|e| e.to_string())?,
+        _ => local_of_issue(state, &t.id),
+    };
+    if let Some(d) = existing.as_ref().filter(|d| d.state != "planned") {
+        return Err(format!("{} already started: it is {}. Nothing to start.", subject(d), d.state));
+    }
+    let not_ready = |titles: Vec<String>| format!("{} {} aren't labelled `ready-for-agent`: only a spec whose tickets all are can start.", if is_spec { "Tickets" } else { "Ticket" }, titles.join(", "));
+    if !is_spec {
+        if !t.labels.iter().any(|l| l == "ready-for-agent") {
+            return Err(not_ready(vec![format!("\"{}\"", t.title)]));
+        }
+    } else if let Some(d) = existing.as_ref().filter(|d| d.local) {
+        let open: Vec<&DeliveryTicket> = d.tickets.iter().filter(|k| k.state == "open").collect();
+        if open.is_empty() {
+            return Err(format!("{} has no tickets to deliver: publish its tickets first.", subject(d)));
+        }
+        let off: Vec<String> = open.iter().filter(|k| !state.db.get_task(&k.id).ok().flatten().is_some_and(|x| x.labels.iter().any(|l| l == "ready-for-agent"))).map(|k| format!("\"{}\"", k.title)).collect();
+        if !off.is_empty() {
+            return Err(not_ready(off));
+        }
+    } else if let Some(g) = t.github.as_ref().filter(|_| is_spec) {
+        let subs = crate::github::get(state, &format!("/repos/{}/issues/{}/sub_issues?per_page=100", g.repo, g.number)).await.map_err(|e| format!("Couldn't read spec #{} on {}: {e}", g.number, g.repo))?;
+        let open: Vec<&Value> = subs.as_array().into_iter().flatten().filter(|x| x.get("pull_request").is_none() && x["state"] == "open").collect();
+        if open.is_empty() {
+            return Err(format!("Spec #{} has no open tickets: publish its tickets first.", g.number));
+        }
+        let off: Vec<String> = open.iter().filter(|x| !x["labels"].as_array().into_iter().flatten().any(|l| l["name"] == "ready-for-agent")).map(|x| format!("#{}", x["number"])).collect();
+        if !off.is_empty() {
+            return Err(not_ready(off));
+        }
+    }
+    let running: Vec<String> = state
+        .db
+        .all_deliveries()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|d| d.project.trim() == project && matches!(d.state.as_str(), "running" | "final_review" | "final_fixes"))
+        .map(subject)
+        .collect();
+    if running.len() as u32 >= opts.running_deliveries {
+        return Err(format!("{project} already runs {} of {} Deliveries at once: {}. Start this one when one of them is done.", running.len(), opts.running_deliveries, running.join(", ")));
+    }
+    let started = start_from_issue(State(state.clone()), Path(t.id.clone())).await.map_err(|e| e.1)?.0;
+    let why = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("the Lead judged it ready");
+    let what = if is_spec { "spec" } else { "ticket" };
+    let text = format!("Delivery started by {} (Lead) at {}: {why}.", me.name, now.with_timezone(&chrono::Local).format("%b %-d, %H:%M"));
+    crate::tasks::log_status(state, &t, &me.id, &text);
+    let agent = started["agent_name"].as_str().unwrap_or("the team");
+    Ok(format!("Started the Delivery of {what} \"{}\": {agent} has its first step.", t.title))
+}
+
+/// The Loft issue of `d`'s spec (or standalone ticket): the one whose thread shows what the Lead did.
+fn delivery_task(state: &AppState, d: &Delivery) -> Option<crate::db::Task> {
+    if d.local {
+        return state.db.get_task(&d.spec_id).ok().flatten();
+    }
+    state.db.list_tasks().ok()?.into_iter().find(|x| x.github.as_ref().is_some_and(|g| g.repo.eq_ignore_ascii_case(&d.repo) && g.number == d.spec))
+}
+
 /// Handle the Delivery tools. None when `name` isn't one of them.
 pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args: &Value) -> Option<Result<String, String>> {
     match name {
@@ -1335,6 +1699,8 @@ pub async fn mcp_call(state: &AppState, me: &crate::db::Agent, name: &str, args:
         "submit_ticket" => Some(submit(state, me, args).await),
         "wait_ticket" => Some(wait(state, me, args).await),
         "review_ticket" => Some(review(state, me, args).await),
+        "start_delivery" => Some(start_by_lead(state, me, args, Utc::now()).await),
+        "resume_delivery" => Some(resume_by_lead(state, me, args, Utc::now()).await),
         _ => None,
     }
 }
@@ -2620,7 +2986,7 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
         return resume_needs_human(state, d).await;
     }
     let stalled = match d.state.as_str() {
-        "stalled" => format!("the Delivery stalled because {}", stall_why(&d.stall_reason)),
+        "stalled" => format!("the Delivery stalled because {}", stall_why(&d.stall_reason, &d.stall_resets_at)),
         "paused" => "the user paused the Delivery, and Loft stopped the work on its step".to_string(),
         _ => return Err(not_resumable(&d)),
     };
@@ -3073,7 +3439,7 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
     let (tone, text) = match d.state.as_str() {
         "planned" => return Value::Null,
         "stalled" => {
-            stalled = format!("Stalled: {}.", stall_why(&d.stall_reason));
+            stalled = format!("Stalled: {}.", stall_why(&d.stall_reason, &d.stall_resets_at));
             ("stalled", stalled.as_str())
         }
         "paused" => ("paused", "Paused: Loft sends no wakes until you resume it."),
@@ -3113,6 +3479,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let mut v = json!({
         "state": d.state,
         "stall_reason": (d.state == "stalled").then_some(d.stall_reason.as_str()),
+        "stall_resets_at": (d.state == "stalled" && !d.stall_resets_at.is_empty()).then_some(d.stall_resets_at.as_str()),
         "state_line": state_line(state, d),
         "can_pause": pausable(d),
         "can_resume": matches!(d.state.as_str(), "stalled" | "paused") || waits_for_user(d),
@@ -3823,6 +4190,38 @@ mod tests {
         run(Some("Pushed."));
         crate::agents::add_msg(&st, &dev.id, None, "assistant", "text", "Found it?", serde_json::json!({ "subagent": "x" }));
         assert!(last_ask(&st, &dev.id, None).is_none());
+    }
+
+    /// The messages Claude Code ends a run with: the plan's usage limit (old and current wording), a 529 and a generic failure.
+    #[test]
+    fn a_failed_runs_error_says_usage_limit_api_error_or_run_failed() {
+        use chrono::{Local, TimeZone};
+        let now = Utc.with_ymd_and_hms(2026, 11, 23, 12, 0, 0).unwrap();
+        // The older wording carries the reset as Unix seconds.
+        let (why, at) = classify_error_text("Claude AI usage limit reached|1795000000", now);
+        assert_eq!((why, at), ("usage_limit", DateTime::from_timestamp(1795000000, 0)));
+        // The current one names the hour on this Mac's clock: the next 3pm, today or tomorrow.
+        let (why, at) = classify_error_text("You've hit your limit · resets 3pm (America/Sao_Paulo)", now);
+        let at = at.expect("a reset time").with_timezone(&Local);
+        assert_eq!((why, chrono::Timelike::hour(&at), chrono::Timelike::minute(&at)), ("usage_limit", 15, 0));
+        assert!(at.with_timezone(&Utc) > now && at.with_timezone(&Utc) <= now + chrono::Duration::days(1));
+        let (_, at) = classify_error_text("5-hour limit reached ∙ resets 12:30am", now);
+        let at = at.unwrap().with_timezone(&Local);
+        assert_eq!((chrono::Timelike::hour(&at), chrono::Timelike::minute(&at)), (0, 30));
+        // No time in it: the caller falls back to the plan's window.
+        assert_eq!(classify_error_text("Claude usage limit reached", now), ("usage_limit", None));
+
+        for e in [
+            r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            "API Error: 500 Internal server error",
+            "API Error: 503 Service Unavailable",
+            "Overloaded",
+        ] {
+            assert_eq!(classify_error_text(e, now), ("api_error", None), "{e}");
+        }
+        for e in ["boom", "claude exited (exit status: 1) without a result.", "API Error: 400 invalid_request_error", ""] {
+            assert_eq!(classify_error_text(e, now), ("run_failed", None), "{e}");
+        }
     }
 
     #[test]
