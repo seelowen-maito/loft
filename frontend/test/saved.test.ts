@@ -33,3 +33,8 @@ test("the list's preview drops Markdown marks and is cut", () => {
   assert.equal(excerpt("# Title\n\n**Bold** and `code`"), "Title Bold and code");
   assert.equal(excerpt("a ".repeat(200), 10), "a a a a a …");
 });
+
+test("the preview leaves out a table's separator row and horizontal rules", () => {
+  assert.equal(excerpt("| Step | Time |\n|---|:---:|\n| build | 2 min |\n\n---\n\nDone"), "Step Time build 2 min Done");
+  assert.equal(excerpt("Step | Time\n--- | ---\nbuild | 2"), "Step Time build 2");
+});

@@ -9,6 +9,9 @@ import { fmtDate } from "../lib/time";
 import { errorText } from "../lib/useAction";
 import { excerpt, sourceHref, tagOptions } from "../lib/saved";
 import { ErrorLine } from "../components/Callout";
+import { MD_COMPONENTS } from "./agents/Chat";
+
+const MISSING = "This saved item doesn't exist.";
 
 const PAGE = "mx-auto flex w-full max-w-[900px] flex-col gap-4 px-4 py-5 sm:px-5";
 
@@ -82,7 +85,8 @@ function ItemPage({ id }: { id: number }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    api.savedItem(id).then((i) => live && setItem(i), (e) => live && setError(errorText(e)));
+    if (!Number.isInteger(id)) return setError(MISSING);
+    api.savedItem(id).then((i) => live && setItem(i), (e) => live && setError(errorText(e) === "not found" ? MISSING : errorText(e)));
     return () => {
       live = false;
     };
@@ -108,7 +112,7 @@ function ItemPage({ id }: { id: number }) {
             )}
           </div>
           <div className="prose-chat rounded-2xl border border-line bg-white/[0.02] px-5 py-4 [overflow-wrap:anywhere]">
-            <Markdown remarkPlugins={[remarkGfm]}>{item.content}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{item.content}</Markdown>
           </div>
         </article>
       )}

@@ -133,3 +133,28 @@ test("an item opens as a readable page, linking back to its message while it's t
   assert.equal([...r.div.querySelectorAll("a")].some((a) => a.textContent!.includes("Open in chat")), false);
   r.unmount();
 });
+
+test("links in an item open as in the chat: external ones in a new tab", async () => {
+  answer = () => ({ body: { ...item(4, "Docs", "Tutorial"), content: "See [docs](https://example.com)", source_exists: true } });
+  const r = page("/saved/4");
+  await settle();
+  const a = [...r.div.querySelectorAll(".prose-chat a")].find((x) => x.textContent === "docs")!;
+  assert.equal(a.getAttribute("href"), "https://example.com");
+  assert.equal(a.getAttribute("target"), "_blank");
+  assert.equal(a.getAttribute("rel"), "noopener noreferrer");
+  r.unmount();
+});
+
+test("a missing item or a bad id says the item doesn't exist", async () => {
+  answer = () => ({ status: 404, body: { error: "not found" } });
+  let r = page("/saved/999");
+  await settle();
+  assert.match(r.div.textContent!, /This saved item doesn't exist\./);
+  r.unmount();
+  calls = [];
+  r = page("/saved/abc");
+  await settle();
+  assert.match(r.div.textContent!, /This saved item doesn't exist\./);
+  assert.equal(calls.length, 0);
+  r.unmount();
+});

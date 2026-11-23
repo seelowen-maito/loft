@@ -96,7 +96,8 @@ function reachable(href: string | undefined) {
   return href.replace(LOOPBACK, `$1${host}`);
 }
 
-const MD_COMPONENTS: Components = {
+/** How chat Markdown renders links: issue links as chips, others reachable from the phone, external ones in a new tab. */
+export const MD_COMPONENTS: Components = {
   a: ({ node: _node, href: raw, children, ...rest }) => {
     const task = raw && TASK_LINK.exec(raw);
     if (task) return <TaskChip id={task[1]} />;
