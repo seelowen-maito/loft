@@ -440,8 +440,12 @@ fn missing(folder: &Path) -> bool {
 /// (see the module docs), each folder once. A folder the guard can't tell (`cd "$dir"`) lets the commands after it run.
 /// The ceiling counts only for a command that is plain git (`plain_git`); any other can move it, so it has none.
 pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<Change> {
+    checkout_changes_within(command, cwd, ceiling, Work::new())
+}
+
+fn checkout_changes_within(command: &str, cwd: &Path, ceiling: &[PathBuf], work: Work) -> Vec<Change> {
     let mut found = vec![];
-    WORK.with(|w| *w.borrow_mut() = Work::new());
+    WORK.with(|w| *w.borrow_mut() = work);
     let start = Some(cwd.to_path_buf());
     let ceiling: Vec<PathBuf> = ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect();
     let storage = ceiling.first().cloned().unwrap_or_default();
@@ -2629,7 +2633,7 @@ impl Level {
     }
 }
 
-/// Lexes from `i` to the end, or past the `stop` (`)` or a backtick) that closes a substitution, adding the
+/// Lexes from `i` to the end, or past the `stop` (`)`, or NUL for the text of a backtick command, which `backtick_body` has cut out) that closes a substitution, adding the
 /// commands it finds to `p`. Returns the index it stopped at.
 fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
     let mut l = Level::new();
@@ -2730,18 +2734,21 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                         '`' => {
                             l.word.push('$');
                             l.cmd(p);
-                            i = lex(p, c, i, Some('`'));
+                            let (body, next) = backtick_body(c, i);
+                            lex(p, &body, 0, Some('\0'));
+                            i = next;
                         }
                         _ => l.word.push(q),
                     }
                 }
             }
-            '`' if stop == Some('`') => break,
             '`' => {
                 l.in_word = true;
                 l.word.push('$');
                 l.cmd(p);
-                i = lex(p, c, i, Some('`'));
+                let (body, next) = backtick_body(c, i);
+                lex(p, &body, 0, Some('\0'));
+                i = next;
             }
             '$' | '<' | '>' if next == Some('(') => {
                 l.in_word = true;
@@ -2962,6 +2969,24 @@ fn closes_arithmetic(c: &[char], i: usize) -> bool {
 
 /// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
 /// decoded. Returns the index past its closing quote.
+/// The command a backtick at `i - 1` opens: the text to the next backtick that isn't escaped, with its `\\`` (a backtick
+/// of a command nested in it), `\\\\` and `\\$` unescaped as the shell does, and where the text after it starts.
+fn backtick_body(c: &[char], mut i: usize) -> (Vec<char>, usize) {
+    let mut body = vec![];
+    while let Some(&ch) = c.get(i) {
+        i += 1;
+        match ch {
+            '`' => break,
+            '\\' if matches!(c.get(i), Some('`' | '\\' | '$')) => {
+                body.push(c[i]);
+                i += 1;
+            }
+            _ => body.push(ch),
+        }
+    }
+    (body, i)
+}
+
 fn ansi_c_quoted(c: &[char], mut i: usize, word: &mut String) -> usize {
     while let Some(&q) = c.get(i) {
         i += 1;
@@ -5258,5 +5283,30 @@ mod tests {
         changes("git checkout main", &mut dirs, 0, &mut out);
         assert!(out.is_empty());
         assert!(WORK.with(|w| w.borrow().spent_up));
+    }
+
+    /// Inside a backtick command, `\`` is a backtick of a command nested in it.
+    #[test]
+    fn a_backtick_command_nested_in_a_backtick_command_asks() {
+        let user = Some(PathBuf::from(USER));
+        for cmd in [
+            "echo `echo \\`cd /nowhere/dev/loft && git checkout main\\``",
+            "echo \"`echo \\`cd /nowhere/dev/loft && git checkout main\\``\"",
+            "echo `cd /nowhere/dev/loft && echo \\`git checkout main\\``",
+            "echo `echo \\`echo \\\\\\`cd /nowhere/dev/loft && git checkout main\\\\\\`\\``",
+        ] {
+            assert_eq!(asks(cmd, CLONE), user, "{cmd}");
+        }
+        assert_eq!(asks("echo `echo \\`git status\\``", CLONE), None);
+    }
+
+    /// A command that goes over the work budget asks, in the folder it starts in.
+    #[test]
+    fn the_too_complex_backstop_asks_about_the_folder_the_command_starts_in() {
+        let spent = Work { left: 0, started: std::time::Instant::now(), spent_up: false };
+        let found = checkout_changes_within("echo hello", Path::new(CLONE), &[], spent);
+        assert_eq!(found, vec![Change { folder: PathBuf::from(CLONE), command: "(too complex for Loft to check)".into() }]);
+        let plenty = checkout_changes_within("echo hello", Path::new(CLONE), &[], Work::new());
+        assert!(plenty.is_empty());
     }
 }
