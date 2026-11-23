@@ -37,7 +37,8 @@ pub struct Settings {
     /// `own` (yours go straight, agents' wait) or `all` (everything goes straight). Was the per-project fallback.
     pub comment_approval_default: String,
     pub push: Push,
-    /// Where the daily backups go (see backup.rs). Empty: `~/Library/Application Support/Loft/backups`.
+    /// Where the daily backups go (see backup.rs). Empty: `Loft/backups` in the system's data folder
+    /// (`~/Library/Application Support` on a Mac, `%APPDATA%` on Windows).
     pub backup_dir: String,
     /// Hours with no run after which an agent counts as idle: Loft then shuts its Simulator device down.
     pub idle_timeout_hours: u32,

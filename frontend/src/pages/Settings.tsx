@@ -183,7 +183,7 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
           </Callout>
         )}
         <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
-          <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
+          <input className="input font-mono" placeholder={s?.dir ?? ""} value={folder} onChange={(e) => onFolder(e.target.value)} />
         </Field>
         {folderErr && <p className="text-[12.5px] text-bad [overflow-wrap:anywhere]">{folderErr}</p>}
     </SettingsCard>

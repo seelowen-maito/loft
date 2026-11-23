@@ -232,6 +232,7 @@ fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
         file.write_all(text.as_bytes())?;
         drop(file);
         std::fs::rename(&tmp, path)?;
+        crate::owner_only::file(path)?;
         Ok(())
     })();
     if result.is_err() {

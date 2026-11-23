@@ -513,7 +513,7 @@ export type Settings = {
   auto_publish_all: boolean;
   /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
   comment_approval_default: ApprovalMode;
-  /** Where the daily backups go; "" is ~/Library/Application Support/Loft/backups. */
+  /** Where the daily backups go; "" is Loft/backups in the system's data folder (~/Library/Application Support on a Mac, %APPDATA% on Windows). */
   backup_dir: string;
   /** Hours with no run before an agent counts as idle and Loft shuts its Simulator device down. At least 1. */
   idle_timeout_hours: number;

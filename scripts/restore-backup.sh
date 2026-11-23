@@ -1,9 +1,15 @@
 # Restoring a Loft backup (docs/backups.md). Sourced by setup.sh; scripts/test-restore.sh tests it.
 
-# Where backups are looked for: the default folder, then iCloud Drive's "Loft backups". Only folders that exist.
+# Where backups are looked for: the default folder, Loft/backups in the system's data folder (as backend/src/backup.rs
+# names it), then iCloud Drive's "Loft backups" on a Mac. Only folders that exist.
 backup_dirs() {
-  local d
-  for d in "$HOME/Library/Application Support/Loft/backups" "$HOME/Library/Mobile Documents/com~apple~CloudDocs/Loft backups"; do
+  local d data
+  case "$(uname -s)" in
+    Darwin) data="$HOME/Library/Application Support" ;;
+    MINGW*|MSYS*|CYGWIN*) data=$(cygpath -u "${APPDATA:-}" 2>/dev/null) ;;
+    *) data=${XDG_DATA_HOME:-}; [[ $data == /* ]] || data="$HOME/.local/share" ;;
+  esac
+  for d in ${data:+"$data/Loft/backups"} "$HOME/Library/Mobile Documents/com~apple~CloudDocs/Loft backups"; do
     [ -d "$d" ] && echo "$d"
   done
 }

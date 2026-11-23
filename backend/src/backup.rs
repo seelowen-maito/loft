@@ -18,8 +18,9 @@ use crate::api::ApiResult;
 use crate::state::AppState;
 use crate::sys::Canonical;
 
-/// Under the home folder, when Settings names no other.
-const DEFAULT_DIR: &str = "Library/Application Support/Loft/backups";
+/// Under the system's data folder (`~/Library/Application Support` on a Mac, `%APPDATA%` on Windows,
+/// `$XDG_DATA_HOME` or `~/.local/share` on Linux), when Settings names no other.
+const DEFAULT_DIR: &str = "Loft/backups";
 /// iCloud Drive's own folder under the home folder, there only once iCloud Drive is on.
 const ICLOUD_DRIVE: &str = "Library/Mobile Documents/com~apple~CloudDocs";
 /// A backup's folder name: when it was made, in local time.
@@ -61,13 +62,16 @@ pub struct Failure {
 /// The backups folder Settings names, or the default one.
 pub fn dir(s: &crate::settings::Settings) -> PathBuf {
     match s.backup_dir.trim() {
-        "" => dirs::home_dir().unwrap_or_default().join(DEFAULT_DIR),
+        "" => dirs::data_dir().unwrap_or_default().join(DEFAULT_DIR),
         d => PathBuf::from(d),
     }
 }
 
-/// The iCloud Drive choice for this Mac's user.
+/// The iCloud Drive choice for this Mac's user: iCloud Drive is Mac-only.
 fn icloud() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
     dirs::home_dir().and_then(|h| icloud_in(&h))
 }
 
@@ -389,6 +393,21 @@ mod tests {
         assert!(missing.is_empty(), "everything committed before the backup started is in it; missing {missing:?}");
         let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(last.path.join("settings.json")).unwrap()).unwrap();
         assert_eq!(settings["backup_dir"], serde_json::json!(root.to_string_lossy()));
+    }
+
+    #[test]
+    fn the_default_folder_is_in_the_system_data_folder() {
+        let s = crate::settings::Settings::default();
+        #[cfg(unix)]
+        let home = dirs::home_dir().unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(dir(&s), home.join("Library/Application Support/Loft/backups"), "unchanged on a Mac");
+        #[cfg(windows)]
+        assert_eq!(dir(&s), PathBuf::from(std::env::var_os("APPDATA").unwrap()).join("Loft").join("backups"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(dir(&s), std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|d| d.is_absolute()).unwrap_or(home.join(".local/share")).join("Loft/backups"));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(icloud(), None, "iCloud Drive is Mac-only");
     }
 
     #[tokio::test]
