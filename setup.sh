@@ -168,8 +168,9 @@ else fail "git is missing"; if [ "$MACOS" = 1 ]; then tip "Run: xcode-select --i
 
 if cargo_version=$(cargo --version 2>/dev/null); then
   ok "Rust ($(echo "$cargo_version" | cut -d' ' -f2))"
-  # Loft builds with the MSVC toolchain on Windows (docs/adr/0005).
-  if [ "$WINDOWS" = 1 ] && ! rustc -vV 2>/dev/null | grep -q '^host: .*-msvc$'; then
+  # Loft builds with the MSVC toolchain on Windows (docs/adr/0005). No grep -q in these pipes: under pipefail, its early
+  # exit can fail the pipe.
+  if [ "$WINDOWS" = 1 ] && ! rustc -vV 2>/dev/null | tr -d '\r' | grep '^host: .*-msvc$' >/dev/null; then
     fail "Rust's default toolchain isn't MSVC"; tip "Run: rustup default stable-x86_64-pc-windows-msvc"
   fi
 elif command -v rustup >/dev/null; then
@@ -233,7 +234,7 @@ else warn "GitHub CLI not installed (optional: PRs, issues, private repos)"; tip
 # Agents' clones go deep (agent-local-storage/<id>/<repo>/…): past Windows' 260-character limit, git and builds fail
 # unless long paths are on, in Windows and in git.
 if [ "$WINDOWS" = 1 ]; then
-  if MSYS_NO_PATHCONV=1 reg query 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem' /v LongPathsEnabled 2>/dev/null | tr -d '\r' | grep -q 'REG_DWORD *0x1$'; then
+  if MSYS_NO_PATHCONV=1 reg query 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem' /v LongPathsEnabled 2>/dev/null | tr -d '\r' | grep 'REG_DWORD *0x1$' >/dev/null; then
     ok "long paths on in Windows"
   else
     warn "long paths are off in Windows: agents' clones can fail past 260 characters"
@@ -393,7 +394,7 @@ if [ "$WINDOWS" = 1 ]; then
     ok "skipped ${D}(run ${HERE}start.sh to use loft in the foreground)${N}"
   fi
   if [ "$service" = 1 ]; then
-    if win reg query 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' /v AutoAdminLogon 2>/dev/null | tr -d '\r' | grep -q 'REG_SZ *1$'; then
+    if win reg query 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' /v AutoAdminLogon 2>/dev/null | tr -d '\r' | grep 'REG_SZ *1$' >/dev/null; then
       ok "automatic sign-in is on, so loft comes back after a reboot"
     else warn "the task only runs while you're signed in"; tip "For a server: turn on automatic sign-in, e.g. with Sysinternals Autologon."; fi
   fi
