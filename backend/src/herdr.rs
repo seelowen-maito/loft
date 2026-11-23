@@ -125,12 +125,15 @@ pub async fn setup_local(State(state): State<AppState>) -> ApiResult<Value> {
     done.push(format!("Pointed it at {url}"));
 
     // A plain command on PATH, so Herdr can start a chat again after it restarts.
-    let link = home().join(".local/bin/loft-herdr");
-    if std::fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(true) {
-        let _ = std::fs::create_dir_all(link.parent().unwrap());
-        let _ = std::fs::remove_file(&link);
-        if std::os::unix::fs::symlink(&bin, &link).is_ok() {
-            done.push(format!("Linked {}", link.display()));
+    #[cfg(unix)]
+    {
+        let link = home().join(".local/bin/loft-herdr");
+        if std::fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(true) {
+            let _ = std::fs::create_dir_all(link.parent().unwrap());
+            let _ = std::fs::remove_file(&link);
+            if std::os::unix::fs::symlink(&bin, &link).is_ok() {
+                done.push(format!("Linked {}", link.display()));
+            }
         }
     }
 
@@ -163,6 +166,7 @@ fn socket() -> PathBuf {
 }
 
 /// One request over Herdr's socket API (newline-delimited JSON); `None` when Herdr isn't running or fails.
+#[cfg(unix)]
 async fn call(socket: &Path, method: &str, params: Value) -> Option<Value> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let talk = async {
@@ -175,6 +179,12 @@ async fn call(socket: &Path, method: &str, params: Value) -> Option<Value> {
         if v.get("error").is_some() { None } else { Some(v.get("result").cloned().unwrap_or(Value::Null)) }
     };
     tokio::time::timeout(Duration::from_secs(10), talk).await.ok().flatten()
+}
+
+/// Herdr's socket is a Unix one: on Windows, Herdr never answers.
+#[cfg(not(unix))]
+async fn call(_socket: &Path, _method: &str, _params: Value) -> Option<Value> {
+    None
 }
 
 /// The pane showing this Loft agent's chat in a `pane.list` reply, if Herdr has one.
@@ -200,6 +210,7 @@ async fn focus_pane(socket: &Path, agent_id: &str, sync: Option<&Path>) -> Resul
 
 /// The app a Herdr client runs in, from `ps -axo pid=,ppid=,ruid=,args=` (only processes of user `uid` count; the real uid, since setuid `login` between the shell and the terminal shows uid 0): the nearest ancestor of a `herdr` client
 /// process (not `herdr server`) that runs from an app bundle: the client's pid and that bundle's path.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn terminal_app(ps: &str, uid: u32) -> Option<(u32, String)> {
     let procs: Vec<(u32, u32, &str)> = ps
         .lines()
@@ -228,7 +239,7 @@ fn terminal_app(ps: &str, uid: u32) -> Option<(u32, String)> {
 
 /// The real path of the program process `pid` runs, from the kernel (`ps -o comm=` gives only the name it was
 /// started with, or a path cut short).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn exe_of(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
@@ -243,6 +254,7 @@ fn exe_of(pid: u32) -> Option<PathBuf> {
 }
 
 /// Whether `exe` is the `herdr` Loft found, by real path.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn is_herdr_exe(exe: &Path, herdr: &Path) -> bool {
     match (std::fs::canonicalize(exe), std::fs::canonicalize(herdr)) {
         (Ok(a), Ok(b)) => a == b,
@@ -253,6 +265,7 @@ fn is_herdr_exe(exe: &Path, herdr: &Path) -> bool {
 /// Brings the terminal running Herdr to the front; best effort (Herdr may run in tmux or over ssh). Only this
 /// user's processes count, and the client must really run the `herdr` executable Loft found (its path from the
 /// system, not the process's own argv[0]), so another process can't name an app for Loft to open.
+#[cfg(unix)]
 async fn raise_terminal() {
     // SAFETY: geteuid has no preconditions and cannot fail.
     let uid = unsafe { libc::geteuid() };
@@ -263,6 +276,10 @@ async fn raise_terminal() {
         let _ = run(Path::new("/usr/bin/open"), &["-a", &app], None).await;
     }
 }
+
+/// Windows has no Herdr.
+#[cfg(not(unix))]
+async fn raise_terminal() {}
 
 /// `POST /api/herdr/focus/{agent_id}`: shows the agent's tab in Herdr and brings its terminal forward.
 /// 409 when Herdr isn't running, 404 when the agent has no tab even after a sync.
@@ -322,12 +339,14 @@ mod tests {
     }
 
     /// A fake Herdr on a socket in a temp folder: answers `pane.list` with these panes and records `pane.focus`.
+    #[cfg(unix)]
     async fn fake_herdr(panes: Value) -> (PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         let (path, focused, _) = fake_herdr_counting(panes).await;
         (path, focused)
     }
 
     /// The same, also counting the `pane.list` calls.
+    #[cfg(unix)]
     async fn fake_herdr_counting(panes: Value) -> (PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>, std::sync::Arc<std::sync::Mutex<u32>>) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let path = temp().join("herdr.sock");
@@ -359,6 +378,7 @@ mod tests {
         (path, focused, lists)
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn focuses_the_agents_pane() {
         let panes = json!([{ "pane_id": "w1:p1", "tokens": { "loft_agent": "a1" } }, { "pane_id": "w1:p2", "tokens": { "loft_agent": "a2" } }]);
@@ -374,6 +394,7 @@ mod tests {
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn asks_herdr_for_its_panes_once() {
         let panes = json!([{ "pane_id": "w1:p1", "tokens": { "loft_agent": "a1" } }]);
@@ -388,6 +409,7 @@ mod tests {
         assert_eq!((err.0, err.1.as_str()), (StatusCode::CONFLICT, "Herdr isn't running."));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn says_when_the_agent_has_no_tab() {
         let (sock, focused) = fake_herdr(json!([{ "pane_id": "w1:p1", "tokens": { "loft_agent": "a1" } }, { "pane_id": "w1:p3" }])).await;
@@ -422,6 +444,7 @@ mod tests {
         assert_eq!(terminal_app(theirs, 502), Some((503, "/Applications/Evil.app".to_string())));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_herdr_exe_is_checked_by_real_path() {
         let dir = temp();
@@ -438,6 +461,7 @@ mod tests {
         assert!(!is_herdr_exe(Path::new(&real.to_string_lossy()[..16]), &real));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_exe_comes_from_the_kernel_not_the_process_name() {
         let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();

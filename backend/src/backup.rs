@@ -4,7 +4,6 @@
 //! Restoring one is manual: see docs/backups.md.
 
 use std::collections::HashSet;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -81,7 +80,7 @@ fn icloud_in(home: &Path) -> Option<PathBuf> {
 /// Backs up `db` (and `settings`, when there is one) into a new folder under `root` named for `at`, and
 /// checks the copy. Blocking. The folder appears only once it's complete.
 pub fn make(db: &Path, settings: &Path, root: &Path, at: NaiveDateTime) -> Result<Last> {
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(root).with_context(|| format!("can't create {}", root.display()))?;
+    crate::owner_only::create_dir(root, true).with_context(|| format!("can't create {}", root.display()))?;
     let done = root.join(at.format(NAME).to_string());
     // Back up now twice in the same second: the backup just made is as fresh, so it is the answer.
     if done.join("loft.db").is_file() {
@@ -89,13 +88,13 @@ pub fn make(db: &Path, settings: &Path, root: &Path, at: NaiveDateTime) -> Resul
     }
     let partial = done.with_extension("partial");
     let _ = std::fs::remove_dir_all(&partial);
-    std::fs::DirBuilder::new().mode(0o700).create(&partial).with_context(|| format!("can't create {}", partial.display()))?;
+    crate::owner_only::create_dir(&partial, false).with_context(|| format!("can't create {}", partial.display()))?;
     let made = (|| -> Result<u64> {
         let out = partial.join("loft.db");
         // Never create: a missing database is an error, not an empty backup.
         let src = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         src.execute("VACUUM INTO ?1", [out.to_string_lossy()])?;
-        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600))?;
+        crate::owner_only::file(&out)?;
         let check: String = Connection::open_with_flags(&out, OpenFlags::SQLITE_OPEN_READ_ONLY)?.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
         if check != "ok" {
             bail!("the copy failed its integrity check: {check}");
@@ -104,7 +103,7 @@ pub fn make(db: &Path, settings: &Path, root: &Path, at: NaiveDateTime) -> Resul
         if settings.exists() {
             let to = partial.join("settings.json");
             std::fs::copy(settings, &to)?;
-            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))?;
+            crate::owner_only::file(&to)?;
             bytes += std::fs::metadata(&to)?.len();
         }
         Ok(bytes)
@@ -310,6 +309,7 @@ pub async fn now(State(state): State<AppState>) -> ApiResult<Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
 
     fn t(s: &str) -> NaiveDateTime {
@@ -331,10 +331,12 @@ mod tests {
         st
     }
 
+    #[cfg(unix)]
     fn mode(p: &Path) -> u32 {
         std::fs::metadata(p).unwrap().mode() & 0o777
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_backup_made_while_loft_writes_has_every_committed_row_and_is_owner_only() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -404,6 +406,7 @@ mod tests {
         assert!(names.iter().all(|n| !n.ends_with(".partial")), "{names:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_backup_is_recorded_until_a_good_one_and_leaves_nothing_behind() {
         let base = temp();
@@ -518,6 +521,7 @@ mod tests {
         assert_eq!(items(&st).len(), 1, "never a good one");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn icloud_drive_is_offered_only_when_it_is_on_and_takes_the_next_backup() {
         let home = temp();
@@ -548,6 +552,7 @@ mod tests {
         assert!(put(&home.join(ICLOUD_DRIVE).join("Other backups")).await.is_err_and(|e| e.1.contains("git repository")));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn settings_refuse_a_backups_folder_that_is_relative_or_inside_loft_or_a_repo() {
         let st = crate::tasks::tests::state();

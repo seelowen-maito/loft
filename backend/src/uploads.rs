@@ -310,6 +310,8 @@ fn base64(b: &[u8]) -> String {
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts, which run on Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
 
@@ -363,6 +365,7 @@ mod tests {
         std::fs::read_to_string(log).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_video_reaches_the_agent_as_frames_with_timestamps_and_its_path() {
         let Some(ffmpeg) = find_tool("ffmpeg") else { return eprintln!("skipped: no ffmpeg to make the test video") };
@@ -389,6 +392,7 @@ mod tests {
         assert!(images.iter().all(|i| i["source"]["media_type"] == "image/jpeg" && i["source"]["data"].as_str().unwrap().starts_with("/9j/")));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_video_ffmpeg_cant_read_still_goes_with_its_path_and_a_note() {
         let (st, a) = crate::agents::tests::fake_claude_state();

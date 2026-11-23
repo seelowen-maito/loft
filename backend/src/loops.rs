@@ -153,6 +153,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_loop_sends_when_due_then_again_every_interval_and_stops() {
         let (st, a) = agents::tests::fake_claude_state();
@@ -204,6 +205,7 @@ mod tests {
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().repeat.unwrap().next_at, at(17, 0).to_rfc3339());
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn starting_a_loop_replaces_the_one_running() {
         let (st, a) = agents::tests::fake_claude_state();

@@ -30,8 +30,8 @@
 //! stays readable (`GET /api/workspaces/log`).
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
@@ -213,10 +213,19 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
     if let Some(f) = FAKE_FREE.with(|f| f.get()) {
         return Some(f);
     }
-    let dir = path.ancestors().find(|p| p.exists())?;
-    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+    #[cfg(unix)]
+    {
+        let dir = path.ancestors().find(|p| p.exists())?;
+        let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
+        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+    }
+    // Not measured on Windows yet: no low-disk warning there.
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// `GET /api/workspaces`: every agent's workspace size, whether it is busy (in a run, so Clean can't remove its
@@ -667,9 +676,8 @@ fn holds_git(path: &Path) -> bool {
 /// (`cp -p`, `tar x`) still has a ctime of the day it arrived.
 fn changed_of(path: &Path) -> SystemTime {
     fn ctime(path: &Path) -> SystemTime {
-        use std::os::unix::fs::MetadataExt;
         let Ok(m) = path.symlink_metadata() else { return SystemTime::UNIX_EPOCH };
-        let own = SystemTime::UNIX_EPOCH + Duration::new(m.ctime().max(0) as u64, m.ctime_nsec().clamp(0, 999_999_999) as u32);
+        let own = crate::sys::ctime(&m);
         if !m.is_dir() {
             return own;
         }
@@ -1028,8 +1036,8 @@ fn trim_deps(root: &Path, id: &str, shared: &Path, mut total: u64, now: SystemTi
             let Ok(m) = e.path().symlink_metadata() else { continue };
             let Ok(t) = m.modified() else { continue };
             // A file with another link frees nothing (cargo links each binary into its profile too), so it stays.
-            if m.is_file() && m.nlink() == 1 && now.duration_since(t).unwrap_or_default() >= DEPS_OLD {
-                old.push((t, deps.clone(), e.path(), m.blocks() * 512));
+            if m.is_file() && nlink(&m) == 1 && now.duration_since(t).unwrap_or_default() >= DEPS_OLD {
+                old.push((t, deps.clone(), e.path(), on_disk(&m)));
             }
         }
     }
@@ -1252,6 +1260,7 @@ fn remove(root: &Path, path: &Path) -> Result<(), String> {
 /// Removes `path`, a file or a folder and all in it, through folder handles opened from `root` down, none of
 /// them through a symlink: a folder on the way swapped for a symlink after the checks fails the removal instead
 /// of leading it outside `root`. Symlinks inside go, not what they point at.
+#[cfg(unix)]
 fn remove_under(root: &Path, path: &Path) -> Result<(), String> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -1272,7 +1281,17 @@ fn remove_under(root: &Path, path: &Path) -> Result<(), String> {
     remove_at(&dir, last)
 }
 
+/// On Windows, the standard library's removal, which doesn't follow symlinks or junctions inside.
+#[cfg(not(unix))]
+fn remove_under(root: &Path, path: &Path) -> Result<(), String> {
+    path.strip_prefix(root).map_err(|_| "outside agent-local-storage")?;
+    let m = path.symlink_metadata().map_err(|e| e.to_string())?;
+    let removed = if m.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    removed.map_err(|e| e.to_string())
+}
+
 /// The folder `name` in `dir`, opened without following a symlink.
+#[cfg(unix)]
 fn open_dir(dir: libc::c_int, name: &std::ffi::CStr) -> Result<OwnedFd, String> {
     // SAFETY: a valid C string; the fd is owned from here on.
     let fd = unsafe { libc::openat(dir, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
@@ -1283,6 +1302,7 @@ fn open_dir(dir: libc::c_int, name: &std::ffi::CStr) -> Result<OwnedFd, String> 
 }
 
 /// Removes `name` in `dir`: a folder with all in it, or anything else as it is.
+#[cfg(unix)]
 fn remove_at(dir: &OwnedFd, name: &std::ffi::CStr) -> Result<(), String> {
     let last = || Err(std::io::Error::last_os_error().to_string());
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -1305,6 +1325,7 @@ fn remove_at(dir: &OwnedFd, name: &std::ffi::CStr) -> Result<(), String> {
 }
 
 /// The names in an open folder, but `.` and `..`.
+#[cfg(unix)]
 fn entries(dir: &OwnedFd) -> Result<Vec<std::ffi::CString>, String> {
     // SAFETY: `fdopendir` takes its own copy of the fd, closed by `closedir`.
     let d = unsafe { libc::fdopendir(libc::dup(dir.as_raw_fd())) };
@@ -1363,10 +1384,10 @@ fn du(path: &Path) -> (u64, Option<SystemTime>) {
 /// `du` of `path`, leaving each file with hard links in `links` by (device, inode): links seen, links it has, size.
 fn du_in(path: &Path, links: &mut HashMap<(u64, u64), (u64, u64, u64)>) -> (u64, Option<SystemTime>) {
     let Ok(meta) = path.symlink_metadata() else { return (0, None) };
-    let n = meta.blocks() * 512;
+    let n = on_disk(&meta);
     if !meta.is_dir() {
-        if meta.nlink() > 1 {
-            links.entry((meta.dev(), meta.ino())).or_insert((0, meta.nlink(), n)).0 += 1;
+        if nlink(&meta) > 1 {
+            links.entry(file_id(&meta)).or_insert((0, nlink(&meta), n)).0 += 1;
             return (0, meta.modified().ok());
         }
         return (n, meta.modified().ok());
@@ -1377,10 +1398,44 @@ fn du_in(path: &Path, links: &mut HashMap<(u64, u64), (u64, u64, u64)>) -> (u64,
     })
 }
 
+/// The disk space a file takes: its blocks on Unix, its length on Windows.
+fn on_disk(m: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    return std::os::unix::fs::MetadataExt::blocks(m) * 512;
+    #[cfg(not(unix))]
+    m.len()
+}
+
+/// How many hard links a file has. Not known on Windows yet, where every file counts as having one.
+fn nlink(m: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    return std::os::unix::fs::MetadataExt::nlink(m);
+    #[cfg(not(unix))]
+    {
+        let _ = m;
+        1
+    }
+}
+
+/// A file's (device, inode), the same for each of its hard links.
+fn file_id(m: &std::fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    return (std::os::unix::fs::MetadataExt::dev(m), std::os::unix::fs::MetadataExt::ino(m));
+    #[cfg(not(unix))]
+    {
+        let _ = m;
+        (0, 0)
+    }
+}
+
 #[cfg(test)]
+// Some of these use symlinks, file modes or shell commands, which are Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
 
     fn temp() -> PathBuf {
         let d = crate::testdir::for_this_test("sweep");
@@ -1717,6 +1772,7 @@ mod tests {
         assert_eq!(reasons, [("loft", "kept: Uncommitted changes (7 files)"), ("loft/.git", "git history: never deleted"), ("loft/.git/HEAD", "git history: never deleted")]);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn clean_refuses_paths_outside_the_workspace_through_symlinks_or_of_another_agent() {
         let st = crate::tasks::tests::state();
@@ -1897,6 +1953,7 @@ mod tests {
         assert!(odd.join("scratch/x").exists() && odd.join("app/target/debug/app").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_swapped_for_a_symlink_after_the_checks_leads_nowhere_outside() {
         let root = temp();
@@ -2068,6 +2125,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_logged_command_removes_exactly_the_planned_files() {
         let storage = temp();
@@ -2080,6 +2138,7 @@ mod tests {
         assert_eq!(left, [false, false, true, true], "{}", f.command);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_deps_file_with_another_link_or_a_symlinked_deps_stays() {
         let storage = temp();
@@ -2097,6 +2156,7 @@ mod tests {
         assert_eq!(planned, [deps.join("b.o"), deps.join("c.o")], "linked a.o is passed over");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_trim_asks_before_each_file_skips_one_already_gone_and_counts_what_went() {
         let storage = temp();
@@ -2137,6 +2197,7 @@ mod tests {
         assert!(storage.join("b/.cargo-build/debug/deps/a.o").exists() && l.lines.is_empty(), "{:?}", l.lines);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_file_and_its_hard_link_measure_as_one_file_counted_only_where_its_last_link_goes() {
         let storage = temp();
@@ -2338,6 +2399,7 @@ mod tests {
         assert!(ws.join("scratch/412/repo/.git").exists() && ws.join("scratch/pra/.git").exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_symlinked_scratch_is_not_read_and_copied_old_files_are_not_old() {
         let st = crate::tasks::tests::state();
@@ -2450,6 +2512,7 @@ mod tests {
         assert!(storage.join("a/loft/target").exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_agent_in_a_run_is_skipped_but_one_with_only_a_leftover_process_is_not() {
         use std::os::unix::process::CommandExt;
@@ -2575,6 +2638,7 @@ mod tests {
         assert!(items.iter().filter(|i| i.agent == "a").all(|i| i.blocked.is_empty() || i.blocked == "symlink"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinks_are_not_followed_and_nothing_outside_the_agents_folder_is_touched() {
         let root = temp();

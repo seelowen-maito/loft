@@ -1660,6 +1660,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn git_in_a_workspace_that_isnt_a_clone_changes_the_checkout_around_it() {
         let project = std::env::temp_dir().join(format!("loft-guard-{}", uuid::Uuid::new_v4())).join("loft");

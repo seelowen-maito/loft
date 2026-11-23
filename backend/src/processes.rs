@@ -103,7 +103,7 @@ impl Owners {
     /// The recorded sessions, and the workspaces of `agents`: every agent's, or only the one whose processes count.
     fn load(storage: &Path, agents: &[String]) -> Self {
         let workspaces = agents.iter().filter_map(|id| Some((storage.join(id).canonicalize().ok()?, id.clone()))).collect();
-        Owners { sessions: session_owners(storage), workspaces, uid: unsafe { libc::getuid() } }
+        Owners { sessions: session_owners(storage), workspaces, uid: crate::sys::uid() }
     }
 
     /// The agent `p` is: the one of its session, else the one of the nearest session above it before Loft or a GUI
@@ -180,10 +180,43 @@ fn agent_ids(state: &AppState) -> Vec<String> {
     state.db.list_agents().unwrap_or_default().into_iter().map(|a| a.id).collect()
 }
 
-/// The process session of `pid`, if it is alive.
+/// The process session of `pid`, if it is alive. Windows has no sessions: none there.
 fn session_of(pid: i32) -> Option<i32> {
-    let sid = unsafe { libc::getsid(pid) };
-    (sid > 0).then_some(sid)
+    #[cfg(unix)]
+    {
+        let sid = unsafe { libc::getsid(pid) };
+        (sid > 0).then_some(sid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The process group of `pid`, if it is alive. None on Windows.
+fn group_of(pid: i32) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        let pgid = unsafe { libc::getpgid(pid) };
+        (pgid >= 0).then_some(pgid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Sends `signal` to `pid`. Windows has no signals: there it always fails, and nothing is stopped.
+fn signal(pid: i32, signal: i32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return if unsafe { libc::kill(pid, signal) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) };
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, signal);
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Loft can't stop processes on Windows yet"))
+    }
 }
 
 /// The script claude runs in each Bash command's shell before the command (`CLAUDE_ENV_FILE`): it records the
@@ -227,7 +260,6 @@ fn shims_dir(storage: &Path) -> PathBuf {
 /// Writes the commands that stand in for `kill`, `pkill` and `killall` where the shell functions don't reach
 /// (`xargs kill`, `find -exec kill`), and returns their folder.
 pub fn write_shims(storage: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = shims_dir(storage);
     std::fs::create_dir_all(&dir)?;
     for (tool, _) in TOOLS {
@@ -236,7 +268,7 @@ pub fn write_shims(storage: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
         if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
             std::fs::write(&path, text)?;
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        crate::owner_only::executable(&path)?;
     }
     Ok(dir)
 }
@@ -299,7 +331,7 @@ async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + S
             .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.command)))
             .collect();
         for (pid, _, _) in &targets {
-            unsafe { libc::kill(*pid, libc::SIGTERM) };
+            let _ = signal(*pid, SIGTERM);
         }
         targets
     })
@@ -312,7 +344,7 @@ async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + S
             // Only a process still in the session: the PID may belong to another one by now.
             for (pid, sid, _) in targets {
                 if session_of(pid) == Some(sid) {
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    let _ = signal(pid, SIGKILL);
                 }
             }
         });
@@ -506,6 +538,16 @@ fn ancestors(procs: &[Proc], mut pid: i32) -> HashSet<i32> {
 
 // ---- signals ----------------------------------------------------------
 
+#[cfg(unix)]
+const SIGTERM: i32 = libc::SIGTERM;
+#[cfg(unix)]
+const SIGKILL: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
+const SIGTERM: i32 = 15;
+#[cfg(not(unix))]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
 const SIGNALS: &[(&str, i32)] = &[
     ("HUP", libc::SIGHUP),
     ("INT", libc::SIGINT),
@@ -538,6 +580,10 @@ const SIGNALS: &[(&str, i32)] = &[
     ("USR2", libc::SIGUSR2),
 ];
 
+/// Windows has no signals: the names kill takes, with the usual numbers.
+#[cfg(not(unix))]
+const SIGNALS: &[(&str, i32)] = &[("HUP", 1), ("INT", 2), ("QUIT", 3), ("KILL", SIGKILL), ("TERM", SIGTERM)];
+
 /// A signal by number (`9`) or name (`KILL`, `SIGKILL`, `term`).
 fn signal_of(s: &str) -> Option<i32> {
     if let Ok(n) = s.parse::<i32>() {
@@ -561,8 +607,7 @@ pub fn cli() -> ! {
         std::process::exit(2);
     };
     let Ok(url) = std::env::var(URL_VAR) else {
-        use std::os::unix::process::CommandExt;
-        let e = std::process::Command::new(real).args(&args).exec();
+        let e = crate::sys::exec(std::process::Command::new(real).args(&args));
         eprintln!("{tool}: {e}");
         std::process::exit(126);
     };
@@ -808,10 +853,11 @@ fn clip(s: &str, max: usize) -> String {
 /// Sends `signal` to each PID, noting failures the way kill does.
 fn send(pids: &[i32], signal: i32, tool: &str, out: &mut Output) {
     for &pid in pids {
-        if unsafe { libc::kill(pid, signal) } != 0 {
-            let e = std::io::Error::last_os_error();
+        if let Err(e) = self::signal(pid, signal) {
             let why = match e.raw_os_error() {
+                #[cfg(unix)]
                 Some(libc::ESRCH) => "No such process".to_string(),
+                #[cfg(unix)]
                 Some(libc::EPERM) => "Operation not permitted".to_string(),
                 _ => e.to_string(),
             };
@@ -839,7 +885,7 @@ const KILL_USAGE: &str = "usage: kill [-s signal_name] pid ...\n       kill -l [
 /// user owns but the caller) or `-<pgid>` (a process group).
 fn plan_kill(args: &[String], caller: i32, procs: &[Proc]) -> Plan {
     let bad_signal = |s: &str| Plan::Done(Output::error(2, format!("kill: unknown signal {s}; valid signals:\n{}\n", names())));
-    let mut signal = libc::SIGTERM;
+    let mut signal = SIGTERM;
     let mut rest = args;
     match args.first().map(String::as_str) {
         None => return Plan::Done(Output::error(2, KILL_USAGE.into())),
@@ -863,14 +909,14 @@ fn plan_kill(args: &[String], caller: i32, procs: &[Proc]) -> Plan {
     }
     let mut out = Output::default();
     let mut pids = vec![];
-    let group = |pgid: i32| -> Vec<i32> { procs.iter().map(|p| p.pid).filter(|&p| unsafe { libc::getpgid(p) } == pgid).collect() };
-    let uid = unsafe { libc::getuid() };
+    let group = |pgid: Option<i32>| -> Vec<i32> { procs.iter().map(|p| p.pid).filter(|&p| pgid.is_some() && group_of(p) == pgid).collect() };
+    let uid = crate::sys::uid();
     for a in rest {
         let found = match a.parse::<i32>() {
             Ok(pid) if pid > 0 => vec![pid],
-            Ok(0) => group(unsafe { libc::getpgid(caller) }),
+            Ok(0) => group(group_of(caller)),
             Ok(-1) => procs.iter().filter(|p| p.uid == uid && p.pid != caller && p.pid > 1).map(|p| p.pid).collect(),
-            Ok(n) => group(-n),
+            Ok(n) => group(Some(-n)),
             Err(_) => {
                 out.stderr += &format!("kill: illegal process id: {a}\n");
                 out.code = 1;
@@ -895,7 +941,7 @@ fn names() -> String {
 fn plan_pkill(args: &[String], caller_side: &HashSet<i32>, cwd: Option<&Path>) -> Plan {
     let (signal, rest) = match args.first().and_then(|a| signal_of(a.strip_prefix('-')?)) {
         Some(sig) => (sig, &args[1..]),
-        None => (libc::SIGTERM, args),
+        None => (SIGTERM, args),
     };
     // `-I` asks before each kill, which no one can answer here.
     let rest: Vec<String> = rest.iter().filter(|a| *a != "-I").cloned().collect();
@@ -918,7 +964,7 @@ fn plan_killall(args: &[String], caller_side: &HashSet<i32>, cwd: Option<&Path>)
         return Plan::Done(shown);
     }
     // One `kill -<signal> <pid>` line a process.
-    let mut signal = libc::SIGTERM;
+    let mut signal = SIGTERM;
     let mut pids = vec![];
     for line in shown.stdout.lines() {
         let words: Vec<&str> = line.split_whitespace().collect();
@@ -949,7 +995,8 @@ fn run(bin: &str, args: &[String], cwd: Option<&Path>) -> Output {
     }
 }
 
-#[cfg(test)]
+// Unix only: they start processes in sessions of their own and signal them.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::agents::tests::{fake_claude_state, until};

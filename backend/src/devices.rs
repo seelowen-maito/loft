@@ -235,6 +235,8 @@ pub async fn configure(State(state): State<AppState>, headers: HeaderMap, Json(b
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts, which run on Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use p256::ecdsa::signature::Verifier;
@@ -347,6 +349,7 @@ mod tests {
         assert!(!tools.contains("relay_url") && !tools.contains("relay_key"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn register_configure_and_push_through_a_fake_apns() {
         let st = crate::tasks::tests::state();

@@ -5340,6 +5340,7 @@ pub(crate) mod tests {
         (git_in(dir, &["for-each-ref", "refs/heads"]), git_in(dir, &["rev-parse", "--abbrev-ref", "HEAD"]), git_in(dir, &["status", "--porcelain", "--untracked-files=all"]))
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn merge_merges_in_the_devs_clone_and_never_touches_the_users_copy() {
         let st = state();
@@ -5546,6 +5547,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn git_never_runs_in_a_project_that_resolves_into_an_agent_workspace() {
         let st = state();
@@ -5651,6 +5653,7 @@ pub(crate) mod tests {
 
     /// #447: a plan kept in Loft in a folder of several repos. Each ticket names the repo it changes, Start says
     /// which tickets name none, and the Delivery branches and merges in each ticket's repo.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_plan_across_repos_in_one_folder_branches_and_merges_in_each() {
         let st = state();

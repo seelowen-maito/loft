@@ -740,6 +740,7 @@ mod tests {
         assert_eq!(super::strip_userinfo("git@gitlab.com:o/r.git"), "git@gitlab.com:o/r.git");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_project_outside_the_projects_folder_reaches_no_repo_and_no_github() {
         use serde_json::json;
@@ -773,6 +774,7 @@ mod tests {
     }
 
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_project_cant_borrow_another_repos_origin_from_inside_the_projects_folder() {
         let st = crate::mirror::tests::state();

@@ -1067,6 +1067,8 @@ pub async fn open_editor(
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts, which run on Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub(crate) mod tests {
     /// An agent PATCH of just its project, for other modules' tests.
     pub(crate) fn apply_project(st: &crate::state::AppState, a: &mut crate::db::Agent, project: &str) -> Result<(), super::ApiError> {
@@ -1106,6 +1108,7 @@ pub(crate) mod tests {
         assert!(v.get("title").is_none() && v["name"] == "Ana", "{v}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn settings_never_return_the_github_token_and_only_accept_a_runnable_claude_command() {
         use axum::{Json, extract::State};
@@ -1163,6 +1166,7 @@ pub(crate) mod tests {
         assert_eq!(card["cost_usd"], 255.0, "the agent card still counts 14 days");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn deleting_an_agent_with_purge_files_removes_its_workspace_and_without_it_keeps_it() {
         use axum::extract::{Path, Query, State};
@@ -1492,7 +1496,8 @@ pub(crate) mod tests {
     }
 }
 
-#[cfg(test)]
+// Unix only: it uses symlinks.
+#[cfg(all(test, unix))]
 mod ls_tests {
     use super::ls;
 
@@ -1579,6 +1584,7 @@ mod find_tests {
         assert!(find(&st, &a.id, "").await.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn outside_git_it_walks_the_workspace_skipping_the_noise() {
         let st = crate::tasks::tests::state();

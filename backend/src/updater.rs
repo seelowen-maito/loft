@@ -1,7 +1,6 @@
 //! Self-update: with auto-update on in Settings, poll the checkout's upstream branch and,
 //! once no agent is running, pull, rebuild and restart into the new binary.
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -328,7 +327,7 @@ pub fn restart(state: &AppState) {
         Ok(exe) => exe,
         Err(err) => return restart_failed(state, err),
     };
-    let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
+    let err = crate::sys::exec(std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)));
     restart_failed(state, err)
 }
 

@@ -522,6 +522,7 @@ mod tests {
         assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its refs"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn only_a_real_folder_at_the_top_of_the_agent_s_own_workspace_is_checked() {
         let (storage, loft) = setup();

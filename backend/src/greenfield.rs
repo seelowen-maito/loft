@@ -597,6 +597,7 @@ mod tests {
         assert!(crate::grill::active(&st, &a.id).is_some(), "the grill goes on");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_organization_owner_and_a_git_repo_without_a_remote() {
         let st = state();
