@@ -80,12 +80,17 @@ pub fn hooks(exe: &std::path::Path) -> Value {
 
 /// The changes a hook input's command makes to checkouts outside `agent-local-storage`, run under the git `ceiling`.
 fn outside_changes(input: &str, ceiling: &[PathBuf]) -> Vec<Change> {
+    outside_changes_within(input, ceiling, Work::new())
+}
+
+fn outside_changes_within(input: &str, ceiling: &[PathBuf], work: Work) -> Vec<Change> {
     let Ok(v) = serde_json::from_str::<Value>(input) else { return vec![] };
     let Some(command) = v["tool_input"]["command"].as_str() else { return vec![] };
     let Some(cwd) = v["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::current_dir().ok()) else { return vec![] };
     // Loft's ceiling is the storage folder.
     let storage = ceiling.first().map(|c| real(c.clone())).unwrap_or_default();
-    checkout_changes(command, &cwd, ceiling).into_iter().filter(|c| !in_agent_storage(&c.folder, &storage)).collect()
+    // A command Loft couldn't check in time asks wherever it runs, even from an agent's own workspace.
+    checkout_changes_within(command, &cwd, ceiling, work).into_iter().filter(|c| c.command == TOO_COMPLEX || !in_agent_storage(&c.folder, &storage)).collect()
 }
 
 fn check(input: &str) -> Result<(), &'static str> {
@@ -453,7 +458,7 @@ fn checkout_changes_within(command: &str, cwd: &Path, ceiling: &[PathBuf], work:
     changes(command, &mut Dirs { start: start.clone(), cwd: start.clone(), ceiling, storage, ..Default::default() }, 0, &mut found);
     // A command too big to check in time asks, in the folder it starts in.
     if WORK.with(|w| w.borrow().spent_up) {
-        found.push(Change { folder: start.as_deref().map(outermost_checkout).unwrap_or_default(), command: "(too complex for Loft to check)".into() });
+        found.push(Change { folder: start.as_deref().map(outermost_checkout).unwrap_or_default(), command: TOO_COMPLEX.into() });
     }
     let mut out: Vec<Change> = vec![];
     for c in found {
@@ -465,6 +470,9 @@ fn checkout_changes_within(command: &str, cwd: &Path, ceiling: &[PathBuf], work:
     }
     out
 }
+
+/// The command of the Change a command gets when it went over the budget below.
+const TOO_COMPLEX: &str = "(too complex for Loft to check)";
 
 /// What checking one command may spend: texts examined and time. Nested texts (a heredoc's substitutions, `eval`,
 /// repeated passes) can multiply, and past this the command asks instead of the guard running on.
@@ -1187,13 +1195,10 @@ fn substitutions(s: &str) -> Vec<String> {
             out.push(c[i + 2..].iter().collect());
             i += 2;
         } else if c[i] == '`' {
-            // To the next backtick that isn't escaped: the commands after it are the body's own, found on their own.
-            let mut end = i + 1;
-            while end < c.len() && c[end] != '`' {
-                end += if c[end] == '\\' { 2 } else { 1 };
-            }
-            out.push(c[i + 1..end.min(c.len())].iter().collect());
-            i = end + 1;
+            // Up to the next backtick that isn't escaped, unescaped as the shell does. Each backtick starts one, whatever
+            // pairing the ones before it would make: a backtick in a quote or a comment inside `$(…)` is only text.
+            out.push(backtick_body(&c, i + 1).0.into_iter().collect());
+            i += 1;
         } else {
             i += 1;
         }
@@ -3078,11 +3083,16 @@ pub async fn handle(
         // Read again each time: an "Always allow" for one folder may cover the next.
         let Ok(Some(a)) = state.db.get_agent(&agent_id) else { break };
         let at = change.folder.clone();
-        if !at.starts_with(&projects) || in_agent_storage(&at, &storage) {
+        let unchecked = change.command == TOO_COMPLEX;
+        if !unchecked && (!at.starts_with(&projects) || in_agent_storage(&at, &storage)) {
             continue;
         }
         let folder = at.display().to_string();
-        let reason = format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command);
+        let reason = if unchecked {
+            format!("{} runs a command too complex for Loft to check, from {folder}: it may change your checkouts", a.name)
+        } else {
+            format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command)
+        };
         let input = json!({ "command": change.command, "folder": folder });
         let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
         let d = crate::agents::ask_permission_for(&state, &a.id, "prompt", "Checkout", input, &reason, String::new(), wait).await;
@@ -3091,8 +3101,9 @@ pub async fn handle(
         }
         let why = d.message.unwrap_or_else(|| "The user denied it.".into());
         let ws = crate::agents::workspace(&state, &a.id);
+        let what = if unchecked { "is too complex for Loft to check and could change the user's own checkouts".to_string() } else { format!("changes {folder}, the user's own checkout") };
         let message = format!(
-            "Loft didn't run this: it changes {folder}, the user's own checkout, so it asked the user. {why} Work in your own clone in your workspace ({}): clone the project there if it isn't yet.",
+            "Loft didn't run this: it {what}, so it asked the user. {why} Work in your own clone in your workspace ({}): clone the project there if it isn't yet.",
             ws.display()
         );
         return axum::Json(json!({ "allow": false, "message": message }));
@@ -5305,8 +5316,38 @@ mod tests {
     fn the_too_complex_backstop_asks_about_the_folder_the_command_starts_in() {
         let spent = Work { left: 0, started: std::time::Instant::now(), spent_up: false };
         let found = checkout_changes_within("echo hello", Path::new(CLONE), &[], spent);
-        assert_eq!(found, vec![Change { folder: PathBuf::from(CLONE), command: "(too complex for Loft to check)".into() }]);
+        assert_eq!(found, vec![Change { folder: PathBuf::from(CLONE), command: TOO_COMPLEX.into() }]);
         let plenty = checkout_changes_within("echo hello", Path::new(CLONE), &[], Work::new());
         assert!(plenty.is_empty());
+    }
+
+    /// A command over the budget reaches the user even from an agent's own workspace, which the hook otherwise trusts; so
+    /// does a payload hidden after thousands of harmless nested texts.
+    #[test]
+    fn a_command_that_went_over_the_budget_asks_from_the_agents_own_clone() {
+        let input = |cmd: &str| json!({ "tool_name": "Bash", "cwd": CLONE, "tool_input": { "command": cmd } }).to_string();
+        let spent = Work { left: 0, started: std::time::Instant::now(), spent_up: false };
+        let found = outside_changes_within(&input("echo hello"), &[PathBuf::from(STORAGE)], spent);
+        assert_eq!(found, vec![Change { folder: CLONE.into(), command: TOO_COMPLEX.into() }]);
+        let hidden = format!("{}eval 'git -C {USER} reset --hard'", "eval true;".repeat(2100));
+        assert!(!asks_all(&hidden, CLONE).is_empty());
+    }
+
+    /// Each real backtick in a heredoc body is found, however the ones around it pair up or nest.
+    #[test]
+    fn a_real_backtick_in_a_heredoc_asks_whatever_surrounds_it() {
+        let user = vec![PathBuf::from(USER)];
+        let git = format!("git -C {USER} reset --hard");
+        for body in [
+            format!("`{git}`"),
+            format!("`echo \\`{git}\\``"),
+            format!("`echo \\`echo \\\\\\`{git}\\\\\\`\\``"),
+            format!("$(echo '`') it's `{git}`"),
+            format!("$(: '`') # `{git}`"),
+        ] {
+            let cmd = format!("cat <<E\n{body}\nE");
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+        assert!(asks_all("cat <<E\n\\`git status\\` and `echo hi`\nE", CLONE).is_empty());
     }
 }
