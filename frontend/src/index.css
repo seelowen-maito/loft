@@ -134,6 +134,16 @@ body::after {
   .input {
     @apply w-full rounded-xl border border-line-strong bg-ink-850 px-3 py-2 text-[13.5px] text-fg outline-none transition placeholder:text-fg-3 focus:border-accent/50 focus:ring-2 focus:ring-accent/10;
   }
+  /* A message footer's action: a 28px ghost pill, with a 44px hit area on touch. */
+  .msg-act {
+    @apply relative inline-flex h-7 items-center gap-1.5 rounded-full px-2 font-sans text-[12px] text-fg-3 transition-colors hover:bg-white/[0.08] hover:text-fg focus-visible:text-fg focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-50;
+    @media (pointer: coarse) {
+      &::after {
+        content: "";
+        @apply absolute -inset-y-2 inset-x-0;
+      }
+    }
+  }
   .chip {
     @apply inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 font-mono text-[11px] text-fg-2;
   }

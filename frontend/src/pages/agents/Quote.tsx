@@ -1,6 +1,5 @@
 import { useRef } from "react";
 import { CornerUpLeft, Reply, X } from "lucide-react";
-import { cx } from "../../lib/format";
 import { authorLabel, type Quote } from "../../lib/reply";
 
 // Quoted text is shown as plain text: React escapes it, and nothing here parses Markdown or HTML.
@@ -38,17 +37,11 @@ export function QuoteBlock({ q, onJump }: { q: Quote; onJump: (id: number) => vo
   );
 }
 
-/** Reply on a message: shown on hover or keyboard focus; on a touch screen a long press replies instead. */
-export function ReplyButton({ onReply, className }: { onReply: () => void; className?: string }) {
+/** Reply in a message's footer, always shown; on a touch screen a long press replies too. */
+export function ReplyButton({ onReply, label }: { onReply: () => void; label: string }) {
   return (
-    <button
-      type="button"
-      onClick={onReply}
-      className={cx("rounded-full p-1.5 text-fg-3 opacity-0 transition hover:bg-white/[0.08] hover:text-fg focus-visible:opacity-100 group-hover:opacity-100", className)}
-      aria-label="Reply"
-      title="Reply"
-    >
-      <Reply className="size-3.5" />
+    <button type="button" onClick={onReply} className="msg-act" aria-label={label} title={label}>
+      <Reply className="size-3.5" aria-hidden /> Reply
     </button>
   );
 }
