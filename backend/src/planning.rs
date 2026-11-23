@@ -5036,7 +5036,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "stall_resets_at": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -6242,6 +6242,56 @@ pub(crate) mod tests {
         run_starts(&st, qa);
         crate::delivery::run_ended(&st, &qa.id, false).await;
         assert_eq!(delivery(&st, slug).stalled_at, at);
+    }
+
+    /// A failed run stalls its Delivery for the reason its error says: the plan's usage limit (with when it frees),
+    /// an API error, or a plain failure. Needs you and the Lead's notice say so in words.
+    #[tokio::test]
+    async fn a_failed_runs_error_picks_the_stall_reason_and_both_notices_say_it() {
+        let cases = [
+            ("usage_limit", "Claude AI usage limit reached|1795000000", "the plan's usage limit was reached; it frees at "),
+            ("api_error", r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#, "the Claude API failed (overloaded, 529 or a server error)"),
+            ("run_failed", "boom", "the run Loft woke for its step failed"),
+        ];
+        for (reason, error, words) in cases {
+            let st = state();
+            let fake = own_fake(&st);
+            let name = format!("st-{}", reason.replace('_', "-"));
+            let (dev, _) = building(&st, &fake, &name, &["qa"]).await;
+            let lead = busy(&st, "Lofty", &name, "lead");
+            run_starts(&st, &dev);
+            crate::delivery::run_ended_with(&st, &dev.id, Some(error)).await;
+            let d = delivery(&st, &format!("octo/{name}"));
+            assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("stalled", reason));
+            assert_eq!(!d.stall_resets_at.is_empty(), reason == "usage_limit", "{d:?}");
+            let item = &stalled_items(&st)[0];
+            let text = item["reason"].as_str().unwrap();
+            assert!(text.to_lowercase().starts_with(&words.to_lowercase()), "{text}");
+            let w = woken(&st, &lead);
+            assert!(w.iter().any(|w| w.contains("The Delivery stalled at #41: ") && w.contains(words)), "{w:?}");
+            if reason == "usage_limit" {
+                let at = chrono::DateTime::from_timestamp(1795000000, 0).unwrap();
+                assert_eq!(d.stall_resets_at, at.to_rfc3339());
+                assert!(text.contains(&at.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string()), "{text}");
+            }
+            // Resuming clears the time with the reason.
+            crate::delivery::resume(&st, &format!("octo/{name}"), 40).await.unwrap();
+            assert_eq!(delivery(&st, &format!("octo/{name}")).stall_resets_at, "");
+        }
+    }
+
+    /// A usage limit whose message names no time frees when the plan's 5-hour window does.
+    #[tokio::test]
+    async fn a_usage_limit_without_a_time_frees_when_the_plans_five_hour_window_does() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, _) = building(&st, &fake, "st-window", &["qa"]).await;
+        let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+        crate::usage::fake(&st, json!({ "windows": [{ "key": "five_hour", "label": "session", "percent": 100.0, "resets_at": reset.to_rfc3339() }], "error": null })).await;
+        run_starts(&st, &dev);
+        crate::delivery::run_ended_with(&st, &dev.id, Some("Claude usage limit reached")).await;
+        let d = delivery(&st, "octo/st-window");
+        assert_eq!((d.stall_reason.as_str(), d.stall_resets_at.as_str()), ("usage_limit", reset.to_rfc3339().as_str()));
     }
 
     #[tokio::test]

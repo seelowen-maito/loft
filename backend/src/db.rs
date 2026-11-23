@@ -41,10 +41,15 @@ pub struct Delivery {
     /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes").
     #[serde(default)]
     pub resume_to: String,
-    /// Why it stalled: "run_failed", "no_call" (the run ended without its call) or "restart" (the run was
-    /// lost when Loft restarted).
+    /// Why it stalled: "usage_limit" (the plan's usage limit; see `stall_resets_at`), "api_error" (529, overloaded
+    /// or a 5xx from the API), "run_failed" (any other error), "no_call" (the run ended without its call) or
+    /// "restart" (the run was lost when Loft restarted).
     #[serde(default)]
     pub stall_reason: String,
+    /// For a "usage_limit" stall: when the limit frees (RFC 3339), read from the run's error or, failing that,
+    /// from the plan's 5-hour window. Empty for any other reason.
+    #[serde(default)]
+    pub stall_resets_at: String,
     /// When it stalled (RFC 3339): a new stall is a new Needs you item.
     #[serde(default)]
     pub stalled_at: String,
@@ -129,7 +134,7 @@ impl Delivery {
         if matches!(self.state.as_str(), "stalled" | "paused") {
             self.state = std::mem::take(&mut self.resume_to);
         }
-        (self.resume_to, self.stall_reason, self.stalled_at) = (String::new(), String::new(), String::new());
+        (self.resume_to, self.stall_reason, self.stalled_at, self.stall_resets_at) = (String::new(), String::new(), String::new(), String::new());
         self.stalled_on.clear();
         self.stall_ask = None;
     }
@@ -1632,6 +1637,7 @@ impl Db {
                 state: if has(&settled) { "settled" } else { "planned" }.into(),
                 resume_to: String::new(),
                 stall_reason: String::new(),
+                stall_resets_at: String::new(),
                 stalled_at: String::new(),
                 stalled_on: vec![],
                 stall_ask: None,
