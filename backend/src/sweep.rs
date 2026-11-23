@@ -26,7 +26,8 @@
 //! 10 MB) goes after `TEST_IDLE` too; Clean lists all of those ticked. Reports and images in `notes/` are never swept.
 //!
 //! Neither follows a symlink or removes anything outside the agent's own workspace in `agent-local-storage/`,
-//! so Loft's own checkout stays. Each run writes a log of what it removed, skipped and why, and the last one
+//! so Loft's own checkout stays; on Windows a junction counts as a symlink, and a file in use is left, with the rest
+//! of its folder removed, for the next run. Each run writes a log of what it removed, skipped and why, and the last one
 //! stays readable (`GET /api/workspaces/log`).
 
 use std::collections::HashMap;
@@ -194,7 +195,7 @@ impl Log {
         } else {
             self.removed += 1;
         }
-        // A trim that stopped partway freed what it removed before (a failed removal says 0).
+        // A removal or trim that stopped partway freed what it removed before.
         self.freed_bytes += l.bytes;
         self.lines.push(l);
     }
@@ -221,11 +222,15 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
         (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
     }
-    // Not measured on Windows yet: no low-disk warning there.
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = path;
-        None
+        use std::os::windows::ffi::OsStrExt;
+        let dir = path.ancestors().find(|p| p.exists())?;
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+        let mut free = 0u64;
+        // SAFETY: a NUL-terminated path and an out pointer; the other two totals aren't asked for.
+        let ok = unsafe { windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+        (ok != 0).then_some(free)
     }
 }
 
@@ -383,8 +388,8 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
                     }
                     let bytes = size(&path);
                     let command = rm_command(&path);
-                    let error = if busy(&id) { Some("agent started working".into()) } else { remove_item(&root, &path).err() };
-                    log.push(Line { agent: id, path, rel, bytes: if error.is_none() { bytes } else { 0 }, error, command, done: String::new() });
+                    let (error, bytes) = if busy(&id) { (Some("agent started working".into()), 0) } else { removed(remove_item(&root, &path), &path, bytes) };
+                    log.push(Line { agent: id, path, rel, bytes, error, command, done: String::new() });
                 }
             }
             show(&st, &log);
@@ -554,7 +559,7 @@ pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Ve
             items.push(i);
         }
         for path in test_output_in(&ws.join("notes")) {
-            let rel = path.strip_prefix(&ws).unwrap_or(&path).to_string_lossy().to_string();
+            let rel = crate::sys::forward_slashes(path.strip_prefix(&ws).unwrap_or(&path));
             let mut i = item(&id, rel, path);
             i.name = i.rel.clone();
             (i.label, i.ticked) = ("test output".into(), true);
@@ -717,7 +722,7 @@ fn plan_scratch(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool,
             continue;
         }
         let ws = e.path();
-        let rel = |path: &Path| path.strip_prefix(&ws).unwrap_or(path).to_string_lossy().to_string();
+        let rel = |path: &Path| crate::sys::forward_slashes(path.strip_prefix(&ws).unwrap_or(path));
         let old = |path: PathBuf, p: &mut Plan| {
             let changed = changed_of(&path);
             if now.duration_since(changed).unwrap_or_default() >= TEST_IDLE {
@@ -892,7 +897,7 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
 
 /// The agent and `rel` a path names, for the log, whatever it is.
 fn split(root: &Path, path: &Path) -> (String, String) {
-    let rest = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
+    let rest = crate::sys::forward_slashes(path.strip_prefix(root).unwrap_or(path));
     let (a, r) = rest.split_once('/').unwrap_or((&rest, ""));
     (a.into(), r.into())
 }
@@ -965,7 +970,7 @@ fn one_line(s: &str) -> String {
 }
 
 fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, p: &mut Plan) {
-    let rel = |path: &Path| path.strip_prefix(ws).unwrap_or(path).to_string_lossy().to_string();
+    let rel = |path: &Path| crate::sys::forward_slashes(path.strip_prefix(ws).unwrap_or(path));
     let mut clones = vec![];
     find_clones(ws, DEPTH, &mut clones);
     let shared = ws.join(".cargo-build");
@@ -1037,7 +1042,7 @@ fn trim_deps(root: &Path, id: &str, shared: &Path, mut total: u64, now: SystemTi
             let Ok(m) = e.path().symlink_metadata() else { continue };
             let Ok(t) = m.modified() else { continue };
             // A file with another link frees nothing (cargo links each binary into its profile too), so it stays.
-            if m.is_file() && nlink(&m) == 1 && now.duration_since(t).unwrap_or_default() >= DEPS_OLD {
+            if m.is_file() && hard_links(&e.path(), &m).0 == 1 && now.duration_since(t).unwrap_or_default() >= DEPS_OLD {
                 old.push((t, deps.clone(), e.path(), on_disk(&m)));
             }
         }
@@ -1080,9 +1085,10 @@ fn rm_command(path: &Path) -> String {
 
 /// `path` quoted for the shell when it needs to be, on one line.
 fn quoted(path: &Path) -> String {
-    let p = path.to_string_lossy();
+    // Git Bash takes `C:/…` as it is.
+    let p = crate::sys::forward_slashes(path);
     if p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c)) {
-        p.into()
+        p
     } else if p.chars().any(char::is_control) {
         format!("$'{}'", one_line(&p.replace('\\', "\\\\").replace('\'', "\\'")))
     } else {
@@ -1100,18 +1106,28 @@ fn apply(root: &Path, folders: Vec<Folder>, busy: &dyn Fn(&str) -> bool, line: &
         } else if busy(&f.agent) {
             (Some("agent started working".into()), 0, String::new())
         } else {
-            let e = remove(root, &f.path).err();
-            let b = if e.is_none() { f.bytes } else { 0 };
+            let (e, b) = removed(remove(root, &f.path), &f.path, f.bytes);
             (e, b, String::new())
         };
         line(Line { agent: f.agent, path: f.path, rel: f.rel, bytes, error, command: f.command, done });
     }
 }
 
+/// A removal's error and what it freed of `bytes`: all of it, or what went before it stopped (on Windows, all but
+/// the files in use).
+fn removed(r: Result<(), String>, path: &Path, bytes: u64) -> (Option<String>, u64) {
+    match r {
+        Ok(()) => (None, bytes),
+        Err(e) if path.symlink_metadata().is_ok() => (Some(e), bytes.saturating_sub(du(path).0)),
+        Err(e) => (Some(e), 0),
+    }
+}
+
 /// Removes a trim's files one by one, asking `busy` before each, and skips one already gone. Stops when the
-/// agent starts a run or a removal fails, and says why; answers what it freed either way.
+/// agent starts a run; a file that can't be removed (in use on Windows) is left for the next run and the others
+/// still go. Says why it stopped or what it left, and answers what it freed either way.
 fn trim(root: &Path, f: &Folder, busy: &dyn Fn(&str) -> bool) -> (Option<String>, u64) {
-    let mut freed = 0;
+    let (mut freed, mut left) = (0, None);
     for (file, bytes) in &f.files {
         if busy(&f.agent) {
             return (Some("agent started working".into()), freed);
@@ -1119,10 +1135,12 @@ fn trim(root: &Path, f: &Folder, busy: &dyn Fn(&str) -> bool) -> (Option<String>
         match remove_under(root, file) {
             Ok(()) => freed += bytes,
             Err(_) if file.symlink_metadata().is_err() => {}
-            Err(e) => return (Some(e), freed),
+            Err(e) => {
+                left.get_or_insert(e);
+            }
         }
     }
-    (None, freed)
+    (left, freed)
 }
 
 /// Real (not symlinked) directories, never a dotfile one.
@@ -1282,13 +1300,150 @@ fn remove_under(root: &Path, path: &Path) -> Result<(), String> {
     remove_at(&dir, last)
 }
 
-/// On Windows, the standard library's removal, which doesn't follow symlinks or junctions inside.
-#[cfg(not(unix))]
+/// On Windows, each folder from `root` down is held open without delete sharing, so it can't be renamed or swapped
+/// for a junction or symlink while the removal works below it, and nothing is opened through a link: a link inside
+/// goes, not what it points at. A file in use is left with the rest removed, and tried again on the next run; a
+/// read-only one (git's objects) goes.
+#[cfg(windows)]
 fn remove_under(root: &Path, path: &Path) -> Result<(), String> {
-    path.strip_prefix(root).map_err(|_| "outside agent-local-storage")?;
-    let m = path.symlink_metadata().map_err(|e| e.to_string())?;
-    let removed = if m.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
-    removed.map_err(|e| e.to_string())
+    let rest = path.strip_prefix(root).map_err(|_| "outside agent-local-storage")?;
+    let names = rest
+        .components()
+        .map(|c| match c {
+            Component::Normal(s) => Ok(s),
+            _ => Err("not a plain path"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (last, parents) = names.split_last().ok_or("not in a workspace")?;
+    let mut dir = root.to_path_buf();
+    let mut held = vec![win::hold(&dir)?];
+    for n in parents {
+        dir.push(n);
+        held.push(win::hold(&dir)?);
+    }
+    let mut left = win::Left::default();
+    win::remove(&dir.join(last), &mut left);
+    drop(held);
+    left.result()
+}
+
+/// Windows' file handles for the sweep: folders held, files' link counts, removals that skip what's in use.
+#[cfg(windows)]
+mod win {
+    use std::fs::File;
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use std::path::Path;
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE};
+    use windows_sys::Win32::Storage::FileSystem as fs;
+
+    /// What a removal left: how many entries, and the first one with its error.
+    #[derive(Default)]
+    pub struct Left {
+        count: usize,
+        first: Option<String>,
+    }
+
+    impl Left {
+        fn add(&mut self, path: &Path, e: std::io::Error) {
+            self.count += 1;
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.first.get_or_insert_with(|| format!("{name}: {e}"));
+        }
+
+        /// Ok when nothing was left; otherwise what, for the log.
+        pub fn result(self) -> Result<(), String> {
+            match self.first {
+                None => Ok(()),
+                Some(f) if self.count == 1 => Err(format!("left for the next run: {f}")),
+                Some(f) => Err(format!("{} left for the next run, like {f}", self.count)),
+            }
+        }
+    }
+
+    /// `path` as itself, never what a link points at.
+    fn open(path: &Path, access: u32, share: u32) -> std::io::Result<File> {
+        std::fs::OpenOptions::new()
+            .access_mode(access | fs::SYNCHRONIZE)
+            .share_mode(share)
+            .custom_flags(fs::FILE_FLAG_OPEN_REPARSE_POINT | fs::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
+
+    pub fn file_info(h: std::os::windows::io::RawHandle) -> Option<fs::BY_HANDLE_FILE_INFORMATION> {
+        let mut i: fs::BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: an open handle and an out pointer.
+        (unsafe { fs::GetFileInformationByHandle(h as HANDLE, &mut i) } != 0).then_some(i)
+    }
+
+    fn is_folder(attrs: u32) -> bool {
+        attrs & fs::FILE_ATTRIBUTE_DIRECTORY != 0 && attrs & fs::FILE_ATTRIBUTE_REPARSE_POINT == 0
+    }
+
+    /// The real folder `dir`, held open so that until the handle closes nobody can rename it, remove it or put a
+    /// link in its place (reading its list counts for sharing; a process's working folder doesn't stop it).
+    pub fn hold(dir: &Path) -> Result<File, String> {
+        let f = open(dir, fs::FILE_LIST_DIRECTORY | fs::FILE_READ_ATTRIBUTES, fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE).map_err(|e| e.to_string())?;
+        match file_info(f.as_raw_handle()) {
+            Some(i) if is_folder(i.dwFileAttributes) => Ok(f),
+            Some(_) => Err("symlink".into()),
+            None => Err(std::io::Error::last_os_error().to_string()),
+        }
+    }
+
+    /// Removes `path`, a folder with all in it or anything else as it is, going on past what can't be removed.
+    /// The handle it's removed through also holds a folder while its entries go.
+    pub fn remove(path: &Path, left: &mut Left) {
+        let access = fs::DELETE | fs::FILE_READ_ATTRIBUTES | fs::FILE_WRITE_ATTRIBUTES;
+        let f = match open(path, access, fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE) {
+            Ok(f) => f,
+            Err(e) => return left.add(path, e),
+        };
+        let Some(info) = file_info(f.as_raw_handle()) else { return left.add(path, std::io::Error::last_os_error()) };
+        if is_folder(info.dwFileAttributes) {
+            let before = left.count;
+            match std::fs::read_dir(path).and_then(|d| d.map(|e| e.map(|e| e.path())).collect::<Result<Vec<_>, _>>()) {
+                Ok(entries) => entries.iter().for_each(|e| remove(e, left)),
+                Err(e) => left.add(path, e),
+            }
+            if left.count > before {
+                return;
+            }
+        }
+        if let Err(e) = delete(&f, info.dwFileAttributes) {
+            left.add(path, e);
+        }
+    }
+
+    /// Marks an open file or empty folder for deletion. POSIX deletion takes the name away now, even while another
+    /// process has the file open (sharing deletion), so its folder can go next, and it ignores the read-only
+    /// attribute; where it isn't supported (FAT), the attribute is cleared and the name goes when the handle closes.
+    fn delete(f: &File, attrs: u32) -> std::io::Result<()> {
+        let h = f.as_raw_handle() as HANDLE;
+        let set = |class, info: *const std::ffi::c_void, size: usize| {
+            // SAFETY: an open handle and `size` bytes of the info `class` names.
+            unsafe { fs::SetFileInformationByHandle(h, class, info, size as u32) != 0 }
+        };
+        let flags = fs::FILE_DISPOSITION_FLAG_DELETE | fs::FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | fs::FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+        let ex = fs::FILE_DISPOSITION_INFO_EX { Flags: flags };
+        if set(fs::FileDispositionInfoEx, (&raw const ex).cast(), size_of_val(&ex)) {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        if !matches!(e.raw_os_error().map(|c| c as u32), Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION)) {
+            return Err(e);
+        }
+        if attrs & fs::FILE_ATTRIBUTE_READONLY != 0 {
+            let rest = attrs & !fs::FILE_ATTRIBUTE_READONLY;
+            // Zero times stay as they are; zero attributes would too, so a file with none left is "normal".
+            let mut basic: fs::FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+            basic.FileAttributes = if rest == 0 { fs::FILE_ATTRIBUTE_NORMAL } else { rest };
+            if !set(fs::FileBasicInfo, (&raw const basic).cast(), size_of_val(&basic)) {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        let old = fs::FILE_DISPOSITION_INFO { DeleteFile: true };
+        if set(fs::FileDispositionInfo, (&raw const old).cast(), size_of_val(&old)) { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
 }
 
 /// The folder `name` in `dir`, opened without following a symlink.
@@ -1387,8 +1542,8 @@ fn du_in(path: &Path, links: &mut HashMap<(u64, u64), (u64, u64, u64)>) -> (u64,
     let Ok(meta) = path.symlink_metadata() else { return (0, None) };
     let n = on_disk(&meta);
     if !meta.is_dir() {
-        if nlink(&meta) > 1 {
-            links.entry(file_id(&meta)).or_insert((0, nlink(&meta), n)).0 += 1;
+        if let (nlink @ 2.., id) = hard_links(path, &meta) {
+            links.entry(id).or_insert((0, nlink, n)).0 += 1;
             return (0, meta.modified().ok());
         }
         return (n, meta.modified().ok());
@@ -1407,25 +1562,32 @@ fn on_disk(m: &std::fs::Metadata) -> u64 {
     m.len()
 }
 
-/// How many hard links a file has. Not known on Windows yet, where every file counts as having one.
-fn nlink(m: &std::fs::Metadata) -> u64 {
+/// How many hard links a file has, and its (volume, file id), the same for each of its links.
+fn hard_links(path: &Path, m: &std::fs::Metadata) -> (u64, (u64, u64)) {
     #[cfg(unix)]
-    return std::os::unix::fs::MetadataExt::nlink(m);
-    #[cfg(not(unix))]
     {
-        let _ = m;
-        1
+        use std::os::unix::fs::MetadataExt;
+        let _ = path;
+        (m.nlink(), (m.dev(), m.ino()))
     }
-}
-
-/// A file's (device, inode), the same for each of its hard links.
-fn file_id(m: &std::fs::Metadata) -> (u64, u64) {
-    #[cfg(unix)]
-    return (std::os::unix::fs::MetadataExt::dev(m), std::os::unix::fs::MetadataExt::ino(m));
-    #[cfg(not(unix))]
+    // Windows' metadata from a folder listing doesn't have them: they are asked of the file, opened as itself
+    // (not what a link points at) for its attributes only. One that can't be opened counts as having one link.
+    #[cfg(windows)]
     {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem as fs;
         let _ = m;
-        (0, 0)
+        let info = std::fs::OpenOptions::new()
+            .access_mode(fs::FILE_READ_ATTRIBUTES)
+            .share_mode(fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE | fs::FILE_SHARE_DELETE)
+            .custom_flags(fs::FILE_FLAG_OPEN_REPARSE_POINT | fs::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .ok()
+            .and_then(|f| win::file_info(f.as_raw_handle()));
+        match info {
+            Some(i) => (i.nNumberOfLinks.into(), (i.dwVolumeSerialNumber.into(), (u64::from(i.nFileIndexHigh) << 32) | u64::from(i.nFileIndexLow))),
+            None => (1, (0, 0)),
+        }
     }
 }
 
@@ -2813,5 +2975,137 @@ mod tests {
         assert_eq!((l.removed, l.skipped.len()), (0, 1), "{l:?}");
         assert_eq!(l.skipped[0].reason, "kept: 1 commit not pushed (main)");
         assert!(loft.join("new.txt").exists());
+    }
+
+    /// Windows: free space, hard links, and a removal that never follows a link and leaves only what's in use.
+    #[cfg(windows)]
+    mod windows {
+        use super::*;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        fn junction(link: &Path, target: &Path) {
+            let out = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
+            assert!(out.status.success(), "mklink: {}", String::from_utf8_lossy(&out.stderr));
+        }
+
+        fn read_only(p: &Path) {
+            let mut perm = fs::metadata(p).unwrap().permissions();
+            perm.set_readonly(true);
+            fs::set_permissions(p, perm).unwrap();
+        }
+
+        /// `p` open the way an editor or a running build holds a file: not sharing deletion.
+        fn in_use(p: &Path) -> fs::File {
+            fs::OpenOptions::new().read(true).share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ).open(p).unwrap()
+        }
+
+        #[test]
+        fn free_space_is_measured_on_the_disk_of_the_nearest_folder_that_exists() {
+            let d = temp();
+            let free = free_bytes(&d).unwrap();
+            assert!(free > 0);
+            let later = free_bytes(&d.join("not/made/yet")).unwrap();
+            assert!(later.abs_diff(free) < 1_000_000_000, "{free} then {later}");
+        }
+
+        #[test]
+        fn a_file_and_its_hard_link_measure_as_one_file_counted_only_where_its_last_link_goes() {
+            let root = temp();
+            fs::create_dir_all(root.join("a/deps")).unwrap();
+            fs::create_dir_all(root.join("b")).unwrap();
+            fs::write(root.join("a/deps/x.rlib"), vec![b'x'; 5000]).unwrap();
+            fs::hard_link(root.join("a/deps/x.rlib"), root.join("a/x")).unwrap();
+            let m = fs::symlink_metadata(root.join("a/x")).unwrap();
+            let (n, id) = hard_links(&root.join("a/x"), &m);
+            assert_eq!((n, id), (2, hard_links(&root.join("a/deps/x.rlib"), &m).1));
+            assert_eq!(du(&root.join("a")).0, 5000, "both links inside: once");
+            assert_eq!(du(&root.join("a/deps")).0, 0, "its other link stays");
+            fs::write(root.join("b/y"), vec![b'y'; 300]).unwrap();
+            assert_eq!(du(&root.join("b")).0, 300);
+        }
+
+        #[test]
+        fn read_only_files_like_git_objects_go_and_so_do_files_open_with_delete_sharing() {
+            let root = temp();
+            let dir = root.join("a/scratch/1");
+            let object = dir.join("repo/.git/objects/ab/cdef");
+            file(&object);
+            read_only(&object);
+            read_only(&object.parent().unwrap().to_path_buf());
+            file(&dir.join("open.log"));
+            let _open = fs::File::open(dir.join("open.log")).unwrap();
+            assert_eq!(remove_under(&root, &dir), Ok(()));
+            assert!(!dir.exists());
+        }
+
+        #[test]
+        fn a_file_in_use_is_left_with_the_rest_removed_and_goes_on_the_next_try() {
+            let root = temp();
+            let target = root.join("a/loft/target");
+            for f in ["debug/app.exe", "debug/deps/x.rlib", "release/y"] {
+                file(&target.join(f));
+            }
+            let held = in_use(&target.join("debug/app.exe"));
+            let e = remove_under(&root, &target).unwrap_err();
+            assert!(e.starts_with("left for the next run: app.exe"), "{e}");
+            assert!(target.join("debug/app.exe").exists());
+            assert!(!target.join("debug/deps").exists() && !target.join("release").exists());
+            drop(held);
+            assert_eq!(remove_under(&root, &target), Ok(()));
+            assert!(!target.exists());
+        }
+
+        #[test]
+        fn a_junction_inside_goes_but_not_what_it_points_at() {
+            let root = temp();
+            let outside = temp();
+            file(&outside.join("keep.txt"));
+            let target = root.join("a/loft/target");
+            file(&target.join("debug/app.exe"));
+            junction(&target.join("debug/out"), &outside);
+            assert_eq!(remove_under(&root, &target), Ok(()));
+            assert!(!target.exists() && outside.join("keep.txt").exists());
+        }
+
+        #[test]
+        fn a_junction_on_the_way_fails_the_removal_instead_of_leading_outside() {
+            let root = temp();
+            let outside = temp();
+            file(&outside.join("target/keep.txt"));
+            fs::create_dir_all(root.join("a")).unwrap();
+            junction(&root.join("a/loft"), &outside);
+            assert_eq!(remove_under(&root, &root.join("a/loft/target")), Err("symlink".into()));
+            assert!(outside.join("target/keep.txt").exists());
+            // Clean says so before it tries.
+            assert_eq!(check(&root, &root.join("a/loft/target"), &|_| HashMap::new()), Err("symlink"));
+        }
+
+        #[test]
+        fn the_sweep_removes_build_output_and_leaves_a_file_in_use_for_the_next_one() {
+            let storage = temp();
+            let loft = storage.join("a/loft");
+            clone(&loft);
+            fs::write(loft.join("target/debug/app.exe"), vec![b'x'; 4000]).unwrap();
+            let held = in_use(&loft.join("target/debug/app"));
+            let l = sweep(&storage, Some("a"), &|_| false, later(), IDLE);
+            let line = l.lines.iter().find(|l| l.rel == "loft/target").unwrap_or_else(|| panic!("{:?}", l.lines));
+            assert!(line.error.as_deref().is_some_and(|e| e.contains("left for the next run")), "{line:?}");
+            assert!(line.bytes >= 4000, "what went counts: {line:?}");
+            assert!(!loft.join("target/debug/app.exe").exists() && !loft.join("frontend/node_modules").exists(), "{:?}", l.lines);
+            drop(held);
+            let l = sweep(&storage, Some("a"), &|_| false, later(), IDLE);
+            assert_eq!(l.removed_paths(), [loft.join("target")], "{:?}", l.lines);
+        }
+
+        #[test]
+        fn clean_lists_and_logs_paths_with_forward_slashes() {
+            let storage = temp();
+            let ws = storage.join("a");
+            file(&ws.join("notes/run/dev.log"));
+            let items = listing(&storage, Some("a"), &|_| vec![], &|_| false);
+            assert!(items.iter().any(|i| i.rel == "notes/run/dev.log"), "{items:?}");
+            assert_eq!(split(&storage, &ws.join("scratch").join("1")), ("a".into(), "scratch/1".into()));
+            assert_eq!(rm_command(Path::new(r"C:\Users\me\loft\target")), "rm -rf 'C:/Users/me/loft/target'");
+        }
     }
 }
