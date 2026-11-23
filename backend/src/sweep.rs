@@ -836,12 +836,13 @@ fn item(agent: &str, rel: String, path: PathBuf) -> Item {
 /// The main clone of each of `projects` in `ws`, as folder name → project: a clone whose `.git/config` (read as a
 /// file, no git run) names a remote of that project. Of several, the one named after the project.
 pub(crate) fn main_clones(ws: &Path, projects: &[String]) -> HashMap<String, String> {
-    let last = |p: &str| p.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string();
+    // A local origin on Windows may be written with backslashes (`C:\dev\loft`).
+    let last = |p: &str| p.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default().to_string();
     let mut found: Vec<(String, String)> = vec![];
     for (name, dir) in subdirs(ws) {
         let Ok(config) = std::fs::read_to_string(dir.join(".git/config")) else { continue };
         let urls = config.lines().filter_map(|l| l.trim().strip_prefix("url")?.trim().strip_prefix('=').map(str::trim));
-        let repos: Vec<String> = urls.map(|u| last(u.trim_end_matches('/').trim_end_matches(".git")).rsplit(':').next().unwrap_or_default().to_string()).collect();
+        let repos: Vec<String> = urls.map(|u| last(u.trim_end_matches(['/', '\\']).trim_end_matches(".git")).rsplit(':').next().unwrap_or_default().to_string()).collect();
         if let Some(p) = projects.iter().find(|p| repos.contains(&last(p))) {
             found.push((name, p.clone()));
         }
