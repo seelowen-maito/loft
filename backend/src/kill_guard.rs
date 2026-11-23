@@ -30,7 +30,8 @@
 //!
 //! Its limits, which the prompt rule covers: it reads shell text, so it doesn't see a script file the agent writes
 //! and runs, a command name built at run time (`k=/bin/kill; $k 123`), or other languages sending a signal
-//! (osascript, python, node, PowerShell's `Stop-Process`, `wmic`). It fails open: input it can't read lets the
+//! (osascript, python, node, PowerShell's `Stop-Process`, `wmic`), PowerShell running taskkill (`powershell -Command
+//! "taskkill /PID 1"`). It fails open: input it can't read lets the
 //! command run.
 
 use std::io::Read;
@@ -2812,10 +2813,13 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     i += 1;
                     match q {
                         '"' => break,
-                        '\\' => {
+                        // Bash keeps a backslash in double quotes but before these (`"C:\Windows\..."` is that
+                        // path), and drops it with a new line after it.
+                        '\\' if matches!(c.get(i), Some('$' | '`' | '"' | '\\')) => {
                             l.word.extend(c.get(i));
                             i += 1;
                         }
+                        '\\' if c.get(i) == Some(&'\n') => i += 1,
                         '$' if c.get(i) == Some(&'(') => {
                             l.word.push('$');
                             l.cmd(p);
@@ -3334,6 +3338,12 @@ mod tests {
             "/c/Windows/System32/taskkill //PID 1",
             "C:/Windows/System32/taskkill.exe -PID 1",
             "'C:\\Windows\\System32\\taskkill.exe' /PID 1",
+            // Bash keeps the backslashes of a path in double quotes.
+            "\"C:\\Windows\\System32\\taskkill.exe\" //PID 1",
+            "\"C:\\Windows\\System32\\cmd.exe\" //c taskkill //PID 1",
+            "cmd //c \"C:\\Windows\\System32\\taskkill.exe /pid 1\"",
+            "cmd //c \"%SystemRoot%\\System32\\taskkill.exe /F /PID 1\"",
+            "cmd //c \"x\\taskkill /pid 1\"",
             "xargs taskkill.exe //PID < pids",
             "sh -c 'taskkill.exe //PID 1'",
             "unset -f taskkill",
