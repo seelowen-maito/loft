@@ -29,6 +29,15 @@ export function replyOf(meta: Record<string, any> | null | undefined): Quote | n
 /** A quote's author as shown: the user is "You". */
 export const authorLabel = (q: Quote) => q.author ?? "You";
 
+/** The footer's Reply label: it names who wrote the message. */
+export function replyLabel(m: Quotable, agentName: string): string {
+  const author = quoteOf(m, agentName).author;
+  return author ? `Reply to ${author}` : "Reply to your message";
+}
+
+/** The box after Copy to box on a cancelled message: its text, after any draft already there. */
+export const copiedToBox = (draft: string, text: string) => (draft.trim() ? `${draft}\n\n${text}` : text);
+
 /** The DOM id of a message's row, which a quote jumps to. */
 export const messageAnchor = (id: number) => `msg-${id}`;
 

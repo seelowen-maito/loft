@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { authorLabel, jumpStep, quotable, quoteGone, quoteOf, replyOf } from "../src/lib/reply.ts";
+import { authorLabel, copiedToBox, jumpStep, quotable, quoteGone, quoteOf, replyLabel, replyOf } from "../src/lib/reply.ts";
 
 const msg = (role: string, content: string, meta: object | null = null) => ({ id: 3, role, content, meta });
 
@@ -41,4 +41,16 @@ test("only the gone-quote refusal drops the composer's quote", () => {
   assert.equal(quoteGone("The quoted message isn't in this chat."), true);
   assert.equal(quoteGone("Only chat messages can be quoted."), false);
   assert.equal(quoteGone("empty message"), false);
+});
+
+test("the footer's Reply names the author", () => {
+  assert.equal(replyLabel(msg("user", "hi"), "Dev"), "Reply to your message");
+  assert.equal(replyLabel(msg("assistant", "hi"), "Dev"), "Reply to Dev");
+  assert.equal(replyLabel(msg("user", "hi", { from_agent: { id: "l", name: "Loft Lead" } }), "Dev"), "Reply to Loft Lead");
+});
+
+test("Copy to box keeps what the box already holds", () => {
+  assert.equal(copiedToBox("", "bump the build"), "bump the build");
+  assert.equal(copiedToBox("  ", "bump the build"), "bump the build");
+  assert.equal(copiedToBox("draft", "bump the build"), "draft\n\nbump the build");
 });
