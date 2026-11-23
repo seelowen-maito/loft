@@ -444,7 +444,7 @@ fn restart_status(head: &str, running_agents: usize) -> UpdateStatus {
 /// (a stale signed copy runs the build first, see signing.rs). Exits with `RESTART_CODE` for a script that runs Loft
 /// again, and otherwise `exec`s the build with the same arguments.
 pub fn restart() -> ! {
-    if !restarts_by_exit(cfg!(windows), std::env::var_os("LOFT_RESTART_BY_EXIT").as_deref()) {
+    if !restarts_by_exit(cfg!(windows), RESTART_BY_EXIT.get().and_then(|v| v.as_deref())) {
         tracing::info!("restarting: replacing this process with the build on disk");
         match std::env::current_exe() {
             Ok(exe) => {
@@ -456,6 +456,18 @@ pub fn restart() -> ! {
     }
     tracing::info!("restarting: exiting with code {RESTART_CODE}");
     std::process::exit(RESTART_CODE)
+}
+
+/// The `LOFT_RESTART_BY_EXIT` Loft started with.
+static RESTART_BY_EXIT: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+
+/// Reads `LOFT_RESTART_BY_EXIT` and takes it out of Loft's environment, so the agents, their shells and their dev
+/// servers don't inherit it: a Loft an agent starts from its clone has no script to start it again, and must `exec`.
+/// Called first thing in `main`, while Loft has one thread.
+pub fn take_restart_by_exit() {
+    let _ = RESTART_BY_EXIT.set(std::env::var_os("LOFT_RESTART_BY_EXIT"));
+    // SAFETY: no other thread runs yet to read the environment meanwhile.
+    unsafe { std::env::remove_var("LOFT_RESTART_BY_EXIT") };
 }
 
 /// Whether a restart exits with `RESTART_CODE` rather than `exec`ing: always on Windows, and wherever
@@ -505,10 +517,15 @@ mod tests {
         assert!(super::restarts_by_exit(true, Some(OsStr::new("1"))));
     }
 
-    /// Runs `restart` in a copy of this test binary, since it ends the process.
+    /// Runs `restart` in a copy of this test binary, since it ends the process: started as run-backend.sh starts
+    /// Loft, it takes the variable out of its environment (exit 1 if not) and exits with the restart code.
     #[test]
     fn a_restart_exits_with_the_restart_code() {
         if std::env::var_os("LOFT_TEST_RESTART").is_some() {
+            super::take_restart_by_exit();
+            if std::env::var_os("LOFT_RESTART_BY_EXIT").is_some() {
+                std::process::exit(1);
+            }
             super::restart();
         }
         let status = std::process::Command::new(std::env::current_exe().unwrap())

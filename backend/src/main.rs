@@ -78,6 +78,8 @@ fn main() -> anyhow::Result<()> {
         Some(signing::ARG) => signing::cli(),
         _ => {}
     }
+    // Before any thread starts: read once, and kept from everything Loft runs (see updater::take_restart_by_exit).
+    updater::take_restart_by_exit();
     serve()
 }
 

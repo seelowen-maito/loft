@@ -1496,6 +1496,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .args(user_plugin.iter().flat_map(|p| [std::ffi::OsStr::new("--plugin-dir"), p.as_os_str()]))
         .args(["--name", &a.name])
         .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
+        // Only the script running Loft itself restarts it (main takes it out of Loft's environment too).
+        .env_remove("LOFT_RESTART_BY_EXIT")
         // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
         .env("BASH_MAX_TIMEOUT_MS", TOOL_WAIT.as_millis().to_string())
         .env("CLAUDE_ENV_FILE", crate::sys::forward_slashes(&agent_file(state, &a.id, "env.sh")))
@@ -2233,6 +2235,14 @@ pub(crate) mod tests {
         if crate::tailnet::host().is_none() {
             assert!(linux.contains("<this computer's Tailscale or LAN host name>") && mac.contains("<this Mac's Tailscale"));
         }
+    }
+
+    #[test]
+    fn agents_dont_inherit_how_loft_restarts() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cmd = build_command(&st, &a, false).unwrap();
+        assert!(cmd.as_std().get_envs().any(|(k, v)| k == "LOFT_RESTART_BY_EXIT" && v.is_none()), "removed from the agent's environment");
     }
 
     #[test]
