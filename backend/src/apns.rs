@@ -218,6 +218,9 @@ pub fn remove_relay_key() -> Result<()> {
 
 /// Writes `text` to `path` in the key folder, owner-only, through a uniquely named temporary file beside it, so concurrent writes never share one.
 fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
+    // One write at a time: Windows refuses to rename over a file another write is still setting the ACL of.
+    static WRITING: Mutex<()> = Mutex::new(());
+    let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let dir = key_dir();
     std::fs::create_dir_all(&dir)?;
     crate::owner_only::dir(&dir)?;
