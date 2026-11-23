@@ -189,13 +189,15 @@ fn locate_all(bin: &str, path: Option<std::ffi::OsString>, exts: &[String], fall
 }
 
 /// Where the tool `bin` is usually installed on `os` (`std::env::consts::OS`), as paths to the program without its
-/// extension, given the environment (`env`): Homebrew's folders on a Mac and Linux, and on Windows winget's, Scoop's
-/// and Chocolatey's shared folders and each tool's own installer folder.
+/// extension, given the environment (`env`): Homebrew's folders on a Mac and Linux, and on Windows winget's and Scoop's
+/// shared folders and each tool's own installer folder. On Windows only folders the user or an admin owns: any user
+/// can create a folder in `C:\ProgramData` (where Chocolatey's would be, which its installer puts on PATH anyway) and
+/// plant a program there for Loft to run as the owner.
 fn install_paths(bin: &str, os: &str, env: &dyn Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
     let at = |var: &str, rest: &str| env(var).map(|d| rest.split('/').fold(d, |d, part| d.join(part)));
     let mut dirs: Vec<Option<PathBuf>> = vec![];
     if os == "windows" {
-        dirs.extend([at("LOCALAPPDATA", "Microsoft/WinGet/Links"), at("USERPROFILE", "scoop/shims"), at("ProgramData", "chocolatey/bin")]);
+        dirs.extend([at("LOCALAPPDATA", "Microsoft/WinGet/Links"), at("USERPROFILE", "scoop/shims")]);
         dirs.extend(match bin {
             // The native installer, then npm's.
             "claude" => vec![at("USERPROFILE", ".local/bin"), at("APPDATA", "npm")],
@@ -325,7 +327,7 @@ mod tests {
             Some(PathBuf::from(v))
         };
         let paths = |bin: &str, os: &str| install_paths(bin, os, &env).iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect::<Vec<_>>();
-        let shared = |bin: &str| ["C:/Users/me/AppData/Local/Microsoft/WinGet/Links", "C:/Users/me/scoop/shims", "C:/ProgramData/chocolatey/bin"].map(|d| format!("{d}/{bin}"));
+        let shared = |bin: &str| ["C:/Users/me/AppData/Local/Microsoft/WinGet/Links", "C:/Users/me/scoop/shims"].map(|d| format!("{d}/{bin}"));
         let has = |all: &[String], want: &str| assert!(all.iter().any(|p| p == want), "{want} not in {all:?}");
         for bin in ["claude", "code", "tailscale", "ffmpeg", "ffprobe", "gh"] {
             let all = paths(bin, "windows");
@@ -339,6 +341,12 @@ mod tests {
         has(&paths("code", "windows"), "C:/Program Files/Microsoft VS Code/bin/code");
         has(&paths("tailscale", "windows"), "C:/Program Files/Tailscale/tailscale");
         has(&paths("gh", "windows"), "C:/Program Files/GitHub CLI/gh");
+        // Only the user's own folders or admin-only ones: never one another user could create, like C:/ProgramData's.
+        for bin in ["claude", "code", "tailscale", "ffmpeg", "ffprobe", "gh", "other"] {
+            for p in paths(bin, "windows") {
+                assert!(p.starts_with("C:/Users/me/") || p.starts_with("C:/Program Files/"), "{p}");
+            }
+        }
         // Unset folders are left out.
         assert_eq!(install_paths("gh", "windows", &|_| None), Vec::<PathBuf>::new());
         // Homebrew elsewhere, and the Mac app's own Tailscale CLI.
