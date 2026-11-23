@@ -444,6 +444,7 @@ fn missing(folder: &Path) -> bool {
 /// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
 /// (see the module docs), each folder once. A folder the guard can't tell (`cd "$dir"`) lets the commands after it run.
 /// The ceiling counts only for a command that is plain git (`plain_git`); any other can move it, so it has none.
+#[cfg(test)]
 pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<Change> {
     checkout_changes_within(command, cwd, ceiling, Work::new())
 }
