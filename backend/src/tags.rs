@@ -51,6 +51,73 @@ fn parse(text: &str) -> Vec<(String, Target)> {
     out
 }
 
+/// The ids of the saved items `text` mentions as `#saved-<id>` or `#saved-<id>-<slug>`, or links to as `…/saved/<id>`,
+/// in order and without repeats. A mention starts a word.
+fn saved_ids(text: &str) -> Vec<i64> {
+    let mut out = vec![];
+    let add = |digits: &str, out: &mut Vec<i64>| {
+        if let Some(id) = digits.parse::<i64>().ok().filter(|_| digits.len() < 10)
+            && !out.contains(&id)
+        {
+            out.push(id);
+        }
+    };
+    for (i, _) in text.match_indices("#saved-") {
+        if !text[..i].chars().last().is_none_or(|p| p.is_whitespace() || "([{\"'".contains(p)) {
+            continue;
+        }
+        let rest = &text[i + 7..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if rest[digits.len()..].chars().next().is_none_or(|c| !(c.is_alphanumeric() || c == '_')) {
+            add(&digits, &mut out);
+        }
+    }
+    for (i, _) in text.match_indices("/saved/") {
+        let word_start = text[..i].rfind(char::is_whitespace).map_or(0, |p| p + 1);
+        let host = &text[word_start..i];
+        if !(host.trim_start_matches('(').starts_with("http") && host.contains("://")) {
+            continue;
+        }
+        let rest = &text[i + 7..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if rest[digits.len()..].chars().next().is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '/' || c == '-')) {
+            add(&digits, &mut out);
+        }
+    }
+    out
+}
+
+/// The saved items `text` links or mentions, as `meta.tags` entries: `{ tag: "#saved-<id>", kind: "saved", title, saved_id }`.
+/// A missing item is left out, so its mention stays text.
+pub fn resolve_saved(state: &AppState, text: &str) -> Vec<Value> {
+    saved_ids(text)
+        .into_iter()
+        .take(MAX)
+        .filter_map(|id| state.db.get_saved(id).ok().flatten())
+        .map(|i| json!({ "tag": format!("#saved-{}", i.id), "kind": "saved", "title": i.title, "saved_id": i.id }))
+        .collect()
+}
+
+/// At most this many characters of a saved item reach the prompt.
+const SAVED_CHARS: usize = 20_000;
+
+/// The block an agent's prompt gets for the saved items in its message's `tags`: title and content of each, read now so
+/// an edit counts. Empty when none; an item deleted since is skipped. This is the only way Saved reaches an agent.
+pub fn saved_block(state: &AppState, tags: &Value) -> String {
+    let items: Vec<String> = tags
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["kind"] == "saved")
+        .filter_map(|t| state.db.get_saved(t["saved_id"].as_i64()?).ok().flatten())
+        .map(|i| {
+            let body: String = i.content.chars().take(SAVED_CHARS).collect();
+            format!("--- Saved item “{}” ---\n{body}\n--- end of saved item ---", crate::tasks::inert(&i.title))
+        })
+        .collect();
+    if items.is_empty() { String::new() } else { format!("[The user linked saved items, to read:\n{}]", items.join("\n")) }
+}
+
 /// The known tags of `text`, as the message's `meta.tags`: `{ tag, kind (spec | issue | pr), title, state, url, task_id? }`.
 /// A bare `#N` means the agent's project; other tags that GitHub or Loft doesn't have are left out.
 pub fn resolve(state: &AppState, agent: &Agent, text: &str) -> Vec<Value> {
@@ -99,6 +166,7 @@ pub fn block(tags: &Value) -> String {
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|t| t["kind"] != "saved")
         .map(|t| {
             let s = |k: &str| t[k].as_str().unwrap_or("");
             let link = t["url"].as_str().map_or_else(|| format!("Loft issue {}", s("task_id")), String::from);
@@ -194,5 +262,50 @@ mod tests {
         crate::agents::enqueue_with(&st, &a.id, Some("#7".into()), json!({ "task_refs": [t.id], "tags": tags }), "user");
         let q = st.rt.lock().unwrap().queued.get(&a.id).map(|q| q.join("\n---\n")).unwrap_or_default();
         assert!(q.contains("The user refers to task") && !q.contains("Tagged by the user"), "{q}");
+    }
+
+    #[test]
+    fn saved_mentions_and_links() {
+        assert_eq!(saved_ids("read #saved-12 and #saved-3-my-title, (#saved-7)"), [12, 3, 7]);
+        assert_eq!(saved_ids("see https://loft.local/saved/42 or (http://x:1/saved/9)."), [42, 9]);
+        assert_eq!(saved_ids("#saved-12 #saved-12"), [12]);
+        // Not mentions: inside a word, without an id, a longer word, a link without a scheme.
+        assert!(saved_ids("a#saved-1 #saved-x #saved-1x #saved- /saved/5 http://x/saved/5x http://x/saved/5/edit").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_saved_item_reaches_the_prompt_only_when_linked() {
+        use crate::tasks::tests::{agent, busy, state};
+        let st = state();
+        let a = agent(&st, "Worker");
+        st.db.save_agent(&a).unwrap();
+        busy(&st, &a);
+        let item = st.db.add_saved("Deploy steps", "Tutorial", "1. Build\n2. Ship SECRET-BODY", "gone", "Old", 1).unwrap();
+        let send = |text: String| {
+            let st = st.clone();
+            let id = a.id.clone();
+            async move {
+                let r = crate::api::send_message(axum::extract::State(st), axum::extract::Path(id), axum::Json(serde_json::from_value(json!({ "text": text })).unwrap())).await.ok().unwrap().0;
+                r["message"]["meta"]["tags"].clone()
+            }
+        };
+        let queue = || st.rt.lock().unwrap().queued.get(&a.id).map(|q| q.join("\n---\n")).unwrap_or_default();
+
+        // Nothing mentioned: nothing from Saved, not even its existence.
+        assert!(send("hello, any saved items?".into()).await.is_null());
+        assert!(!queue().contains("SECRET-BODY") && !queue().contains("Deploy steps"), "{}", queue());
+
+        // An unknown slug stays text.
+        assert!(send("see #saved-999".into()).await.is_null());
+        assert!(!queue().contains("saved items, to read"), "{}", queue());
+
+        let tags = send(format!("follow #saved-{}-deploy-steps", item.id)).await;
+        assert_eq!(tags[0]["kind"], "saved");
+        assert_eq!(tags[0]["title"], "Deploy steps");
+        assert!(tags[0].get("content").is_none(), "the chat keeps a chip, not the content");
+        let q = queue();
+        assert!(q.contains("--- Saved item “Deploy steps” ---\n1. Build\n2. Ship SECRET-BODY\n--- end of saved item ---"), "{q}");
+        assert!(!q.contains("Tagged by the user"), "{q}");
+        assert_eq!(resolve_saved(&st, &format!("https://loft.local/saved/{}", item.id))[0]["saved_id"], item.id);
     }
 }

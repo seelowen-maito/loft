@@ -567,7 +567,8 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
     }
-    let tags = crate::tags::resolve(&state, &agent, &text);
+    let mut tags = crate::tags::resolve(&state, &agent, &text);
+    tags.extend(crate::tags::resolve_saved(&state, &text));
     if !tags.is_empty() {
         meta["tags"] = json!(tags);
     }
