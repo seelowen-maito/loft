@@ -583,7 +583,7 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     let msg = if leading {
         agents::add_msg(&state, &id, None, "user", "text", &text, meta)
     } else {
-        agents::enqueue_with(&state, &id, Some(text.clone()), meta, "user")
+        agents::enqueue_chat(&state, &id, text.clone(), meta)
     };
     crate::mentions::deliver(&state, &agent, &mentioned, &text, msg.as_ref().map(|m| m.id));
     Ok(Json(json!({ "ok": true, "queued": queued && !leading, "message": msg, "mentioned": crate::mentions::meta(&mentioned) })))
@@ -602,6 +602,12 @@ pub async fn run_now(State(state): State<AppState>, Path(id): Path<String>) -> A
 pub async fn mark_read(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     let a = agents::mark_read(&state, &id)?.ok_or_else(not_found)?;
     Ok(Json(agent_json(&state, &a)))
+}
+
+/// `POST /api/agents/{id}/messages/{message}/cancel`: takes an agent's message back out of the queue before a
+/// run takes it. `ok` is false when a run already took it.
+pub async fn cancel_queued_message(State(state): State<AppState>, Path((id, message)): Path<(String, i64)>) -> ApiResult<Value> {
+    Ok(Json(json!({ "ok": agents::cancel_queued(&state, &id, message)? })))
 }
 
 pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {

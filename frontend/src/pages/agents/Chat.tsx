@@ -46,7 +46,7 @@ import { useMention } from "../../components/MentionMenu";
 import { useTagMenu } from "../../components/TagMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
-import { QUEUED_MARK, sendState } from "../../lib/agentMessage";
+import { CANCELLED_MARK, QUEUED_MARK, sendState } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
@@ -963,6 +963,7 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
   const longPress = useLongPress(() => onReply(m));
   const press = canReply ? longPress : {};
   const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} />;
+  const cancel = useAction();
   if (m.kind === "clear") {
     return (
       <div className="flex items-center gap-3 py-2">
@@ -1048,13 +1049,20 @@ const MessageRow = memo(function MessageRow({ m, agent, agents, grill, onClearWi
           </div>
           <div id={messageAnchor(m.id)} className="group flex items-center gap-1" {...press}>
             {replyButton}
-            <div className="whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]">{taskText(m)}</div>
+            <div className={cx("whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-tr-md border border-line bg-white/[0.04] px-4 py-2.5 text-[14px]", m.meta?.cancelled && "text-fg-3 line-through")}>{taskText(m)}</div>
           </div>
           {agent.queued_messages?.includes(m.id) && (
-            <div className="mt-1 flex items-center gap-1 font-mono text-[10.5px] text-warn">
-              <Hourglass className="size-3" /> {QUEUED_MARK}
+            <div className="mt-1 flex items-center gap-2 font-mono text-[10.5px] text-warn">
+              <span className="flex items-center gap-1">
+                <Hourglass className="size-3" /> {QUEUED_MARK}
+              </span>
+              <button type="button" className="text-accent hover:underline disabled:opacity-50" disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id)).then((r) => r && !r.ok && cancel.setError("The agent already took this message"))}>
+                Cancel
+              </button>
+              {cancel.error && <span className="text-bad">{cancel.error}</span>}
             </div>
           )}
+          {m.meta?.cancelled && <div className="mt-1 font-mono text-[10.5px] text-fg-3">{CANCELLED_MARK}</div>}
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
