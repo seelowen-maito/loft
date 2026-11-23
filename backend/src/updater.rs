@@ -521,6 +521,16 @@ mod tests {
         assert_eq!(status.code(), Some(super::RESTART_CODE));
     }
 
+    /// The scripts that start Loft again keep their own copy of the code, and tell Loft they do.
+    #[test]
+    fn the_restart_scripts_use_the_restart_code_and_say_so() {
+        for script in ["run-backend.sh", "run-service.sh"] {
+            let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts").join(script)).unwrap();
+            assert!(text.contains(&format!("\nRESTART_CODE={}\n", super::RESTART_CODE)), "{script}");
+            assert!(text.contains("\nexport LOFT_RESTART_BY_EXIT=1\n"), "{script}");
+        }
+    }
+
     /// start.sh's loop with a fake cargo that exits with the given codes in turn: how many times it ran, the
     /// `LOFT_RESTART_BY_EXIT` and args it got, and the script's own exit code.
     #[cfg(unix)]

@@ -4,7 +4,7 @@
 # Windows, setup must read back a C:\\… folder, and on a machine with nothing installed give a winget command for each
 # requirement and check long paths; saying no leaves no logon task, and accepting it must create one task whose Loft
 # comes back after a restart and a crash; a second checkout that takes the task over must stop the first one's Loft and
-# serve its own.
+# serve its own. start.sh's Loft must come back after a restart too.
 # `scripts/test-setup.sh` from a checkout that was never set up (no .loft/settings.json). Uses $LOFT_PORT (7420).
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -130,12 +130,18 @@ if [ "$WINDOWS" = 1 ] && [ "$rc" = 0 ]; then
   check "a second run reinstalls it (the default)" "$(grep -c '✓ installed (task "Loft"' "$T/task2.log")" 1
   check "still one task" "$(MSYS_NO_PATHCONV=1 schtasks /Query /FO CSV /NH 2>/dev/null | tr -d '\r' | grep -c '^"\\Loft"')" 1
   if answers; then
+    # What run-service.sh last logged about how Loft ended (its "loft: starting" lines left out).
+    ended() { grep '^loft: ' "$LOCALAPPDATA/Loft/loft.log" 2>/dev/null | grep -v '^loft: starting' | tail -n 1; }
     # A restart from the web app exits with the restart code: the task starts Loft again right away.
     curl -s -m 5 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/api/restart"
-    wait_for 20 0; check "after a restart, Loft is back" "$(wait_for 60 1 && echo 1 || echo 0)" 1
+    check "a restart stops Loft" "$(wait_for 20 0 && echo 1 || echo 0)" 1
+    check "after a restart, Loft is back" "$(wait_for 60 1 && echo 1 || echo 0)" 1
+    check "through the restart code" "$(ended)" "loft: restarting"
     # A crash (killed): back after run-service.sh's 10 seconds.
     for pid in $(netstat -ano | tr -d '\r' | awk -v p=":$PORT" '$2 ~ p"$" && $4 == "LISTENING" {print $5}' | sort -u); do taskkill //F //PID "$pid" >/dev/null 2>&1; done
-    wait_for 20 0; check "after a crash, Loft is back" "$(wait_for 60 1 && echo 1 || echo 0)" 1
+    check "a crash stops Loft" "$(wait_for 20 0 && echo 1 || echo 0)" 1
+    check "after a crash, Loft is back" "$(wait_for 60 1 && echo 1 || echo 0)" 1
+    check "as a crash" "$(ended | sed 's/^\(loft: exited with code\) .*/\1/')" "loft: exited with code"
     grep '^loft: ' "$LOCALAPPDATA/Loft/loft.log" 2>/dev/null | sed 's/^/    log | /'
 
     # A second checkout (a worktree, with this one's release build so it doesn't start from scratch) takes the task
@@ -164,18 +170,32 @@ if [ "$WINDOWS" = 1 ] && [ "$rc" = 0 ]; then
   wait_for 20 0
 fi
 
-# start.sh builds the web app, runs the release build and serves Loft.
+# start.sh builds the web app, runs the release build and serves Loft, and runs it again after a restart from the web
+# app (on Windows cargo waits on loft rather than becoming it, so the restart code has to come back through cargo).
 if [ "$rc" = 0 ]; then
   bash start.sh > "$T/start.log" 2>&1 &
   START_PID=$!
-  up=0
-  for _ in $(seq 1 90); do
-    curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/api/info" && { up=1; break; }
-    kill -0 "$START_PID" 2>/dev/null || break
-    sleep 2
-  done
+  # Waits up to $1 seconds for Loft to answer (1) or not (0), as $2 says, while start.sh runs.
+  serves() {
+    local _ up
+    for _ in $(seq 1 "$1"); do
+      curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/api/info" && up=1 || up=0
+      [ "$up" = "$2" ] && return 0
+      kill -0 "$START_PID" 2>/dev/null || return 1
+      sleep 1
+    done
+    return 1
+  }
+  up=$(serves 300 1 && echo 1 || echo 0)
   check "start.sh serves Loft on port $PORT" "$up" 1
   [ "$up" = 1 ] || sed 's/^/    | /' "$T/start.log" | tail -n 30
+  if [ "$up" = 1 ]; then
+    curl -s -m 5 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/api/restart"
+    check "a restart stops start.sh's Loft" "$(serves 20 0 && echo 1 || echo 0)" 1
+    check "and start.sh runs it again" "$(serves 120 1 && echo 1 || echo 0)" 1
+    check "through the restart code" "$(grep -c '^loft: restarting' "$T/start.log")" 1
+    [ "$(grep -c '^loft: restarting' "$T/start.log")" = 1 ] || sed 's/^/    | /' "$T/start.log" | tail -n 30
+  fi
   stop_loft
 fi
 exit $fails
