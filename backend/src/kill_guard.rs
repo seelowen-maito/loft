@@ -3007,18 +3007,13 @@ fn backtick_body(c: &[char], mut i: usize, in_quotes: bool) -> (Vec<char>, usize
     (body, i)
 }
 
-/// The readings of the backtick command at `i - 1`: its `backtick_body` for `in_quotes`, and inside a `${…}` also the
-/// other, since zsh and bash disagree there about `\"` (and double quotes opened inside the braces aren't followed).
+/// The readings of the backtick command at `i - 1`: its `backtick_body` for `in_quotes`, and the other too. Whether `\"`
+/// is unescaped depends on the shell and on quotes and `${…}` the guard can't always follow (`"${x:-'}'`…`}"` closes
+/// differently in bash and zsh), so a command that reads differently either way is checked both ways: a git in either asks.
 fn backtick_readings(c: &[char], i: usize, in_quotes: bool) -> (Vec<Vec<char>>, usize) {
     let (body, next) = backtick_body(c, i, in_quotes);
-    let mut bodies = vec![body];
-    let open = c[..i - 1].windows(2).rposition(|w| w == ['$', '{']);
-    if open.is_some_and(|o| !c[o..i].contains(&'}')) {
-        let other = backtick_body(c, i, !in_quotes).0;
-        if other != bodies[0] {
-            bodies.push(other);
-        }
-    }
+    let other = backtick_body(c, i, !in_quotes).0;
+    let bodies = if other == body { vec![body] } else { vec![body, other] };
     (bodies, next)
 }
 
@@ -5429,9 +5424,6 @@ mod tests {
         ] {
             assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
         }
-        // Outside double quotes `\"` stays an escaped quote: the `git` is inside the string.
-        assert!(asks_all(&format!("echo \"`echo \\\"; {git}; echo \\\"`\""), CLONE).is_empty(), "the git is inside a string");
-        assert!(asks_all(&format!("echo `echo \"x\\\"; {git}; echo \\\"y\"`"), CLONE).is_empty(), "outside quotes the git is inside the string");
         assert!(asks_all("echo \"`echo \\\"git status\\\"`\"", CLONE).is_empty());
     }
 
@@ -5467,5 +5459,23 @@ mod tests {
             assert_eq!(asks_all(&cmd, CLONE), vec![PathBuf::from(USER)], "{cmd}");
         }
         assert!(asks_all("echo ${x:-\"`echo \\\"git status\\\"`\"}", CLONE).is_empty());
+    }
+
+    /// Where bash and zsh count `${…}` or quotes differently, a backtick command is read both ways (found by security):
+    /// a `}` in single quotes, a quote inside the braces, a continuation making `${`.
+    #[test]
+    fn a_backtick_in_a_string_is_read_both_ways_whatever_the_braces_look_like() {
+        let git = format!("git -C {USER} reset --hard");
+        let payload = format!("`echo \\\"; {git}; echo \\\"`");
+        for cmd in [
+            format!("echo \"${{x:-'}}'{payload}}}\""),
+            format!("bash -c 'echo \"${{x:-'\\''}}'\\''{payload}}}\"'"),
+            format!("echo \"${{x:-'}}}}}}'{payload}}}\""),
+            format!("echo \"${{x+'}}'{payload}}}\""),
+            format!("echo \"${{x:-\"}}\"{payload}}}\""),
+            format!("echo \"$\\\n{{x:-{payload}}}\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), vec![PathBuf::from(USER)], "{cmd}");
+        }
     }
 }
