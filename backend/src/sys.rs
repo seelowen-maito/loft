@@ -118,33 +118,105 @@ pub fn forward_slashes(p: &Path) -> String {
     if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
 }
 
-/// The program `bin` names. On Windows a bare name is looked up on PATH with the extensions Windows runs (`claude`
-/// is `claude.exe` or `claude.cmd`), and a path without an extension tries them too. Elsewhere, or when nothing is
-/// found, `bin` itself.
+/// The program `bin` names, as [`find_tool`] finds it: on Windows `claude` is `claude.exe` or `claude.cmd`. When
+/// nothing is found, `bin` itself.
 pub fn program(bin: &str) -> PathBuf {
-    #[cfg(windows)]
-    if let Some(p) = with_extensions(bin, std::env::var_os("PATH"), std::env::var("PATHEXT").ok()) {
-        return p;
-    }
-    PathBuf::from(bin)
+    find_tool(bin).unwrap_or_else(|| PathBuf::from(bin))
 }
 
-/// The file `bin` runs on Windows, given `PATH` and `PATHEXT` (`.COM;.EXE;.BAT;.CMD` when unset): one with an extension
-/// is itself, otherwise the extensions are tried in order, in each absolute PATH folder for a bare name.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn with_extensions(bin: &str, path: Option<std::ffi::OsString>, pathext: Option<String>) -> Option<PathBuf> {
+/// Where the tool `bin` is: on PATH (with the extensions Windows runs, there), else in the folders it is usually
+/// installed in, since a background service or a logon task can have a short PATH. A path is that file, with an
+/// extension added on Windows. None when it's nowhere.
+pub fn find_tool(bin: &str) -> Option<PathBuf> {
+    find_tools(bin).into_iter().next()
+}
+
+/// Every copy of the tool `bin` [`find_tool`] would find, in the order it looks: for a tool whose first copy may not
+/// answer (a CLI on PATH that can't reach the app installed elsewhere).
+pub fn find_tools(bin: &str) -> Vec<PathBuf> {
+    let exts = if cfg!(windows) { run_extensions(std::env::var("PATHEXT").ok()) } else { vec![] };
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    locate_all(bin, std::env::var_os("PATH"), &exts, &install_paths(bin, std::env::consts::OS, &env))
+}
+
+/// Sets `cmd` to start without a console window on Windows, where a console program started by Loft (which may
+/// have no console of its own) would otherwise flash one up. Elsewhere it does nothing.
+pub fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(cmd, 0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
+
+/// The extensions Windows runs, lowercased, from `PATHEXT` (`.COM;.EXE;.BAT;.CMD` when unset).
+fn run_extensions(pathext: Option<String>) -> Vec<String> {
     let pathext = pathext.filter(|e| !e.trim().is_empty()).unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-    let exts: Vec<String> = pathext.split(';').map(|e| e.trim().to_ascii_lowercase()).filter(|e| e.starts_with('.')).collect();
-    let has_ext = Path::new(bin).extension().is_some_and(|e| exts.contains(&format!(".{}", e.to_string_lossy().to_ascii_lowercase())));
-    let names: Vec<String> = if has_ext { vec![bin.to_string()] } else { exts.iter().map(|e| format!("{bin}{e}")).collect() };
+    pathext.split(';').map(|e| e.trim().to_ascii_lowercase()).filter(|e| e.starts_with('.')).collect()
+}
+
+/// The file `bin` runs, given `PATH`, the extensions to try (Windows', or none elsewhere) and where else it may be
+/// installed (`fallback`, paths to the program without its extension). A name with one of `exts` is itself; otherwise
+/// each extension is tried in order, in each absolute PATH folder for a bare name, then at each fallback. A path
+/// (absolute, or with a separator) is only ever that file.
+#[cfg(test)]
+fn locate(bin: &str, path: Option<std::ffi::OsString>, exts: &[String], fallback: &[PathBuf]) -> Option<PathBuf> {
+    locate_all(bin, path, exts, fallback).into_iter().next()
+}
+
+/// Every file [`locate`] could pick, in its order, each once.
+fn locate_all(bin: &str, path: Option<std::ffi::OsString>, exts: &[String], fallback: &[PathBuf]) -> Vec<PathBuf> {
     if bin.is_empty() {
-        return None;
+        return vec![];
     }
-    if bin.contains(['/', '\\']) {
-        return names.into_iter().map(PathBuf::from).find(|p| p.is_file());
+    let windows = !exts.is_empty();
+    let has_ext = Path::new(bin).extension().is_some_and(|e| exts.contains(&format!(".{}", e.to_string_lossy().to_ascii_lowercase())));
+    let with_exts = |p: &Path| -> Vec<PathBuf> {
+        if !windows || has_ext {
+            return vec![p.to_path_buf()];
+        }
+        exts.iter().map(|e| PathBuf::from(format!("{}{e}", p.display()))).collect()
+    };
+    if Path::new(bin).is_absolute() || bin.contains('/') || (windows && bin.contains('\\')) {
+        return with_exts(Path::new(bin)).into_iter().filter(|p| p.is_absolute() && p.is_file()).take(1).collect();
     }
-    let dirs: Vec<PathBuf> = path.map(|p| std::env::split_paths(&p).filter(|d| d.is_absolute()).collect()).unwrap_or_default();
-    dirs.iter().find_map(|d| names.iter().map(|n| d.join(n)).find(|p| p.is_file()))
+    let dirs = path.map(|p| std::env::split_paths(&p).filter(|d| d.is_absolute()).collect::<Vec<_>>()).unwrap_or_default();
+    let mut found: Vec<PathBuf> = vec![];
+    for p in dirs.into_iter().map(|d| d.join(bin)).chain(fallback.iter().cloned()).flat_map(|p| with_exts(&p)) {
+        if p.is_file() && !found.contains(&p) {
+            found.push(p);
+        }
+    }
+    found
+}
+
+/// Where the tool `bin` is usually installed on `os` (`std::env::consts::OS`), as paths to the program without its
+/// extension, given the environment (`env`): Homebrew's folders on a Mac and Linux, and on Windows winget's, Scoop's
+/// and Chocolatey's shared folders and each tool's own installer folder.
+fn install_paths(bin: &str, os: &str, env: &dyn Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
+    let at = |var: &str, rest: &str| env(var).map(|d| rest.split('/').fold(d, |d, part| d.join(part)));
+    let mut dirs: Vec<Option<PathBuf>> = vec![];
+    if os == "windows" {
+        dirs.extend([at("LOCALAPPDATA", "Microsoft/WinGet/Links"), at("USERPROFILE", "scoop/shims"), at("ProgramData", "chocolatey/bin")]);
+        dirs.extend(match bin {
+            // The native installer, then npm's.
+            "claude" => vec![at("USERPROFILE", ".local/bin"), at("APPDATA", "npm")],
+            // VS Code installed for the user, then for everyone.
+            "code" => vec![at("LOCALAPPDATA", "Programs/Microsoft VS Code/bin"), at("ProgramFiles", "Microsoft VS Code/bin")],
+            "tailscale" => vec![at("ProgramFiles", "Tailscale")],
+            "gh" => vec![at("ProgramFiles", "GitHub CLI")],
+            _ => vec![],
+        });
+    } else {
+        dirs.extend([Some("/opt/homebrew/bin".into()), Some("/usr/local/bin".into())]);
+        if bin == "claude" {
+            dirs.push(at("HOME", ".local/bin"));
+        }
+    }
+    let mut paths: Vec<PathBuf> = dirs.into_iter().flatten().map(|d| d.join(bin)).collect();
+    // The Mac app bundles its own CLI.
+    if os == "macos" && bin == "tailscale" {
+        paths.push("/Applications/Tailscale.app/Contents/MacOS/Tailscale".into());
+    }
+    paths
 }
 
 #[cfg(test)]
@@ -179,6 +251,14 @@ mod tests {
         assert_eq!(git_bash_form("Cx:/no"), "Cx:/no");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn paths_for_the_web_and_prompts_use_forward_slashes() {
+        assert_eq!(forward_slashes(Path::new(r"work\meuez")), "work/meuez");
+        assert_eq!(forward_slashes(&Path::new("work").join("client").join("app.rs")), "work/client/app.rs");
+        assert_eq!(forward_slashes(Path::new(r"C:\Users\me")), "C:/Users/me");
+    }
+
     #[test]
     fn a_bare_name_finds_a_cmd_or_exe_on_path() {
         let dir = crate::testdir::for_this_test("sys-program");
@@ -187,18 +267,84 @@ mod tests {
         std::fs::create_dir_all(&native).unwrap();
         std::fs::write(npm.join("claude.cmd"), "").unwrap();
         let path = |dirs: &[&Path]| Some(std::env::join_paths(dirs).unwrap());
-        assert_eq!(with_extensions("claude", path(&[&npm]), None), Some(npm.join("claude.cmd")));
+        let win = |bin: &str, path, pathext: Option<&str>| locate(bin, path, &run_extensions(pathext.map(String::from)), &[]);
+        assert_eq!(win("claude", path(&[&npm]), None), Some(npm.join("claude.cmd")));
         // PATH order first, then PATHEXT's.
         std::fs::write(native.join("claude.exe"), "").unwrap();
-        assert_eq!(with_extensions("claude", path(&[&native, &npm]), None), Some(native.join("claude.exe")));
-        assert_eq!(with_extensions("claude", path(&[&npm, &native]), Some(".EXE;.CMD".into())), Some(npm.join("claude.cmd")));
+        assert_eq!(win("claude", path(&[&native, &npm]), None), Some(native.join("claude.exe")));
+        assert_eq!(win("claude", path(&[&npm, &native]), Some(".EXE;.CMD")), Some(npm.join("claude.cmd")));
         // A name with an extension, or a path, is that file.
-        assert_eq!(with_extensions("claude.cmd", path(&[&native, &npm]), None), Some(npm.join("claude.cmd")));
+        assert_eq!(win("claude.cmd", path(&[&native, &npm]), None), Some(npm.join("claude.cmd")));
         let full = native.join("claude").to_string_lossy().into_owned();
-        assert_eq!(with_extensions(&full, None, None), Some(native.join("claude.exe")));
-        // Relative PATH folders are skipped, and nothing found is None.
-        assert_eq!(with_extensions("claude", Some("npm".into()), None), None);
-        assert_eq!(with_extensions("codex", path(&[&native, &npm]), None), None);
-        assert_eq!(with_extensions("", path(&[&native]), None), None);
+        assert_eq!(win(&full, None, None), Some(native.join("claude.exe")));
+        // Relative PATH folders and relative paths are skipped, and nothing found is None.
+        assert_eq!(win("claude", Some("npm".into()), None), None);
+        assert_eq!(win("./claude", path(&[&native]), None), None);
+        assert_eq!(win("codex", path(&[&native, &npm]), None), None);
+        assert_eq!(win("", path(&[&native]), None), None);
+        // Without extensions (Unix) a name is only itself.
+        assert_eq!(locate("claude", path(&[&native, &npm]), &[], &[]), None);
+        std::fs::write(npm.join("claude"), "").unwrap();
+        assert_eq!(locate("claude", path(&[&native, &npm]), &[], &[]), Some(npm.join("claude")));
+    }
+
+    #[test]
+    fn a_tool_off_path_is_found_where_it_is_usually_installed() {
+        let dir = crate::testdir::for_this_test("sys-find-tool");
+        let (on_path, installed) = (dir.join("bin"), dir.join("Program Files").join("Tailscale"));
+        std::fs::create_dir_all(&on_path).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("tailscale.exe"), "").unwrap();
+        let exts = run_extensions(None);
+        let path = Some(std::env::join_paths([&on_path]).unwrap());
+        let fallback = [installed.join("tailscale")];
+        assert_eq!(locate("tailscale", path.clone(), &exts, &fallback), Some(installed.join("tailscale.exe")));
+        // PATH comes first.
+        std::fs::write(on_path.join("tailscale.exe"), "").unwrap();
+        assert_eq!(locate("tailscale", path.clone(), &exts, &fallback), Some(on_path.join("tailscale.exe")));
+        // Every copy, PATH's first, each once.
+        let twice = Some(std::env::join_paths([&on_path, &on_path]).unwrap());
+        assert_eq!(locate_all("tailscale", twice, &exts, &fallback), [on_path.join("tailscale.exe"), installed.join("tailscale.exe")]);
+        // A path given is never looked for elsewhere.
+        let elsewhere = dir.join("nowhere").join("tailscale").to_string_lossy().into_owned();
+        assert_eq!(locate(&elsewhere, path, &exts, &fallback), None);
+    }
+
+    #[test]
+    fn each_tool_has_its_usual_install_folders() {
+        let env = |k: &str| {
+            let v = match k {
+                "LOCALAPPDATA" => "C:/Users/me/AppData/Local",
+                "APPDATA" => "C:/Users/me/AppData/Roaming",
+                "USERPROFILE" => "C:/Users/me",
+                "ProgramFiles" => "C:/Program Files",
+                "ProgramData" => "C:/ProgramData",
+                "HOME" => "/Users/me",
+                _ => return None,
+            };
+            Some(PathBuf::from(v))
+        };
+        let paths = |bin: &str, os: &str| install_paths(bin, os, &env).iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect::<Vec<_>>();
+        let shared = |bin: &str| ["C:/Users/me/AppData/Local/Microsoft/WinGet/Links", "C:/Users/me/scoop/shims", "C:/ProgramData/chocolatey/bin"].map(|d| format!("{d}/{bin}"));
+        let has = |all: &[String], want: &str| assert!(all.iter().any(|p| p == want), "{want} not in {all:?}");
+        for bin in ["claude", "code", "tailscale", "ffmpeg", "ffprobe", "gh"] {
+            let all = paths(bin, "windows");
+            for p in shared(bin) {
+                has(&all, &p);
+            }
+        }
+        has(&paths("claude", "windows"), "C:/Users/me/.local/bin/claude");
+        has(&paths("claude", "windows"), "C:/Users/me/AppData/Roaming/npm/claude");
+        has(&paths("code", "windows"), "C:/Users/me/AppData/Local/Programs/Microsoft VS Code/bin/code");
+        has(&paths("code", "windows"), "C:/Program Files/Microsoft VS Code/bin/code");
+        has(&paths("tailscale", "windows"), "C:/Program Files/Tailscale/tailscale");
+        has(&paths("gh", "windows"), "C:/Program Files/GitHub CLI/gh");
+        // Unset folders are left out.
+        assert_eq!(install_paths("gh", "windows", &|_| None), Vec::<PathBuf>::new());
+        // Homebrew elsewhere, and the Mac app's own Tailscale CLI.
+        assert_eq!(paths("ffmpeg", "linux"), ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]);
+        has(&paths("claude", "macos"), "/Users/me/.local/bin/claude");
+        has(&paths("tailscale", "macos"), "/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        assert!(!paths("tailscale", "linux").iter().any(|p| p.contains("Applications")));
     }
 }

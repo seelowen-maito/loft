@@ -104,15 +104,10 @@ struct OnDisk<'a> {
     github_token: &'a str,
 }
 
-/// Whether `bin` names a file to run: a full path to one, or a bare name found in an absolute PATH folder.
+/// Whether `bin` names a file to run: a full path to one, or a bare name found in an absolute PATH folder or where
+/// it is usually installed ([`crate::sys::find_tool`]; on Windows `claude` may be `claude.exe` or `claude.cmd`).
 pub fn runnable(bin: &str) -> bool {
-    let p = Path::new(bin);
-    if p.is_absolute() {
-        return p.is_file();
-    }
-    !bin.is_empty()
-        && !bin.contains('/')
-        && std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.is_absolute() && d.join(bin).is_file()))
+    crate::sys::find_tool(bin).is_some()
 }
 
 /// Settings read once at startup; changing them asks for a restart.
@@ -290,6 +285,19 @@ mod tests {
         assert!(!runnable("./sh"));
         assert!(!runnable("no-such-command-anywhere"));
         assert!(!runnable(""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_claude_command_may_leave_out_its_extension() {
+        let dir = crate::testdir::for_this_test("settings-windows");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("claude.cmd"), "@echo off\r\n").unwrap();
+        assert!(runnable(&dir.join("claude").to_string_lossy()));
+        assert!(runnable(&dir.join("claude.cmd").to_string_lossy()));
+        assert!(!runnable(&dir.join("codex").to_string_lossy()));
+        assert!(runnable("cmd"), "cmd.exe, on PATH");
+        assert!(!runnable(r"bin\claude"), "relative");
     }
 
     #[test]

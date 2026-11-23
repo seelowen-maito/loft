@@ -855,7 +855,7 @@ fn walk(root: &FsPath, dir: &FsPath, depth: usize, out: &mut Vec<Value>) {
         let meta = e.metadata().ok();
         let is_dir = p.is_dir();
         out.push(json!({
-            "path": p.strip_prefix(root).unwrap_or(&p).to_string_lossy(),
+            "path": crate::sys::forward_slashes(p.strip_prefix(root).unwrap_or(&p)),
             "dir": is_dir,
             "depth": depth,
             "size": meta.as_ref().map(|m| m.len()).unwrap_or(0),
@@ -903,7 +903,7 @@ pub async fn list_dir(State(state): State<AppState>, Path(id): Path<String>, Que
     let _ = std::fs::create_dir_all(&ws);
     let projects = &state.settings.boot().projects_dir;
     let (dir, entries) = ls(&agents::at_base(&state, &a), &[&ws, projects], q.path.as_deref().unwrap_or("")).map_err(bad)?;
-    let shown = projects.canonical().ok().and_then(|r| dir.strip_prefix(r).ok().map(|d| d.display().to_string())).unwrap_or_else(|| dir.display().to_string());
+    let shown = crate::sys::forward_slashes(projects.canonical().ok().and_then(|r| dir.strip_prefix(r).ok()).unwrap_or(&dir));
     Ok(Json(json!({ "dir": shown, "entries": entries })))
 }
 
@@ -1065,13 +1065,14 @@ pub async fn open_editor(
                 "This loft runs on another machine. Set its SSH host in Settings to open workspaces with VS Code Remote-SSH.".into(),
             ));
         }
-        let host = host.trim();
-        let url = format!("vscode://vscode-remote/ssh-remote+{host}{}", dir.display());
+        let url = remote_ssh_url(host.trim(), &dir.to_string_lossy(), cfg!(windows));
         return Ok(Json(json!({ "ok": true, "path": dir, "url": url })));
     }
 
     let run = |bin: &str, args: Vec<std::ffi::OsString>| {
-        let mut cmd = tokio::process::Command::new(bin);
+        // On Windows `code` is `code.cmd`, in VS Code's install folder when it isn't on PATH.
+        let mut cmd = tokio::process::Command::new(crate::sys::program(bin));
+        crate::sys::no_window(cmd.as_std_mut());
         cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
         cmd
     };
@@ -1099,6 +1100,25 @@ pub async fn open_editor(
     }
 }
 
+/// The VS Code link that opens folder `dir` of the machine `host` over Remote-SSH. A folder of a `windows` host
+/// (`C:\x`) goes as `/C:/x`, as VS Code names them; characters a URL can't hold as they are are percent-encoded.
+fn remote_ssh_url(host: &str, dir: &str, windows: bool) -> String {
+    let mut path = if windows { dir.replace('\\', "/") } else { dir.to_string() };
+    let b = path.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        path.insert(0, '/');
+    }
+    let mut encoded = String::new();
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/!$&'()*+,;=:@".contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("vscode://vscode-remote/ssh-remote+{host}{encoded}")
+}
+
 #[cfg(test)]
 // Most of these fake commands with shell scripts, which run on Unix only.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
@@ -1112,6 +1132,16 @@ pub(crate) mod tests {
             assert!(super::MAC_ONLY.iter().all(|f| !elsewhere.contains(f)), "{os}: {elsewhere:?}");
             assert!(elsewhere.contains(&"tasks") && elsewhere.contains(&"reply"), "{os}: the rest stays");
         }
+    }
+
+    #[test]
+    fn the_remote_ssh_link_names_the_folder_as_vs_code_does() {
+        assert_eq!(super::remote_ssh_url("box", "/Users/me/loft/ws", false), "vscode://vscode-remote/ssh-remote+box/Users/me/loft/ws");
+        assert_eq!(super::remote_ssh_url("box", r"/home/me/a\b", false), "vscode://vscode-remote/ssh-remote+box/home/me/a%5Cb");
+        let url = |dir: &str| super::remote_ssh_url("box", dir, true);
+        assert_eq!(url(r"C:\Users\me\loft\ws"), "vscode://vscode-remote/ssh-remote+box/C:/Users/me/loft/ws");
+        assert_eq!(url("D:/work/ws"), "vscode://vscode-remote/ssh-remote+box/D:/work/ws");
+        assert_eq!(url(r"C:\Users\Zé Silva\a#b?c%d"), "vscode://vscode-remote/ssh-remote+box/C:/Users/Z%C3%A9%20Silva/a%23b%3Fc%25d");
     }
 
     #[tokio::test]

@@ -482,7 +482,7 @@ fn discover(root: &Path) -> Vec<(String, PathBuf)> {
                 continue;
             }
             if p.join(".git").is_dir() {
-                let name = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                let name = crate::sys::forward_slashes(p.strip_prefix(root).unwrap());
                 out.push((name, p));
             } else if depth < MAX_DEPTH {
                 walk(root, &p, depth + 1, out);
