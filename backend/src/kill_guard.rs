@@ -5468,6 +5468,10 @@ mod tests {
         let git = format!("git -C {USER} reset --hard");
         let payload = format!("`echo \\\"; {git}; echo \\\"`");
         for cmd in [
+            format!("echo \"${{x:-${{y}}{payload}}}\""),
+            format!("echo \"${{x:-`true`${{y}}{payload}}}\""),
+            format!("echo \"${{x:-\\}}{payload}}}\""),
+            format!("echo \"${{x:-$(echo }}){payload}}}\""),
             format!("echo \"${{x:-'}}'{payload}}}\""),
             format!("bash -c 'echo \"${{x:-'\\''}}'\\''{payload}}}\"'"),
             format!("echo \"${{x:-'}}}}}}'{payload}}}\""),
