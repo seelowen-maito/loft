@@ -1149,6 +1149,7 @@ async fn loft_issues_for(state: &AppState, me: &Agent, slug: &str, spec: Option<
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::sys::Canonical;
     use crate::github::tests::{Fake, fake_github, own_fake, state_with_token};
     use crate::grill::tests::planner;
 
@@ -5217,7 +5218,7 @@ pub(crate) mod tests {
         assert_eq!(w.len(), 1);
         for want in [
             "[Loft Delivery: spec \"Offline mode\"] This is not a message from the user. You are the Dev on this Delivery: build ticket \"Store\" (Loft issue ".to_string(),
-            format!("Work on the spec branch `spec/1-offline-mode` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin spec/1-offline-mode`. There is no PR.", dir.canonicalize().unwrap().display()),
+            format!("Work on the spec branch `spec/1-offline-mode` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin spec/1-offline-mode`. There is no PR.", dir.canonical().unwrap().display()),
             format!("each message ending with `Refs {}`", store.id),
             format!("call `mcp__loft__submit_ticket` with \"{}\"", store.id),
         ] {
@@ -5450,7 +5451,7 @@ pub(crate) mod tests {
         assert_eq!(w.len(), 1);
         for want in [
             format!("[Loft Delivery: ticket \"Dark mode\"] This is not a message from the user. You are the Dev on this Delivery: build ticket \"Dark mode\" (Loft issue {})", t.id),
-            format!("Work on the ticket branch `ticket/1-dark-mode` of the project's own repo `{}`", dir.canonicalize().unwrap().display()),
+            format!("Work on the ticket branch `ticket/1-dark-mode` of the project's own repo `{}`", dir.canonical().unwrap().display()),
             format!("each message ending with `Refs {}`", t.id),
         ] {
             assert!(w[0].contains(&want), "missing {want:?} in {}", w[0]);
@@ -5517,7 +5518,7 @@ pub(crate) mod tests {
         git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "old work"]);
         git_in(&dir, &["checkout", "-q", "main"]);
         let err = start().await.unwrap_err().1;
-        assert_eq!(err, format!("The Delivery didn't start: `{}` already has a branch `ticket/1-dark-mode` with commits not on `main`: rename or delete it, then start again.", dir.canonicalize().unwrap().display()));
+        assert_eq!(err, format!("The Delivery didn't start: `{}` already has a branch `ticket/1-dark-mode` with commits not on `main`: rename or delete it, then start again.", dir.canonical().unwrap().display()));
         none_left();
         git_in(&dir, &["branch", "-q", "-D", "ticket/1-dark-mode"]);
         assert_eq!(start().await.unwrap().0["agent_name"], "dev agent");
@@ -5589,7 +5590,7 @@ pub(crate) mod tests {
         let st = state();
         let (a, m, dev, dir) = plan_without_git(&st, "no-git").await;
         let v = press(&st, &a, &m).await.unwrap();
-        assert_eq!((&v["ok"], &v["needs_git"], &v["dir"]), (&json!(false), &json!(true), &json!(dir.canonicalize().unwrap().display().to_string())));
+        assert_eq!((&v["ok"], &v["needs_git"], &v["dir"]), (&json!(false), &json!(true), &json!(dir.canonical().unwrap().display().to_string())));
         // Asked, not done: no repo, no Delivery started, nobody woken.
         assert!(!dir.join(".git").exists() && !dir.join(".gitignore").exists());
         let d = crate::delivery::local_of(&st, "no-git", &loft_ticket(&st, "no-git", "Offline mode").id).unwrap();
@@ -5712,7 +5713,7 @@ pub(crate) mod tests {
         let d = crate::delivery::local_of(&st, name, &spec.id).unwrap();
         assert_eq!(d.bases, [("api".to_string(), "main".to_string()), ("web".to_string(), "master".to_string())].into());
         let w = woken(&st, &dev);
-        assert!(w[0].contains(&format!("of the project's own repo `{}`", dir.join("api").canonicalize().unwrap().display())), "{}", w[0]);
+        assert!(w[0].contains(&format!("of the project's own repo `{}`", dir.join("api").canonical().unwrap().display())), "{}", w[0]);
 
         // A ticket published after Start, in a repo the plan hadn't branched in: its branch is made when it starts.
         tickets(vec![with("Store", &[], "api"), with("UI", &["Store"], "web"), with("Print", &["UI"], "pos")]).await.unwrap().unwrap();
@@ -5723,7 +5724,7 @@ pub(crate) mod tests {
         assert_eq!(git_in(&dir.join("pos"), &["rev-parse", "spec/1-menu-sync"]), git_in(&dir.join("pos"), &["rev-parse", "main"]));
         let d = crate::delivery::local_of(&st, name, &spec.id).unwrap();
         assert_eq!(d.bases.get("pos").map(String::as_str), Some("main"));
-        assert!(woken(&st, &dev).last().unwrap().contains(&format!("of the project's own repo `{}`", dir.join("pos").canonicalize().unwrap().display())));
+        assert!(woken(&st, &dev).last().unwrap().contains(&format!("of the project's own repo `{}`", dir.join("pos").canonical().unwrap().display())));
         tool(&st, &dev, "submit_ticket", json!({ "number": loft_ticket(&st, name, "Print").id, "commits": ["abc1234def"] })).await.unwrap();
         assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().state, "ready");
 

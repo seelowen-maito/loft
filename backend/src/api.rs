@@ -18,6 +18,7 @@ use crate::avatar::Avatar;
 use crate::db::{Agent, QuietWindow, now};
 use crate::repos;
 use crate::state::{AppState, Event};
+use crate::sys::Canonical;
 
 #[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub String);
@@ -902,7 +903,7 @@ pub async fn list_dir(State(state): State<AppState>, Path(id): Path<String>, Que
     let _ = std::fs::create_dir_all(&ws);
     let projects = &state.settings.boot().projects_dir;
     let (dir, entries) = ls(&agents::at_base(&state, &a), &[&ws, projects], q.path.as_deref().unwrap_or("")).map_err(bad)?;
-    let shown = projects.canonicalize().ok().and_then(|r| dir.strip_prefix(r).ok().map(|d| d.display().to_string())).unwrap_or_else(|| dir.display().to_string());
+    let shown = projects.canonical().ok().and_then(|r| dir.strip_prefix(r).ok().map(|d| d.display().to_string())).unwrap_or_else(|| dir.display().to_string());
     Ok(Json(json!({ "dir": shown, "entries": entries })))
 }
 
@@ -920,8 +921,8 @@ pub async fn find_files(State(state): State<AppState>, Path(id): Path<String>, Q
 
 fn ls(base: &FsPath, roots: &[&FsPath], path: &str) -> Result<(std::path::PathBuf, Vec<Value>), String> {
     // Resolved for real (`..`, symlinks, absolute paths) before checking where it landed.
-    let dir = base.join(path).canonicalize().map_err(|_| format!("No folder {path}"))?;
-    if !roots.iter().any(|root| root.canonicalize().is_ok_and(|r| dir.starts_with(r))) {
+    let dir = base.join(path).canonical().map_err(|_| format!("No folder {path}"))?;
+    if !roots.iter().any(|root| root.canonical().is_ok_and(|r| dir.starts_with(r))) {
         return Err("That's outside the projects folder".into());
     }
     let mut out: Vec<(bool, String)> = std::fs::read_dir(&dir)

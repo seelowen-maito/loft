@@ -13,6 +13,7 @@ use serde_json::Value;
 use tokio::process::Command;
 
 use crate::state::AppState;
+use crate::sys::Canonical;
 
 const ACTIVITY_DAYS: i64 = 182;
 const GIT_TTL: Duration = Duration::from_secs(120);
@@ -191,9 +192,9 @@ pub fn project_name(raw: &str) -> Result<String, String> {
 /// can make a repo there with any origin.
 pub fn project_dir(state: &AppState, project: &str) -> Option<std::path::PathBuf> {
     let name = project_name(project).ok().filter(|n| !n.is_empty())?;
-    let root = state.settings.boot().projects_dir.canonicalize().ok()?;
-    let dir = root.join(&name).canonicalize().ok()?;
-    let workspaces = state.cfg.storage_dir.canonicalize().unwrap_or_else(|_| state.cfg.storage_dir.clone());
+    let root = state.settings.boot().projects_dir.canonical().ok()?;
+    let dir = root.join(&name).canonical().ok()?;
+    let workspaces = state.cfg.storage_dir.canonical().unwrap_or_else(|_| state.cfg.storage_dir.clone());
     (dir.starts_with(&root) && !dir.starts_with(&workspaces)).then_some(dir)
 }
 

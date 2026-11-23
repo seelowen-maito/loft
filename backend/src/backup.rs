@@ -16,6 +16,7 @@ use serde::Serialize;
 
 use crate::api::ApiResult;
 use crate::state::AppState;
+use crate::sys::Canonical;
 
 /// Under the home folder, when Settings names no other.
 const DEFAULT_DIR: &str = "Library/Application Support/Loft/backups";
@@ -166,7 +167,7 @@ fn resolved(p: &Path) -> PathBuf {
     let mut rest = vec![];
     let mut cur = p;
     loop {
-        if let Ok(real) = cur.canonicalize() {
+        if let Ok(real) = cur.canonical() {
             return rest.iter().rev().fold(real, |acc, name| acc.join(name));
         }
         match (cur.parent(), cur.file_name()) {

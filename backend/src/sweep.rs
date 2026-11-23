@@ -40,6 +40,7 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
+use crate::sys::Canonical;
 
 /// Build output whose newest file is this old goes in the daily sweep.
 pub const IDLE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
@@ -357,7 +358,7 @@ pub async fn clean(axum::extract::State(state): axum::extract::State<AppState>, 
     let rt = tokio::runtime::Handle::current();
     let log = tokio::task::spawn_blocking(move || {
         let storage = &st.cfg.storage_dir;
-        let root = storage.canonicalize().unwrap_or_default();
+        let root = storage.canonical().unwrap_or_default();
         let projects = projects(&st);
         let mains = |id: &str| main_clones(&root.join(id), projects.get(id).map(Vec::as_slice).unwrap_or_default());
         let busy = busy_check(&st);
@@ -454,7 +455,7 @@ pub async fn run(state: &AppState, what: Option<&'static str>, only: Option<&str
             }
         };
         show(&log);
-        let root = storage.canonicalize().unwrap_or_default();
+        let root = storage.canonical().unwrap_or_default();
         apply(&root, p.folders, &busy, &mut |l| {
             log.push(l);
             show(&log);
@@ -497,7 +498,7 @@ pub async fn scheduler(state: AppState) {
 
 /// The workspaces' top-level items in `storage` (or only `only`'s), for Clean: biggest first within each.
 pub fn listing(storage: &Path, only: Option<&str>, projects: &dyn Fn(&str) -> Vec<String>, busy: &dyn Fn(&str) -> bool) -> Vec<Item> {
-    let Ok(root) = storage.canonicalize() else { return vec![] };
+    let Ok(root) = storage.canonical() else { return vec![] };
     let mut out = vec![];
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
@@ -709,7 +710,7 @@ fn test_output_in(notes: &Path) -> Vec<PathBuf> {
 /// `n` is closed or merged, other `scratch/` entries (and `scratch/<n>` of an unknown `n`) and test output in
 /// `notes/` once unchanged for `TEST_IDLE`. Workspaces of agents `busy` names are skipped.
 fn plan_scratch(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now: SystemTime, ticket: &dyn Fn(&str, u64) -> Ticket, p: &mut Plan) {
-    let Ok(root) = storage.canonicalize() else { return };
+    let Ok(root) = storage.canonical() else { return };
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
         if id.starts_with('.') || id.contains(char::is_control) || only.is_some_and(|o| o != id) || !e.file_type().is_ok_and(|t| t.is_dir()) || busy(&id) {
@@ -757,7 +758,7 @@ fn plan_scratch(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool,
 
 /// The folders in `rel` inside one of agent `id`'s main clones, all unticked, biggest first.
 fn inside(storage: &Path, id: &str, rel: &str, projects: &[String], busy: bool) -> Result<Vec<Item>, String> {
-    let root = storage.canonicalize().map_err(|e| e.to_string())?;
+    let root = storage.canonical().map_err(|e| e.to_string())?;
     let dir = root.join(id).join(rel);
     let mains = main_clones(&root.join(id), projects);
     if !mains.contains_key(rel.split('/').next().unwrap_or_default()) {
@@ -866,7 +867,7 @@ fn check(root: &Path, path: &Path, mains: &dyn Fn(&str) -> HashMap<String, Strin
     }
     // APFS finds a name whatever its case or Unicode form (`.GIT` is `.git`, `LOFT` is `loft`), so the names
     // below are compared only once the path is spelled as it is on disk.
-    if p.canonicalize().ok().as_deref() != Some(p.as_path()) {
+    if p.canonical().ok().as_deref() != Some(p.as_path()) {
         return Err("not the name on disk");
     }
     if parts.contains(&".git") {
@@ -908,7 +909,7 @@ fn remove_item(root: &Path, path: &Path) -> Result<(), String> {
 /// newest file is `idle` old, in workspaces of agents `busy` doesn't name.
 pub fn plan(storage: &Path, only: Option<&str>, busy: &dyn Fn(&str) -> bool, now: SystemTime, idle: Duration) -> Plan {
     let mut p = Plan::default();
-    let Ok(root) = storage.canonicalize() else { return p };
+    let Ok(root) = storage.canonical() else { return p };
     for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let id = e.file_name().to_string_lossy().to_string();
         // `.agent-files` and the like are Loft's; no agent's id has a control character.
@@ -1018,7 +1019,7 @@ fn workspace(root: &Path, id: &str, ws: &Path, now: SystemTime, idle: Duration, 
 
 /// Adds `path` to the plan when it is a real directory inside `root`.
 fn folder(root: &Path, id: &str, rel: &str, path: PathBuf, changed: SystemTime, p: &mut Plan) {
-    if !path.canonicalize().is_ok_and(|c| c.starts_with(root)) {
+    if !path.canonical().is_ok_and(|c| c.starts_with(root)) {
         p.skipped.push(skip(id, rel, "outside agent-local-storage"));
         return;
     }
@@ -1063,7 +1064,7 @@ fn trim_deps(root: &Path, id: &str, shared: &Path, mut total: u64, now: SystemTi
         f.files.push((file, bytes));
     }
     for f in by_dir {
-        if f.path.canonicalize().is_ok_and(|c| c.starts_with(root)) {
+        if f.path.canonical().is_ok_and(|c| c.starts_with(root)) {
             p.folders.push(f);
         } else {
             p.skipped.push(skip(id, &f.rel, "outside agent-local-storage"));
@@ -1251,7 +1252,7 @@ fn remove(root: &Path, path: &Path) -> Result<(), String> {
     if !path.symlink_metadata().is_ok_and(|m| m.is_dir() || m.is_file()) {
         return Err("no longer there".into());
     }
-    if !path.canonicalize().is_ok_and(|p| p.starts_with(root)) {
+    if !path.canonical().is_ok_and(|p| p.starts_with(root)) {
         return Err("outside agent-local-storage".into());
     }
     remove_under(root, path)
@@ -1440,7 +1441,7 @@ mod tests {
     fn temp() -> PathBuf {
         let d = crate::testdir::for_this_test("sweep");
         fs::create_dir_all(&d).unwrap();
-        d.canonicalize().unwrap()
+        d.canonical().unwrap()
     }
 
     fn file(p: &Path) {
@@ -1481,7 +1482,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let p = untracked(rt.handle(), plan(storage, only, busy, now, idle));
         let mut log = Log { skipped: p.skipped, ..Default::default() };
-        apply(&storage.canonicalize().unwrap(), p.folders, busy, &mut |l| log.push(l));
+        apply(&storage.canonical().unwrap(), p.folders, busy, &mut |l| log.push(l));
         log
     }
 
@@ -1652,7 +1653,7 @@ mod tests {
         file(&ws.join(".cargo-build/debug/deps/x.rlib"));
         fs::write(ws.join("dev.log"), vec![b'x'; 5000]).unwrap();
         file(&ws.join("scratch/out.json"));
-        (a, ws.canonicalize().unwrap())
+        (a, ws.canonical().unwrap())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1702,7 +1703,7 @@ mod tests {
         file(&ws.join("wt1895/src/x.cs"));
         fs::write(ws.join("wt1895/.git"), "gitdir: ../api/.git/worktrees/wt1895\n").unwrap();
         file(&ws.join("scratch/out.json"));
-        let ws = ws.canonicalize().unwrap();
+        let ws = ws.canonical().unwrap();
 
         let items = preview_of(&st, Some(&a.id)).await;
         let by = |n: &str| items.iter().find(|i| i.name == n).unwrap();
@@ -1887,7 +1888,7 @@ mod tests {
         run(&st, Some("Daily sweep"), None, IDLE).await;
         let axum::Json(l) = log(axum::extract::State(st.clone())).await;
         assert_eq!((l.what.as_str(), l.removed, l.running), ("Daily sweep", 5, false));
-        let target = ws.canonicalize().unwrap().join("loft/target");
+        let target = ws.canonical().unwrap().join("loft/target");
         assert!(l.lines.iter().any(|x| x.path == target && x.bytes > 0 && x.error.is_none()), "{:?}", l.lines);
 
         // A restart forgets the in-memory log; the saved one is read back.
@@ -1972,7 +1973,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, ws.join("app")).unwrap();
         fs::remove_dir_all(ws.join("scratch")).unwrap();
         std::os::unix::fs::symlink(outside.join("scratch"), ws.join("scratch")).unwrap();
-        let storage = storage.canonicalize().unwrap();
+        let storage = storage.canonical().unwrap();
         let mut lines = vec![];
         for f in p.folders {
             lines.push(remove_under(&storage, &f.path));
@@ -2164,7 +2165,7 @@ mod tests {
         let p = deps_plan(&storage);
         fs::remove_file(deps.join("a.o")).unwrap();
         let mut log = Log::default();
-        apply(&storage.canonicalize().unwrap(), p.folders.clone(), &|_| false, &mut |l| log.push(l));
+        apply(&storage.canonical().unwrap(), p.folders.clone(), &|_| false, &mut |l| log.push(l));
         assert_eq!((log.removed, log.failed, log.lines[0].bytes > 0), (1, 0, true), "{:?}", log.lines);
 
         let deps = deps_by_age(&storage.join("a"));
@@ -2176,7 +2177,7 @@ mod tests {
             asked.get() > 1
         };
         let mut log = Log::default();
-        apply(&storage.canonicalize().unwrap(), p.folders, &busy, &mut |l| log.push(l));
+        apply(&storage.canonical().unwrap(), p.folders, &busy, &mut |l| log.push(l));
         assert!(!deps.join("a.o").exists() && deps.join("b.o").exists());
         assert_eq!(log.lines[0].error.as_deref(), Some("agent started working"));
         assert_eq!(log.freed_bytes, fs::metadata(deps.join("b.o")).unwrap().blocks() * 512, "the first file's freed bytes count");
@@ -2273,7 +2274,7 @@ mod tests {
         let a = st.db.update_agent(&a.id, |a| (a.project, a.projects) = ("loft".into(), vec!["loft".into()])).unwrap().unwrap();
         let ws = crate::agents::workspace(st, &a.id);
         fs::create_dir_all(&ws).unwrap();
-        (a, ws.canonicalize().unwrap(), fake)
+        (a, ws.canonical().unwrap(), fake)
     }
 
     fn removed_rels(l: &Log) -> Vec<String> {
@@ -2701,7 +2702,7 @@ mod tests {
         let a = st.db.update_agent(&a.id, |a| (a.project, a.projects) = ("loft".into(), vec!["loft".into()])).unwrap().unwrap();
         let ws = crate::agents::workspace(st, &a.id);
         fs::create_dir_all(&ws).unwrap();
-        let ws = ws.canonicalize().unwrap();
+        let ws = ws.canonical().unwrap();
         let origin = temp().join("loft.git");
         git(&origin, &["init", "-q", "--bare", "-b", "main"]);
         let seed = temp().join("seed");

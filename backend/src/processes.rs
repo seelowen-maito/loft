@@ -33,6 +33,7 @@ use serde_json::{Value, json};
 
 use crate::db::Agent;
 use crate::state::AppState;
+use crate::sys::Canonical;
 
 /// The argument that makes this binary run as an agent's `kill`, `pkill` or `killall`.
 pub const ARG: &str = "kill-as";
@@ -64,6 +65,7 @@ fn sessions_dir(storage: &Path, agent_id: &str) -> PathBuf {
 }
 
 /// Records process session `sid` as the agent's.
+#[cfg(unix)]
 pub fn record(storage: &Path, agent_id: &str, sid: u32) -> anyhow::Result<()> {
     let dir = sessions_dir(storage, agent_id);
     std::fs::create_dir_all(&dir)?;
@@ -91,19 +93,33 @@ fn session_owners(storage: &Path) -> HashMap<i32, String> {
 }
 
 /// Who owns a process: the agent whose session it runs in, else the agent of the nearest process it runs under that
-/// is in an agent's session, else the agent whose workspace holds its working folder.
+/// is in an agent's session, else the agent whose workspace holds its working folder. On Windows, the agent whose
+/// job it is in (see job.rs).
+#[cfg_attr(windows, allow(dead_code))]
 struct Owners {
     sessions: HashMap<i32, String>,
     /// Each agent's workspace, resolved (a process's working folder comes resolved), and its id.
     workspaces: Vec<(PathBuf, String)>,
     uid: u32,
+    /// The processes in each agent's job, and the agent.
+    #[cfg(windows)]
+    jobs: HashMap<i32, String>,
 }
 
 impl Owners {
     /// The recorded sessions, and the workspaces of `agents`: every agent's, or only the one whose processes count.
+    /// On Windows, every agent's job.
     fn load(storage: &Path, agents: &[String]) -> Self {
-        let workspaces = agents.iter().filter_map(|id| Some((storage.join(id).canonicalize().ok()?, id.clone()))).collect();
-        Owners { sessions: session_owners(storage), workspaces, uid: crate::sys::uid() }
+        let workspaces = agents.iter().filter_map(|id| Some((storage.join(id).canonical().ok()?, id.clone()))).collect();
+        #[cfg(windows)]
+        let jobs = crate::job::agents(storage).into_iter().flat_map(|id| crate::job::pids(storage, &id).into_iter().map(move |pid| (pid as i32, id.clone()))).collect();
+        Owners {
+            sessions: session_owners(storage),
+            workspaces,
+            uid: crate::sys::uid(),
+            #[cfg(windows)]
+            jobs,
+        }
     }
 
     /// The agent `p` is: the one of its session, else the one of the nearest session above it before Loft or a GUI
@@ -111,15 +127,20 @@ impl Owners {
     /// that parent runs), else, for a process of the user's with no terminal that runs under neither Loft nor a GUI
     /// app, the one whose workspace holds its working folder.
     fn of(&self, p: &Proc) -> Option<&String> {
-        let sid = session_of(p.pid)?;
-        if let Some(id) = std::iter::once(&sid).chain(&p.sessions_above).find_map(|s| self.sessions.get(s)) {
-            return Some(id);
+        #[cfg(windows)]
+        return self.jobs.get(&p.pid);
+        #[cfg(not(windows))]
+        {
+            let sid = session_of(p.pid)?;
+            if let Some(id) = std::iter::once(&sid).chain(&p.sessions_above).find_map(|s| self.sessions.get(s)) {
+                return Some(id);
+            }
+            if self.workspaces.is_empty() || p.uid != self.uid || p.tty || p.under_app {
+                return None;
+            }
+            let cwd = cwd_of(p.pid)?;
+            self.workspaces.iter().find(|(w, _)| cwd.starts_with(w)).map(|(_, id)| id)
         }
-        if self.workspaces.is_empty() || p.uid != self.uid || p.tty || p.under_app {
-            return None;
-        }
-        let cwd = cwd_of(p.pid)?;
-        self.workspaces.iter().find(|(w, _)| cwd.starts_with(w)).map(|(_, id)| id)
     }
 }
 
@@ -137,18 +158,20 @@ fn cwd_of(pid: i32) -> Option<PathBuf> {
     (!path.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn cwd_of(pid: i32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
 /// Xcode's helper daemons, which `xcrun` and `xcodebuild` start and which never exit. They run in the agent's
 /// session but aren't its processes: Clean doesn't list them, and the idle stop and Stop them leave them alone.
+#[cfg(unix)]
 const HELPERS: [&str; 4] = ["DTServiceHub", "DTDeviceKit", "XCBBuildService", "SWBBuildService"];
 
 /// Whether `comm`, a process's executable path with no arguments (`ps -o comm=`), is one of the helpers inside an
 /// app bundle: decided from the executable, not from the arguments. `comm` is argv[0] on macOS, so an agent can
 /// still spoof the name (`exec -a`, a symlink) and hide a process from Clean; that low risk is accepted.
+#[cfg(unix)]
 fn is_helper(comm: &str) -> bool {
     comm.contains(".app/") && HELPERS.contains(&comm.rsplit('/').next().unwrap_or_default())
 }
@@ -214,26 +237,38 @@ fn group_of(pid: i32) -> Option<i32> {
     }
 }
 
-/// Sends `signal` to `pid`. Windows has no signals: there it always fails, and nothing is stopped.
+/// Sends `signal` to `pid`. Windows has no signals: there signal 0 checks the process is alive, and any other ends it.
 fn signal(pid: i32, signal: i32) -> std::io::Result<()> {
     #[cfg(unix)]
     return if unsafe { libc::kill(pid, signal) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = (pid, signal);
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Loft can't stop processes on Windows yet"))
+        let pid = u32::try_from(pid).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        if signal != 0 {
+            return crate::job::kill(pid);
+        }
+        if crate::job::alive(pid) { Ok(()) } else { Err(std::io::Error::from(std::io::ErrorKind::NotFound)) }
     }
 }
 
 /// The script claude runs in each Bash command's shell before the command (`CLAUDE_ENV_FILE`): it records the
 /// shell's session (Claude Code makes the shell a session leader, so `$$` is its id) and sends kills through Loft.
 /// A job (`kill %1`) is the shell's own child, so a call naming only jobs (after the signal option) stays with the
-/// builtin; one that mixes jobs and PIDs is refused, or the builtin would signal the PIDs too.
+/// builtin; one that mixes jobs and PIDs is refused, or the builtin would signal the PIDs too. On Windows the shell is
+/// already in the agent's job (see job.rs), so nothing is recorded, and the paths are Git Bash's.
 pub fn env_script(storage: &Path, agent_id: &str, exe: &Path) -> String {
-    let loft = quote(&exe.to_string_lossy());
+    env_script_on(storage, agent_id, exe, cfg!(windows))
+}
+
+fn env_script_on(storage: &Path, agent_id: &str, exe: &Path, windows: bool) -> String {
+    let loft = quote(&crate::sys::bash_path(exe));
+    let record = if windows {
+        "# Loft: sends kills through Loft.".to_string()
+    } else {
+        format!("# Loft: records this shell's process session as the agent's, and sends kills through Loft.\n: > {}/\"$$\" 2>/dev/null", quote(&sessions_dir(storage, agent_id).to_string_lossy()))
+    };
     format!(
-        r#"# Loft: records this shell's process session as the agent's, and sends kills through Loft.
-: > {dir}/"$$" 2>/dev/null
+        r#"{record}
 kill() {{
   case " $* " in *" %"*) ;; *) {loft} {ARG} kill "$@"; return ;; esac
   local a s=f
@@ -254,8 +289,7 @@ killall() {{ {loft} {ARG} killall "$@"; }}
 PATH={bin}:"$PATH"
 export PATH
 "#,
-        dir = quote(&sessions_dir(storage, agent_id).to_string_lossy()),
-        bin = quote(&shims_dir(storage).to_string_lossy()),
+        bin = quote(&crate::sys::bash_path(&shims_dir(storage))),
     )
 }
 
@@ -270,7 +304,7 @@ pub fn write_shims(storage: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     for (tool, _) in TOOLS {
         let path = dir.join(tool);
-        let text = format!("#!/bin/sh\nexec {} {ARG} {tool} \"$@\"\n", quote(&exe.to_string_lossy()));
+        let text = format!("#!/bin/sh\nexec {} {ARG} {tool} \"$@\"\n", quote(&crate::sys::bash_path(exe)));
         if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
             std::fs::write(&path, text)?;
         }
@@ -314,9 +348,15 @@ pub async fn pruner(storage: PathBuf) {
     }
 }
 
-/// Stops every process the agent owns, when it is deleted (see [`stop`]). Its session records go now.
+/// Stops every process the agent owns, when it is deleted (see [`stop`]): on Windows its whole job ends. Its session
+/// records go now.
 pub async fn stop_all(storage: &Path, agent_id: &str) {
     stop(storage, agent_id, || true, false).await;
+    #[cfg(windows)]
+    {
+        crate::job::terminate(storage, agent_id);
+        crate::job::forget(storage, agent_id);
+    }
     let _ = tokio::fs::remove_dir_all(sessions_dir(storage, agent_id)).await;
 }
 
@@ -344,7 +384,8 @@ async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + S
         let targets: Vec<(i32, i32, i32, String)> = table()
             .into_iter()
             .filter(|p| p.pid != me && !p.helper && (p.browser || !browsers_only) && owners.of(p) == Some(&id))
-            .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.ppid, p.command)))
+            // On Windows the first stop ends the process: no session to check before a second.
+            .filter_map(|p| Some((p.pid, if cfg!(windows) { 0 } else { session_of(p.pid)? }, p.ppid, p.command)))
             .collect();
         for (pid, _, _, _) in &targets {
             let _ = signal(*pid, SIGTERM);
@@ -443,6 +484,7 @@ pub async fn stop_left_running(State(state): State<AppState>, UrlPath(id): UrlPa
 
 // ---- the process table ------------------------------------------------
 
+#[cfg_attr(windows, allow(dead_code))]
 struct Proc {
     pid: i32,
     ppid: i32,
@@ -463,13 +505,28 @@ struct Proc {
 }
 
 /// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+#[cfg(unix)]
 fn etime(s: &str) -> Option<u64> {
     let (days, rest) = s.split_once('-').map_or((0, s), |(d, r)| (d.parse().unwrap_or(0), r));
     let parts: Vec<u64> = rest.split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
     Some(days * 86400 + parts.iter().fold(0, |t, x| t * 60 + x))
 }
 
+/// Every process on Windows, from the system's snapshot: no terminals, user ids or sessions there, and ownership is by
+/// job.
+#[cfg(windows)]
+fn table() -> Vec<Proc> {
+    crate::job::table()
+        .into_iter()
+        .map(|e| {
+            let browser = is_test_browser(&e.exe.replace('\\', "/"));
+            Proc { pid: e.pid as i32, ppid: e.ppid as i32, uid: 0, age_secs: e.age_secs, command: e.exe, helper: false, browser, tty: false, under_app: false, sessions_above: vec![] }
+        })
+        .collect()
+}
+
 /// Every process on the Mac, from `ps`.
+#[cfg(unix)]
 fn table() -> Vec<Proc> {
     let Ok(out) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,ppid=,uid=,etime=,tty=,command="]).output() else {
         return vec![];
@@ -512,6 +569,7 @@ fn table() -> Vec<Proc> {
 /// Whether `comm`, a process's executable path, is a GUI app's (the app's own or a helper app's, like VS Code's
 /// `Code Helper (Plugin)`), installed in /Applications or ~/Applications (where JetBrains Toolbox puts its IDEs).
 /// Postgres.app's `postgres` isn't: it's in `bin`, not `MacOS`.
+#[cfg(unix)]
 fn is_gui_app(comm: &str) -> bool {
     let home = std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(|h| format!("{}/Applications/", h.trim_end_matches('/')));
     (comm.starts_with("/Applications/") || home.is_some_and(|h| comm.starts_with(&h))) && comm.contains(".app/Contents/MacOS/")
@@ -519,6 +577,7 @@ fn is_gui_app(comm: &str) -> bool {
 
 /// Marks the processes that are, or run under, one of `apps` (Loft and the GUI apps), and lists the sessions
 /// (`sid_of`) of the processes each one runs under, up to the first app.
+#[cfg(unix)]
 fn mark_under_app(procs: &mut [Proc], apps: &HashSet<i32>, sid_of: impl Fn(i32) -> Option<i32>) {
     let parents: HashMap<i32, i32> = procs.iter().map(|p| (p.pid, p.ppid)).collect();
     let mut sids: HashMap<i32, Option<i32>> = HashMap::new();
@@ -1943,5 +2002,53 @@ mod tests {
         let out = bash(&st, &a.id, &format!("kill {}", other.pid())).await;
         assert!(out.contains("Loft didn't stop") && out.contains("did not respond") && out.contains("exit 1"), "{out}");
         assert!(other.alive());
+    }
+}
+
+// On every OS: the env script, and on Windows the agents' jobs.
+#[cfg(test)]
+mod job_tests {
+    use super::*;
+
+    #[test]
+    fn on_windows_the_env_script_records_no_session() {
+        let (storage, exe) = (Path::new("/data/storage"), Path::new("/opt/loft/loft"));
+        let unix = env_script_on(storage, "a1", exe, false);
+        assert!(unix.contains(": > '/data/storage/.agent-files/a1.sessions'/\"$$\""), "{unix}");
+        let windows = env_script_on(storage, "a1", exe, true);
+        assert!(!windows.contains("sessions") && !windows.contains("$$"), "{windows}");
+        // The kills still go through Loft.
+        assert!(windows.contains("pkill() { '/opt/loft/loft' kill-as pkill \"$@\"; }"), "{windows}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_process_in_an_agent_s_job_is_the_agent_s_and_deleting_the_agent_ends_its_tree() {
+        let storage = crate::testdir::for_this_test("processes-job");
+        let _child = crate::job::tests::spawn_tree(&storage, "a1");
+        let pids = crate::job::tests::wait_for(&storage, "a1", 3);
+        let ids = ["a1".to_string(), "b2".to_string()];
+        let live = live_processes(&storage, &ids);
+        let mine: HashSet<i32> = live.get("a1").into_iter().flatten().map(|p| p.pid).collect();
+        assert!(pids.iter().all(|p| mine.contains(&(*p as i32))), "{pids:?} vs {mine:?}");
+        assert!(!live.contains_key("b2"), "another agent owns none of them");
+        // Loft itself is no agent's.
+        assert!(!mine.contains(&(std::process::id() as i32)));
+        stop_all(&storage, "a1").await;
+        crate::agents::tests::until("the job's processes to end", 10, || pids.iter().all(|p| !crate::job::alive(*p))).await;
+        assert!(crate::job::agents(&storage).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_idle_stop_ends_the_agent_s_processes_and_signal_zero_checks_one() {
+        let storage = crate::testdir::for_this_test("processes-job-stop");
+        let _child = crate::job::tests::spawn_tree(&storage, "a1");
+        let pids = crate::job::tests::wait_for(&storage, "a1", 3);
+        assert!(signal(pids[0] as i32, 0).is_ok());
+        let stopped = stop(&storage, "a1", || true, false).await;
+        assert!(pids.iter().all(|p| stopped.iter().any(|(s, _, _)| *s == *p as i32)), "{pids:?} vs {stopped:?}");
+        crate::agents::tests::until("the job's processes to end", 10, || pids.iter().all(|p| !crate::job::alive(*p))).await;
+        assert!(signal(pids[0] as i32, 0).is_err());
     }
 }

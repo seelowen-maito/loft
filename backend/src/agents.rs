@@ -17,6 +17,7 @@ use tokio::sync::{Notify, oneshot};
 use crate::db::{Agent, Message, PermissionRequest, now};
 use crate::schedule;
 use crate::state::{AppState, Decision, Event};
+use crate::sys::Canonical;
 
 pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -44,7 +45,7 @@ pub fn workspace(state: &AppState, agent_id: &str) -> PathBuf {
 pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
     let projects = &state.settings.boot().projects_dir;
     let project = projects.join(a.project.trim());
-    match (a.project.trim().is_empty(), project.canonicalize(), projects.canonicalize()) {
+    match (a.project.trim().is_empty(), project.canonical(), projects.canonical()) {
         (false, Ok(p), Ok(root)) if p.starts_with(&root) && p.is_dir() => p,
         _ => workspace(state, &a.id),
     }
@@ -571,6 +572,32 @@ These rules are Loft's and apply to every message you send another agent with `m
 7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
+    system_prompt_on(state, a, cfg!(windows))
+}
+
+/// The prompt line saying where the agent runs, on Windows.
+const ON_WINDOWS: &str = "- This computer runs Windows. Your Bash tool is Git Bash: use Unix commands, and paths with forward slashes (`C:/Users/…`), which Bash and your file tools both read. There is no PowerShell tool.\n";
+
+/// The Showing your work line on the Simulator, which only a Mac has.
+fn simulator_line(state: &AppState, a: &Agent) -> String {
+    let device = match state.db.agent_device(&a.id).ok().flatten() {
+        Some(udid) => format!(
+            "Your device's UDID is `{udid}` (also in `${var}`); if simctl says it doesn't exist, call `mcp__loft__simulator_device` for a new one.",
+            var = crate::simulator::DEVICE_VAR
+        ),
+        None => "You have none yet: call `mcp__loft__simulator_device` the first time you need one. It creates your device and gives you its UDID.".into(),
+    };
+    let axe = crate::simulator::axe()
+        .map(|p| format!(" To drive the app, use AXe at `{}`: `tap -x <x> -y <y> --tap-style physical`, `swipe`, `type`, `describe-ui` (coordinates in points; see `--help`), always with `--udid <udid>`.", p.display()))
+        .unwrap_or_default();
+    format!(
+        "\n- iOS apps: run them in the Simulator on this Mac, only on your own device (`<udid>` below), never `booted` or another one: other agents run theirs. {device} Boot it with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install <udid> \"$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME\"` and `xcrun simctl launch <udid> <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io <udid> screenshot <file>.png` and read the image.{axe}"
+    )
+}
+
+/// The agent's system prompt, for Loft on Windows or not: on Windows it says so, shows paths with forward slashes and
+/// leaves out the Mac's Simulator.
+fn system_prompt_on(state: &AppState, a: &Agent, windows: bool) -> String {
     let ws = workspace(state, &a.id);
     let mem_block = a.memory_index.clone().unwrap_or_else(|| memory_block(state, &a.id));
     let schedule = if a.interval_minutes > 0 {
@@ -612,7 +639,7 @@ You are **{name}** ({role}), an autonomous agent living inside Loft — the user
 {schedule}
 
 # Workspace
-- Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
+{on_windows}- Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review while that clone exists; if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first and carry on. Never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
 - Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first, in a command of its own: run git on the new clone in the next command, not in the same one (`git clone x t && git -C t …` asks the user, because the guard can't know yet what the clone brought).
@@ -632,8 +659,7 @@ Each message starts a run that ends with your reply. Claude Code background work
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
-- Dev servers (web apps, APIs, docs sites): serve them only on your own ports, {ports} (`$PORT` is the first, `${range_var}` the whole range): they are yours on every run, and no other agent uses them. Start them detached (see Runs), listening on all interfaces (`vite --host --port $PORT`, `next dev -H 0.0.0.0` (it reads `$PORT`), `python3 -m http.server $PORT --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`, a port in your range. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
-- iOS apps: run them in the Simulator on this Mac, only on your own device (`<udid>` below), never `booted` or another one: other agents run theirs. {device} Boot it with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install <udid> "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch <udid> <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io <udid> screenshot <file>.png` and read the image.{axe}
+- Dev servers (web apps, APIs, docs sites): serve them only on your own ports, {ports} (`$PORT` is the first, `${range_var}` the whole range): they are yours on every run, and no other agent uses them. Start them detached (see Runs), listening on all interfaces (`vite --host --port $PORT`, `next dev -H 0.0.0.0` (it reads `$PORT`), `python3 -m http.server $PORT --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`, a port in your range. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).{simulator}
 
 # Long-term memory
 You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
@@ -667,24 +693,21 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         role = crate::planning::role_label(if a.role.is_empty() { "custom" } else { &a.role }),
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
-        ws = ws.display(),
-        at = at_base(state, a).display(),
-        projects = state.settings.boot().projects_dir.display(),
-        axe = crate::simulator::axe()
-            .map(|p| format!(" To drive the app, use AXe at `{}`: `tap -x <x> -y <y> --tap-style physical`, `swipe`, `type`, `describe-ui` (coordinates in points; see `--help`), always with `--udid <udid>`.", p.display()))
-            .unwrap_or_default(),
-        host = crate::tailnet::host().unwrap_or_else(|| "<this Mac's Tailscale or LAN host name>".into()),
+        on_windows = if windows { ON_WINDOWS } else { "" },
+        ws = shown(&ws),
+        at = shown(&at_base(state, a)),
+        projects = shown(&state.settings.boot().projects_dir),
+        simulator = if windows { String::new() } else { simulator_line(state, a) },
+        host = crate::tailnet::host().unwrap_or_else(|| if windows { "<this computer's Tailscale or LAN host name>" } else { "<this Mac's Tailscale or LAN host name>" }.into()),
         ports = crate::ports::range(state, &a.id).map(|r| format!("{}–{}", r.start(), r.end())).unwrap_or_else(|_| "your port range".into()),
         range_var = crate::ports::RANGE_VAR,
         tool_wait = TOOL_WAIT.as_millis(),
-        device = match state.db.agent_device(&a.id).ok().flatten() {
-            Some(udid) => format!(
-                "Your device's UDID is `{udid}` (also in `${var}`); if simctl says it doesn't exist, call `mcp__loft__simulator_device` for a new one.",
-                var = crate::simulator::DEVICE_VAR
-            ),
-            None => "You have none yet: call `mcp__loft__simulator_device` the first time you need one. It creates your device and gives you its UDID.".into(),
-        },
     )
+}
+
+/// A path as the prompt shows it: with forward slashes on Windows (see [`crate::sys::forward_slashes`]).
+fn shown(p: &Path) -> String {
+    crate::sys::forward_slashes(p)
 }
 
 /// The Workspace lines naming its group and projects, main first; none when it has neither.
@@ -1358,6 +1381,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     let mut allowed: Vec<String> = a.allowed_tools.iter().filter(|r| !r.starts_with("Kill(")).cloned().collect();
     allowed.push("mcp__loft".into());
     let mut disallowed = a.disallowed_tools.clone();
+    // Agents use only the Bash tool, whose commands the kill guard sees: not Claude Code's PowerShell tool (Windows).
+    disallowed.push("PowerShell".into());
     if a.max_subagents == Some(0) {
         disallowed.push("Agent".into());
     }
@@ -1375,7 +1400,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     let user_plugin = crate::commands::sync_user_plugin(&state.cfg.storage_dir.join(AGENT_FILES), &crate::sessions::claude_dir())
         .map(|p| PathBuf::from("..").join(AGENT_FILES).join(p.file_name().unwrap()));
     let ports = crate::ports::range(state, &a.id)?;
-    let mut cmd = Command::new(state.settings.get().claude_bin);
+    let mut cmd = Command::new(crate::sys::program(&state.settings.get().claude_bin));
     cmd.current_dir(workspace(state, &a.id))
         .arg("-p")
         .args(["--output-format", "stream-json", "--verbose"])
@@ -1398,7 +1423,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
         // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
         .env("BASH_MAX_TIMEOUT_MS", TOOL_WAIT.as_millis().to_string())
-        .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
+        .env("CLAUDE_ENV_FILE", crate::sys::forward_slashes(&agent_file(state, &a.id, "env.sh")))
+        .env("CLAUDE_CODE_USE_POWERSHELL_TOOL", "0")
         .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
         .env(crate::kill_guard::URL_VAR, format!("http://127.0.0.1:{}/guard/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
@@ -1431,6 +1457,9 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     unsafe {
         cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
     }
+    // On Windows the agent's job stands in for the session: claude starts suspended until it is in it (see job.rs).
+    #[cfg(windows)]
+    cmd.creation_flags(crate::job::CREATION_FLAGS);
     if !a.model.is_empty() {
         cmd.args(["--model", &a.model]);
     }
@@ -1490,14 +1519,21 @@ async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str,
 
 /// Stop claude the way it can clean up after itself: SIGTERM ends its background shells too, while
 /// SIGKILL would orphan them. SIGKILL only if it is still alive after the grace period. Windows has no SIGTERM:
-/// there it is killed right away.
-async fn terminate(child: &mut tokio::process::Child) {
+/// there claude and the processes under it in the agent's job end right away.
+async fn terminate(state: &AppState, agent_id: &str, child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
+        let _ = (state, agent_id);
         unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_ok() {
             return;
         }
+    }
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let storage = state.cfg.storage_dir.clone();
+        let agent_id = agent_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || crate::job::kill_tree(&storage, &agent_id, pid)).await;
     }
     let _ = child.kill().await;
 }
@@ -1565,10 +1601,16 @@ async fn run_process(
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
     // Its session id is its PID.
+    #[cfg(unix)]
     if let Some(pid) = child.id()
         && let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
             tracing::warn!("agent {agent_id}: could not record its process session: {e}");
         }
+    #[cfg(windows)]
+    if let Err(e) = crate::job::join(&state.cfg.storage_dir, agent_id, &child) {
+        let _ = child.kill().await;
+        anyhow::bail!("failed to start `{}` in the agent's job: {e}", state.settings.get().claude_bin);
+    }
     {
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
@@ -1612,7 +1654,10 @@ async fn run_process(
             l = lines.next_line() => l?,
             _ = kill.notified() => {
                 tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
-                terminate(&mut child).await;
+                // Windows has no SIGTERM for claude to end its background work with: the agent's whole job ends.
+                #[cfg(windows)]
+                crate::job::terminate(&state.cfg.storage_dir, agent_id);
+                terminate(state, agent_id, &mut child).await;
                 loft_stopped = true;
                 killed = true;
                 None
@@ -1635,7 +1680,7 @@ async fn run_process(
                     }
                 }
                 tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
-                terminate(&mut child).await;
+                terminate(state, agent_id, &mut child).await;
                 loft_stopped = true;
                 None
             }
@@ -1650,7 +1695,7 @@ async fn run_process(
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
                 // Replied with nothing left in the background, yet still alive: don't hold the queue for it.
                 tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its reply");
-                terminate(&mut child).await;
+                terminate(state, agent_id, &mut child).await;
                 loft_stopped = true;
                 None
             }
@@ -1935,7 +1980,7 @@ async fn run_process(
         Ok(s) => s?,
         Err(_) => {
             tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its output ended");
-            terminate(&mut child).await;
+            terminate(state, agent_id, &mut child).await;
             loft_stopped = true;
             child.wait().await?
         }
@@ -2094,6 +2139,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn on_windows_the_prompt_says_git_bash_and_leaves_out_the_mac() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let mac = system_prompt_on(&st, &a, false);
+        assert!(mac.contains("in the Simulator on this Mac") && !mac.contains("Git Bash"), "{mac}");
+        let win = system_prompt_on(&st, &a, true);
+        assert!(win.contains("This computer runs Windows. Your Bash tool is Git Bash") && win.contains("There is no PowerShell tool."), "{win}");
+        for gone in ["Simulator", "simctl", "Mac"] {
+            assert!(!win.contains(gone), "{gone} in {win}");
+        }
+        // The rest is the same prompt.
+        assert!(win.contains("# Showing your work") && win.contains("# Long-term memory") && win.contains("Dev servers (web apps"));
+    }
+
+    #[test]
+    fn agents_get_no_powershell_tool() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cmd = build_command(&st, &a, false).unwrap();
+        let env = |k: &str| cmd.as_std().get_envs().find(|(n, _)| *n == k).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(env("CLAUDE_CODE_USE_POWERSHELL_TOOL").as_deref(), Some("0"));
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(agent_file(&st, &a.id, "settings.json")).unwrap()).unwrap();
+        assert!(settings["permissions"]["deny"].as_array().unwrap().contains(&json!("PowerShell")), "{settings}");
+    }
+
+    #[test]
     fn the_identity_line_names_the_role_label() {
         let st = crate::tasks::tests::state();
         let mut a = crate::tasks::tests::agent(&st, "Checker");
@@ -2176,7 +2247,7 @@ pub(crate) mod tests {
         assert!(git(&ws.join("repo"), &["init", "-q"]).status.success());
         let out = git(&ws.join("repo"), &["rev-parse", "--show-toplevel"]);
         assert!(out.status.success(), "{out:?}");
-        assert_eq!(std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), std::fs::canonicalize(ws.join("repo")).unwrap());
+        assert_eq!(crate::sys::canonical(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), crate::sys::canonical(ws.join("repo")).unwrap());
     }
 
     #[test]
@@ -2540,7 +2611,7 @@ esac
         assert!(argv.contains(&format!("../.agent-files/{}.settings.json", a.id)), "{argv}");
         // The fake read the settings file from that relative path.
         let settings: Value = serde_json::from_str(&std::fs::read_to_string(workspace(&st, &a.id).join("settings.log")).unwrap()).unwrap();
-        assert_eq!(settings["permissions"], json!({ "allow": ["Bash(npm *)", "mcp__loft"], "deny": ["WebFetch", "Agent"] }));
+        assert_eq!(settings["permissions"], json!({ "allow": ["Bash(npm *)", "mcp__loft"], "deny": ["WebFetch", "PowerShell", "Agent"] }));
         let hook = &settings["hooks"]["PreToolUse"][0];
         assert_eq!(hook["matcher"], "Bash");
         assert!(hook["hooks"][0]["command"].as_str().unwrap().ends_with("' kill-guard"), "{settings}");
@@ -3306,7 +3377,7 @@ esac
         let st = AppState { settings: std::sync::Arc::new(crate::settings::Store::load(&dir).unwrap()), ..st };
         let mut a = crate::tasks::tests::agent(&st, "Dev");
         a.project = "work/notes".into();
-        assert_eq!(at_base(&st, &a), projects.join("work/notes").canonicalize().unwrap());
+        assert_eq!(at_base(&st, &a), projects.join("work/notes").canonical().unwrap());
         for tag in ["Marketing", "../..", ""] {
             a.project = tag.into();
             assert_eq!(at_base(&st, &a), workspace(&st, &a.id), "{tag:?} falls back to the workspace");

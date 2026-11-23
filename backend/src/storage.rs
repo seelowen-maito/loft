@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::db::Db;
+use crate::sys::Canonical;
 
 /// The storage folder's name, kept where it moved: the checkout guard knows a workspace by it (kill_guard.rs).
 pub const NAME: &str = "agent-local-storage";
@@ -23,7 +24,7 @@ const TEXT_MAX: u64 = 1_000_000;
 /// 200-character name limit.
 pub fn dir_for(root: &Path, data_home: &Path) -> PathBuf {
     use sha2::{Digest, Sha256};
-    let real = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let real = root.canonical().unwrap_or_else(|_| root.to_path_buf());
     let base: String = real.file_name().unwrap_or_default().to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let hash: String = Sha256::digest(real.as_os_str().as_encoded_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect();
     data_home.join("loft").join(format!("{base}-{hash}")).join(NAME)
@@ -244,11 +245,11 @@ fn safe_destination(new: &Path, root: &Path, projects_dir: &Path) -> Result<(), 
         crate::owner_only::dir(p).map_err(|e| format!("couldn't make {} owner-only: {e}", p.display()))?;
     }
     // Links anywhere above count: the real path decides.
-    let real = key.canonicalize().map_err(|e| format!("couldn't resolve {}: {e}", key.display()))?;
-    if real.starts_with(root.canonicalize().unwrap_or_else(|_| root.to_path_buf())) {
+    let real = key.canonical().map_err(|e| format!("couldn't resolve {}: {e}", key.display()))?;
+    if real.starts_with(root.canonical().unwrap_or_else(|_| root.to_path_buf())) {
         return Err(format!("{} is inside Loft's checkout", real.display()));
     }
-    let real_of = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let real_of = |p: &Path| p.canonical().unwrap_or_else(|_| p.to_path_buf());
     let projects_dir = real_of(projects_dir);
     let home = dirs::home_dir().map(|h| real_of(&h));
     if real.starts_with(&projects_dir) && !home.is_some_and(|h| h.starts_with(&projects_dir)) {
@@ -418,7 +419,7 @@ mod tests {
     /// A temporary home with the user's loft checkout at `dev/loft`, a git repository.
     fn home() -> (crate::testdir::TempDir, PathBuf, PathBuf) {
         let home = crate::testdir::TempDir::new("home");
-        let home_path = home.canonicalize().unwrap();
+        let home_path = home.canonical().unwrap();
         let root = home_path.join("dev/loft");
         std::fs::create_dir_all(root.join(".loft")).unwrap();
         ok(git(&root, &["init", "-q"]));

@@ -184,7 +184,7 @@ fn files(src: &Path, rel: &Path, depth: u32, above: &mut Vec<std::path::PathBuf>
         let rel = rel.join(e.file_name());
         let Ok(m) = std::fs::metadata(e.path()) else { continue };
         if m.is_dir() {
-            let real = std::fs::canonicalize(e.path())?;
+            let real = crate::sys::canonical(e.path())?;
             if !SKIP.iter().any(|s| e.file_name() == *s) && !above.contains(&real) {
                 above.push(real);
                 let r = files(src, &rel, depth + 1, above, out);
@@ -240,7 +240,7 @@ pub fn sync_user_plugin(storage: &Path, claude_dir: &Path) -> Option<std::path::
     let mut all: Vec<(&str, Vec<_>)> = Vec::new();
     for kind in ["commands", "skills"] {
         let mut list = Vec::new();
-        if claude_dir.join(kind).is_dir() && files(&claude_dir.join(kind), Path::new(""), 0, &mut vec![std::fs::canonicalize(claude_dir.join(kind)).unwrap_or_default()], &mut list).is_ok() {
+        if claude_dir.join(kind).is_dir() && files(&claude_dir.join(kind), Path::new(""), 0, &mut vec![crate::sys::canonical(claude_dir.join(kind)).unwrap_or_default()], &mut list).is_ok() {
             all.push((kind, list));
         }
     }

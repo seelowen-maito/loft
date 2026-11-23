@@ -256,7 +256,7 @@ fn exe_of(pid: u32) -> Option<PathBuf> {
 /// Whether `exe` is the `herdr` Loft found, by real path.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn is_herdr_exe(exe: &Path, herdr: &Path) -> bool {
-    match (std::fs::canonicalize(exe), std::fs::canonicalize(herdr)) {
+    match (crate::sys::canonical(exe), crate::sys::canonical(herdr)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
@@ -473,8 +473,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_exe_comes_from_the_kernel_not_the_process_name() {
-        let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
-        assert_eq!(std::fs::canonicalize(exe_of(std::process::id()).unwrap()).unwrap(), me);
+        let me = crate::sys::canonical(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(crate::sys::canonical(exe_of(std::process::id()).unwrap()).unwrap(), me);
         assert_eq!(exe_of(u32::MAX - 1), None);
     }
 

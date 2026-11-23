@@ -71,9 +71,10 @@ pub fn hook() -> ! {
     std::process::exit(0)
 }
 
-/// The `hooks` of a settings file that installs the hook, run as `exe kill-guard`. It may wait for the user that long.
+/// The `hooks` of a settings file that installs the hook, run as `exe kill-guard` (by its Git Bash path on Windows, where
+/// Claude Code runs hooks in Git Bash). It may wait for the user that long.
 pub fn hooks(exe: &std::path::Path) -> Value {
-    let command = format!("'{}' {ARG}", exe.to_string_lossy().replace('\'', r"'\''"));
+    let command = format!("'{}' {ARG}", crate::sys::bash_path(exe).replace('\'', r"'\''"));
     let timeout = crate::agents::TOOL_WAIT.as_secs();
     json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }] })
 }
@@ -1678,7 +1679,7 @@ fn real(path: PathBuf) -> PathBuf {
 fn real_at(path: PathBuf, links: usize) -> PathBuf {
     for base in path.ancestors() {
         let rest = path.strip_prefix(base).unwrap_or(Path::new(""));
-        if let Ok(r) = std::fs::canonicalize(base) {
+        if let Ok(r) = crate::sys::canonical(base) {
             return if rest.as_os_str().is_empty() { r } else { r.join(rest) };
         }
         // As many links as the system follows (a loop never resolves).
@@ -3009,8 +3010,8 @@ pub async fn handle(
     axum::Json(req): axum::Json<GuardRequest>,
 ) -> axum::Json<Value> {
     let projects = state.settings.get().projects_dir;
-    let projects = std::fs::canonicalize(&projects).unwrap_or(projects);
-    let storage = std::fs::canonicalize(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone());
+    let projects = crate::sys::canonical(&projects).unwrap_or(projects);
+    let storage = crate::sys::canonical(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone());
     let deadline = tokio::time::Instant::now() + ASK_TIMEOUT;
     for change in req.changes {
         // Read again each time: an "Always allow" for one folder may cover the next.
@@ -4696,7 +4697,7 @@ mod tests {
         for d in [project.join(".git"), ws.join("notes"), clone.join(".git"), clone.join("backend")] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let project = std::fs::canonicalize(&project).unwrap();
+        let project = crate::sys::canonical(&project).unwrap();
         let at = |p: &Path| p.display().to_string();
         for cwd in [&ws, &ws.join("notes")] {
             for cmd in ["git checkout main", "git reset --hard origin/main", "git stash"] {
@@ -4724,7 +4725,7 @@ mod tests {
         assert_eq!(asks("cd link && git reset --hard", &at(&ws)), Some(other.clone()));
         assert_eq!(asks("git -C link checkout main", &at(&ws)), Some(other.clone()));
         // A new folder through that link is in the other checkout, though it doesn't exist yet.
-        let new = std::fs::canonicalize(other.join("src")).unwrap().join("new");
+        let new = crate::sys::canonical(other.join("src")).unwrap().join("new");
         assert_eq!(asks("git clone /src link/new", &at(&ws)), Some(new.clone()));
         assert_eq!(asks("git init link/new", &at(&ws)), Some(new));
         // A dangling symlink: where it points, not where it sits.
@@ -4837,7 +4838,7 @@ mod tests {
         for d in [project.join(".git"), clone.join(".git"), other.join(".git/worktrees/w"), other.join("src")] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = crate::sys::canonical(&root).unwrap();
         let (project, ws, clone, other) = (root.join("loft"), root.join("loft/agent-local-storage/x"), root.join("loft/agent-local-storage/x/loft"), root.join("other"));
         let at = |p: &Path| p.display().to_string();
         // As Loft runs the hook: its ceiling is the storage folder.
@@ -5020,7 +5021,7 @@ mod tests {
         for d in [project.join(".git"), ws.join("notes"), ws.join("loft/.git")] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let project = std::fs::canonicalize(&project).unwrap();
+        let project = crate::sys::canonical(&project).unwrap();
         let at = |p: &Path| p.display().to_string();
         let asks_under = |cmd: &str, cwd: &Path, ceiling: &[PathBuf]| {
             let input = json!({ "tool_name": "Bash", "cwd": at(cwd), "tool_input": { "command": cmd } }).to_string();
@@ -5117,7 +5118,7 @@ mod tests {
         use axum::extract::{Path as P, State};
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Web QA");
-        let projects = std::fs::canonicalize(st.settings.get().projects_dir).unwrap();
+        let projects = crate::sys::canonical(st.settings.get().projects_dir).unwrap();
         let user = projects.join("loft");
         let guard = |folder: PathBuf| {
             let (st, id) = (st.clone(), a.id.clone());
@@ -5130,7 +5131,7 @@ mod tests {
         assert_eq!(guard(PathBuf::from("/tmp/elsewhere")).await.unwrap()["allow"], true);
         let clone = st.cfg.storage_dir.join("x/loft");
         std::fs::create_dir_all(&clone).unwrap();
-        assert_eq!(guard(std::fs::canonicalize(&clone).unwrap()).await.unwrap()["allow"], true);
+        assert_eq!(guard(crate::sys::canonical(&clone).unwrap()).await.unwrap()["allow"], true);
         assert!(pending().is_empty());
 
         // Denied: the agent is told to use its own clone.
@@ -5170,7 +5171,7 @@ mod tests {
         use axum::extract::{Path as P, State};
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Web QA");
-        let projects = std::fs::canonicalize(st.settings.get().projects_dir).unwrap();
+        let projects = crate::sys::canonical(st.settings.get().projects_dir).unwrap();
         let (one, two) = (projects.join("one"), projects.join("two"));
         let change = |f: &PathBuf| Change { folder: f.clone(), command: "git pull".into() };
         let pending = || st.db.list_permissions(Some(&a.id)).unwrap().into_iter().filter(|p| p.status == "pending").collect::<Vec<_>>();

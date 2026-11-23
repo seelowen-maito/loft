@@ -18,6 +18,8 @@ mod planning;
 mod ports;
 mod guard;
 mod herdr;
+#[cfg(windows)]
+mod job;
 mod kill_guard;
 mod chat_commands;
 mod login;
