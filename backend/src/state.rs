@@ -116,8 +116,9 @@ pub struct QueuedMessage {
     pub prompt: String,
     /// The ticket it made the agent's current one, and the one before it.
     pub ticket_set: Option<(String, Option<String>)>,
-    /// It asked for a context clear before the run (`fresh_before`) that wasn't already asked for.
-    pub set_fresh: bool,
+    /// It asked for a context clear before the run (`fresh_before`), and whether one was already asked for.
+    pub wants_fresh: bool,
+    pub fresh_was: bool,
 }
 
 #[derive(Default)]

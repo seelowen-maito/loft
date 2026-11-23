@@ -947,7 +947,7 @@ pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str,
         let Some(q) = rt.queued_messages.get_mut(&to.id).and_then(|q| q.iter_mut().find(|m| m.id == *id)) else { return false };
         // What a cancel undoes.
         q.ticket_set = ticket.filter(|t| prev_ticket.as_deref() != Some(*t)).map(|t| (t.to_string(), prev_ticket.clone()));
-        q.set_fresh = fresh && !fresh_was;
+        (q.wants_fresh, q.fresh_was) = (fresh, fresh_was);
         true
     });
     if queued.is_some() {
@@ -1219,24 +1219,34 @@ pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> 
         let Some(at) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().position(|m| m.id == id)) else {
             return Ok(false);
         };
-        let m = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
+        let q = rt.queued_messages.get_mut(agent_id).unwrap();
+        // What the agent was before the queue changed it, and what the messages left in it make of it.
+        let base_ticket = q.iter().find_map(|m| m.ticket_set.as_ref()).map(|(_, prev)| prev.clone());
+        let base_fresh = q[0].fresh_was;
+        let m = q.remove(at);
+        // The next message inherits what the removed one found: the agent's state before the queue.
+        if at == 0 && !q.is_empty() {
+            q[0].fresh_was = m.fresh_was;
+        }
+        if let Some((_, prev)) = &m.ticket_set
+            && let Some((_, next_prev)) = q.iter_mut().skip(at).find_map(|m| m.ticket_set.as_mut())
+        {
+            *next_prev = prev.clone();
+        }
+        let ticket = q.iter().rev().find_map(|m| m.ticket_set.as_ref()).map(|(t, _)| t.clone()).or_else(|| base_ticket.clone().flatten());
+        let fresh = base_fresh || q.iter().any(|m| m.wants_fresh);
         if let Some(q) = rt.queued.get_mut(agent_id)
             && let Some(p) = q.iter().position(|x| *x == m.prompt)
         {
             q.remove(p);
         }
-        // Undo exactly what it changed: the context clear it asked for, and the ticket it made current.
-        if m.set_fresh {
+        if !fresh && m.wants_fresh {
             rt.fresh_before.remove(agent_id);
         }
-        undo = m.ticket_set;
+        undo = base_ticket.map(|_| ticket);
     }
-    if let Some((ticket, prev)) = undo {
-        let _ = state.db.update_agent(agent_id, |a| {
-            if a.delivery_ticket.as_deref() == Some(ticket.as_str()) {
-                a.delivery_ticket = prev;
-            }
-        });
+    if let Some(ticket) = undo {
+        let _ = state.db.update_agent(agent_id, |a| a.delivery_ticket = ticket);
     }
     state.db.mark_cancelled(agent_id, id)?;
     if let Some(m) = state.db.get_message(agent_id, id)? {
@@ -2939,6 +2949,18 @@ esac
         assert!(st.rt.lock().unwrap().fresh_before.contains(&to.id), "the first still wants it");
         assert!(cancel_queued(&st, &to.id, first).unwrap());
         assert!(!st.rt.lock().unwrap().fresh_before.contains(&to.id));
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#7"));
+
+        // Two hand-overs, A then B, cancelled oldest first: B keeps the ticket and the context clear it needs; then B's cancel
+        // puts back what the agent had, not A's never-delivered ticket.
+        let a = message_on_ticket(&st, &from, &to, "Build #30", json!({}), Some("o/r#30"), true).unwrap();
+        let b = message_on_ticket(&st, &from, &to, "Build #31", json!({}), Some("o/r#31"), true).unwrap();
+        assert!(cancel_queued(&st, &to.id, a).unwrap());
+        assert!(st.rt.lock().unwrap().fresh_before.contains(&to.id), "B still needs it");
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#31"));
+        assert!(cancel_queued(&st, &to.id, b).unwrap());
+        assert!(!st.rt.lock().unwrap().fresh_before.contains(&to.id));
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#7"));
     }
 
     #[tokio::test]
