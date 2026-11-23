@@ -1,13 +1,18 @@
 //! Each agent's processes on Windows: a Job Object per agent, which stands in for the Unix process session (see
 //! processes.rs). A run's claude starts suspended, joins the agent's job and only then runs, so every process it
 //! starts, and theirs, are in the job too: Windows puts a child in its parent's job, and nothing in an agent's job may
-//! leave it. A detached server (`nohup … &`) or a daemon stays in it, whatever its parent.
+//! leave it. A detached server (`nohup … &`) or a daemon stays in it, whatever its parent. Stopping an agent ends its
+//! whole job at once: Windows has no SIGTERM to let its processes clean up.
 //!
-//! The job is named after Loft's storage folder and the agent, so a Loft that restarted finds it again; it lasts while
-//! any of its processes runs. A `<id>.job` file in the agents' files says which agents have one. Stopping an agent ends
-//! its whole job at once: Windows has no SIGTERM to let its processes clean up.
+//! A job's name lasts only while a handle to it is open (its processes don't hold one), so Loft keeps a handle on each
+//! agent's job for as long as it runs. A Loft that restarted can't reach the jobs of the one before, so the agent's
+//! `<id>.job` file in the agents' files records the job's processes (PID and start time) when a run starts and ends
+//! and every minute: after a restart those still running are the agent's too, and stopping it ends them. What they
+//! start after the restart, and what started in the minute before it, isn't known: those are nobody's. The agent's
+//! next run gets a new job.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT};
@@ -16,8 +21,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     Thread32Next,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList, OpenJobObjectW, QueryInformationJobObject,
-    TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList, QueryInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, GetProcessTimes, OpenProcess, OpenThread, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
@@ -27,10 +31,6 @@ use windows_sys::Win32::System::Threading::{
 /// How a run's claude is created: suspended until it is in the agent's job, and with no console window (Loft may run
 /// with no console of its own, and each console program would open one).
 pub const CREATION_FLAGS: u32 = CREATE_SUSPENDED | CREATE_NO_WINDOW;
-
-/// The job access rights Loft asks for (winnt.h's, which windows-sys keeps in another feature).
-const JOB_OBJECT_QUERY: u32 = 0x0004;
-const JOB_OBJECT_TERMINATE: u32 = 0x0008;
 
 /// The exit code of a process Loft ended.
 const STOPPED: u32 = 1;
@@ -43,6 +43,9 @@ impl Handle {
         (!h.is_null() && h != INVALID_HANDLE_VALUE).then_some(Handle(h))
     }
 }
+
+// A kernel handle may be used and closed from any thread.
+unsafe impl Send for Handle {}
 
 impl Drop for Handle {
     fn drop(&mut self) {
@@ -67,22 +70,38 @@ fn marker(storage: &Path, agent_id: &str) -> PathBuf {
     storage.join(crate::agents::AGENT_FILES).join(format!("{agent_id}.job"))
 }
 
-/// Puts the suspended `child` (started with [`CREATION_FLAGS`]) in the agent's job, creating the job if it has none
-/// now, then lets it run. On an error the child is still suspended: the caller ends it.
+/// Loft's handle on each agent's job, by the job's name.
+static JOBS: Mutex<Vec<(Vec<u16>, Handle)>> = Mutex::new(Vec::new());
+
+/// Runs `f` on the agent's job: the one Loft holds, else with `create` a new one (which Loft then holds).
+fn with_job<R>(storage: &Path, agent_id: &str, create: bool, f: impl FnOnce(&Handle) -> R) -> std::io::Result<Option<R>> {
+    let name = name(storage, agent_id);
+    let mut jobs = JOBS.lock().unwrap();
+    if let Some((_, job)) = jobs.iter().find(|(n, _)| *n == name) {
+        return Ok(Some(f(job)));
+    }
+    if !create {
+        return Ok(None);
+    }
+    let job = Handle::new(unsafe { CreateJobObjectW(std::ptr::null(), name.as_ptr()) }).ok_or_else(std::io::Error::last_os_error)?;
+    let r = f(&job);
+    jobs.push((name, job));
+    Ok(Some(r))
+}
+
+/// Puts the suspended `child` (started with [`CREATION_FLAGS`]) in the agent's job, creating the job if Loft holds
+/// none for it, then lets it run. On an error the child is still suspended: the caller ends it.
 pub fn join(storage: &Path, agent_id: &str, child: &tokio::process::Child) -> std::io::Result<()> {
     let (Some(process), Some(pid)) = (child.raw_handle(), child.id()) else {
         return Err(std::io::Error::other("claude exited before it started"));
     };
-    let marker = marker(storage, agent_id);
-    if let Some(dir) = marker.parent() {
+    if let Some(dir) = marker(storage, agent_id).parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&marker, "")?;
-    let job = Handle::new(unsafe { CreateJobObjectW(std::ptr::null(), name(storage, agent_id).as_ptr()) }).ok_or_else(std::io::Error::last_os_error)?;
-    if unsafe { AssignProcessToJobObject(job.0, process.cast()) } == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    let assign = |job: &Handle| if unsafe { AssignProcessToJobObject(job.0, process.cast()) } != 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) };
+    with_job(storage, agent_id, true, assign)?.unwrap_or_else(|| Err(std::io::Error::other("no job")))?;
     resume(pid);
+    remember(storage, agent_id);
     Ok(())
 }
 
@@ -101,44 +120,98 @@ fn resume(pid: u32) {
     }
 }
 
-fn open(storage: &Path, agent_id: &str, access: u32) -> Option<Handle> {
-    Handle::new(unsafe { OpenJobObjectW(access, 0, name(storage, agent_id).as_ptr()) })
-}
-
 /// The agents that have had a job.
 pub fn agents(storage: &Path) -> Vec<String> {
     let Ok(dir) = std::fs::read_dir(storage.join(crate::agents::AGENT_FILES)) else { return vec![] };
     dir.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".job").map(String::from)).collect()
 }
 
-/// The processes in the agent's job: none when it has no job (no process of its own is left).
-pub fn pids(storage: &Path, agent_id: &str) -> Vec<u32> {
-    let Some(job) = open(storage, agent_id, JOB_OBJECT_QUERY) else { return vec![] };
-    // The list's two counts, then the IDs; grown until every assigned process fits.
+/// The processes in the job Loft holds for the agent.
+fn in_job(storage: &Path, agent_id: &str) -> Vec<u32> {
+    with_job(storage, agent_id, false, |job| process_ids(job)).ok().flatten().unwrap_or_default()
+}
+
+/// The processes in `job`: the list's two counts, then the IDs, in a buffer grown until every process fits.
+fn process_ids(job: &Handle) -> Vec<u32> {
+    let first = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) / std::mem::size_of::<usize>();
     let mut room = 256usize;
     loop {
-        let mut buf = vec![0usize; 2 + room];
+        let mut buf = vec![0usize; first + room];
         let size = (buf.len() * std::mem::size_of::<usize>()) as u32;
         let ok = unsafe { QueryInformationJobObject(job.0, JobObjectBasicProcessIdList, buf.as_mut_ptr().cast(), size, std::ptr::null_mut()) } != 0;
-        let counts: [u32; 2] = unsafe { std::ptr::read(buf.as_ptr().cast()) };
-        let (assigned, listed) = (counts[0] as usize, counts[1] as usize);
-        if ok && listed >= assigned {
-            return buf[2..2 + listed.min(room)].iter().map(|&p| p as u32).collect();
-        }
-        if room >= 1 << 16 {
-            return buf[2..2 + listed.min(room)].iter().map(|&p| p as u32).collect();
+        let list: &JOBOBJECT_BASIC_PROCESS_ID_LIST = unsafe { &*buf.as_ptr().cast() };
+        let (assigned, listed) = (list.NumberOfAssignedProcesses as usize, (list.NumberOfProcessIdsInList as usize).min(room));
+        if (ok && listed >= assigned) || room >= 1 << 16 {
+            return buf[first..first + listed].iter().map(|&p| p as u32).collect();
         }
         room = (assigned + 64).max(room * 2);
     }
 }
 
-/// Ends every process in the agent's job. Whether it had one.
+/// When `pid` started (FILETIME's 100 ns steps since 1601), while it runs.
+fn started(pid: u32) -> Option<u64> {
+    let p = Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) })?;
+    if unsafe { WaitForSingleObject(p.0, 0) } != WAIT_TIMEOUT {
+        return None;
+    }
+    let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    (unsafe { GetProcessTimes(p.0, &mut created, &mut exited, &mut kernel, &mut user) } != 0).then(|| ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+}
+
+/// The processes the agent's file records that still run: the same PID, started at the same time.
+fn recorded(storage: &Path, agent_id: &str) -> Vec<u32> {
+    let text = std::fs::read_to_string(marker(storage, agent_id)).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let (pid, at) = l.split_once(' ')?;
+            let (pid, at) = (pid.parse().ok()?, at.parse().ok()?);
+            (started(pid) == Some(at)).then_some(pid)
+        })
+        .collect()
+}
+
+/// The agent's processes: those in its job, and those recorded before Loft restarted that still run.
+pub fn pids(storage: &Path, agent_id: &str) -> Vec<u32> {
+    let mut pids = in_job(storage, agent_id);
+    for pid in recorded(storage, agent_id) {
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// Records the agent's processes in its file (see the module docs).
+pub fn remember(storage: &Path, agent_id: &str) {
+    let text: String = pids(storage, agent_id).into_iter().filter_map(|pid| Some(format!("{pid} {}\n", started(pid)?))).collect();
+    let path = marker(storage, agent_id);
+    let tmp = path.with_extension("job.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Records every agent's processes.
+pub fn remember_all(storage: &Path) {
+    for id in agents(storage) {
+        remember(storage, &id);
+    }
+}
+
+/// Ends every process of the agent: its whole job, and those recorded before Loft restarted. Whether it had any.
 pub fn terminate(storage: &Path, agent_id: &str) -> bool {
-    open(storage, agent_id, JOB_OBJECT_TERMINATE).is_some_and(|job| unsafe { TerminateJobObject(job.0, STOPPED) } != 0)
+    let left = recorded(storage, agent_id);
+    let ended = with_job(storage, agent_id, false, |job| unsafe { TerminateJobObject(job.0, STOPPED) } != 0).ok().flatten() == Some(true);
+    for &pid in &left {
+        let _ = kill(pid);
+    }
+    ended || !left.is_empty()
 }
 
 /// Forgets the agent's job, when the agent is deleted (after [`terminate`]).
 pub fn forget(storage: &Path, agent_id: &str) {
+    let name = name(storage, agent_id);
+    JOBS.lock().unwrap().retain(|(n, _)| *n != name);
     let _ = std::fs::remove_file(marker(storage, agent_id));
 }
 
@@ -206,15 +279,11 @@ fn details(pid: u32) -> (Option<String>, u64) {
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
     let exe = (unsafe { QueryFullProcessImageNameW(p.0, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) } != 0).then(|| String::from_utf16_lossy(&buf[..len as usize]));
-    let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
-    let age = if unsafe { GetProcessTimes(p.0, &mut created, &mut exited, &mut kernel, &mut user) } != 0 {
-        // FILETIME counts 100 ns steps since 1601.
-        let ticks = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
-        let started = SystemTime::UNIX_EPOCH + Duration::from_nanos(ticks.saturating_sub(116_444_736_000_000_000).saturating_mul(100));
-        started.elapsed().map_or(0, |d| d.as_secs())
-    } else {
-        0
-    };
+    // From 1601 to 1970, in FILETIME's steps.
+    let age = started(pid).map_or(0, |ticks| {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_nanos(ticks.saturating_sub(116_444_736_000_000_000).saturating_mul(100));
+        at.elapsed().map_or(0, |d| d.as_secs())
+    });
     (exe, age)
 }
 
@@ -279,6 +348,30 @@ pub(crate) mod tests {
         assert!(!alive(one) && !left.contains(&one) && left.contains(&two), "{pids:?} -> {left:?}");
         assert!(left.len() >= 3, "{left:?}");
         terminate(&storage, "a1");
+    }
+
+    #[tokio::test]
+    async fn after_a_restart_the_processes_recorded_are_still_the_agents() {
+        let storage = crate::testdir::for_this_test("job-restart");
+        let _child = spawn_tree(&storage, "a1");
+        let pids = wait_for(&storage, "a1", 3);
+        remember(&storage, "a1");
+        // A Loft that restarted holds no handle on the job, so it can't reach it.
+        let name = name(&storage, "a1");
+        JOBS.lock().unwrap().retain(|(n, _)| *n != name);
+        assert!(in_job(&storage, "a1").is_empty());
+        let known = super::pids(&storage, "a1");
+        assert!(pids.iter().all(|p| known.contains(p)), "{pids:?} vs {known:?}");
+        assert!(terminate(&storage, "a1"));
+        for _ in 0..100 {
+            if pids.iter().all(|&p| !alive(p)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(pids.iter().all(|&p| !alive(p)), "{pids:?}");
+        // Once they have ended, none is the agent's, even with the same PID again.
+        assert!(super::pids(&storage, "a1").is_empty());
     }
 
     #[test]

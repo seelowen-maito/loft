@@ -1124,6 +1124,12 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             crate::delivery::run_ended(&state, &agent_id, failed).await;
             // Test browsers the run left open hold gigabytes of memory: stop them, and say so in the next run.
             let closed = crate::processes::stop_test_browsers(&state.cfg.storage_dir, &agent_id).await;
+            // On Windows, what a Loft that restarts will know of the agent's job (see job.rs).
+            #[cfg(windows)]
+            {
+                let (storage, id) = (state.cfg.storage_dir.clone(), agent_id.clone());
+                let _ = tokio::task::spawn_blocking(move || crate::job::remember(&storage, &id)).await;
+            }
             if closed > 0
                 && let Ok(Some(a)) = state.db.get_agent(&agent_id)
             {

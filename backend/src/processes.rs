@@ -339,12 +339,18 @@ pub fn prune(storage: &Path) {
     }
 }
 
-/// Prunes the session records once a minute.
+/// Prunes the session records once a minute, and on Windows records the agents' processes.
 pub async fn pruner(storage: PathBuf) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
         let storage = storage.clone();
-        let _ = tokio::task::spawn_blocking(move || prune(&storage)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            prune(&storage);
+            // On Windows, what a Loft that restarts knows of each agent's job (see job.rs).
+            #[cfg(windows)]
+            crate::job::remember_all(&storage);
+        })
+        .await;
     }
 }
 

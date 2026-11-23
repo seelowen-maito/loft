@@ -69,15 +69,30 @@ impl Canonical for Path {
     }
 }
 
-/// `\\?\C:\x` as `C:\x`, and `\\?\UNC\host\share\x` as `\\host\share\x`. None for any other path.
+/// `\\?\C:\x` as `C:\x`, and `\\?\UNC\host\share\x` as `\\host\share\x`, when the plain form names the same file. None
+/// for any other path, and (like the `dunce` crate) for one that plain would read differently: 260 characters or more,
+/// a part that ends in a dot or a space, a reserved name (`CON`, `nul.txt`, `COM1`) or a character Windows paths can't
+/// hold.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn without_verbatim(s: &str) -> Option<String> {
     let rest = s.strip_prefix(r"\\?\")?;
-    if let Some(unc) = rest.strip_prefix(r"UNC\") {
-        return Some(format!(r"\\{unc}"));
-    }
-    let b = rest.as_bytes();
-    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':').then(|| rest.to_string())
+    let (plain, parts) = if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        (format!(r"\\{unc}"), unc)
+    } else {
+        let b = rest.as_bytes();
+        if !(b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') {
+            return None;
+        }
+        (rest.to_string(), rest.get(2..).unwrap_or_default())
+    };
+    let reserved = |part: &str| {
+        let stem = part.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+        matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+            || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit())
+    };
+    let plain_ok = plain.encode_utf16().count() < 260
+        && parts.split('\\').filter(|p| !p.is_empty()).all(|p| !p.ends_with(['.', ' ']) && !reserved(p) && !p.contains(|c: char| c < ' ' || "<>:\"/|?*".contains(c)));
+    plain_ok.then_some(plain)
 }
 
 /// `p` as Git Bash writes it, for the scripts and commands Loft gives agents: `C:\Users\me` is `/c/Users/me` on
@@ -142,6 +157,13 @@ mod tests {
         assert_eq!(without_verbatim(r"\\?\UNC\nas\share\repo").as_deref(), Some(r"\\nas\share\repo"));
         assert_eq!(without_verbatim(r"C:\Users\me"), None);
         assert_eq!(without_verbatim(r"\\?\Volume{1234}\x"), None);
+        // Kept where the plain path would name another file, or none.
+        for odd in [r"\\?\C:\repo\trailing.", r"\\?\C:\repo\space \x", r"\\?\C:\repo\CON", r"\\?\C:\repo\nul.txt", r"\\?\C:\repo\com1", r"\\?\C:\a?b", r"\\?\C:\a/b"] {
+            assert_eq!(without_verbatim(odd), None, "{odd}");
+        }
+        assert_eq!(without_verbatim(&format!(r"\\?\C:\{}", "a".repeat(300))), None);
+        // Names that only look like those are plain.
+        assert_eq!(without_verbatim(r"\\?\C:\console\com10\.git\a.b").as_deref(), Some(r"C:\console\com10\.git\a.b"));
         let dir = crate::testdir::for_this_test("sys-canonical");
         let real = canonical(dir.join(".")).unwrap();
         assert!(real.is_absolute() && real.is_dir() && !real.to_string_lossy().starts_with(r"\\?\"), "{}", real.display());
