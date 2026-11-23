@@ -1212,7 +1212,7 @@ fn substitutions(s: &str) -> Vec<String> {
         } else if c[i] == '`' {
             // Up to the next backtick that isn't escaped, unescaped as the shell does. Each backtick starts one, whatever
             // pairing the ones before it would make: a backtick in a quote or a comment inside `$(…)` is only text.
-            out.push(backtick_body(&c, i + 1).0.into_iter().collect());
+            out.push(backtick_body(&c, i + 1, false).0.into_iter().collect());
             i += 1;
         } else {
             i += 1;
@@ -2754,7 +2754,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                         '`' => {
                             l.word.push('$');
                             l.cmd(p);
-                            let (body, next) = backtick_body(c, i);
+                            let (body, next) = backtick_body(c, i, true);
                             lex(p, &body, 0, Some('\0'));
                             i = next;
                         }
@@ -2766,7 +2766,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 l.in_word = true;
                 l.word.push('$');
                 l.cmd(p);
-                let (body, next) = backtick_body(c, i);
+                let (body, next) = backtick_body(c, i, false);
                 lex(p, &body, 0, Some('\0'));
                 i = next;
             }
@@ -2811,7 +2811,7 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     // `${x:-`cmd`}` too.
                     if n == '`' {
                         l.cmd(p);
-                        let (body, next) = backtick_body(c, i);
+                        let (body, next) = backtick_body(c, i, false);
                         lex(p, &body, 0, Some('\0'));
                         i = next;
                     }
@@ -2989,17 +2989,15 @@ fn closes_arithmetic(c: &[char], i: usize) -> bool {
     false
 }
 
-/// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
-/// decoded. Returns the index past its closing quote.
-/// The command a backtick at `i - 1` opens: the text to the next backtick that isn't escaped, with its `\\`` (a backtick
-/// of a command nested in it), `\\\\` and `\\$` unescaped as the shell does, and where the text after it starts.
-fn backtick_body(c: &[char], mut i: usize) -> (Vec<char>, usize) {
+/// The command a backtick at `i - 1` opens: the text to the next backtick that isn't escaped, with its `\``, `\\` and
+/// `\$` (and `\"`, in double quotes) unescaped as the shell does, and where the text after it starts.
+fn backtick_body(c: &[char], mut i: usize, in_quotes: bool) -> (Vec<char>, usize) {
     let mut body = vec![];
     while let Some(&ch) = c.get(i) {
         i += 1;
         match ch {
             '`' => break,
-            '\\' if matches!(c.get(i), Some('`' | '\\' | '$')) => {
+            '\\' if matches!(c.get(i), Some('`' | '\\' | '$')) || (in_quotes && c.get(i) == Some(&'"')) => {
                 body.push(c[i]);
                 i += 1;
             }
@@ -3009,6 +3007,8 @@ fn backtick_body(c: &[char], mut i: usize) -> (Vec<char>, usize) {
     (body, i)
 }
 
+/// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
+/// decoded. Returns the index past its closing quote.
 fn ansi_c_quoted(c: &[char], mut i: usize, word: &mut String) -> usize {
     while let Some(&q) = c.get(i) {
         i += 1;
@@ -5390,5 +5390,23 @@ mod tests {
         ] {
             assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
         }
+    }
+
+    /// In double quotes, `\"` inside a backtick command is a plain quote of that command, not an escaped one.
+    #[test]
+    fn an_escaped_quote_in_a_backtick_command_in_double_quotes_is_a_quote() {
+        let user = vec![PathBuf::from(USER)];
+        let git = format!("git -C {USER} reset --hard");
+        for cmd in [
+            format!("echo \"`echo \"x\\\"; {git}; echo \\\"y\"`\""),
+            format!("echo \"`echo \\\"a\\\"; {git}`\""),
+            format!("echo \"`cd {USER}; echo \\\"x\\\"; pnpm install`\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+        // Outside double quotes `\"` stays an escaped quote: the `git` is inside the string.
+        assert!(asks_all(&format!("echo \"`echo \\\"; {git}; echo \\\"`\""), CLONE).is_empty(), "the git is inside a string");
+        assert!(asks_all(&format!("echo `echo \"x\\\"; {git}; echo \\\"y\"`"), CLONE).is_empty(), "outside quotes the git is inside the string");
+        assert!(asks_all("echo \"`echo \\\"git status\\\"`\"", CLONE).is_empty());
     }
 }
