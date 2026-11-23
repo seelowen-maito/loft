@@ -604,6 +604,12 @@ pub async fn mark_read(State(state): State<AppState>, Path(id): Path<String>) ->
     Ok(Json(agent_json(&state, &a)))
 }
 
+/// `POST /api/agents/{id}/messages/{message}/cancel`: takes an agent's message back out of the queue before a
+/// run takes it. `ok` is false when a run already took it.
+pub async fn cancel_queued_message(State(state): State<AppState>, Path((id, message)): Path<(String, i64)>) -> ApiResult<Value> {
+    Ok(Json(json!({ "ok": agents::cancel_queued(&state, &id, message)? })))
+}
+
 pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     // Deny any permission prompts that are blocking this agent so the process can exit.
     for p in state.db.list_permissions(Some(&id))?.into_iter().filter(|p| p.status == "pending") {

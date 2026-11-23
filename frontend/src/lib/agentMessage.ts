@@ -24,3 +24,5 @@ export function sendState(result: string | undefined, agents: { queued_messages?
 
 /** The mark on an agent message still waiting for the recipient's current run to end. */
 export const QUEUED_MARK = "Queued until this run ends";
+/** The mark on an agent message the user cancelled while it waited: the agent never read it. */
+export const CANCELLED_MARK = "Cancelled before the agent read it";

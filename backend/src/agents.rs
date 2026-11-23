@@ -93,7 +93,7 @@ pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     v["waiting_on"] = json!(info.map_or(&vec![], |i| &i.waiting_on));
     v["waiting_since"] = json!(info.and_then(|i| i.waiting_since.as_ref()));
     v["subagents"] = json!(info.map_or(&vec![], |i| &i.subagents));
-    v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(&vec![], |q| q));
+    v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(vec![], |q| q.iter().map(|(id, _)| *id).collect()));
     // A Redraw waiting behind the current run or drawing now: the Redraw button shows it's busy.
     v["redrawing"] = json!(rt.redraw_queued.contains(agent_id) || rt.redrawing.contains(agent_id));
 }
@@ -940,7 +940,7 @@ pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str,
         ));
     }
     start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg, false);
-    let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.contains(id)));
+    let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.iter().any(|(i, _)| i == id)));
     if queued.is_some() {
         emit_run(state, &to.id);
     }
@@ -1036,10 +1036,10 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                     rt.queued_for_user.insert(agent_id.to_string());
                 }
                 if let Some(w) = delivery {
-                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt)));
+                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt.clone())));
                 }
                 if let Some(id) = msg {
-                    rt.queued_messages.entry(agent_id.to_string()).or_default().push(id);
+                    rt.queued_messages.entry(agent_id.to_string()).or_default().push((id, prompt));
                 }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
@@ -1198,6 +1198,30 @@ pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str
     if let Some(w) = rt.delivery_queued.remove(agent_id) {
         rt.delivery_running.entry(agent_id.to_string()).or_default().extend(w.into_iter().map(|(w, _)| w));
     }
+}
+
+/// Takes agent message `id` back out of `agent_id`'s queue before a run takes it, and marks it cancelled in the chat.
+/// The queue is read and changed under one lock, the one the run takes it under when it ends: a message is either
+/// cancelled or delivered, never both. False when it isn't queued (a run already took it).
+pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
+    {
+        let mut rt = state.rt.lock().unwrap();
+        let Some(at) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().position(|(i, _)| *i == id)) else {
+            return Ok(false);
+        };
+        let (_, prompt) = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
+        if let Some(q) = rt.queued.get_mut(agent_id)
+            && let Some(p) = q.iter().position(|x| *x == prompt)
+        {
+            q.remove(p);
+        }
+    }
+    state.db.mark_cancelled(agent_id, id)?;
+    if let Some(m) = state.db.get_message(agent_id, id)? {
+        state.emit(Event::Message { message: serde_json::to_value(&m).unwrap() });
+    }
+    emit_run(state, agent_id);
+    Ok(true)
 }
 
 pub fn stop(state: &AppState, agent_id: &str) -> bool {
@@ -2834,6 +2858,33 @@ esac
         let past = "0b4355f1-11b6-4668-809e-1dc392203ef7";
         crate::sessions::tests::write(&dir, past, &[r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"Fix the login bug"}}"#]);
         (dir, past.into())
+    }
+
+    #[tokio::test]
+    async fn a_queued_agent_message_can_be_cancelled_until_a_run_takes_it() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let to = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(to.id.clone(), Arc::new(Notify::new()));
+        let keep = message_on_ticket(&st, &from, &to, "keep me", json!({}), None, false).expect("queued behind the run");
+        let drop = message_on_ticket(&st, &from, &to, "never mind", json!({}), None, false).expect("queued behind the run");
+
+        assert!(cancel_queued(&st, &to.id, drop).unwrap());
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&to.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [keep]);
+            let q = &rt.queued[&to.id];
+            assert!(q.len() == 1 && q[0].contains("keep me") && !q.iter().any(|p| p.contains("never mind")), "{q:?}");
+        }
+        let m = st.db.get_message(&to.id, drop).unwrap().unwrap();
+        assert_eq!(m.meta["cancelled"], true);
+        assert!(st.db.get_message(&to.id, keep).unwrap().unwrap().meta["cancelled"].is_null());
+        assert!(!cancel_queued(&st, &to.id, drop).unwrap(), "twice: nothing left to cancel");
+
+        // The run ended and took the queue (it clears `queued_messages` under the same lock): too late.
+        st.rt.lock().unwrap().queued_messages.remove(&to.id);
+        assert!(!cancel_queued(&st, &to.id, keep).unwrap());
+        assert!(st.db.get_message(&to.id, keep).unwrap().unwrap().meta["cancelled"].is_null());
     }
 
     #[tokio::test]
