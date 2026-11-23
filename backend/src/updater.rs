@@ -1,5 +1,9 @@
 //! Self-update: with auto-update on in Settings, poll the checkout's upstream branch and,
 //! once no agent is running, pull, rebuild and restart into the new binary.
+//!
+//! Loft restarts by exiting with `RESTART_CODE` on every system (Windows can't replace a running process with
+//! `exec`): whatever runs it starts it again. start.sh does (scripts/run-backend.sh), and so does the background
+//! service (launchd's KeepAlive on the Mac).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -12,8 +16,8 @@ use crate::state::{AppState, Event};
 
 const CHECK_EVERY: Duration = Duration::from_secs(60);
 const IDLE_POLL: Duration = Duration::from_secs(5);
-const RESTART_BACKOFF: Duration = Duration::from_secs(30);
-const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(600);
+/// The exit code asking whatever runs Loft to start it again. Keep in step with scripts/run-backend.sh.
+pub const RESTART_CODE: i32 = 75;
 /// How soon turning auto-update on in Settings takes effect.
 const OFF_POLL: Duration = Duration::from_secs(5);
 
@@ -56,14 +60,9 @@ pub fn newer_build_on_disk(started: SystemTime) -> bool {
 }
 
 /// True while an update is queued, being installed or about to be restarted into; the scheduler holds
-/// autonomous wake-ups then. Not after a failed exec: that would hold them for as long as the retries fail.
+/// autonomous wake-ups then.
 pub fn pending(state: &AppState) -> bool {
-    let s = state.update.lock().unwrap();
-    match s.phase {
-        Phase::Waiting | Phase::Updating => true,
-        Phase::Restart => !s.why.as_deref().is_some_and(|w| w.starts_with("restart failed")),
-        _ => false,
-    }
+    matches!(state.update.lock().unwrap().phase, Phase::Waiting | Phase::Updating | Phase::Restart)
 }
 
 fn set(state: &AppState, f: impl FnOnce(&mut UpdateStatus)) {
@@ -223,9 +222,6 @@ pub async fn updater(state: AppState, root: PathBuf) {
     let built = if BUILT_FROM.is_empty() { run(&root, "git", &["rev-parse", "HEAD"]).await.map_err(|e| e.to_string()) } else { Ok(BUILT_FROM.to_string()) };
     // A commit whose build failed, and why; skipped until upstream moves on.
     let mut failed: Option<(String, String)> = None;
-    // After a failed exec: when to try again, and how long to wait after the next failure.
-    let mut retry_at: Option<std::time::Instant> = None;
-    let mut backoff = RESTART_BACKOFF;
     loop {
         if !state.settings.get().auto_update {
             set(&state, |s| *s = UpdateStatus::default());
@@ -245,14 +241,11 @@ pub async fn updater(state: AppState, root: PathBuf) {
         };
         if newer_build_on_disk(started) {
             let n = running_agents(&state);
-            set(&state, |s| *s = restart_status(&head, n, s.why.take()));
-            // Restart by itself once agents are idle, as an update does; `restart` only returns when exec failed.
-            let now = std::time::Instant::now();
-            if should_restart(n, now, retry_at) {
+            set(&state, |s| *s = restart_status(&head, n));
+            // Restart by itself once agents are idle, as an update does.
+            if n == 0 {
                 before_restart(&state).await;
-                restart(&state);
-                retry_at = Some(std::time::Instant::now() + backoff);
-                backoff = next_backoff(backoff);
+                restart();
             }
             tokio::time::sleep(IDLE_POLL).await;
             continue;
@@ -266,7 +259,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
             match install(&root).await {
                 Ok(()) => {
                     before_restart(&state).await;
-                    restart(&state);
+                    restart();
                 }
                 Err(e) => {
                     tracing::error!("update failed: {e:#}");
@@ -301,43 +294,19 @@ fn checked(state: &AppState, head: &str, result: Result<Option<String>, String>,
     None
 }
 
-fn next_backoff(b: Duration) -> Duration {
-    (b * 2).min(RESTART_BACKOFF_MAX)
-}
-
-/// Restart now: no agent runs, and a failed exec's backoff is over.
-fn should_restart(running_agents: usize, now: std::time::Instant, retry_at: Option<std::time::Instant>) -> bool {
-    running_agents == 0 && retry_at.is_none_or(|t| now >= t)
-}
-
-/// The status while a newer build waits on disk. A failed exec's reason stays until a restart works. The loop
-/// doesn't check upstream in this phase (the commit it would compare is the old one, so it would rebuild what's
-/// already on disk): it restarts when idle, and the new process checks.
-fn restart_status(head: &str, running_agents: usize, prev_why: Option<String>) -> UpdateStatus {
-    let why = prev_why.filter(|w| w.starts_with("restart failed")).or_else(|| {
-        (running_agents > 0).then(|| format!("{running_agents} agent{} running; restarts when they finish", if running_agents == 1 { " is" } else { "s are" }))
-    });
+/// The status while a newer build waits on disk. The loop doesn't check upstream in this phase (the commit it
+/// would compare is the old one, so it would rebuild what's already on disk): it restarts when idle, and the new
+/// process checks.
+fn restart_status(head: &str, running_agents: usize) -> UpdateStatus {
+    let why = (running_agents > 0).then(|| format!("{running_agents} agent{} running; restarts when they finish", if running_agents == 1 { " is" } else { "s are" }));
     UpdateStatus { phase: Phase::Restart, current: short(head), running_agents, why, ..Default::default() }
 }
 
-/// Replace this process with the build on disk (same args and env): after an update, the new build, which
-/// signs its own copy again. If exec fails, the old build keeps running and the status says why.
-pub fn restart(state: &AppState) {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(err) => return restart_failed(state, err),
-    };
-    let err = crate::sys::exec(std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)));
-    restart_failed(state, err)
-}
-
-fn restart_failed(state: &AppState, err: std::io::Error) {
-    tracing::error!("restart: exec failed: {err}");
-    // Stay up on the running build and say why it didn't switch.
-    set(state, |s| {
-        s.phase = Phase::Restart;
-        s.why = Some(format!("restart failed: {err}"));
-    });
+/// Exit with `RESTART_CODE`, so whatever runs Loft starts the build on disk in its place: after an update, the new
+/// build, which signs its own copy again (a stale signed copy runs the build first, see signing.rs).
+pub fn restart() -> ! {
+    tracing::info!("restarting: exiting with code {RESTART_CODE}");
+    std::process::exit(RESTART_CODE)
 }
 
 #[cfg(test)]
@@ -353,7 +322,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn wake_ups_are_held_until_the_restart_unless_it_failed() {
+    async fn wake_ups_are_held_until_the_restart() {
         let st = crate::tasks::tests::state();
         let phase = |p: super::Phase, why: Option<&str>| {
             *st.update.lock().unwrap() = super::UpdateStatus { phase: p, why: why.map(Into::into), ..Default::default() };
@@ -361,38 +330,62 @@ mod tests {
         };
         assert!(phase(super::Phase::Restart, None));
         assert!(phase(super::Phase::Restart, Some("1 agent is running; restarts when they finish")));
-        assert!(!phase(super::Phase::Restart, Some("restart failed: boom")));
         assert!(!phase(super::Phase::UpToDate, None));
     }
 
     #[test]
-    fn a_restart_waits_for_idle_and_for_its_backoff() {
-        use std::time::Instant;
-        let now = Instant::now();
-        assert!(!super::should_restart(1, now, None));
-        assert!(super::should_restart(0, now, None));
-        assert!(!super::should_restart(0, now, Some(now + Duration::from_secs(5))));
-        assert!(super::should_restart(0, now, Some(now)));
-        assert!(!super::should_restart(2, now, Some(now)));
+    fn the_restart_status_says_what_it_waits_for() {
+        assert_eq!(super::restart_status("abcdef012", 0).why, None);
+        assert_eq!(super::restart_status("abcdef012", 1).why.unwrap(), "1 agent is running; restarts when they finish");
+        assert!(super::restart_status("abcdef012", 2).why.unwrap().starts_with("2 agents are"));
     }
 
+    /// Runs `restart` in a copy of this test binary, since it ends the process.
     #[test]
-    fn the_restart_backoff_doubles_up_to_its_cap() {
-        let mut b = super::RESTART_BACKOFF;
-        let mut seen = vec![b.as_secs()];
-        for _ in 0..6 {
-            b = super::next_backoff(b);
-            seen.push(b.as_secs());
+    fn a_restart_exits_with_the_restart_code() {
+        if std::env::var_os("LOFT_TEST_RESTART").is_some() {
+            super::restart();
         }
-        assert_eq!(seen, [30, 60, 120, 240, 480, 600, 600]);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "updater::tests::a_restart_exits_with_the_restart_code", "--test-threads=1"])
+            .env("LOFT_TEST_RESTART", "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(super::RESTART_CODE));
     }
 
+    /// start.sh's loop with a fake cargo that exits with the given codes in turn: how many times it ran, the args it
+    /// got, and the script's own exit code.
+    #[cfg(unix)]
+    fn run_backend(codes: &[i32]) -> (usize, String, Option<i32>) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("loft-run-backend-{}-{}", std::process::id(), codes.len()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let codes = codes.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+        let cargo = dir.join("cargo");
+        std::fs::write(
+            &cargo,
+            format!("#!/bin/sh\necho \"$*\" >> '{d}/runs'\nn=$(wc -l < '{d}/runs')\nset -- {codes}\nshift $((n - 1))\nexit \"$1\"\n", d = dir.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/run-backend.sh");
+        let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+        let status = std::process::Command::new("bash").arg(script).arg("--release").env("PATH", path).stderr(std::process::Stdio::null()).status().unwrap();
+        let runs = std::fs::read_to_string(dir.join("runs")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        (runs.lines().count(), runs.lines().next().unwrap_or_default().to_string(), status.code())
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn a_failed_restart_keeps_its_reason_across_loop_ticks() {
-        let failed = Some("restart failed: boom".to_string());
-        assert_eq!(super::restart_status("abcdef012", 2, failed.clone()).why, failed);
-        assert_eq!(super::restart_status("abcdef012", 0, None).why, None);
-        assert!(super::restart_status("abcdef012", 1, Some("1 agent is running".into())).why.unwrap().starts_with("1 agent is"));
+    fn start_sh_runs_loft_again_after_a_restart_and_ends_on_any_other_exit() {
+        let code = super::RESTART_CODE;
+        assert_eq!(run_backend(&[code, code, 0]), (3, "run --release".into(), Some(0)));
+        assert_eq!(run_backend(&[1]), (1, "run --release".into(), Some(1)), "an error ends it instead of restarting");
+        assert_eq!(run_backend(&[code, 101, 0, 0]), (2, "run --release".into(), Some(101)));
     }
 
     #[test]

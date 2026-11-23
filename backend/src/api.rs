@@ -162,11 +162,10 @@ pub async fn restart(State(state): State<AppState>) -> ApiResult<Value> {
         ));
     }
     tracing::info!("restarting on request");
-    let st = state.clone();
     // Let this response go out first.
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        crate::updater::restart(&st);
+        crate::updater::restart();
     });
     Ok(Json(json!({ "ok": true })))
 }

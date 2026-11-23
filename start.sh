@@ -10,4 +10,5 @@ done
 
 . scripts/frontend-pm.sh
 (cd frontend && ([ -d node_modules ] || fe_install) && fe run build)
-cd backend && exec cargo run --release
+# Started again after an update or a restart; any other exit ends start.sh.
+exec bash scripts/run-backend.sh --release
