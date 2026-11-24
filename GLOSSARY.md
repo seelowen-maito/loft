@@ -20,6 +20,10 @@ _Avoid_: Squad, crew
 One folder under the user's projects directory that is, or will become, one git repo: its `origin` is the project's repo, and Loft can create the repo for a project that has none. A folder holding several repos is allowed on an agent, but issues and Deliveries need one repo, so Loft only hints at it.
 _Avoid_: Workspace (that is the agent's private folder), group
 
+**Project settings**:
+The settings one project keeps in Loft, on its own page opened from the repo panel: CI mode, per-ticket reviewers, rounds of changes, base branch, the team's default model and effort, GitHub publishing, merge method, CI grace and sccache. Each starts at Loft's default; the user changes it by hand, or the project's Lead does after the user says yes, and the page shows who changed it and when.
+_Avoid_: Repo config, project preferences
+
 **Lead**:
 The agent with the Lead role: it plans with the user (grill, spec, tickets) and answers questions. A team has at most one.
 _Avoid_: Orchestrator, manager, planner
@@ -43,6 +47,14 @@ _Avoid_: Blocked (a ticket's blockers are set when it's published), parked
 **Waiting for CI** (ticket):
 A ticket in review whose reviewers have all passed, so only its CI on GitHub is left. Loft follows the CI itself and closes the ticket when it is green, or sends the Dev a fix round when it fails. No agent works on it meanwhile: the Delivery shows it as waiting for CI, not as running or stalled.
 _Avoid_: Waiting (that is a Dev's `wait_ticket`), pending, CI running
+
+**CI mode**:
+A project setting for when a Delivery waits for CI: `per ticket` (each ticket closes only with its CI green, the default) or `at the end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready). It changes only what Loft waits for, never which workflows GitHub runs.
+_Avoid_: CI policy, CI level, light CI
+
+**Billing block**:
+GitHub refused to start a Delivery's CI jobs because the account's payments failed or its Actions spending limit was reached. Loft stalls the Delivery with a Needs you item linking the billing page, never sends the Dev a fix round for it, and reruns the failed jobs when the user resumes.
+_Avoid_: CI failure, quota error
 
 **Paused**:
 A Delivery the user paused: Loft stopped the run in flight and sends no more wakes until the user resumes it. Unlike a stalled one, it sends no push and adds nothing to Needs you.
