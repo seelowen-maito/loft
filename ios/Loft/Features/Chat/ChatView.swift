@@ -894,7 +894,9 @@ private struct MessageBubble: View {
     @ViewBuilder private var queueStatus: some View {
         switch mark {
         case .queued?:
+            // In the wrapped footer the mark wraps rather than truncate at large text sizes.
             Label(QueueMark.queuedText, systemImage: "hourglass").foregroundStyle(Theme.attentionInk)
+                .fixedSize(horizontal: false, vertical: true)
             Button(action: cancelQueued) {
                 Label("Cancel", systemImage: "xmark").labelStyle(.titleAndIcon)
             }
@@ -906,6 +908,7 @@ private struct MessageBubble: View {
             .accessibilityIdentifier("cancelQueued")
         case .cancelled?:
             Text(QueueMark.cancelledText).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Button { copyToBox(message) } label: {
                 Label("Copy to box", systemImage: "doc.on.doc").labelStyle(.titleAndIcon)
             }
