@@ -8066,4 +8066,140 @@ pub(crate) mod tests {
         tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "ok" })).await.unwrap();
         assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready");
     }
+
+    // ---- Rounds of changes and CI grace (#464) ----
+
+    #[tokio::test]
+    async fn rounds_of_changes_and_ci_grace_take_a_whole_number_in_their_range() {
+        use crate::project_settings::{get, put};
+        let st = state();
+        planner_on(&st, "pnum", None);
+        let read = || get(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({ "project": "pnum" })).unwrap()));
+        let change = |key: &str, value: Value| put(State(st.clone()), Json(serde_json::from_value(json!({ "project": "pnum", "key": key, "value": value })).unwrap()));
+        let one = |v: &Value, key: &str| v["settings"].as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().clone();
+
+        // Loft's defaults: today's 3 rounds and 10 minutes.
+        let Json(v) = read().await.unwrap();
+        let (r, g) = (one(&v, "max_rounds"), one(&v, "ci_grace_minutes"));
+        assert_eq!((&r["kind"], &r["value"], &r["default"], &r["min"], &r["max"], &r["unit"]), (&json!("number"), &json!(3), &json!(3), &json!(1), &json!(5), &json!("rounds")));
+        assert_eq!((&g["kind"], &g["value"], &g["default"], &g["min"], &g["max"], &g["unit"]), (&json!("number"), &json!(10), &json!(10), &json!(1), &json!(120), &json!("minutes")));
+        assert_eq!((crate::project_settings::max_rounds(&st, "pnum"), crate::project_settings::ci_grace_minutes(&st, "pnum")), (3, 10));
+
+        // The user changes them, as a number or as text.
+        let Json(v) = change("max_rounds", json!(5)).await.unwrap();
+        assert_eq!((&one(&v, "max_rounds")["value"], &one(&v, "max_rounds")["changed"]["agent"]), (&json!(5), &Value::Null));
+        let Json(v) = change("ci_grace_minutes", json!("25")).await.unwrap();
+        assert_eq!(one(&v, "ci_grace_minutes")["value"], 25);
+        assert_eq!((crate::project_settings::max_rounds(&st, "pnum"), crate::project_settings::ci_grace_minutes(&st, "pnum")), (5, 25));
+
+        // Out of range or not a whole number: refused, and nothing saved.
+        for bad in [json!(0), json!(6), json!(2.5), json!("three"), json!(["3"])] {
+            let err = change("max_rounds", bad.clone()).await.unwrap_err();
+            assert_eq!((err.0, err.1.as_str()), (axum::http::StatusCode::BAD_REQUEST, "Rounds of changes takes a whole number of rounds from 1 to 5."), "{bad}");
+        }
+        assert_eq!(change("ci_grace_minutes", json!(121)).await.unwrap_err().1, "CI grace takes a whole number of minutes from 1 to 120.");
+        assert_eq!((crate::project_settings::max_rounds(&st, "pnum"), crate::project_settings::ci_grace_minutes(&st, "pnum")), (5, 25));
+
+        // The Lead changes them with the tool, which lists them with their range.
+        let lead = busy(&st, "Lead", "pnum", "lead");
+        let out = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "max_rounds", "value": 2 })).await.unwrap();
+        assert!(out.contains("- Rounds of changes (`max_rounds`): `2`. Loft's default: `3`. Choices: a whole number of rounds from 1 to 5. Changed by Lead at "), "{out}");
+        assert!(out.contains("- CI grace (`ci_grace_minutes`): `25`. Loft's default: `10`. Choices: a whole number of minutes from 1 to 120. Changed by the user at "), "{out}");
+        assert_eq!(settings_tool(&st, &lead, "set_project_setting", json!({ "key": "ci_grace_minutes", "value": "0" })).await.unwrap_err(), "CI grace takes a whole number of minutes from 1 to 120.");
+        assert_eq!(crate::project_settings::max_rounds(&st, "pnum"), 2);
+        assert_eq!(crate::project_settings::max_rounds(&st, "other"), 3, "another project keeps Loft's default");
+    }
+
+    #[tokio::test]
+    async fn a_projects_rounds_of_changes_count_from_its_next_round() {
+        let (fake, st) = (fake_github(), state());
+        let (name, slug) = ("rv-limit", "octo/rv-limit");
+        let (dev, team) = building(&st, &fake, name, &["qa"]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        crate::project_settings::set(&st, name, "max_rounds", &json!(2), None).unwrap();
+        let changes = |round: u32| json!({ "number": 41, "verdict": "changes", "notes": format!("Round {round}: off by one.") });
+
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let out = tool(&st, &team[0], "review_ticket", changes(1)).await.unwrap();
+        assert!(out.ends_with("The Dev is fixing #41 (round 1 of 2)."), "{out}");
+        assert!(woken(&st, &dev).last().unwrap().contains("asked for changes on ticket #41 \"Store\" (round 1 of 2)"), "{:?}", woken(&st, &dev));
+
+        // Raised to 3 while the Dev fixes it: the next round counts against 3.
+        crate::project_settings::set(&st, name, "max_rounds", &json!(3), None).unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let out = tool(&st, &team[0], "review_ticket", changes(2)).await.unwrap();
+        assert!(out.ends_with("The Dev is fixing #41 (round 2 of 3)."), "{out}");
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let before = woken(&st, &dev).len();
+        let out = tool(&st, &team[0], "review_ticket", changes(3)).await.unwrap();
+        assert!(out.contains("That's round 3 of changes on #41, so it waits for the user now."), "{out}");
+        assert_eq!((standing(&st, slug, 41).0.as_str(), woken(&st, &dev).len()), ("needs_human", before));
+
+        // One round: the first changes wait for the user.
+        let (fake, st) = (fake_github(), state());
+        let (name, slug) = ("rv-one", "octo/rv-one");
+        let (dev, team) = building(&st, &fake, name, &["qa"]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        crate::project_settings::set(&st, name, "max_rounds", &json!(1), None).unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let before = woken(&st, &dev).len();
+        let out = tool(&st, &team[0], "review_ticket", changes(1)).await.unwrap();
+        assert!(out.contains("That's round 1 of changes on #41, so it waits for the user now."), "{out}");
+        assert_eq!((standing(&st, slug, 41).0.as_str(), woken(&st, &dev).len()), ("needs_human", before));
+    }
+
+    #[tokio::test]
+    async fn the_final_reviews_rounds_of_changes_are_the_projects_too() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("cr-limit", "octo/cr-limit");
+        let (dev, team) = building_both(&st, &fake, name, &["code_reviewer"]).await;
+        let cr = &team[0];
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        fake.route("POST", &format!("/repos/{slug}/issues/500/labels"), 200, json!([]));
+        crate::project_settings::set(&st, name, "max_rounds", &json!(5), None).unwrap();
+
+        for round in 1..=4 {
+            let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": format!("Round {round}: a race.") })).await.unwrap();
+            assert!(out.contains(&format!("The Dev is fixing them (round {round} of 5)")), "{out}");
+            tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        }
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "changes", "notes": "Round 5." })).await.unwrap();
+        assert!(out.contains("That's round 5 of changes on the spec PR, so it waits for the user now."), "{out}");
+        assert_eq!(delivery(&st, slug).state, "needs_human");
+    }
+
+    #[tokio::test]
+    async fn a_commit_with_no_check_waits_for_the_projects_ci_grace() {
+        let ago = |m: i64| (chrono::Utc::now() - chrono::Duration::minutes(m)).to_rfc3339();
+        let (fake, st) = (fake_github(), state());
+        let (name, slug) = ("ci-grace", "octo/ci-grace");
+        let (dev, team) = building(&st, &fake, name, &["qa"]).await;
+        fake.route("GET", &format!("/repos/{slug}/actions/workflows"), 200, json!({ "total_count": 1, "workflows": [{ "name": "CI", "state": "active" }] }));
+        crate::project_settings::set(&st, name, "ci_grace_minutes", &json!(30), None).unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.ends_with("#41 waits for its CI: Loft closes it when the CI is green."), "{out}");
+        // Past today's 10 minutes, still within the project's 30.
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(41).unwrap().submitted_at = ago(11));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41).0, "review");
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(41).unwrap().submitted_at = ago(31));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+
+        // A grace shorter than today's: 2 minutes without a check is "no CI ran".
+        let (fake, st) = (fake_github(), state());
+        let (name, slug) = ("ci-grace-short", "octo/ci-grace-short");
+        let (dev, team) = building(&st, &fake, name, &["qa"]).await;
+        fake.route("GET", &format!("/repos/{slug}/actions/workflows"), 200, json!({ "total_count": 1, "workflows": [{ "name": "CI", "state": "active" }] }));
+        crate::project_settings::set(&st, name, "ci_grace_minutes", &json!(1), None).unwrap();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(standing(&st, slug, 41).0, "review", "just submitted: within the grace");
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(41).unwrap().submitted_at = ago(2));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+    }
 }

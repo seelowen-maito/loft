@@ -1257,6 +1257,7 @@ async fn advance(state: &AppState, repo: &str, spec: i64) -> String {
 /// Hands the Dev the fix waiting for ticket #n: the ticket is being built again by the Dev that built it,
 /// with the changes brief queued when it went back. A line for the reply.
 fn fix(state: &AppState, d: &Delivery, n: i64) -> String {
+    let limit = max_rounds(state, &d);
     let mut brief = String::new();
     let Some(d) = update(state, &d.repo, d.spec, |d| {
         let Some(dev) = d.ticket(n).map(|t| builder_id(d, t).to_string()) else { return };
@@ -1271,7 +1272,7 @@ fn fix(state: &AppState, d: &Delivery, n: i64) -> String {
     let Some(t) = d.ticket(n) else { return String::new() };
     let step = Step::Build { ticket: n, round: t.rounds };
     crate::agents::wake_on_ticket(state, builder_id(&d, t), &ticket_key(&d, Some(n)), true, brief, wake_for(&d, step));
-    format!("\nNext: the Dev fixes {} (round {} of {MAX_ROUNDS}).", tag(&d, t), t.rounds)
+    format!("\nNext: the Dev fixes {} (round {} of {limit}).", tag(&d, t), t.rounds)
 }
 
 /// Changes round `rounds` on ticket `t` is the last: the ticket waits for the user, with `notes` (what a
@@ -1294,6 +1295,7 @@ async fn to_user(state: &AppState, d: &Delivery, t: &DeliveryTicket, rounds: u32
 /// round `rounds`: at once when that Dev isn't building another ticket, otherwise once it submits that one,
 /// before any new ticket. The line for the reply.
 async fn send_back(state: &AppState, d: &Delivery, n: i64, rounds: u32, notes: &str, brief: String) -> Result<String, String> {
+    let limit = max_rounds(state, &d);
     let d = update(state, &d.repo, d.spec, |d| {
         if let Some(t) = d.ticket_mut(n) {
             (t.rounds, t.notes) = (rounds, notes.into());
@@ -1307,10 +1309,10 @@ async fn send_back(state: &AppState, d: &Delivery, n: i64, rounds: u32, notes: &
     let name = d.ticket(n).map(|t| tag(&d, t)).unwrap_or_default();
     let dev = d.ticket(n).map(|t| builder_id(&d, t)).unwrap_or_default();
     if let Some(other) = d.tickets.iter().find(|t| t.state == "started" && builder_id(&d, t) == dev) {
-        return Ok(format!(" The Dev is building {} now: it fixes {name} (round {rounds} of {MAX_ROUNDS}) once it submits that one, before any new ticket.", tag(&d, other)));
+        return Ok(format!(" The Dev is building {} now: it fixes {name} (round {rounds} of {limit}) once it submits that one, before any new ticket.", tag(&d, other)));
     }
     advance(state, &d.repo, d.spec).await;
-    Ok(format!(" The Dev is fixing {name} (round {rounds} of {MAX_ROUNDS})."))
+    Ok(format!(" The Dev is fixing {name} (round {rounds} of {limit})."))
 }
 
 /// The agent with `role` that works in the Delivery's project (its main project or one of its projects), if any.
@@ -1813,11 +1815,14 @@ pub async fn agent_wrote(state: &AppState, from: &crate::db::Agent, to: &crate::
     woken
 }
 
-/// Changes rounds after which a ticket waits for the user instead of going back to the Dev.
-const MAX_ROUNDS: u32 = 3;
+/// Changes rounds after which a ticket (or the final review) waits for the user instead of going back to the Dev:
+/// the project's, read anew at each round so a change counts from the next one.
+fn max_rounds(state: &AppState, d: &Delivery) -> u32 {
+    crate::project_settings::max_rounds(state, &d.project)
+}
 
 /// `review_ticket`: a reviewer's verdict, posted on the spec PR. Changes go back to the Dev (or, on the
-/// third round, to the user); the last pass closes the ticket.
+/// project's last round, to the user); the last pass closes the ticket.
 async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result<String, String> {
     let verdict = args["verdict"].as_str().filter(|v| ["pass", "changes"].contains(v)).ok_or("verdict must be \"pass\" or \"changes\"")?;
     let notes = args["notes"].as_str().map(str::trim).unwrap_or("");
@@ -1915,8 +1920,8 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
 
     // Changes end the review step for every reviewer: the ticket goes back to the Dev (or the user).
     let d = unstalled(state, d, n);
-    let rounds = t.rounds + 1;
-    if rounds >= MAX_ROUNDS {
+    let (rounds, limit) = (t.rounds + 1, max_rounds(state, &d));
+    if rounds >= limit {
         let why = to_user(state, &d, &t, rounds, notes, notes).await?;
         return Ok(format!("Posted your changes on {on}.{labelled} That's round {rounds} of changes on {name}, so it waits for the user now{why}."));
     }
@@ -1929,9 +1934,10 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
 /// or the CI) with `notes`. It names the ticket and the commits it judged, so it stands on its own after a
 /// cleared context.
 fn changes_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, rounds: u32, who: &str, notes: &str) -> String {
+    let limit = max_rounds(state, &d);
     let commits = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
     format!(
-        "[Loft Delivery: {about}] This is not a message from the user. {who} asked for changes on ticket {ticket} (round {rounds} of {MAX_ROUNDS}), submitted as {commits}:\n\n{notes}\n\n\
+        "[Loft Delivery: {about}] This is not a message from the user. {who} asked for changes on ticket {ticket} (round {rounds} of {limit}), submitted as {commits}:\n\n{notes}\n\n\
          Fix it on the {bname} `{branch}` with new commits, each ending with `{refs}`. {push} Then call `mcp__loft__submit_ticket` again with {arg} and all the ticket's commits, oldest first.\n{own}",
         own = own_rules("build and check the work"),
         push = one_push(state, d, Some(t)),
@@ -2103,9 +2109,12 @@ async fn unlabel_changes(state: &AppState, d: &Delivery, n: i64) {
 /// How often Loft reads the CI of the tickets waiting for it.
 const CI_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// How long a commit with no check at all waits for one when the repo has workflows: a workflow's checks
-/// show up seconds after a push, so none after this means none runs on the branch.
-const CI_GRACE_MINUTES: i64 = 10;
+/// How long, in minutes, a commit with no check at all waits for one when the repo has workflows: a workflow's
+/// checks show up seconds after a push, so none after this means none runs on the branch. The project's CI grace,
+/// 10 minutes unless it says otherwise; a submitted commit that never reaches the branch waits as long.
+fn ci_grace(state: &AppState, d: &Delivery) -> i64 {
+    crate::project_settings::ci_grace_minutes(state, &d.project)
+}
 
 /// The last lines of a failed job's log a changes round carries; the whole log is at the check's link.
 const LOG_LINES: usize = 300;
@@ -2113,9 +2122,9 @@ const LOG_LINES: usize = 300;
 /// How often Loft reads the Actions minutes of a Delivery's branch.
 const ACTIONS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Whether `since` (RFC 3339, or nothing) is more than `CI_GRACE_MINUTES` ago.
-fn past_grace(since: &str) -> bool {
-    chrono::DateTime::parse_from_rfc3339(since).map_or(true, |t| chrono::Utc::now().signed_duration_since(t) > chrono::Duration::minutes(CI_GRACE_MINUTES))
+/// Whether `since` (RFC 3339, or nothing) is more than `grace` minutes ago.
+fn past_grace(since: &str, grace: i64) -> bool {
+    chrono::DateTime::parse_from_rfc3339(since).map_or(true, |t| chrono::Utc::now().signed_duration_since(t) > chrono::Duration::minutes(grace))
 }
 
 /// Whether ticket `t` is submitted and waits for its CI.
@@ -2174,7 +2183,8 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     let head = branch_head(state, d).await?;
     // The CI first: which tickets the commit includes only matters once it's done.
     let since = waiting.iter().map(|t| t.submitted_at.as_str()).max().unwrap_or_default();
-    let ci = ci_of(state, &d.repo, &head, since).await.map_err(err)?;
+    let grace = ci_grace(state, d);
+    let ci = ci_of(state, &d.repo, &head, since, grace).await.map_err(err)?;
     if matches!(ci, Ci::Running) {
         return Ok(String::new());
     }
@@ -2188,7 +2198,7 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     }
     let ready: Vec<&DeliveryTicket> = included.iter().copied().filter(|t| waits_for_ci(t)).collect();
     // Submitted a while ago and still not on the branch (rebased away, say): its CI will never show up.
-    let lost: Vec<&DeliveryTicket> = d.tickets.iter().filter(|t| waits_for_ci(t) && !ready.iter().any(|r| r.number == t.number) && past_grace(&t.submitted_at)).collect();
+    let lost: Vec<&DeliveryTicket> = d.tickets.iter().filter(|t| waits_for_ci(t) && !ready.iter().any(|r| r.number == t.number) && past_grace(&t.submitted_at, grace)).collect();
     if !lost.is_empty() {
         let names = list_of(&lost.iter().map(|t| format!("{} (`{}`)", tag(d, t), t.commits.last().map_or("", |c| short(c)))).collect::<Vec<_>>());
         stall(state, d, "ci_missing", lost.iter().map(|t| t.number).collect(), None, None);
@@ -2249,8 +2259,8 @@ async fn includes(state: &AppState, repo: &str, head: &str, sha: &str) -> anyhow
 }
 
 /// The checks on commit `sha` of `repo`: its check runs and commit statuses. With none at all, a repo
-/// with active workflows waits for them until `CI_GRACE_MINUTES` after `since`, the ticket's submit.
-async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str) -> anyhow::Result<Ci> {
+/// with active workflows waits for them until `grace` minutes after `since`, the ticket's submit.
+async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str, grace: i64) -> anyhow::Result<Ci> {
     use crate::prs::Check;
     let (runs, statuses) = crate::prs::commit_checks(state, repo, sha).await;
     let (runs, statuses) = (runs?, statuses?);
@@ -2261,7 +2271,7 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str) -> anyhow::
             Err(e) => return Err(e),
         };
         let active = workflows["workflows"].as_array().is_some_and(|w| w.iter().any(|w| w["state"] == "active"));
-        return Ok(if active && !past_grace(since) { Ci::Running } else { Ci::Absent });
+        return Ok(if active && !past_grace(since, grace) { Ci::Running } else { Ci::Absent });
     }
     if runs.iter().any(|c| Check::of_run(c) == Check::Pending) || statuses.iter().any(|s| Check::of_status(s) == Check::Pending) {
         return Ok(Ci::Running);
@@ -2347,8 +2357,9 @@ async fn ci_passed(state: &AppState, repo: &str, spec: i64, n: i64, why: &str) -
 }
 
 /// The CI failed on commit `head`, which includes ticket `t`: a changes round for `t`, with the failure's
-/// log for the Dev, counted against `MAX_ROUNDS` like a reviewer's. The lines for the reply.
+/// log for the Dev, counted against `max_rounds` like a reviewer's. The lines for the reply.
 async fn ci_failed(state: &AppState, d: &Delivery, t: &DeliveryTicket, head: &str, names: &[String], log: &str) -> Result<String, String> {
+    let limit = max_rounds(state, &d);
     let (n, name) = (t.number, tag(d, t));
     let checks = names.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ");
     let mut posted = String::new();
@@ -2361,7 +2372,7 @@ async fn ci_failed(state: &AppState, d: &Delivery, t: &DeliveryTicket, head: &st
     }
     let rounds = t.rounds + 1;
     let notes = format!("The CI failed on `{}`, the newest commit of the {} `{}`, which includes the ticket. Failed: {checks}.\n\n{log}", short(head), branch_name(d), d.branch);
-    if rounds >= MAX_ROUNDS {
+    if rounds >= limit {
         let why = to_user(state, d, t, rounds, &notes, &format!("the CI failed: {checks}")).await?;
         return Ok(format!("\nThe CI failed on {name} ({checks}).{posted} That's round {rounds} of changes, so it waits for the user now{why}."));
     }
@@ -2397,7 +2408,7 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
     // A fix not on the PR yet: its checks are still the red commit's. Like a ticket's (`follow_ci`), it waits for the
     // push, and past the grace it stalls the final fixes.
     if !d.final_ci_fix.is_empty() && !includes(state, repo, &head, &d.final_ci_fix).await.map_err(|e| e.to_string())? {
-        if !past_grace(&d.final_ci_since) {
+        if !past_grace(&d.final_ci_since, ci_grace(state, d)) {
             return Ok(String::new());
         }
         let fix = short(&d.final_ci_fix).to_string();
@@ -2410,7 +2421,7 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
         return Ok(format!("\nThe ready {} doesn't have the CI fix `{fix}`, so Loft can't follow its CI: the Delivery stalled.", final_tag(d)));
     }
     // Exhaustive like `follow_ci`'s: what stalls a ticket's CI stalls the ready PR's too.
-    match ci_of(state, repo, &head, &d.final_ci_since).await.map_err(|e| e.to_string())? {
+    match ci_of(state, repo, &head, &d.final_ci_since, ci_grace(state, d)).await.map_err(|e| e.to_string())? {
         Ci::Running => Ok(String::new()),
         ci @ (Ci::Green | Ci::Absent) => {
             let why = match ci {
@@ -2449,9 +2460,10 @@ pub(crate) async fn follow_ready_ci_or(state: &AppState, d: &Delivery) -> String
 }
 
 /// The CI of `d`'s ready PR failed on commit `head`: a final round for the Dev with the failure's log, counted
-/// against `MAX_ROUNDS` like the final Code Review's, and the last one waits for the user. The PR stays ready,
+/// against `max_rounds` like the final Code Review's, and the last one waits for the user. The PR stays ready,
 /// and Loft follows its CI again once the Dev submits the fix. The lines for the reply.
 async fn ready_ci_failed(state: &AppState, d: &Delivery, head: &str, names: &[String], log: &str) -> Result<String, String> {
+    let limit = max_rounds(state, &d);
     let (pr, what) = (d.pr.unwrap_or_default(), final_tag(d));
     let checks = names.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ");
     let body = format!("**CI** failed on `{}`, the newest commit of the ready {}: {checks}.", short(head), pr_name(d));
@@ -2461,7 +2473,7 @@ async fn ready_ci_failed(state: &AppState, d: &Delivery, head: &str, names: &[St
     };
     let dev = state.db.get_agent(&d.dev).ok().flatten().or_else(|| builder(state, d, &d.dev));
     let rounds = d.final_rounds + 1;
-    let stuck = rounds >= MAX_ROUNDS || dev.is_none();
+    let stuck = rounds >= limit || dev.is_none();
     let notes = format!("The CI failed on `{}`, the newest commit of the {} `{}`, after Loft marked the {} ready. Failed: {checks}.\n\n{log}", short(head), branch_name(d), d.branch, pr_name(d));
     let d = update(state, &d.repo, d.spec, |d| {
         d.final_rounds = rounds;
@@ -2475,11 +2487,11 @@ async fn ready_ci_failed(state: &AppState, d: &Delivery, head: &str, names: &[St
     .ok_or("The Delivery record couldn't be saved.")?;
     let Some(dev) = dev.filter(|_| !stuck) else {
         let why = needs_human(state, &d, None, rounds, &notes).await;
-        let because = if rounds >= MAX_ROUNDS { format!("That's round {rounds} of changes on it") } else { "Nobody can fix it: the team has no Dev and the agent that planned it is gone".to_string() };
+        let because = if rounds >= limit { format!("That's round {rounds} of changes on it") } else { "Nobody can fix it: the team has no Dev and the agent that planned it is gone".to_string() };
         return Ok(format!("\nThe CI failed on the ready {what} ({checks}).{posted} {because}, so it waits for the user now{why}."));
     };
     crate::agents::wake_on_ticket(state, &dev.id, &ticket_key(&d, None), true, fixes_brief(state, &d), wake_for(&d, Step::FinalFixes { round: rounds }));
-    Ok(format!("\nThe CI failed on the ready {what} ({checks}).{posted} {} is fixing it in a final round ({rounds} of {MAX_ROUNDS}), and Loft follows the CI again after.", dev.name))
+    Ok(format!("\nThe CI failed on the ready {what} ({checks}).{posted} {} is fixing it in a final round ({rounds} of {limit}), and Loft follows the CI again after.", dev.name))
 }
 
 /// Follows the CI of every running Delivery's tickets that wait for it, and of every ready PR, on a tick of its
@@ -2700,8 +2712,9 @@ async fn build_done(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> Vec<S
 /// The Dev brief for the final Code Review's fixes, for a Resume: the Code reviewer's notes are on the spec
 /// PR (or the spec's Loft issue), since Loft doesn't keep them.
 fn fixes_brief(state: &AppState, d: &Delivery) -> String {
+    let limit = max_rounds(state, &d);
     // None yet after a Resume on a final review that waited for the user: its rounds start over.
-    let rounds = if d.final_rounds > 0 { format!(" (round {} of {MAX_ROUNDS})", d.final_rounds) } else { String::new() };
+    let rounds = if d.final_rounds > 0 { format!(" (round {} of {limit})", d.final_rounds) } else { String::new() };
     if d.final_ci == "fixing" {
         let notes = if d.last_notes.trim().is_empty() { String::new() } else { format!("\n\n{}", d.last_notes.trim()) };
         return format!(
@@ -2780,6 +2793,7 @@ async fn unlabel_issue(state: &AppState, slug: &str, n: i64, name: &str) -> Resu
 /// The ticket's (with None the spec's, or the standalone ticket's) Loft issue goes back to in progress, if
 /// `needs_human` blocked it.
 fn unblock(state: &AppState, d: &Delivery, t: Option<&DeliveryTicket>) {
+    let limit = max_rounds(state, &d);
     let x = if d.local {
         state.db.get_task(t.map_or(d.spec_id.as_str(), |t| t.id.as_str())).ok().flatten()
     } else {
@@ -2788,7 +2802,7 @@ fn unblock(state: &AppState, d: &Delivery, t: Option<&DeliveryTicket>) {
     };
     if let Some(mut x) = x.filter(|x| x.status == "blocked") {
         x.error.clear();
-        crate::tasks::set_status(state, &mut x, "in_progress", "user", Some(&format!("Resumed by you: a fresh {MAX_ROUNDS} rounds of changes")));
+        crate::tasks::set_status(state, &mut x, "in_progress", "user", Some(&format!("Resumed by you: a fresh {limit} rounds of changes")));
     }
 }
 
@@ -2798,6 +2812,7 @@ fn unblock(state: &AppState, d: &Delivery, t: Option<&DeliveryTicket>) {
 /// back to its final fixes), and the Delivery carries on as usual. A ticket closed by hand meanwhile is
 /// marked closed, and the next one starts. The line saying what it did.
 async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, String> {
+    let limit = max_rounds(state, &d);
     let (d, closed) = reconcile(state, &d).await.map_err(|e| format!("Nothing was resumed: {e}."))?;
     let (repo, spec) = (d.repo.clone(), d.spec);
     // The ticket waiting for the user, or with None the final review.
@@ -2846,7 +2861,7 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
         (None, true) => format!("the spec's Loft issue {}", d.spec_id),
         _ => format!("the {} https://github.com/{repo}/pull/{}", pr_name(&d), d.pr.unwrap_or_default()),
     };
-    let stopped = format!("{what} waited for the user after {rounds} rounds of changes; they looked at it, so it gets a fresh {MAX_ROUNDS} rounds");
+    let stopped = format!("{what} waited for the user after {rounds} rounds of changes; they looked at it, so it gets a fresh {limit} rounds");
     let notes = if t.is_none() && d.final_ci == "fixing" {
         // The CI fixes brief carries the failure and its log.
         String::new()
@@ -2861,15 +2876,15 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
             let t = saved.ticket(t.number).expect("just saved");
             let brief = format!("{}{}{notes}", dev_brief(state, &saved, t), resume_section(&stopped, &done));
             crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&saved, Some(t.number)), brief, wake_for(&saved, Step::Build { ticket: t.number, round: 0 }));
-            format!(" {} is fixing {what} again, with a fresh {MAX_ROUNDS} rounds of changes.", dev.name)
+            format!(" {} is fixing {what} again, with a fresh {limit} rounds of changes.", dev.name)
         }
         None => {
             let brief = format!("{}{}{notes}", fixes_brief(state, &saved), resume_section(&stopped, &[]));
             crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&saved, None), brief, wake_for(&saved, Step::FinalFixes { round: 0 }));
             if saved.final_ci == "fixing" {
-                format!(" {} is fixing the CI of the ready PR, with a fresh {MAX_ROUNDS} rounds of changes; then Loft follows the CI again.", dev.name)
+                format!(" {} is fixing the CI of the ready PR, with a fresh {limit} rounds of changes; then Loft follows the CI again.", dev.name)
             } else {
-                format!(" {} is fixing what the final Code Review found, with a fresh {MAX_ROUNDS} rounds of changes; then the Code reviewer looks again.", dev.name)
+                format!(" {} is fixing what the final Code Review found, with a fresh {limit} rounds of changes; then the Code reviewer looks again.", dev.name)
             }
         }
     };
@@ -3796,7 +3811,7 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
 }
 
 /// `review_ticket` from the Code reviewer: its verdict on the whole spec PR. Any finding is changes, which go
-/// back to the Dev (or, on the third round, to the user); a pass marks the
+/// back to the Dev (or, on the project's last round, to the user); a pass marks the
 /// spec PR ready to merge.
 async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, verdict: &str, notes: &str) -> Result<String, String> {
     let (slug, n, d, _held) = final_of(state, me, args).await?;
@@ -3838,8 +3853,8 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
         return Ok(format!("Posted your pass on {on}.{ready}"));
     }
     let labelled = if d.local { String::new() } else { label_issue(state, &slug, pr, "changes-requested").await.err().map(|e| format!(" The comment is posted, but {e}.")).unwrap_or_default() };
-    let rounds = d.final_rounds + 1;
-    let stuck = rounds >= MAX_ROUNDS;
+    let (rounds, limit) = (d.final_rounds + 1, max_rounds(state, &d));
+    let stuck = rounds >= limit;
     update(state, &slug, d.spec, |d| {
         d.final_rounds = rounds;
         d.state = if stuck { "needs_human" } else { "final_fixes" }.into();
@@ -3852,7 +3867,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     }
     let brief = if d.local {
         format!(
-            "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the spec branch `{branch}` (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
+            "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the spec branch `{branch}` (round {rounds} of {limit}):\n\n{notes}\n\n\
              Fix them on that branch with new commits, each ending with `Refs {spec_id}`. {push} Then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.\n{own}",
         own = own_rules("build and check the work"),
         push = one_push(state, &d, None),
@@ -3863,7 +3878,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
         )
     } else {
         format!(
-            "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the {pname} https://github.com/{slug}/pull/{pr} (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
+            "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the {pname} https://github.com/{slug}/pull/{pr} (round {rounds} of {limit}):\n\n{notes}\n\n\
              Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`. {push} Then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.\n{own}",
         own = own_rules("build and check the work"),
         push = one_push(state, &d, None),
@@ -3876,7 +3891,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
         )
     };
     crate::agents::wake_on_ticket(state, &d.dev, &ticket_key(&d, None), true, brief, wake_for(&d, Step::FinalFixes { round: rounds }));
-    Ok(format!("Posted your changes on {on}.{labelled} The Dev is fixing them (round {rounds} of {MAX_ROUNDS}); the {what} {}.", if d.local { "isn't merged" } else { "stays a draft" }))
+    Ok(format!("Posted your changes on {on}.{labelled} The Dev is fixing them (round {rounds} of {limit}); the {what} {}.", if d.local { "isn't merged" } else { "stays a draft" }))
 }
 
 /// A plan kept in Loft whose last review passed: ready for the user's Merge, which Needs you and the

@@ -44,7 +44,7 @@ export default function ProjectSettingsPage() {
 /** One setting: its choices (the chosen one marked), what each does, Loft's default and who changed it last. */
 function SettingCard({ project, setting: s, onSaved }: { project: string; setting: ProjectSetting; onSaved: (v: ProjectSettingsView) => void }) {
   const save = useAction();
-  const choose = (value: string | string[]) => {
+  const choose = (value: string | string[] | number) => {
     if (value === s.value) return;
     save.run(async () => onSaved(await api.setProjectSetting(project, s.key, value)));
   };
@@ -53,6 +53,7 @@ function SettingCard({ project, setting: s, onSaved }: { project: string; settin
       const on = s.reviewers.filter((r) => s.value.includes(r.role)).map((r) => r.label);
       return on.length > 1 ? `${on.slice(0, -1).join(", ")} and ${on[on.length - 1]}` : (on[0] ?? "no one");
     }
+    if (s.kind === "number") return `${s.value} ${s.value === 1 ? s.unit.replace(/s$/, "") : s.unit}`;
     return s.kind === "branch" ? s.value || "the default branch" : (s.choices.find((c) => c.value === s.value)?.label ?? s.value);
   };
   return (
@@ -61,6 +62,8 @@ function SettingCard({ project, setting: s, onSaved }: { project: string; settin
         <Reviewers project={project} rows={s.reviewers} value={s.value} busy={save.busy} onChoose={choose} />
       ) : s.kind === "branch" ? (
         <BranchPicker project={project} setting={s} busy={save.busy} onChoose={choose} />
+      ) : s.kind === "number" ? (
+        <NumberPicker setting={s} busy={save.busy} onChoose={choose} />
       ) : (
         <div role="radiogroup" aria-label={s.label} className="grid gap-2 sm:grid-cols-2">
           {s.choices.map((c) => {
@@ -104,6 +107,67 @@ function SettingCard({ project, setting: s, onSaved }: { project: string; settin
         )}
       </p>
     </SettingsCard>
+  );
+}
+
+/** A number setting: a short range (like rounds, 1 to 5) is one button per number, a long one (like minutes) a field
+ *  saved on Enter or when it loses focus. Loft's default is marked either way. */
+function NumberPicker({ setting: s, busy, onChoose }: { setting: ProjectSetting & { kind: "number" }; busy: boolean; onChoose: (v: number) => void }) {
+  const [draft, setDraft] = useState(String(s.value));
+  useEffect(() => setDraft(String(s.value)), [s.value]);
+  if (s.max - s.min < 10) {
+    const all = Array.from({ length: s.max - s.min + 1 }, (_, i) => s.min + i);
+    return (
+      <div className="space-y-1.5">
+        <div role="radiogroup" aria-label={s.label} className="inline-flex overflow-hidden rounded-xl border border-line bg-ink-900">
+          {all.map((n) => {
+            const on = n === s.value;
+            return (
+              <button
+                key={n}
+                type="button"
+                role="radio"
+                aria-checked={on}
+                disabled={busy}
+                onClick={() => onChoose(n)}
+                className={cx(
+                  "min-w-11 border-l border-line px-3 py-2 text-[13.5px] tabular-nums transition-colors first:border-l-0 disabled:opacity-60",
+                  on ? "bg-accent/[0.12] text-fg" : "text-fg-2 hover:bg-white/[0.04]",
+                )}
+              >
+                {n}
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[11.5px] text-fg-3">{s.unit[0].toUpperCase() + s.unit.slice(1)}. Loft's default: {s.default}.</p>
+      </div>
+    );
+  }
+  const n = Math.round(Number(draft));
+  const valid = draft.trim() !== "" && Number.isFinite(n) && n >= s.min && n <= s.max;
+  const commit = () => (valid ? onChoose(n) : setDraft(String(s.value)));
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-[13px] text-fg-2">
+        <input
+          className="input w-24 tabular-nums"
+          type="number"
+          aria-label={s.label}
+          min={s.min}
+          max={s.max}
+          value={draft}
+          disabled={busy}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => e.key === "Enter" && commit()}
+        />
+        {s.unit}
+      </label>
+      <p className="text-[11.5px] text-fg-3">
+        From {s.min} to {s.max}. Loft's default: {s.default}.
+      </p>
+    </div>
   );
 }
 

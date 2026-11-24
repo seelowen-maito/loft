@@ -20,11 +20,13 @@ enum Kind {
     Branch,
     /// A list of the roles in `REVIEWER_ROLES`.
     Reviewers,
+    /// A whole number from `min` to `max`, in `unit`.
+    Number { min: i64, max: i64, unit: &'static str },
 }
 
 /// One setting: what it's called, what it does, the values it takes (each with its label and what it does) and
-/// Loft's default. A branch setting takes one of the repo's branches instead of fixed choices, and the reviewers
-/// setting a list of roles.
+/// Loft's default. A branch setting takes one of the repo's branches instead of fixed choices, the reviewers
+/// setting a list of roles, and a number setting a whole number in its range.
 struct Def {
     key: &'static str,
     label: &'static str,
@@ -43,6 +45,10 @@ pub const AT_THE_END: &str = "at_the_end";
 pub const BASE_BRANCH: &str = "base_branch";
 /// The roles that review each ticket of the project's Deliveries.
 pub const TICKET_REVIEWERS: &str = "ticket_reviewers";
+/// How many rounds of changes a Delivery ticket (or the final review) gets before it waits for the user.
+pub const MAX_ROUNDS: &str = "max_rounds";
+/// How many minutes a commit with no check at all waits for one before Loft takes it as "no CI ran".
+pub const CI_GRACE: &str = "ci_grace_minutes";
 
 /// The roles that can review each ticket, in the order they are woken, each with what the page says of it.
 pub const REVIEWER_ROLES: &[(&str, &str)] = &[
@@ -83,6 +89,22 @@ const DEFS: &[Def] = &[
         default: "",
         kind: Kind::Reviewers,
     },
+    Def {
+        key: MAX_ROUNDS,
+        label: "Rounds of changes",
+        help: "How many rounds of changes a ticket, or the final review, gets before the Delivery waits for you. It counts from the next round on.",
+        choices: &[],
+        default: "3",
+        kind: Kind::Number { min: 1, max: 5, unit: "rounds" },
+    },
+    Def {
+        key: CI_GRACE,
+        label: "CI grace",
+        help: "How long a commit with no check at all waits for one when the repo has workflows, before Loft takes it as \"no CI ran\" and carries on.",
+        choices: &[],
+        default: "10",
+        kind: Kind::Number { min: 1, max: 120, unit: "minutes" },
+    },
 ];
 
 fn def(key: &str) -> Option<&'static Def> {
@@ -97,6 +119,21 @@ fn value_of(state: &AppState, project: &str, key: &str) -> String {
     let saved = saved.and_then(|s| s.value.as_str().map(str::to_string));
     let taken = |v: &String| if d.kind == Kind::Branch { v.is_empty() || crate::planning::is_branch_name(v) } else { d.choices.iter().any(|c| c.0 == v) };
     saved.filter(taken).unwrap_or_else(|| d.default.to_string())
+}
+
+/// A number setting's value in `v`, a whole number or one written as text, when it's in the setting's range.
+fn number_in(d: &Def, v: &Value) -> Option<i64> {
+    let Kind::Number { min, max, .. } = d.kind else { return None };
+    let n = v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))?;
+    (min..=max).contains(&n).then_some(n)
+}
+
+/// `project`'s value of number setting `key`: the one saved, or Loft's default (also for a saved value out of its
+/// range now).
+fn number_of(state: &AppState, project: &str, key: &str) -> i64 {
+    let d = def(key).expect("a known setting");
+    let saved = state.db.project_settings(project.trim()).ok().and_then(|mut s| s.remove(key));
+    saved.and_then(|s| number_in(d, &s.value)).unwrap_or_else(|| d.default.parse().expect("a number default"))
 }
 
 /// A list of reviewer roles, in the order they are woken; None when `v` isn't a list of them (an array, or a
@@ -139,6 +176,17 @@ pub fn base_branch(state: &AppState, project: &str) -> Option<String> {
     Some(value_of(state, project, BASE_BRANCH)).filter(|b| !project.trim().is_empty() && !b.is_empty())
 }
 
+/// How many rounds of changes each ticket, and the final review, of `project`'s Deliveries gets before it waits
+/// for the user: 3 unless the project says otherwise.
+pub fn max_rounds(state: &AppState, project: &str) -> u32 {
+    number_of(state, project, MAX_ROUNDS) as u32
+}
+
+/// How many minutes a commit of `project` with no check at all waits for one: 10 unless the project says otherwise.
+pub fn ci_grace_minutes(state: &AppState, project: &str) -> i64 {
+    number_of(state, project, CI_GRACE)
+}
+
 /// Whether `project`'s CI mode is `at the end`: its Delivery tickets close on their reviewers, without waiting for CI.
 pub fn ci_at_the_end(state: &AppState, project: &str) -> bool {
     !project.trim().is_empty() && value_of(state, project, CI_MODE) == AT_THE_END
@@ -163,7 +211,7 @@ pub fn view(state: &AppState, project: &str) -> Value {
             let choices: Vec<Value> = d.choices.iter().map(|(v, l, h)| json!({ "value": v, "label": l, "help": h })).collect();
             let mut s = json!({
                 "key": d.key,
-                "kind": match d.kind { Kind::Choice => "choice", Kind::Branch => "branch", Kind::Reviewers => "reviewers" },
+                "kind": match d.kind { Kind::Choice => "choice", Kind::Branch => "branch", Kind::Reviewers => "reviewers", Kind::Number { .. } => "number" },
                 "label": d.label,
                 "help": d.help,
                 "choices": choices,
@@ -174,6 +222,10 @@ pub fn view(state: &AppState, project: &str) -> Value {
             if d.kind == Kind::Reviewers {
                 (s["default"], s["value"]) = (json!(DEFAULT_REVIEWERS), json!(ticket_reviewers(state, project)));
                 s["reviewers"] = json!(reviewer_rows(state, project));
+            }
+            if let Kind::Number { min, max, unit } = d.kind {
+                (s["default"], s["value"]) = (json!(d.default.parse::<i64>().unwrap_or_default()), json!(number_of(state, project, d.key)));
+                (s["min"], s["max"], s["unit"]) = (json!(min), json!(max), json!(unit));
             }
             s
         })
@@ -198,6 +250,7 @@ pub fn set(state: &AppState, project: &str, key: &str, value: &Value, by: Option
             let bad = bad.map(|b| format!(" `{b}` isn't one.")).unwrap_or_default();
             format!("{} takes a list of the roles that review each ticket, from {roles}; an empty one for none.{bad}", d.label)
         })?),
+        Kind::Number { min, max, unit } => json!(number_in(d, value).ok_or_else(|| format!("{} takes a whole number of {unit} from {min} to {max}.", d.label))?),
     };
     let s = ProjectSetting {
         value: v,
@@ -322,11 +375,11 @@ pub fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "set_project_setting",
-            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped.",
+            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10).",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "The project; your main project when omitted." },
                 "key": { "type": "string", "description": "The setting, like `ci_mode`." },
-                "value": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Its new value, like `at_the_end`; for `ticket_reviewers`, a list of roles like [\"qa\", \"code_reviewer\"]." }
+                "value": { "type": ["string", "array", "integer"], "items": { "type": "string" }, "description": "Its new value, like `at_the_end`; for `ticket_reviewers`, a list of roles like [\"qa\", \"code_reviewer\"]; for `max_rounds` and `ci_grace_minutes`, a whole number like 4." }
             }, "required": ["key", "value"] }
         }),
     ]
@@ -357,6 +410,7 @@ fn tool_text(state: &AppState, project: &str) -> String {
                     "a list of {}, or an empty one for none; a role with no agent on the team is skipped",
                     REVIEWER_ROLES.iter().map(|(k, h)| format!("`{k}` ({})", h.trim_end_matches('.'))).collect::<Vec<_>>().join(", ")
                 ),
+                Kind::Number { min, max, unit } => format!("a whole number of {unit} from {min} to {max}"),
             };
             let changed = saved.get(d.key).map_or(" Never changed.".to_string(), |s| {
                 let who = if s.changed_by.is_empty() { "the user".to_string() } else { state.db.get_agent(&s.changed_by).ok().flatten().map_or_else(|| s.changed_by_name.clone(), |a| a.name) };
@@ -366,6 +420,8 @@ fn tool_text(state: &AppState, project: &str) -> String {
             let (value, default) = if d.kind == Kind::Reviewers {
                 let list = |l: &[&str]| format!("`[{}]`", l.join(", "));
                 (list(&ticket_reviewers(state, project)), list(DEFAULT_REVIEWERS))
+            } else if matches!(d.kind, Kind::Number { .. }) {
+                (format!("`{}`", number_of(state, project, d.key)), format!("`{}`", d.default))
             } else {
                 (shown(&value_of(state, project, d.key)), shown(d.default))
             };
