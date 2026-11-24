@@ -65,7 +65,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "host": crate::tailnet::host(),
         // Lets clients (the iOS app) tell what this server supports.
-        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply"],
+        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply", "saved"],
     }))
 }
 
@@ -567,7 +567,8 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
     }
-    let tags = crate::tags::resolve(&state, &agent, &text);
+    let mut tags = crate::tags::resolve(&state, &agent, &text);
+    tags.extend(crate::tags::resolve_saved(&state, &text));
     if !tags.is_empty() {
         meta["tags"] = json!(tags);
     }

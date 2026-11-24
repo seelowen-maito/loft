@@ -15,9 +15,9 @@ final class MacSelectionTests: XCTestCase {
     }
 
     func testCommandNumbersMatchSidebarOrder() {
-        XCTAssertEqual(MacSection.allCases.map(\.rawValue), [1, 2, 3, 4, 5])
+        XCTAssertEqual(MacSection.allCases.map(\.rawValue), [1, 2, 3, 4, 5, 6])
         XCTAssertEqual(MacSection(rawValue: 3), .issues)
-        XCTAssertEqual(MacSection.allCases.map(\.title), ["Overview", "Agents", "Issues", "Needs you", "Settings"])
+        XCTAssertEqual(MacSection.allCases.map(\.title), ["Overview", "Agents", "Issues", "Needs you", "Saved", "Settings"])
     }
 
     func testLinksLandInTheirSection() {

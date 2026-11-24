@@ -24,6 +24,11 @@ struct ChatView: View {
     @State private var quickAck: (agentId: String, after: Int64, text: String, at: Date)?
     /// The message picked with Reply, quoted above the message box and sent with the next message (spec #572).
     @State private var replyingTo: MessageQuote?
+    /// The chat's first load is in: Open in chat waits for it, as its newer messages would pull the chat to the bottom.
+    @State private var loaded = false
+    /// The saved message Open in chat loads earlier pages for: scrolled to once its row is in the view, since a
+    /// scroll queued before the new rows are laid out loses to the bottom anchor (#630).
+    @State private var revealTo: Int64?
 
     private var shownQuickAck: String? {
         guard let a = quickAck, a.agentId == agent.id, Date().timeIntervalSince(a.at) < 120,
@@ -95,6 +100,29 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .accessibilityIdentifier("messageList")
+            .onChange(of: shown.first?.id) {
+                guard let id = revealTo, shown.contains(where: { $0.id == id }) else { return }
+                revealTo = nil
+                DispatchQueue.main.async { withAnimation { proxy.scrollTo(id, anchor: .top) } }
+            }
+            // A saved item's Open in chat: scroll to its message once the chat's first load is in, loading earlier
+            // pages until it's there.
+            .task(id: "\(agent.id) \(nav.chatFocus?.message ?? 0) \(loaded)") {
+                guard let f = nav.chatFocus, f.agentId == agent.id, loaded else { return }
+                nav.chatFocus = nil
+                revealTo = f.message
+                let first = shown.first?.id
+                if await store.loadMessage(f.message, in: agent.id) {
+                    // No earlier page came: its row is laid out already, so scroll now; else once the rows are in.
+                    if revealTo != nil, shown.first?.id == first {
+                        revealTo = nil
+                        DispatchQueue.main.async { withAnimation { proxy.scrollTo(f.message, anchor: .top) } }
+                    }
+                } else {
+                    revealTo = nil
+                    nav.chatNote = (agent.id, "That message is no longer in the chat.")
+                }
+            }
             }
             .overlay {
                 if let loadError, shown.isEmpty {
@@ -170,7 +198,9 @@ struct ChatView: View {
             suggested = (m.id, replies)
         }
         .task(id: agent.id) {
+            loaded = false
             do { try await store.loadConversation(agent.id); loadError = nil } catch { loadError = APIError.from(error) }
+            loaded = true
         }
     }
 }
@@ -187,6 +217,11 @@ private struct MessageRow: View {
     /// Copy to box on a cancelled message: its text goes into the message box, after any draft.
     var copyToBox: () -> Void = {}
     var jump: (Int64) -> Void = { _ in }
+    @State private var saving = false
+    /// The saved item's title, shown under the message for a moment once Save is done.
+    @State private var savedAs: String?
+
+    private var canSave: Bool { store.info?.supports(.saved) == true && Saved.canSave(message) }
     @State private var cancelling = false
     @State private var cancelError: String?
 
@@ -268,6 +303,7 @@ private struct MessageRow: View {
                     .accessibilityLabel(spoken)
                     .accessibilityAction(named: "Copy") { copy() }
                     .accessibilityAction(named: "Reply") { reply?() }
+                    .accessibilityAction(named: "Save") { if canSave { saving = true } }
                     .accessibilityActions {
                         // Only in its own state: Cancel while queued, Copy to box once cancelled.
                         if mark == .queued { Button("Cancel this queued message", action: cancelQueued) }
@@ -285,6 +321,13 @@ private struct MessageRow: View {
                     if let cancelError {
                         Text(cancelError).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.failureInk)
                     }
+                    if let savedAs {
+                        Label("Saved “\(savedAs)”", systemImage: "bookmark.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.accent)
+                            .transition(.opacity)
+                            .accessibilityIdentifier("savedNote")
+                    }
                 }
             }
             .contextMenu {
@@ -292,6 +335,17 @@ private struct MessageRow: View {
                     Button { reply() } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
                 }
                 Button { copy() } label: { Label("Copy", systemImage: "doc.on.doc") }
+                if canSave {
+                    Button { saving = true } label: { Label("Save", systemImage: "bookmark") }
+                }
+            }
+            .sheet(isPresented: $saving) { SaveMessageSheet(message: message) { savedAs = $0.title } }
+            // Save's confirmation, as the web's toast: under the message for a moment, and spoken.
+            .task(id: savedAs) {
+                guard let t = savedAs else { return }
+                AccessibilityNotification.Announcement("Saved “\(t)”").post()
+                try? await Task.sleep(for: .seconds(3))
+                withAnimation { savedAs = nil }
             }
         }
     }

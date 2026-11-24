@@ -615,6 +615,18 @@ public final class LoftStore {
         historyHasMore[agentId] = page.count >= 100
     }
 
+    /// Loads earlier pages until message `id` is in the chat, for a saved item's Open in chat (at most `pages` pages).
+    /// True when it's there.
+    public func loadMessage(_ id: Int64, in agentId: String, pages: Int = 10) async -> Bool {
+        // A chat restored from the disk cache doesn't know yet whether it has earlier pages: load its latest page first.
+        if historyHasMore[agentId] == nil { try? await loadConversation(agentId) }
+        for _ in 0..<pages {
+            guard let first = messages[agentId]?.first, first.id > id else { break }
+            guard historyHasMore[agentId] == true, (try? await loadOlder(agentId)) != nil else { break }
+        }
+        return messages[agentId]?.contains { $0.id == id } == true
+    }
+
     /// A dictation going out after a short Undo from a chat ("Sending to …"). It lives here rather than in the
     /// composer, so it still goes when you leave the chat during the window.
     public struct VoiceAutoSend: Identifiable {
@@ -1162,6 +1174,15 @@ public final class LoftStore {
     public func herdrStatus() async throws -> JSONValue { try await requireWrite().herdrStatus() }
     public func herdrSetup() async throws -> JSONValue { try await requireWrite().herdrSetup() }
     public func herdrFocus(agentId: String) async throws { try await requireWrite().herdrFocus(agentId: agentId) }
+    public func savedList(query: String = "", tag: String = "") async throws -> SavedList { try await requireWrite().savedList(query: query, tag: tag) }
+    public func savedItem(id: Int64) async throws -> SavedItem { try await requireWrite().savedItem(id: id) }
+    public func saveMessage(_ m: ChatMessage, title: String, tag: String) async throws -> SavedItem {
+        try await requireWrite().saveMessage(agentId: m.agentId, messageId: m.id, title: title, tag: tag)
+    }
+    public func updateSaved(id: Int64, title: String, tag: String, content: String) async throws -> SavedItem {
+        try await requireWrite().updateSaved(id: id, title: title, tag: tag, content: content)
+    }
+    public func deleteSaved(id: Int64) async throws { try await requireWrite().deleteSaved(id: id) }
 
     /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
     public func saveIssueSettings(_ s: IssueSettings) async throws {

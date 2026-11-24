@@ -58,6 +58,10 @@ struct ChatView: View {
     /// The on-device model's replies to the agent's latest message, when it ends on a question.
     @State private var suggested: (messageId: Int64, replies: [String])?
     private let dictate: Bool
+    /// The message to scroll to once the chat has loaded, instead of the bottom (a saved item's Open in chat).
+    @State private var focus: Int64?
+    /// The message `reveal` draws down to: scrolled to once its rows are in the view, as `keepTop` (#630).
+    @State private var revealTo: String?
     @Environment(VoiceSession.self) private var voice
 
     /// `-fixture-voice ask`: the Send it? question shows at once, for screenshots.
@@ -69,9 +73,10 @@ struct ChatView: View {
         return false
     }
 
-    init(agentId: String, draft: String? = nil, dictate: Bool = false) {
+    init(agentId: String, draft: String? = nil, dictate: Bool = false, message: Int64? = nil) {
         self.agentId = agentId
         self.dictate = dictate
+        _focus = State(initialValue: message)
         _draft = State(initialValue: draft ?? "")
         // Talk's tidied text, landed in the box: it gets the Send it? bar until it's sent or touched.
         _talkText = State(initialValue: VoicePresentation.shared.statusAgentId == agentId ? draft : nil)
@@ -86,6 +91,23 @@ struct ChatView: View {
         } else {
             EmptyState(symbol: "bubble.left", title: "Agent not found", message: "It may have been deleted on the Mac.")
         }
+    }
+
+    /// Draws the chat down to message `id` and scrolls to it, for a reply's quote or a saved item's Open in chat.
+    /// False when it isn't loaded.
+    private func reveal(_ id: Int64, _ proxy: ScrollViewProxy) -> Bool {
+        let all = ChatItem.build(store.conversation(agentId))
+        let key = ChatItem.key(message: id)
+        guard let i = all.firstIndex(where: { $0.id == key }) else { return false }
+        keepTop = nil
+        if shown >= all.count - i {
+            DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
+        } else {
+            // Not drawn yet: a scroll queued now runs before its rows are laid out, and the bottom anchor wins.
+            revealTo = key
+            shown = all.count - i
+        }
+        return true
     }
 
     private func chat(_ agent: Agent) -> some View {
@@ -134,14 +156,7 @@ struct ChatView: View {
                         ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand, clearWith: clearWith,
                                      reply: store.info?.supports(.reply) == true ? { replyingTo = MessageQuote(of: $0, agentName: agent.name) } : nil,
                                      copyToBox: { draft = QueueMark.copiedToBox(draft, $0) },
-                                     jump: { id in
-                                         // The original may be loaded but not drawn yet: draw down to it first.
-                                         let key = ChatItem.key(message: id)
-                                         guard let i = all.firstIndex(where: { $0.id == key }) else { return }
-                                         keepTop = nil
-                                         shown = max(shown, all.count - i)
-                                         DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
-                                     })
+                                     jump: { _ = reveal($0, proxy) })
                             .id(item.id)
                     }
                     ForEach(store.pending(for: agentId)) { p in
@@ -170,13 +185,26 @@ struct ChatView: View {
             .defaultScrollAnchor(.bottom)
             // Jump to the bottom once it has messages; new ones scroll it down below.
             .task(id: !items.isEmpty) {
-                guard !items.isEmpty else { return }
+                guard !items.isEmpty, focus == nil else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            // Or to the saved message Open in chat came for, once the chat's first load is in (on a cold launch it
+            // would bring newer messages and pull you to the bottom), loading earlier pages until it's there.
+            .task(id: loading) {
+                guard !loading, let id = focus else { return }
+                focus = nil
+                _ = await store.loadMessage(id, in: agentId)
+                if !reveal(id, proxy) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .scrollDismissesKeyboard(.interactively)
             // Scroll back to the kept item once the earlier page is in the view, not right after the tap: after a
             // server fetch a scroll queued then runs before the new page is laid out, and you land on its top (#630).
             .onChange(of: items.first?.id) {
+                if let key = revealTo {
+                    revealTo = nil
+                    DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
+                    return
+                }
                 guard let keep = keepTop else { return }
                 keepTop = nil
                 DispatchQueue.main.async { proxy.scrollTo(keep, anchor: .top) }
@@ -860,10 +888,15 @@ private struct MessageBubble: View {
     var reply: ((ChatMessage) -> Void)?
     var copyToBox: (ChatMessage) -> Void = { _ in }
     var jump: (Int64) -> Void = { _ in }
+    @State private var saving = false
+    /// The saved item's title, shown under the message for a moment once Save is done.
+    @State private var savedAs: String?
+
+    private var isUser: Bool { message.role == "user" && message.fromAgentName == nil }
+    private var canSave: Bool { store.info?.supports(.saved) == true && Saved.canSave(message) }
     @State private var cancelling = false
     @State private var cancelError: String?
 
-    private var isUser: Bool { message.role == "user" && message.fromAgentName == nil }
     private var mark: QueueMark? { QueueMark(message, in: agent) }
 
     /// Takes the message back out of the agent's queue; a run that already took it says so under the message.
@@ -1017,7 +1050,11 @@ private struct MessageBubble: View {
                                 }
                                 // The long press opens this menu instead of text selection: keep Copy in it.
                                 Button { UIPasteboard.general.string = message.displayContent } label: { Label("Copy", systemImage: "doc.on.doc") }
+                                if canSave {
+                                    Button { saving = true } label: { Label("Save", systemImage: "bookmark") }
+                                }
                             }
+                            .sheet(isPresented: $saving) { SaveMessageSheet(message: message) { savedAs = $0.title } }
                     }
                     // One row: yours (right) the queue status, then the time; the others' (left) the time, then the status.
                     // On a narrow phone it wraps, with the status above and the time and actions on the last line (#666).
@@ -1036,6 +1073,12 @@ private struct MessageBubble: View {
                     .font(.caption2)
                     if let cancelError {
                         Text(cancelError).font(.caption2).foregroundStyle(Theme.failure).accessibilityIdentifier("cancelError")
+                    }
+                    if let savedAs {
+                        Label("Saved “\(savedAs)”", systemImage: "bookmark.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.accent)
+                            .transition(.opacity)
                     }
                     if !isUser && message.role == "assistant" { UnreadAloudNote(message: message) }
                     if isUser, !message.mentionedNames.isEmpty {
@@ -1058,6 +1101,14 @@ private struct MessageBubble: View {
             }
             .accessibilityAction(named: "Read aloud") { if !isUser { speaker.speak(message) } }
             .accessibilityAction(named: "Reply") { reply?(message) }
+            .accessibilityAction(named: "Save") { if canSave { saving = true } }
+            // Save's confirmation, as the web's toast: under the message for a moment, and spoken.
+            .task(id: savedAs) {
+                guard let t = savedAs else { return }
+                AccessibilityNotification.Announcement("Saved “\(t)”").post()
+                try? await Task.sleep(for: .seconds(3))
+                withAnimation { savedAs = nil }
+            }
             .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
         }
     }

@@ -187,6 +187,8 @@ struct ChatRoute: Hashable {
     var draft: String?
     /// Start dictation as soon as the chat opens (the Overview's Talk button).
     var dictate = false
+    /// The message to scroll to once the chat opens (a saved item's Open in chat).
+    var message: Int64?
 }
 
 struct AgentRoute: Hashable { let id: String }
@@ -260,9 +262,11 @@ extension View {
     func withRoutes() -> some View {
         navigationDestination(for: AgentRoute.self) { AgentDetailView(agentId: $0.id) }
             .navigationDestination(for: TaskRoute.self) { TaskDetailView(taskId: $0.id) }
-            .navigationDestination(for: ChatRoute.self) { ChatView(agentId: $0.agentId, draft: $0.draft, dictate: $0.dictate) }
+            .navigationDestination(for: ChatRoute.self) { ChatView(agentId: $0.agentId, draft: $0.draft, dictate: $0.dictate, message: $0.message) }
             .navigationDestination(for: ActivityRoute.self) { _ in ActivityListView() }
             .navigationDestination(for: SettingsRoute.self) { _ in SettingsView() }
+            .navigationDestination(for: SavedRoute.self) { _ in SavedListView() }
+            .navigationDestination(for: SavedItemRoute.self) { SavedItemView(id: $0.id) }
             .navigationDestination(for: NeedsYouRoute.self) { NeedsYouListView(focus: $0.focus) }
     }
 
