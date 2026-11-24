@@ -998,6 +998,7 @@ pub fn needs_action_from_loft(state: &AppState, to: &Agent, text: &str) {
 const MAX_FYIS_PER_PROMPT: usize = 20;
 
 /// A prompt that is a slash command, like `/goal clear` or `/context`: claude may answer it itself, without a turn.
+/// It runs only as the whole prompt, so it runs alone: no FYIs in front, no other queued message joined to it.
 fn is_command(prompt: &str) -> bool {
     prompt.starts_with('/')
 }
@@ -1101,8 +1102,8 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
-            // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
-            let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
+            // A slash command must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
+            let fyis = if !is_command(&prompt) && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
             let full = with_fyis(&fyis, &prompt);
             let mut delivered = false;
             let failed = match run_once(&state, &agent_id, &full, trigger, for_user, throwaway, kill.clone(), &mut delivered).await {
@@ -1132,30 +1133,51 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let (next, push) = {
                 let mut rt = state.rt.lock().unwrap();
                 let drew = rt.redrawing.remove(&agent_id);
-                // The run that takes the queue delivers its agent messages.
-                let delivered = rt.queued_messages.remove(&agent_id).is_some();
-                let next = match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
-                    (Some(q), g) if !q.is_empty() => {
-                        // User work first; grill follow-ups wait for the run after it.
-                        if let Some(g) = g {
-                            rt.grill_queued.insert(agent_id.clone(), g);
+                // A slash command in a longer queue runs on its own first (a sent-now `/goal clear` put back, say);
+                // the rest waits for the run after it.
+                let command = rt.queued.get(&agent_id).filter(|q| q.len() > 1).and_then(|q| q.iter().find(|p| is_command(p)).cloned());
+                let (delivered, next) = if let Some(cmd) = command {
+                    let id = rt.queued_messages.get(&agent_id).and_then(|q| q.iter().find(|(_, p)| *p == cmd)).map(|(i, _)| *i);
+                    let mine = id.is_some_and(|i| state.db.get_message(&agent_id, i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()));
+                    match id {
+                        Some(i) => {
+                            unqueue(&state, &mut rt, &agent_id, i);
                         }
-                        let u = rt.queued_for_user.remove(&agent_id);
-                        take_delivery_queue(&mut rt, &agent_id);
-                        Some((q.join("\n\n"), "user", u, false))
+                        None => {
+                            let q = rt.queued.get_mut(&agent_id).unwrap();
+                            if let Some(at) = q.iter().position(|p| *p == cmd) {
+                                q.remove(at);
+                            }
+                        }
                     }
-                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false, false)),
-                    // A Redraw waits for everything else.
-                    _ if rt.redraw_queued.remove(&agent_id) => {
-                        rt.redrawing.insert(agent_id.clone());
-                        Some((REDRAW_PROMPT.to_string(), "avatar", false, true))
-                    }
-                    _ => {
-                        // Saved before the run stops counting as running, so a restart keeps the idle time.
-                        let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
-                        rt.running.remove(&agent_id);
-                        None
-                    }
+                    (id.is_some(), Some((cmd, "user", mine, false)))
+                } else {
+                    // The run that takes the queue delivers its agent messages.
+                    let delivered = rt.queued_messages.remove(&agent_id).is_some();
+                    let next = match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
+                        (Some(q), g) if !q.is_empty() => {
+                            // User work first; grill follow-ups wait for the run after it.
+                            if let Some(g) = g {
+                                rt.grill_queued.insert(agent_id.clone(), g);
+                            }
+                            let u = rt.queued_for_user.remove(&agent_id);
+                            take_delivery_queue(&mut rt, &agent_id);
+                            Some((q.join("\n\n"), "user", u, false))
+                        }
+                        (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false, false)),
+                        // A Redraw waits for everything else.
+                        _ if rt.redraw_queued.remove(&agent_id) => {
+                            rt.redrawing.insert(agent_id.clone());
+                            Some((REDRAW_PROMPT.to_string(), "avatar", false, true))
+                        }
+                        _ => {
+                            // Saved before the run stops counting as running, so a restart keeps the idle time.
+                            let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
+                            rt.running.remove(&agent_id);
+                            None
+                        }
+                    };
+                    (delivered, next)
                 };
                 let push = delivered || (drew && next.is_some());
                 (next, push)
@@ -3832,6 +3854,42 @@ esac
         assert!(ws.join("stdin-closed").exists());
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
         assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
+    }
+
+    fn prompt_list(st: &AppState, id: &str) -> Vec<String> {
+        prompts(st, id).split("\n---\n").filter(|p| !p.is_empty()).map(String::from).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_buttons_goal_clear_runs_alone_and_pending_fyis_wait_for_the_next_run() {
+        let (st, a) = fake_claude_state();
+        set(&st, &a.id, |a| a.goal = Some("the user said the password".into()));
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        fyi_from_agent(&st, &lead, &a, "The build is green.");
+        clear_goal(&st, &a.id).unwrap();
+        until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        assert_eq!(prompt_list(&st, &a.id), ["/goal clear"], "no FYI in front of the command");
+        let fyis = st.db.take_pending_fyis(&a.id).unwrap();
+        assert!(fyis.len() == 1 && fyis[0].1.ends_with("The build is green."), "the FYI waits for a real run: {fyis:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_goal_clear_runs_on_its_own_before_the_rest_of_the_queue() {
+        let (st, a) = fake_claude_state();
+        set(&st, &a.id, |a| a.goal = Some("the user said the password".into()));
+        // "slow" takes input but never reads it: what's sent now into it goes back to the queue when it ends.
+        enqueue(&st, &a.id, Some("slow".into()), "user");
+        until("the run to take input", 10, || st.rt.lock().unwrap().runs.get(&a.id).is_some_and(|i| i.send_now.is_some())).await;
+        let chatty = enqueue_chat(&st, &a.id, "chatty".into(), json!({})).unwrap().id;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true);
+        until("the queue to run", 20, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "On it.")).await;
+        idle(&st, &a.id).await;
+        assert_eq!(prompt_list(&st, &a.id), ["slow", "/goal clear", "chatty"], "the command alone, then the rest");
+        assert_eq!(goal_of(&st, &a.id), None);
+        assert!(st.rt.lock().unwrap().queued_messages.get(&a.id).is_none_or(|q| q.iter().all(|(i, _)| *i != chatty)));
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
