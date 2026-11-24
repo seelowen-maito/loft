@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Link, useLocation } from "react-router";
 import { permCard } from "../../lib/pending";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Copy, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench, X,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Copy, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, SendHorizontal, Square, Wrench, X,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
 import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
@@ -46,7 +46,7 @@ import { useMention } from "../../components/MentionMenu";
 import { useTagMenu } from "../../components/TagMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
-import { CANCELLED_MARK, QUEUED_MARK, sendState, taskText } from "../../lib/agentMessage";
+import { CANCELLED_MARK, QUEUED_MARK, SENT_NOW_MARK, sendState, taskText } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
@@ -961,7 +961,9 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
   const press = canReply ? longPress : {};
   const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} label={replyLabel(m, agent.name)} />;
   const cancel = useAction();
+  const sendNow = useAction();
   // The footer's status on a message waiting in the queue, yours or another agent's: Cancel, or Copy to box once cancelled.
+  // Yours can also be sent now, into the run in progress; another agent's waits for the run to end.
   const sender = m.meta?.from_agent ? (findAgent(agents, m.meta.from_agent.id)?.name ?? m.meta.from_agent.name) : null;
   const status =
     agent.queued_messages?.includes(m.id) ? (
@@ -972,8 +974,17 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
         <button type="button" className="msg-act text-warn hover:bg-warn/[0.12] hover:text-warn" aria-label={sender ? `Cancel this queued message from ${sender}` : "Cancel this queued message"} disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id)).then((r) => r && !r.ok && cancel.setError("The agent already took this message"))}>
           <X className="size-3.5" aria-hidden /> Cancel
         </button>
-        {cancel.error && <span className="px-1 text-bad">{cancel.error}</span>}
+        {!sender && (
+          <button type="button" className="msg-act text-accent hover:bg-accent/[0.12] hover:text-accent" title="Deliver it into the run in progress now, instead of when it ends" disabled={sendNow.busy || cancel.busy} onClick={() => void sendNow.run(() => api.sendNow(agent.id, m.id)).then((r) => r && !r.ok && sendNow.setError("The run is ending: it waits for the next one"))}>
+            <SendHorizontal className="size-3.5" aria-hidden /> Send now
+          </button>
+        )}
+        {(cancel.error || sendNow.error) && <span className="px-1 text-bad">{cancel.error || sendNow.error}</span>}
       </>
+    ) : m.meta?.sent_now ? (
+      <span className="flex items-center gap-1 px-1 text-accent">
+        <SendHorizontal className="size-3" aria-hidden /> {SENT_NOW_MARK}
+      </span>
     ) : m.meta?.cancelled ? (
       <>
         <span className="px-1">{CANCELLED_MARK}</span>

@@ -1102,7 +1102,7 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let failed = match run_once(&state, &agent_id, &full, trigger, for_user, throwaway, kill.clone(), &mut delivered).await {
                 Ok(failed) => failed,
                 Err(e) => {
-                    state.rt.lock().unwrap().runs.remove(&agent_id);
+                    end_run_info(&state, &agent_id);
                     // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
                     if !delivered {
                         let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
@@ -1224,32 +1224,97 @@ pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str
 pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
     {
         let mut rt = state.rt.lock().unwrap();
-        let Some(at) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().position(|(i, _)| *i == id)) else {
+        if unqueue(state, &mut rt, agent_id, id).is_none() {
             return Ok(false);
-        };
-        let (_, prompt) = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
-        if let Some(q) = rt.queued.get_mut(agent_id)
-            && let Some(p) = q.iter().position(|x| *x == prompt)
-        {
-            q.remove(p);
-        }
-        // Nothing queued is for the user any more (every waiting prompt is a tracked message, none the user's own):
-        // the next run isn't an answer to them.
-        let rest: Vec<i64> = rt.queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
-        if rt.queued.get(agent_id).map_or(0, |q| q.len()) == rest.len()
-            && !rest.iter().any(|i| state.db.get_message(agent_id, *i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()))
-        {
-            rt.queued_for_user.remove(agent_id);
         }
         // The ticket and context clear a hand-over set are left as they are: the worst case is one context clear
         // the agent didn't need on its next run.
     }
     state.db.mark_cancelled(agent_id, id)?;
+    emit_message(state, agent_id, id)?;
+    emit_run(state, agent_id);
+    Ok(true)
+}
+
+/// Takes queued message `id` out of `agent_id`'s queue, returning its prompt. None when it isn't queued.
+fn unqueue(state: &AppState, rt: &mut crate::state::Runtime, agent_id: &str, id: i64) -> Option<String> {
+    let at = rt.queued_messages.get(agent_id)?.iter().position(|(i, _)| *i == id)?;
+    let (_, prompt) = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
+    if let Some(q) = rt.queued.get_mut(agent_id)
+        && let Some(p) = q.iter().position(|x| *x == prompt)
+    {
+        q.remove(p);
+    }
+    // Nothing queued is for the user any more (every waiting prompt is a tracked message, none the user's own):
+    // the next run isn't an answer to them.
+    let rest: Vec<i64> = rt.queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+    if rt.queued.get(agent_id).map_or(0, |q| q.len()) == rest.len()
+        && !rest.iter().any(|i| state.db.get_message(agent_id, *i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()))
+    {
+        rt.queued_for_user.remove(agent_id);
+    }
+    Some(prompt)
+}
+
+fn emit_message(state: &AppState, agent_id: &str, id: i64) -> Result<()> {
     if let Some(m) = state.db.get_message(agent_id, id)? {
         state.emit(Event::Message { message: serde_json::to_value(&m).unwrap() });
     }
+    Ok(())
+}
+
+/// Send now: delivers the user's queued message `id` into `agent_id`'s run in progress, as Ctrl+Enter does in the
+/// terminal, instead of waiting for the run to end. It leaves the queue for good: it can't be cancelled and the next
+/// run doesn't get it again. False, leaving it queued, for an agent's message, or when the run takes no more input
+/// (it's ending, or it's a quiet one): it waits for the next run as before.
+pub fn send_now(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
+    if !state.db.get_message(agent_id, id)?.is_some_and(|m| m.meta["from_agent"].is_null()) {
+        return Ok(false);
+    }
+    {
+        // Under the lock the run closes its input under: a message is either written to it or stays queued.
+        let mut rt = state.rt.lock().unwrap();
+        let Some(tx) = rt.runs.get(agent_id).and_then(|i| i.send_now.clone()) else {
+            return Ok(false);
+        };
+        let Some(prompt) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().find(|(i, _)| *i == id)).map(|(_, p)| p.clone()) else {
+            return Ok(false);
+        };
+        if tx.send((id, prompt.clone())).is_err() {
+            return Ok(false);
+        }
+        unqueue(state, &mut rt, agent_id, id);
+        let info = rt.runs.get_mut(agent_id).unwrap();
+        info.sent.push((id, prompt));
+        // The run now answers the user: its reply is an Unread reply.
+        info.for_user = true;
+    }
+    state.db.mark_sent_now(agent_id, id, true)?;
+    emit_message(state, agent_id, id)?;
     emit_run(state, agent_id);
     Ok(true)
+}
+
+/// The run is over in Loft's books: drops its info, and puts the user's messages sent now that claude never took
+/// back at the front of the queue, as they were, for the next run. Returns the info.
+fn end_run_info(state: &AppState, agent_id: &str) -> Option<crate::state::RunInfo> {
+    let info = {
+        let mut rt = state.rt.lock().unwrap();
+        rt.waiting.remove(agent_id);
+        let info = rt.runs.remove(agent_id)?;
+        for (id, prompt) in info.sent.iter().rev() {
+            rt.queued.entry(agent_id.to_string()).or_default().insert(0, prompt.clone());
+            rt.queued_messages.entry(agent_id.to_string()).or_default().insert(0, (*id, prompt.clone()));
+            rt.queued_for_user.insert(agent_id.to_string());
+        }
+        info
+    };
+    for (id, _) in &info.sent {
+        tracing::info!("agent {agent_id}: message {id} was sent now but the run ended before claude took it: queued again");
+        let _ = state.db.mark_sent_now(agent_id, *id, false);
+        let _ = emit_message(state, agent_id, *id);
+    }
+    Some(info)
 }
 
 pub fn stop(state: &AppState, agent_id: &str) -> bool {
@@ -1646,6 +1711,41 @@ impl Brake {
     }
 }
 
+/// `prompt` as a line of claude's stream-json input, its images inline. `now`: for a run in progress, which claude
+/// otherwise takes only once its turn ends; during a Stop hook's or goal's block, that's never.
+async fn input_line(state: &AppState, agent_id: &str, prompt: &str, now: bool) -> String {
+    let line = crate::uploads::stdin_line(state, agent_id, prompt).await;
+    let mut v = line.and_then(|l| serde_json::from_str::<Value>(&l).ok()).unwrap_or_else(|| {
+        json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] } })
+    });
+    if now {
+        v["priority"] = json!("now");
+    }
+    v.to_string() + "\n"
+}
+
+/// The text of a user line, claude's or Loft's input: what tells a replay apart.
+fn user_text(ev: &Value) -> String {
+    let content = &ev["message"]["content"];
+    content.as_str().map(String::from).unwrap_or_else(|| content.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect())
+}
+
+/// Claude stays alive while its stdin is open: Loft closes it where the run would end. Not while a message sent
+/// now is still on its way in (claude takes it in a turn of its own); false then.
+fn close_input(state: &AppState, agent_id: &str, stdin: &mut Option<tokio::process::ChildStdin>) -> bool {
+    if stdin.is_none() {
+        return true;
+    }
+    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+        if !i.sent.is_empty() {
+            return false;
+        }
+        i.send_now = None;
+    }
+    *stdin = None;
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_process(
     state: &AppState,
@@ -1691,15 +1791,15 @@ async fn run_process(
     }
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
-    let image_line = crate::uploads::stdin_line(state, agent_id, prompt).await;
+    let first = input_line(state, agent_id, prompt, false).await;
+    let first_text = serde_json::from_str::<Value>(&first).map(|v| user_text(&v)).unwrap_or_default();
     let mut cmd = build_command(state, &agent, resume)?;
     if throwaway {
         // Not saved, so it isn't listed among the agent's past Sessions either.
         cmd.arg("--no-session-persistence");
     }
-    if image_line.is_some() {
-        cmd.args(["--input-format", "stream-json"]);
-    }
+    // Input as stream-json lines, each echoed back once claude takes it: a message sent now is delivered at its echo.
+    cmd.args(["--input-format", "stream-json", "--replay-user-messages"]);
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
@@ -1708,10 +1808,17 @@ async fn run_process(
         && let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
             tracing::warn!("agent {agent_id}: could not record its process session: {e}");
         }
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
+    let mut stdin = child.stdin.take();
+    stdin.as_mut().unwrap().write_all(first.as_bytes()).await?;
+    // A run the user reads takes their messages sent now (`send_now`) while it lasts; a quiet one only its prompt.
+    let takes_input = !quiet && !throwaway;
+    if !takes_input {
+        stdin = None;
     }
+    let (send_tx, mut send_rx) = tokio::sync::mpsc::unbounded_channel::<(i64, String)>();
+    // Messages sent now written to claude, by the text claude echoes back once it takes one.
+    let mut written: Vec<(i64, String)> = Vec::new();
+    let mut first_echoed = false;
     *delivered = true;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stderr = child.stderr.take().unwrap();
@@ -1747,11 +1854,23 @@ async fn run_process(
     let mut brake = Brake::default();
     // The brake stopped the run: it ends like a stop, with the reason in the chat, and the queue goes on.
     let mut braked = false;
-    state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), for_user, ..Default::default() });
+    state.rt.lock().unwrap().runs.insert(
+        agent_id.to_string(),
+        crate::state::RunInfo { last_output_at: now(), for_user, send_now: takes_input.then_some(send_tx), ..Default::default() },
+    );
     loop {
         let waiting = replied && !bg.is_empty();
         let line = tokio::select! {
             l = lines.next_line() => l?,
+            Some((id, p)) = send_rx.recv(), if stdin.is_some() => {
+                let line = input_line(state, agent_id, &p, true).await;
+                match stdin.as_mut().unwrap().write_all(line.as_bytes()).await {
+                    Ok(()) => written.push((id, serde_json::from_str::<Value>(&line).map(|v| user_text(&v)).unwrap_or_default())),
+                    // It stays among the run's `sent`: back to the queue when the run ends.
+                    Err(e) => tracing::warn!("agent {agent_id}: run {run_id}: could not send message {id} now: {e}"),
+                }
+                continue;
+            }
             _ = kill.notified() => {
                 tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
                 terminate(&mut child).await;
@@ -1892,6 +2011,7 @@ async fn run_process(
                     }
                     if replied && bg.is_empty() {
                         // The last one finished after the reply; claude starts a turn to report it, or exits.
+                        close_input(state, agent_id, &mut stdin);
                         exit_by = Some(tokio::time::Instant::now() + FOLLOW_UP_GRACE);
                     }
                 }
@@ -1971,6 +2091,25 @@ async fn run_process(
                     }
                 }
             }
+            // Claude took one of its input lines: the prompt, or a message sent now, now delivered. Not shown again.
+            Some("user") if ev["isReplay"] == true => {
+                let text = user_text(&ev);
+                let at = match written.iter().position(|(_, t)| *t == text) {
+                    Some(at) => Some(at),
+                    None if !first_echoed && text == first_text => None,
+                    // Claude reworded it somehow: echoes come in the order the lines went in.
+                    None => (!written.is_empty()).then_some(0),
+                };
+                if text == first_text {
+                    first_echoed = true;
+                }
+                if let Some(at) = at {
+                    let (id, _) = written.remove(at);
+                    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+                        i.sent.retain(|(s, _)| *s != id);
+                    }
+                }
+            }
             Some("user") => {
                 let blocks = ev["message"]["content"].as_array().cloned().unwrap_or_default();
                 for b in blocks {
@@ -2010,12 +2149,16 @@ async fn run_process(
                 }
             }
             Some("result") => {
-                got_result = true;
+                // A message sent now cut the turn short: claude goes on with it in a new turn of the same run.
+                let aborted = ev["terminal_reason"].as_str().is_some_and(|r| r.starts_with("aborted"));
+                got_result |= !aborted;
                 // Resuming a session whose background task was stopped first replays an empty result
                 // (no turns); the real turn follows, however long the model thinks first.
-                replied = ev["num_turns"].as_u64() != Some(0);
+                replied = !aborted && ev["num_turns"].as_u64() != Some(0);
                 if replied && bg.is_empty() {
-                    exit_by = Some(tokio::time::Instant::now() + EXIT_GRACE);
+                    // The run ends here, unless a message sent now is still on its way in: claude answers it first.
+                    let grace = if close_input(state, agent_id, &mut stdin) { EXIT_GRACE } else { FOLLOW_UP_GRACE };
+                    exit_by = Some(tokio::time::Instant::now() + grace);
                 } else if replied {
                     if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
                         i.waiting_since = Some(now());
@@ -2057,7 +2200,9 @@ async fn run_process(
                     "is_error": ev["is_error"],
                     "usage": ev["usage"],
                 });
-                if replied || run_error.is_some() {
+                if aborted {
+                    // Neither a reply nor the run's end: its cost counts, in the next run end's running total.
+                } else if replied || run_error.is_some() {
                     run_msg(quiet, state, agent_id, rid, "system", "run_end", "", end);
                     held_end = None;
                 } else {
@@ -2069,12 +2214,12 @@ async fn run_process(
         }
     }
 
-    let had_subagents = {
-        let mut rt = state.rt.lock().unwrap();
-        rt.waiting.remove(agent_id);
-        rt.runs.remove(agent_id).is_some_and(|i| !i.subagents.is_empty())
-    };
-    if had_subagents {
+    drop(stdin);
+    // Messages sent now that claude never took go back to the queue, ahead of the rest.
+    let info = end_run_info(state, agent_id);
+    // A message the user sent now made this run an answer to them.
+    let for_user = for_user || info.as_ref().is_some_and(|i| i.for_user);
+    if info.is_some_and(|i| !i.subagents.is_empty()) {
         emit_run(state, agent_id);
     }
     if let Some(end) = held_end {
@@ -2485,7 +2630,10 @@ pub(crate) mod tests {
     /// on its own; "goal-tools" does the same with a tool call after four turns and three more after it, then replies.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
-prompt=$(cat)
+text() { perl -CO -MJSON::PP -ne 'my $c = JSON::PP->new->utf8->decode($_)->{message}{content}; print ref $c ? join("", map { $_->{text} // "" } @$c) : $c'; }
+IFS= read -r line
+prompt=$(printf '%s\n' "$line" | text)
+printf '%s\n' "$line" > input.json
 printf '%s\n---\n' "$prompt" >> prompts.log
 case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
   chmod -x "$0"
@@ -2512,6 +2660,26 @@ echo '{"type":"system","subtype":"init","session_id":"'"$sid"'","slash_commands"
 case "$prompt" in *"redraw your sticker"*) while [ ! -f go ]; do sleep 0.05; done;; esac
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
+esac
+case "$prompt" in *send-now*|*send-lost*)
+  replay() { sed 's/}$/,"isReplay":true}/'; }
+  printf '%s\n' "$line" | replay
+  for i in 1 2; do
+    echo '{"type":"assistant","message":{"id":"g'$i'","content":[{"type":"text","text":"What is the password?"}]}}'
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met."}]},"isSynthetic":true}'
+  done
+  IFS= read -r next
+  printf '%s\n' "$next" >> sent.log
+  case "$prompt" in *send-lost*) exit 1;; esac
+  printf '%s\n' "$next" | replay
+  echo '{"type":"result","subtype":"success","result":"","num_turns":2,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  said=$(printf '%s\n' "$next" | text)
+  echo '{"type":"assistant","message":{"id":"g3","content":[{"type":"text","text":"Got it: '"$said"'"}]}}'
+  echo '{"type":"result","subtype":"success","result":"Got it","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.02}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
 esac
 case "$prompt" in *crash*) exit 1;; esac
 case "$prompt" in *leftover*) sleep 20 & exit 1;; esac
@@ -3290,6 +3458,66 @@ esac
         assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
         assert!(msgs.iter().any(|m| m.kind == "text" && m.content == "started"), "the queued message got its run");
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().status, "idle");
+    }
+
+    fn asked(st: &AppState, id: &str, n: usize) -> bool {
+        st.db.list_messages(id, 100, None).unwrap().iter().filter(|m| m.content == "What is the password?").count() >= n
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_now_delivers_the_users_queued_message_into_the_run_in_progress() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        // Not a run the user started: Send now makes its reply an answer to them.
+        wake(&st, &a.id, "send-now".into(), "agent");
+        until("the goal to block", 10, || asked(&st, &a.id, 2)).await;
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "Status?");
+        let from_agent = st.db.list_messages(&a.id, 100, None).unwrap().into_iter().find(|m| m.content == "Status?").unwrap().id;
+        let mine = enqueue_chat(&st, &a.id, "The password is BANANA-42.".into(), json!({})).unwrap().id;
+        assert!(!send_now(&st, &a.id, from_agent).unwrap(), "an agent's message only waits in the queue");
+        assert!(send_now(&st, &a.id, mine).unwrap());
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&a.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [from_agent], "it left the queue");
+        }
+        assert_eq!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta["sent_now"], true);
+        assert!(!cancel_queued(&st, &a.id, mine).unwrap(), "sent now: no cancelling it");
+        assert!(!send_now(&st, &a.id, mine).unwrap(), "once is enough");
+        until("the agent to answer it in the run", 10, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "Got it: The password is BANANA-42.")).await;
+        idle(&st, &a.id).await;
+        let sent = std::fs::read_to_string(ws.join("sent.log")).unwrap();
+        let line: Value = serde_json::from_str(sent.trim()).unwrap();
+        assert_eq!(line["priority"], "now", "it gets in during the hook's block");
+        assert_eq!(user_text(&line), "The password is BANANA-42.");
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input at the end of the run");
+        assert!(std::fs::read_to_string(ws.join("argv.log")).unwrap().lines().any(|l| l == "--replay-user-messages"));
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert_eq!(msgs.iter().filter(|m| m.content == "The password is BANANA-42.").count(), 1, "its replay isn't shown again");
+        assert!(msgs.iter().all(|m| !(m.role == "assistant" && m.content.trim().is_empty())), "no empty bubble for the cut-short turn");
+        // The cut-short turn isn't the run's end; the agent's message got the next run, and the user's didn't.
+        assert_eq!(msgs.iter().filter(|m| m.kind == "run_end").count(), 2, "one per run: {msgs:?}");
+        let p = prompts(&st, &a.id);
+        assert!(p.contains("Status?") && !p.contains("BANANA-42"), "{p}");
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_sent_now_that_claude_never_took_goes_back_to_the_queue() {
+        let (st, a) = fake_claude_state();
+        wake(&st, &a.id, "send-lost".into(), "agent");
+        until("the goal to block", 10, || asked(&st, &a.id, 2)).await;
+        let mine = enqueue_chat(&st, &a.id, "remember BANANA".into(), json!({})).unwrap().id;
+        assert!(send_now(&st, &a.id, mine).unwrap());
+        until("the next run to take it", 20, || prompts(&st, &a.id).contains("remember BANANA")).await;
+        idle(&st, &a.id).await;
+        assert!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta.get("sent_now").is_none());
+        // After the run, there's nothing to send it into: it waits for a run like any message.
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let later = enqueue_chat(&st, &a.id, "later".into(), json!({})).unwrap().id;
+        assert!(!send_now(&st, &a.id, later).unwrap());
+        assert!(st.rt.lock().unwrap().queued_messages[&a.id].iter().any(|(i, _)| *i == later));
     }
 
     #[tokio::test(flavor = "multi_thread")]

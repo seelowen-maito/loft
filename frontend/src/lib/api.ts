@@ -791,6 +791,8 @@ export const api = {
   markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
   /** Takes an agent's message back out of the queue before a run takes it; `ok` is false when one already did. */
   cancelQueued: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/cancel`),
+  /** Send now: the user's queued message into the agent's run in progress; `ok` is false when it stays queued (the run is ending). */
+  sendNow: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/send-now`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
   /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */

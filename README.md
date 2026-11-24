@@ -92,6 +92,8 @@ The `ios/` folder has a native iPhone app for agent status, approvals, tasks and
 
 Each agent runs headless Claude Code in its own folder under `~/.local/share/loft/<checkout>-<hash>/agent-local-storage/` (`$XDG_DATA_HOME` when set), outside any repo; an older install moves its workspaces there from the checkout on start ([ADR 0005](docs/adr/0005-workspaces-outside-the-checkout.md)). Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
 
+A message you send while the agent is running waits in the queue until the run ends, and you can still cancel it there. **Send now** on one of your queued messages delivers it into the run in progress instead, like Ctrl+Enter in the terminal: the agent answers it in that run, even while a `/goal` or Stop hook keeps the run going, and it can't be cancelled any more. Messages from other agents and Delivery steps always wait in the queue.
+
 A run that takes 5 turns in a row without calling a tool, as when a `/goal` or Stop hook keeps sending the agent back with the same answer, is stopped, the chat says why, and the next queued message runs.
 
 ## Development

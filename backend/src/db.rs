@@ -1705,6 +1705,18 @@ impl Db {
         Ok(())
     }
 
+    /// Marks a queued message as sent into the run in progress (Send now), or not any more when it went back to the queue.
+    pub fn mark_sent_now(&self, agent_id: &str, id: i64, sent: bool) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        let sql = if sent {
+            "UPDATE messages SET meta = json_set(meta, '$.sent_now', json('true')) WHERE agent_id = ?1 AND id = ?2"
+        } else {
+            "UPDATE messages SET meta = json_remove(meta, '$.sent_now') WHERE agent_id = ?1 AND id = ?2"
+        };
+        c.execute(sql, params![agent_id, id])?;
+        Ok(())
+    }
+
     /// Records on an end-of-planning card that its Delivery started: who got which ticket.
     pub fn mark_delivery_started(&self, agent_id: &str, id: i64, entry: Option<usize>, started: &Value) -> Result<()> {
         let c = self.0.lock().unwrap();
