@@ -29,6 +29,7 @@ mod mcp;
 mod mentions;
 mod mirror;
 mod processes;
+mod project_settings;
 mod prs;
 mod push;
 mod signin;
@@ -96,6 +97,7 @@ fn api_routes() -> Router<AppState> {
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
+        .route("/project-settings", get(project_settings::get).put(project_settings::put))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))

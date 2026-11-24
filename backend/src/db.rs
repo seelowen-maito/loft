@@ -165,6 +165,16 @@ impl Delivery {
     }
 }
 
+/// A project setting changed from Loft's default: its value, who changed it (an agent's id, empty for the user, and
+/// the name it had then) and when (RFC 3339).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSetting {
+    pub value: Value,
+    pub changed_by: String,
+    pub changed_by_name: String,
+    pub changed_at: String,
+}
+
 /// What the agent whose run stalled a Delivery asked at the end of that run: Needs you shows it with the stall.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StallAsk {
@@ -760,6 +770,17 @@ DROP TABLE IF EXISTS paired_clients;
 CREATE TABLE IF NOT EXISTS agent_devices (
     agent_id TEXT PRIMARY KEY,
     udid TEXT NOT NULL
+);
+-- Each project's settings changed from Loft's default (project_settings.rs): the value as JSON, and who changed it
+-- and when. `changed_by` is the agent's id, empty for the user.
+CREATE TABLE IF NOT EXISTS project_settings (
+    project TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    changed_by TEXT NOT NULL,
+    changed_by_name TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
+    PRIMARY KEY(project, key)
 );
 "#;
 
@@ -1680,6 +1701,28 @@ impl Db {
         c.execute(
             "INSERT OR REPLACE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)",
             params![d.repo, d.spec, d.state, serde_json::to_string(d)?],
+        )?;
+        Ok(())
+    }
+
+    // ---- project settings ----------------------------------------------
+
+    /// The settings `project` changed from Loft's default, by key.
+    pub fn project_settings(&self, project: &str) -> Result<HashMap<String, ProjectSetting>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT key, value, changed_by, changed_by_name, changed_at FROM project_settings WHERE project = ?1")?;
+        let rows = st.query_map([project.trim()], |r| {
+            let value: String = r.get(1)?;
+            Ok((r.get::<_, String>(0)?, ProjectSetting { value: serde_json::from_str(&value).unwrap_or(Value::Null), changed_by: r.get(2)?, changed_by_name: r.get(3)?, changed_at: r.get(4)? }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    pub fn set_project_setting(&self, project: &str, key: &str, s: &ProjectSetting) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT OR REPLACE INTO project_settings (project, key, value, changed_by, changed_by_name, changed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![project.trim(), key, serde_json::to_string(&s.value)?, s.changed_by, s.changed_by_name, s.changed_at],
         )?;
         Ok(())
     }

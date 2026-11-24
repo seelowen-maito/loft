@@ -829,14 +829,21 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
          - Other Devs may push to the branch while you work: pull it again right before you push.\n\
          - One or more commits, each message ending with `{refs}`.\n\
          - {own}\n\
-         - When the commits are on GitHub and your local tests pass, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first. Don't wait for the CI: Loft follows it. Loft hands the commits to the team's reviewers and closes the ticket when they pass and the CI is green: never close it yourself.\n\
+         - When the commits are on GitHub and your local tests pass, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first. Don't wait for the CI: Loft follows it. Loft hands the commits to the team's reviewers and closes the ticket when they pass{green}: never close it yourself.\n\
          - If the ticket can't go on until another issue closes or another agent answers, push what you have and call `mcp__loft__wait_ticket` with {arg}, what it waits on and why, then end your run. Never end your run mid-ticket without `submit_ticket` or `wait_ticket`: Loft would report the Delivery as stalled. Loft wakes you on the ticket when that issue closes or that agent messages you.",
         about = subject(d),
         ticket = ticket_ref(d, t),
         refs = refs(d, t),
         arg = ticket_arg(d, t),
         own = own_rules("build and check the work"),
+        green = if ci_per_ticket(state, d) { " and the CI is green" } else { " (this project's CI mode is `at the end`: Loft checks the CI once the PR is ready)" },
     )
+}
+
+/// Whether `d`'s tickets each wait for their CI before they close: on GitHub, unless its project's CI mode is
+/// `at the end` (then only the ready PR's CI is followed).
+fn ci_per_ticket(state: &AppState, d: &Delivery) -> bool {
+    !d.local && !crate::project_settings::ci_at_the_end(state, &d.project)
 }
 
 /// Who builds the tickets: the team's Dev, or the agent that planned the spec when the team has none, as long
@@ -1495,8 +1502,8 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     refuse_behind(state, &d).await?;
     refuse_unpushed(state, &d, &commits).await?;
     let reviewers: Vec<(&str, crate::db::Agent)> = TICKET_REVIEWERS.iter().filter_map(|r| with_role(state, &d, r).map(|a| (*r, a))).collect();
-    // A plan kept in Loft has no GitHub CI to follow.
-    let ci = !d.local;
+    // A plan kept in Loft has no GitHub CI to follow, and with the CI mode `at the end` it's followed once the PR is ready.
+    let ci = ci_per_ticket(state, &d);
     let d = unstalled(state, d, n);
     let d = update(state, &slug, d.spec, |d| {
         if let Some(t) = d.ticket_mut(n) {
@@ -1515,7 +1522,8 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     .ok_or("The Delivery record couldn't be saved.")?;
     if reviewers.is_empty() && !ci {
         let closed = finish(state, &d, n).await?;
-        return Ok(format!("Submitted {name}. The team has no QA or Security, so it passed as submitted.{closed}"));
+        let end = if d.local { "" } else { " (the CI mode is `at the end`: Loft checks the CI once the PR is ready)" };
+        return Ok(format!("Submitted {name}. The team has no QA or Security, so it passed as submitted{end}.{closed}"));
     }
     // Free of #n: the Dev moves on while it's reviewed, in a run of its own.
     let mut next = advance(state, &slug, d.spec).await;

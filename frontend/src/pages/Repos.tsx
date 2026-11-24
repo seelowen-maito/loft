@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import {
   AlertTriangle, ArrowDown, ArrowUp, CircleDot, ExternalLink, FolderGit2, GitCommitHorizontal,
-  GitPullRequest, Globe, KeyRound, Lock, RefreshCw, Search, Star, X,
+  GitPullRequest, Globe, KeyRound, Lock, RefreshCw, Search, Settings2, Star, X,
 } from "lucide-react";
 import { api, type Commit, type GithubInfo, type GithubItem, type Info, type Repo, type Site } from "../lib/api";
 import { cx, fmtNum } from "../lib/format";
@@ -439,13 +439,18 @@ function RepoDrawer({ repo: r, gh, onClose }: { repo: Repo; gh?: GithubInfo; onC
     <Dialog title={r.name} size="drawer" onClose={onClose} className="flex flex-col">
       <div className="flex items-start justify-between gap-4 border-b border-line px-6 py-5">
         <div className="min-w-0">
-          <div className="eyebrow">{r.path}</div>
+          <div className="eyebrow [overflow-wrap:anywhere]">{r.path}</div>
           <h2 className="mt-1 font-serif text-[34px] leading-none tracking-tight">{r.name}</h2>
           {gh?.description && <p className="mt-2 text-[13px] text-fg-2">{gh.description}</p>}
         </div>
-        <button className="btn-ghost" onClick={onClose} aria-label="Close">
-          <X className="size-4" />
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <Link to={`/repos/${encodeURIComponent(r.name)}/settings`} className="btn shrink-0" title="This project's own settings, like its CI mode">
+            <Settings2 className="size-3.5" /> Settings
+          </Link>
+          <button className="btn-ghost" onClick={onClose} aria-label="Close">
+            <X className="size-4" />
+          </button>
+        </div>
       </div>
       <div className="min-h-0 flex-1 space-y-7 overflow-y-auto px-6 py-6">
         <StatusChips r={r} />

@@ -74,6 +74,10 @@ Then open http://localhost:7420 and check **Settings** (gear icon, top right). S
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
 - **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (and `npm` when pnpm and corepack are missing) on `PATH`.
 
+Each project also has its own **Project settings**, opened with **Settings** in its repo panel (Repos, then click the repo). Each one starts at Loft's default and shows who changed it last and when: you, or the project's Lead, which can change one with its `set_project_setting` tool once you said yes. They're kept in loft's database:
+
+- **CI mode**: `Per ticket` (the default) closes each Delivery ticket only once its CI is green; `At the end` closes tickets on their reviewers and checks the CI once the spec PR is ready, where a red CI is a final round for the Dev. It only changes what Loft waits for, never which workflows GitHub runs.
+
 ### Use it from other devices
 
 loft is a web app on port `7420`, so it works with whatever network setup you already have: a reverse proxy, a VPN, or your local network. Set **SSH host** to this machine's name so `/code` opens VS Code over Remote-SSH.

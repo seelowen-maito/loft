@@ -7248,6 +7248,120 @@ pub(crate) mod tests {
         }
     }
 
+    // ---- Project settings (#462) ----
+
+    async fn settings_tool(st: &AppState, a: &Agent, name: &str, args: Value) -> Result<String, String> {
+        crate::project_settings::mcp_call(st, a, name, &args).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn project_settings_start_at_lofts_defaults_and_record_who_changed_them() {
+        use crate::project_settings::{get, put};
+        let st = state();
+        planner_on(&st, "pset", None);
+        let read = |project: &str| get(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({ "project": project })).unwrap()));
+        let change = |project: &str, key: &str, value: Value| put(State(st.clone()), Json(serde_json::from_value(json!({ "project": project, "key": key, "value": value })).unwrap()));
+        let ci = |v: &Value| v["settings"].as_array().unwrap().iter().find(|s| s["key"] == "ci_mode").unwrap().clone();
+
+        // Loft's defaults, never changed.
+        let Json(v) = read("pset").await.unwrap();
+        let s = ci(&v);
+        assert_eq!((&v["project"], &s["value"], &s["default"], &s["changed"]), (&json!("pset"), &json!("per_ticket"), &json!("per_ticket"), &Value::Null));
+        assert_eq!(s["choices"].as_array().unwrap().iter().map(|c| c["value"].clone()).collect::<Vec<_>>(), vec![json!("per_ticket"), json!("at_the_end")]);
+        assert!(s["help"].as_str().unwrap().contains("never which workflows GitHub runs"), "{s}");
+
+        // The user changes it: recorded with no agent, and when.
+        let Json(v) = change("pset", "ci_mode", json!("at_the_end")).await.unwrap();
+        let s = ci(&v);
+        assert_eq!((&s["value"], &s["changed"]["agent"]), (&json!("at_the_end"), &Value::Null));
+        assert!(chrono::DateTime::parse_from_rfc3339(s["changed"]["at"].as_str().unwrap()).is_ok(), "{s}");
+        assert!(crate::project_settings::ci_at_the_end(&st, "pset") && !crate::project_settings::ci_at_the_end(&st, "other"));
+        assert_eq!(ci(&read("pset").await.unwrap().0)["value"], "at_the_end", "kept");
+
+        // Refused: a value or setting there isn't, and a project that isn't a folder in the projects folder.
+        let err = change("pset", "ci_mode", json!("never")).await.unwrap_err();
+        assert_eq!((err.0, err.1.as_str()), (axum::http::StatusCode::BAD_REQUEST, "CI mode takes `per_ticket` or `at_the_end`."));
+        assert!(change("pset", "colour", json!("red")).await.unwrap_err().1.starts_with("There's no project setting `colour`."));
+        assert_eq!(read("nowhere").await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(change("../pset", "ci_mode", json!("per_ticket")).await.unwrap_err().0, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(ci(&read("pset").await.unwrap().0)["value"], "at_the_end", "nothing refused was saved");
+
+        // Only the project's Lead changes it with the tool.
+        let dev = busy(&st, "Builder", "pset", "dev");
+        let err = settings_tool(&st, &dev, "set_project_setting", json!({ "key": "ci_mode", "value": "per_ticket" })).await.unwrap_err();
+        assert_eq!(err, "Only the project's Lead changes its Project settings, once the user said yes.");
+        let lead = busy(&st, "Lead", "pset", "lead");
+        let err = settings_tool(&st, &lead, "set_project_setting", json!({ "project": "web", "key": "ci_mode", "value": "per_ticket" })).await.unwrap_err();
+        assert_eq!(err, "web isn't one of your projects.");
+        let err = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "ci_mode", "value": "sometimes" })).await.unwrap_err();
+        assert_eq!(err, "CI mode takes `per_ticket` or `at_the_end`.");
+        let out = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "ci_mode", "value": "per_ticket" })).await.unwrap();
+        assert!(out.starts_with("Saved, as changed by you now.\nProject settings of pset:\n- CI mode (`ci_mode`): `per_ticket`. Loft's default: `per_ticket`."), "{out}");
+
+        // The page shows the Lead, and keeps the name it had once it's gone.
+        let s = ci(&read("pset").await.unwrap().0);
+        assert_eq!((&s["value"], &s["changed"]["agent"]), (&json!("per_ticket"), &json!({ "id": lead.id, "name": "Lead" })));
+        let out = settings_tool(&st, &dev, "project_settings", json!({})).await.unwrap();
+        assert!(out.contains("- CI mode (`ci_mode`): `per_ticket`.") && out.contains("Changed by Lead at "), "{out}");
+        st.db.delete_agent(&lead.id).unwrap();
+        assert_eq!(ci(&read("pset").await.unwrap().0)["changed"]["agent"]["name"], "Lead");
+        assert!(crate::mcp::tools(&st).as_array().unwrap().iter().any(|t| t["name"] == "set_project_setting"));
+    }
+
+    #[tokio::test]
+    async fn with_the_ci_mode_at_the_end_tickets_close_on_their_reviewers_and_the_ci_is_followed_once_ready() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("ci-at-end", "octo/ci-at-end");
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        let (dev, team) = building_both(&st, &fake, name, &["qa", "code_reviewer"]).await;
+        let (qa, cr) = (&team[0], &team[1]);
+        let planner = planner_of(&st, slug);
+        spec_issue(&st, &fake, name, slug);
+        crate::project_settings::set(&st, name, "ci_mode", &json!("at_the_end"), None).unwrap();
+        // A CI that would hold every ticket in per-ticket mode.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("in_progress", None)] }));
+
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("are reviewing it. Loft wakes you if they ask for changes, and closes it when they pass."), "{out}");
+        let out = tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(!out.contains("waits for its CI"), "{out}");
+        assert_eq!(standing(&st, slug, 41).0, "closed", "closed on its reviewer, with its CI still running");
+        let w = woken(&st, &dev);
+        assert!(w.last().unwrap().contains("closes the ticket when they pass (this project's CI mode is `at the end`: Loft checks the CI once the PR is ready): never close it yourself."), "{}", w.last().unwrap());
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        tool(&st, qa, "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(standing(&st, slug, 42).0, "closed");
+        crate::delivery::follow_all(&st).await;
+        assert!(fake.seen(&runs).is_empty(), "no ticket's CI is read");
+
+        // The final Code Review passes: the spec PR is ready, and only now its CI is followed.
+        tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.done_at.as_str()), ("ready", "following", ""));
+        assert!(!fake.seen(&runs).is_empty() && done_items(&st).is_empty(), "not done while the ready PR's CI runs");
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert!(d.final_ci.is_empty() && !d.done_at.is_empty(), "{d:?}");
+        assert_eq!(woken(&st, &planner).iter().filter(|w| w.contains("is done.")).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn with_the_ci_mode_at_the_end_a_team_with_no_reviewers_passes_a_ticket_as_submitted() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("ci-at-end-alone", "octo/ci-at-end-alone");
+        let (dev, _) = building(&st, &fake, name, &[]).await;
+        crate::project_settings::set(&st, name, "ci_mode", &json!("at_the_end"), Some(&dev)).unwrap();
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("in_progress", None)] }));
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.starts_with("Submitted #41. The team has no QA or Security, so it passed as submitted (the CI mode is `at the end`: Loft checks the CI once the PR is ready)."), "{out}");
+        assert_eq!(standing(&st, slug, 41).0, "closed");
+        assert!(fake.seen(&runs).is_empty());
+    }
+
     // ---- CI after ready (#460) ----
 
     /// `name`'s Delivery (tickets #41 and #42, a Code reviewer) through its final Code Review's pass, with these
