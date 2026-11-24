@@ -1212,7 +1212,7 @@ fn substitutions(s: &str) -> Vec<String> {
         } else if c[i] == '`' {
             // Up to the next backtick that isn't escaped, unescaped as the shell does. Each backtick starts one, whatever
             // pairing the ones before it would make: a backtick in a quote or a comment inside `$(…)` is only text.
-            out.push(backtick_body(&c, i + 1).0.into_iter().collect());
+            out.extend(backtick_readings(&c, i + 1, false).0.into_iter().map(|b| b.into_iter().collect::<String>()));
             i += 1;
         } else {
             i += 1;
@@ -2754,8 +2754,8 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                         '`' => {
                             l.word.push('$');
                             l.cmd(p);
-                            let (body, next) = backtick_body(c, i);
-                            lex(p, &body, 0, Some('\0'));
+                            let (bodies, next) = backtick_readings(c, i, true);
+                            lex_readings(p, &mut l, &bodies);
                             i = next;
                         }
                         _ => l.word.push(q),
@@ -2766,8 +2766,8 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                 l.in_word = true;
                 l.word.push('$');
                 l.cmd(p);
-                let (body, next) = backtick_body(c, i);
-                lex(p, &body, 0, Some('\0'));
+                let (bodies, next) = backtick_readings(c, i, false);
+                lex_readings(p, &mut l, &bodies);
                 i = next;
             }
             '$' | '<' | '>' if next == Some('(') => {
@@ -2811,8 +2811,8 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     // `${x:-`cmd`}` too.
                     if n == '`' {
                         l.cmd(p);
-                        let (body, next) = backtick_body(c, i);
-                        lex(p, &body, 0, Some('\0'));
+                        let (bodies, next) = backtick_readings(c, i, false);
+                        lex_readings(p, &mut l, &bodies);
                         i = next;
                     }
                 }
@@ -2989,17 +2989,15 @@ fn closes_arithmetic(c: &[char], i: usize) -> bool {
     false
 }
 
-/// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
-/// decoded. Returns the index past its closing quote.
-/// The command a backtick at `i - 1` opens: the text to the next backtick that isn't escaped, with its `\\`` (a backtick
-/// of a command nested in it), `\\\\` and `\\$` unescaped as the shell does, and where the text after it starts.
-fn backtick_body(c: &[char], mut i: usize) -> (Vec<char>, usize) {
+/// The command a backtick at `i - 1` opens: the text to the next backtick that isn't escaped, with its `\``, `\\` and
+/// `\$` (and `\"`, in double quotes) unescaped as the shell does, and where the text after it starts.
+fn backtick_body(c: &[char], mut i: usize, in_quotes: bool) -> (Vec<char>, usize) {
     let mut body = vec![];
     while let Some(&ch) = c.get(i) {
         i += 1;
         match ch {
             '`' => break,
-            '\\' if matches!(c.get(i), Some('`' | '\\' | '$')) => {
+            '\\' if matches!(c.get(i), Some('`' | '\\' | '$')) || (in_quotes && c.get(i) == Some(&'"')) => {
                 body.push(c[i]);
                 i += 1;
             }
@@ -3009,6 +3007,28 @@ fn backtick_body(c: &[char], mut i: usize) -> (Vec<char>, usize) {
     (body, i)
 }
 
+/// The readings of the backtick command at `i - 1`: its `backtick_body` for `in_quotes`, and the other too. Whether `\"`
+/// is unescaped depends on the shell and on quotes and `${…}` the guard can't always follow (`"${x:-'}'`…`}"` closes
+/// differently in bash and zsh), so a command that reads differently either way is checked both ways: a git in either asks.
+fn backtick_readings(c: &[char], i: usize, in_quotes: bool) -> (Vec<Vec<char>>, usize) {
+    let (body, next) = backtick_body(c, i, in_quotes);
+    let other = backtick_body(c, i, !in_quotes).0;
+    let bodies = if other == body { vec![body] } else { vec![body, other] };
+    (bodies, next)
+}
+
+/// Lexes each reading as a command of its own; the first has its command slot already.
+fn lex_readings(p: &mut Parse, l: &mut Level, bodies: &[Vec<char>]) {
+    for (n, body) in bodies.iter().enumerate() {
+        if n > 0 {
+            l.cmd(p);
+        }
+        lex(p, body, 0, Some('\0'));
+    }
+}
+
+/// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
+/// decoded. Returns the index past its closing quote.
 fn ansi_c_quoted(c: &[char], mut i: usize, word: &mut String) -> usize {
     while let Some(&q) = c.get(i) {
         i += 1;
@@ -5389,6 +5409,77 @@ mod tests {
             format!("echo ${{x:-`true`}}; cd {USER}; echo \"`true`\"; git reset --hard"),
         ] {
             assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+    }
+
+    /// In double quotes, `\"` inside a backtick command is a plain quote of that command, not an escaped one.
+    #[test]
+    fn an_escaped_quote_in_a_backtick_command_in_double_quotes_is_a_quote() {
+        let user = vec![PathBuf::from(USER)];
+        let git = format!("git -C {USER} reset --hard");
+        for cmd in [
+            format!("echo \"`echo \"x\\\"; {git}; echo \\\"y\"`\""),
+            format!("echo \"`echo \\\"a\\\"; {git}`\""),
+            format!("echo \"`cd {USER}; echo \\\"x\\\"; pnpm install`\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+        assert!(asks_all("echo \"`echo \\\"git status\\\"`\"", CLONE).is_empty());
+    }
+
+    /// Inside `${…}` in double quotes zsh unescapes `\"` in a backtick command and bash doesn't: a git in either reading asks.
+    #[test]
+    fn a_backtick_in_a_parameter_expansion_in_double_quotes_is_read_as_zsh_and_as_bash() {
+        let user = vec![PathBuf::from(USER)];
+        let git = format!("git -C {USER} reset --hard");
+        for cmd in [
+            // bash: the git runs; zsh: it is in a string.
+            format!("echo \"${{x:-`echo \\\"; {git}; echo \\\"`}}\""),
+            format!("bash -c 'echo \"${{x:-`echo \\\"; {git}; echo \\\"`}}\"'"),
+            format!("echo \"${{x:-`echo \\\"; cd {USER}; pnpm install; echo \\\"`}}\""),
+            // zsh: the git runs.
+            format!("echo \"${{x:-`echo \"x\\\"; {git}; echo \\\"y\"`}}\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+    }
+
+    /// Double quotes opened inside `${…}`, with the backtick command in them (found on `main`): both readings of `\"` are
+    /// checked, so a git in either asks.
+    #[test]
+    fn double_quotes_inside_a_parameter_expansion_dont_hide_a_backtick_command() {
+        let git = format!("git -C {USER} reset --hard");
+        let inner = format!("`echo \"x\\\"; {git}; echo \\\"y\"`");
+        for cmd in [
+            format!("echo ${{x:-\"{inner}\"}}"),
+            format!("echo \"${{x:-\"{inner}\"}}\""),
+            format!("cat <<EOF\n${{x:-\"{inner}\"}}\nEOF"),
+            format!("bash -c 'echo ${{x:-\"{inner}\"}}'"),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), vec![PathBuf::from(USER)], "{cmd}");
+        }
+        assert!(asks_all("echo ${x:-\"`echo \\\"git status\\\"`\"}", CLONE).is_empty());
+    }
+
+    /// Where bash and zsh count `${…}` or quotes differently, a backtick command is read both ways (found by security):
+    /// a `}` in single quotes, a quote inside the braces, a continuation making `${`.
+    #[test]
+    fn a_backtick_in_a_string_is_read_both_ways_whatever_the_braces_look_like() {
+        let git = format!("git -C {USER} reset --hard");
+        let payload = format!("`echo \\\"; {git}; echo \\\"`");
+        for cmd in [
+            format!("echo \"${{x:-${{y}}{payload}}}\""),
+            format!("echo \"${{x:-`true`${{y}}{payload}}}\""),
+            format!("echo \"${{x:-\\}}{payload}}}\""),
+            format!("echo \"${{x:-$(echo }}){payload}}}\""),
+            format!("echo \"${{x:-'}}'{payload}}}\""),
+            format!("bash -c 'echo \"${{x:-'\\''}}'\\''{payload}}}\"'"),
+            format!("echo \"${{x:-'}}}}}}'{payload}}}\""),
+            format!("echo \"${{x+'}}'{payload}}}\""),
+            format!("echo \"${{x:-\"}}\"{payload}}}\""),
+            format!("echo \"$\\\n{{x:-{payload}}}\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), vec![PathBuf::from(USER)], "{cmd}");
         }
     }
 }

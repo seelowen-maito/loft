@@ -240,6 +240,14 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
                             meta: ["duration_ms": .number(143_000)], createdAt: ago(93).addingTimeInterval(143)),
             ],
         ]
+        // `-fixture-queued`: two messages typed while the Orchestrator's run goes on, one still queued, one cancelled (#668).
+        if args.contains("-fixture-queued") {
+            msgs["orch", default: []] += [
+                m(14, "orch", "user", "text", "Skip the iPad layout for now.", 3, meta: ["cancelled": true]),
+                m(15, "orch", "user", "text", "Also add a dark mode toggle to the settings screen.", 1),
+            ]
+            agentList[0].queuedMessages = [15]
+        }
         perms = [
             PermissionRequest(id: "p1", agentId: "ios", source: "prompt", toolName: "Bash", input: ["command": "xcodebuild test -scheme Loft"],
                               reason: nil, rule: "Bash(xcodebuild *)", status: "pending", createdAt: ago(4)),
@@ -712,6 +720,18 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
     public func stopRun(agentId: String) async throws { try check(); sent("stop", agentId) }
+    public func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool {
+        try check()
+        return locked {
+            guard let i = agentList.firstIndex(where: { $0.id == agentId }), agentList[i].queuedMessages?.contains(messageId) == true else { return false }
+            agentList[i].queuedMessages?.removeAll { $0 == messageId }
+            if let j = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), case .object(var o)? = msgs[agentId]![j].meta ?? .object([:]) {
+                o["cancelled"] = true
+                msgs[agentId]![j].meta = .object(o)
+            }
+            return true
+        }
+    }
     public func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
     /// `-fixture-slow-disk`: sizes take a while, as a real measure can, to show the loader.
     private func measure() async {

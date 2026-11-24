@@ -72,8 +72,9 @@ struct ChatView: View {
                     ForEach(Array(shown.enumerated()), id: \.element.id) { i, m in
                         // The sticker shows once per run of replies from the same agent.
                         MessageRow(message: m, agent: agent, showsSticker: i == 0 || Self.speaker(shown[i - 1]) != Self.speaker(m),
-                                   reply: store.info?.supports(.reply) == true && m.isQuotable
+                                   reply: store.info?.supports(.reply) == true && m.isQuotable && !m.isCancelled
                                        ? { replyingTo = MessageQuote(of: m, agentName: agent.name) } : nil,
+                                   copyToBox: { draft = QueueMark.copiedToBox(draft, m) },
                                    jump: { id in
                                        // One older than the loaded pages can't be scrolled to: say so, as the web does.
                                        if shown.contains(where: { $0.id == id }) {
@@ -194,12 +195,18 @@ private struct MessageRow: View {
     var showsSticker = true
     /// Reply to this message (nil when it can't be quoted), and jump to the one it quotes.
     var reply: (() -> Void)?
+    /// Copy to box on a cancelled message: its text goes into the message box, after any draft.
+    var copyToBox: () -> Void = {}
     var jump: (Int64) -> Void = { _ in }
     @State private var saving = false
     /// The saved item's title, shown under the message for a moment once Save is done.
     @State private var savedAs: String?
 
     private var canSave: Bool { store.info?.supports(.saved) == true && Saved.canSave(message) }
+    @State private var cancelling = false
+    @State private var cancelError: String?
+
+    private var mark: QueueMark? { QueueMark(message, in: agent) }
 
     /// The user's own message. Another agent's handover, delegation or FYI also comes as role user, with who sent
     /// it: that one is incoming, on the left, as on the iPhone and the web.
@@ -229,44 +236,72 @@ private struct MessageRow: View {
                     }
                     .frame(width: 26, height: 26)
                     .padding(.top, 2)
+                    .accessibilityHidden(true)
                 }
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                    if let from = message.fromAgentName {
-                        Text(message.isMentionReply ? "\(from) · answering your mention" : "From \(from)")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(Theme.accent)
-                    }
-                    let photos = message.photos.compactMap { store.uploadURL(agentId: message.agentId, file: $0) }
-                    if !photos.isEmpty {
-                        HStack { ForEach(photos, id: \.self) { Photo(url: $0) } }
-                    }
-                    if let q = message.replyQuote {
-                        QuoteBlock(quote: q) { jump(q.id) }
-                    }
-                    if !message.displayContent.isEmpty {
-                        if isUser {
-                            // As on the web: your messages in a faint bubble on the right.
-                            Text(MarkdownView.inline(message.displayContent))
-                                .font(.system(size: 14))
-                                .lineSpacing(3)
-                                .textSelection(.enabled)
-                                .padding(.horizontal, 14).padding(.vertical, 9)
-                                .foregroundStyle(WebTheme.fg)
-                                .background(WebTheme.fg.opacity(0.07),
-                                            in: UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16,
-                                                                       bottomTrailingRadius: 6, topTrailingRadius: 16, style: .continuous))
-                        } else {
-                            // The agent's reply as one card, so each reads as a block.
-                            let shape = UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 16,
-                                                               bottomTrailingRadius: 16, topTrailingRadius: 16, style: .continuous)
-                            MarkdownView(message.displayContent)
-                                .foregroundStyle(WebTheme.fg)
-                                .padding(.horizontal, 16).padding(.vertical, 12)
-                                .background(WebTheme.surface, in: shape)
-                                .overlay(shape.strokeBorder(WebTheme.line))
+                    // The message as one element; the footer below stays out of it, so its buttons are reachable.
+                    VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
+                        if let from = message.fromAgentName {
+                            Text(message.isMentionReply ? "\(from) · answering your mention" : "From \(from)")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(Theme.accent)
+                        }
+                        let photos = message.photos.compactMap { store.uploadURL(agentId: message.agentId, file: $0) }
+                        if !photos.isEmpty {
+                            HStack { ForEach(photos, id: \.self) { Photo(url: $0) } }
+                        }
+                        if let q = message.replyQuote {
+                            QuoteBlock(quote: q) { jump(q.id) }
+                        }
+                        if !message.displayContent.isEmpty {
+                            if isUser {
+                                // As on the web: your messages in a faint bubble on the right.
+                                Text(MarkdownView.inline(message.displayContent))
+                                    .font(.system(size: 14))
+                                    .strikethrough(message.isCancelled)
+                                    .lineSpacing(3)
+                                    .textSelection(.enabled)
+                                    .padding(.horizontal, 14).padding(.vertical, 9)
+                                    .foregroundStyle(WebTheme.fg)
+                                    .background(WebTheme.fg.opacity(0.07),
+                                                in: UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16,
+                                                                           bottomTrailingRadius: 6, topTrailingRadius: 16, style: .continuous))
+                            } else {
+                                // The agent's reply as one card, so each reads as a block.
+                                let shape = UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 16,
+                                                                   bottomTrailingRadius: 16, topTrailingRadius: 16, style: .continuous)
+                                MarkdownView(message.displayContent)
+                                    .foregroundStyle(message.isCancelled ? WebTheme.fg3 : WebTheme.fg)
+                                    .strikethrough(message.isCancelled)
+                                    .padding(.horizontal, 16).padding(.vertical, 12)
+                                    .background(WebTheme.surface, in: shape)
+                                    .overlay(shape.strokeBorder(WebTheme.line))
+                            }
                         }
                     }
-                    Text(message.createdAt, style: .time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
+                    // Selectable text isn't read by a combined element, so the label says it.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(spoken)
+                    .accessibilityAction(named: "Copy") { copy() }
+                    .accessibilityAction(named: "Reply") { reply?() }
+                    .accessibilityAction(named: "Save") { if canSave { saving = true } }
+                    .accessibilityActions {
+                        // Only in its own state: Cancel while queued, Copy to box once cancelled.
+                        if mark == .queued { Button("Cancel this queued message", action: cancelQueued) }
+                        if mark == .cancelled { Button("Copy to box", action: copyToBox) }
+                    }
+                    .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
+                    .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
+                    // The footer (#666): yours (right) end with the time, the others' (left) start with it.
+                    HStack(spacing: 4) {
+                        if isUser, mark != nil { queueStatus; separator }
+                        Text(message.createdAt, style: .time).foregroundStyle(WebTheme.fg3).accessibilityHidden(true)
+                        if !isUser, mark != nil { separator; queueStatus }
+                    }
+                    .font(.system(size: 10.5, design: .monospaced))
+                    if let cancelError {
+                        Text(cancelError).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.failureInk)
+                    }
                     if let savedAs {
                         Label("Saved “\(savedAs)”", systemImage: "bookmark.fill")
                             .font(.system(size: 11))
@@ -286,12 +321,6 @@ private struct MessageRow: View {
                 }
             }
             .sheet(isPresented: $saving) { SaveMessageSheet(message: message) { savedAs = $0.title } }
-            // Selectable text isn't read by a combined element, so the label says it.
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(spoken)
-            .accessibilityAction(named: "Copy") { copy() }
-            .accessibilityAction(named: "Reply") { reply?() }
-            .accessibilityAction(named: "Save") { if canSave { saving = true } }
             // Save's confirmation, as the web's toast: under the message for a moment, and spoken.
             .task(id: savedAs) {
                 guard let t = savedAs else { return }
@@ -299,8 +328,47 @@ private struct MessageRow: View {
                 try? await Task.sleep(for: .seconds(3))
                 withAnimation { savedAs = nil }
             }
-            .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
-            .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
+        }
+    }
+
+    private var separator: some View {
+        Rectangle().fill(WebTheme.line).frame(width: 1, height: 12).padding(.horizontal, 4).accessibilityHidden(true)
+    }
+
+    /// The footer's queue status (#668): the queued mark with Cancel, or the cancelled mark with Copy to box.
+    @ViewBuilder private var queueStatus: some View {
+        switch mark {
+        case .queued?:
+            Label(QueueMark.queuedText, systemImage: "hourglass").foregroundStyle(Theme.attentionInk).accessibilityHidden(true)
+            Button(action: cancelQueued) { Label("Cancel", systemImage: "xmark") }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Theme.attentionInk)
+                .disabled(cancelling)
+                .help(message.fromAgentName.map { "Cancel this queued message from \($0)" } ?? "Cancel this queued message")
+                .accessibilityIdentifier("cancelQueued")
+        case .cancelled?:
+            Text(QueueMark.cancelledText).foregroundStyle(WebTheme.fg3).accessibilityHidden(true)
+            Button(action: copyToBox) { Label("Copy to box", systemImage: "doc.on.doc") }
+                .buttonStyle(.borderless)
+                .foregroundStyle(WebTheme.fg2)
+                .help("Copy this message back into the box")
+                .accessibilityIdentifier("copyToBox")
+        case nil:
+            EmptyView()
+        }
+    }
+
+    /// Takes the message back out of the agent's queue; a run that already took it says so under the message.
+    private func cancelQueued() {
+        cancelling = true
+        cancelError = nil
+        Task {
+            do {
+                if try await !store.cancelQueued(agentId: agent.id, messageId: message.id) { cancelError = QueueMark.tooLateText }
+            } catch {
+                cancelError = APIError.from(error).title
+            }
+            cancelling = false
         }
     }
 
@@ -322,6 +390,7 @@ private struct MessageRow: View {
         if !message.photos.isEmpty { parts.append(message.photos.count == 1 ? "Image" : "\(message.photos.count) images") }
         if let q = message.replyQuote { parts.append("Replying to \(q.authorLabel): \(q.excerpt)") }
         parts.append(message.displayContent)
+        if mark == .queued { parts.append(QueueMark.queuedText) } else if mark == .cancelled { parts.append(QueueMark.cancelledText) }
         parts.append(message.createdAt.formatted(date: .omitted, time: .shortened))
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }

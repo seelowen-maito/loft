@@ -91,6 +91,8 @@ public struct Agent: Codable, Identifiable, Hashable {
     /// Background tasks the agent is waiting on after it already replied (e.g. "Run the QA suite").
     public var waitingOn: [String]? = nil
     public var waitingSince: Date? = nil
+    /// Typed messages waiting for its current run to end, which Cancel can take back (nil from older servers).
+    public var queuedMessages: [Int64]? = nil
     /// The Claude Code Session its next run resumes; nil after Clear (and from older servers).
     public var sessionId: String? = nil
     /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" or "always" (nil from older servers).
