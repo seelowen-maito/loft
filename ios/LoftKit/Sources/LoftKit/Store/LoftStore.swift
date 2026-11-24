@@ -615,6 +615,16 @@ public final class LoftStore {
         historyHasMore[agentId] = page.count >= 100
     }
 
+    /// Loads earlier pages until message `id` is in the chat, for a saved item's Open in chat (at most `pages` pages).
+    /// True when it's there.
+    public func loadMessage(_ id: Int64, in agentId: String, pages: Int = 10) async -> Bool {
+        for _ in 0..<pages {
+            guard let first = messages[agentId]?.first, first.id > id else { break }
+            guard historyHasMore[agentId] == true, (try? await loadOlder(agentId)) != nil else { break }
+        }
+        return messages[agentId]?.contains { $0.id == id } == true
+    }
+
     /// A dictation going out after a short Undo from a chat ("Sending to …"). It lives here rather than in the
     /// composer, so it still goes when you leave the chat during the window.
     public struct VoiceAutoSend: Identifiable {

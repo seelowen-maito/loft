@@ -161,7 +161,7 @@ struct SavedItemView: View {
                 Text("Edited \(edited.formatted(date: .abbreviated, time: .shortened))")
             }
             if item.sourceExists == true, store.agent(item.agentId) != nil {
-                NavigationLink(value: ChatRoute(agentId: item.agentId)) {
+                NavigationLink(value: ChatRoute(agentId: item.agentId, message: item.messageId)) {
                     Label("Open in chat", systemImage: "bubble.left")
                 }
                 .accessibilityIdentifier("savedOpenChat")

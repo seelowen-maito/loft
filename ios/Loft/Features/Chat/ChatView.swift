@@ -58,6 +58,8 @@ struct ChatView: View {
     /// The on-device model's replies to the agent's latest message, when it ends on a question.
     @State private var suggested: (messageId: Int64, replies: [String])?
     private let dictate: Bool
+    /// The message to scroll to once the chat has loaded, instead of the bottom (a saved item's Open in chat).
+    @State private var focus: Int64?
     @Environment(VoiceSession.self) private var voice
 
     /// `-fixture-voice ask`: the Send it? question shows at once, for screenshots.
@@ -69,9 +71,10 @@ struct ChatView: View {
         return false
     }
 
-    init(agentId: String, draft: String? = nil, dictate: Bool = false) {
+    init(agentId: String, draft: String? = nil, dictate: Bool = false, message: Int64? = nil) {
         self.agentId = agentId
         self.dictate = dictate
+        _focus = State(initialValue: message)
         _draft = State(initialValue: draft ?? "")
         // Talk's tidied text, landed in the box: it gets the Send it? bar until it's sent or touched.
         _talkText = State(initialValue: VoicePresentation.shared.statusAgentId == agentId ? draft : nil)
@@ -86,6 +89,18 @@ struct ChatView: View {
         } else {
             EmptyState(symbol: "bubble.left", title: "Agent not found", message: "It may have been deleted on the Mac.")
         }
+    }
+
+    /// Draws the chat down to message `id` and scrolls to it, for a reply's quote or a saved item's Open in chat.
+    /// False when it isn't loaded.
+    private func reveal(_ id: Int64, _ proxy: ScrollViewProxy) -> Bool {
+        let all = ChatItem.build(store.conversation(agentId))
+        let key = ChatItem.key(message: id)
+        guard let i = all.firstIndex(where: { $0.id == key }) else { return false }
+        keepTop = nil
+        shown = max(shown, all.count - i)
+        DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
+        return true
     }
 
     private func chat(_ agent: Agent) -> some View {
@@ -133,14 +148,7 @@ struct ChatView: View {
                     ForEach(items) { item in
                         ChatItemView(item: item, agent: agent, currentQuestionId: currentQuestion?.id, command: grillCommand, clearWith: clearWith,
                                      reply: store.info?.supports(.reply) == true ? { replyingTo = MessageQuote(of: $0, agentName: agent.name) } : nil,
-                                     jump: { id in
-                                         // The original may be loaded but not drawn yet: draw down to it first.
-                                         let key = ChatItem.key(message: id)
-                                         guard let i = all.firstIndex(where: { $0.id == key }) else { return }
-                                         keepTop = nil
-                                         shown = max(shown, all.count - i)
-                                         DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
-                                     })
+                                     jump: { _ = reveal($0, proxy) })
                             .id(item.id)
                     }
                     ForEach(store.pending(for: agentId)) { p in
@@ -170,6 +178,12 @@ struct ChatView: View {
             // Jump to the bottom once it has messages; new ones scroll it down below.
             .task(id: !items.isEmpty) {
                 guard !items.isEmpty else { return }
+                // Or to the saved message Open in chat came for, loading earlier pages until it's there.
+                if let id = focus {
+                    focus = nil
+                    _ = await store.loadMessage(id, in: agentId)
+                    if reveal(id, proxy) { return }
+                }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
             .scrollDismissesKeyboard(.interactively)

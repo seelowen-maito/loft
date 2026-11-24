@@ -94,6 +94,17 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .accessibilityIdentifier("messageList")
+            // A saved item's Open in chat: scroll to its message once the chat has loaded, loading earlier pages
+            // until it's there.
+            .task(id: "\(agent.id) \(nav.chatFocus?.message ?? 0) \(shown.isEmpty)") {
+                guard let f = nav.chatFocus, f.agentId == agent.id, !shown.isEmpty else { return }
+                nav.chatFocus = nil
+                if await store.loadMessage(f.message, in: agent.id) {
+                    DispatchQueue.main.async { withAnimation { proxy.scrollTo(f.message, anchor: .top) } }
+                } else {
+                    nav.chatNote = (agent.id, "That message is no longer in the chat.")
+                }
+            }
             }
             .overlay {
                 if let loadError, shown.isEmpty {

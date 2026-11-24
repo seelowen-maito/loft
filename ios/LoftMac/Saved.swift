@@ -148,7 +148,7 @@ private struct SavedPage: View {
                         Text("From \(item.agentName) · \(item.createdAt.formatted(date: .abbreviated, time: .omitted))")
                         if let edited = item.updatedAt { Text("· Edited \(edited.formatted(date: .abbreviated, time: .shortened))") }
                         if item.sourceExists == true, store.agent(item.agentId) != nil {
-                            Button { nav.openChat(item.agentId) } label: { Label("Open in chat", systemImage: "bubble.left") }
+                            Button { nav.openChat(item.agentId, message: item.messageId) } label: { Label("Open in chat", systemImage: "bubble.left") }
                                 .buttonStyle(.link)
                                 .accessibilityIdentifier("savedOpenChat")
                         } else if item.sourceExists == false {

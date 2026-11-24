@@ -172,9 +172,13 @@ final class MacNav {
         set { selection.chatNote = newValue }
     }
 
-    func openChat(_ agentId: String) {
+    /// The message to scroll to once its chat shows (a saved item's Open in chat).
+    var chatFocus: (agentId: String, message: Int64)?
+
+    func openChat(_ agentId: String, message: Int64? = nil) {
         selection.openChat()
         self.agentId = agentId
+        chatFocus = message.map { (agentId, $0) }
     }
 
     /// Opens the agent's chat with Talk listening.
