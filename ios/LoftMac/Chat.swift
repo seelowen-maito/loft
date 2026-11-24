@@ -220,49 +220,65 @@ private struct MessageRow: View {
                     }
                     .frame(width: 26, height: 26)
                     .padding(.top, 2)
+                    .accessibilityHidden(true)
                 }
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                    if let from = message.fromAgentName {
-                        Text(message.isMentionReply ? "\(from) · answering your mention" : "From \(from)")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(Theme.accent)
-                    }
-                    let photos = message.photos.compactMap { store.uploadURL(agentId: message.agentId, file: $0) }
-                    if !photos.isEmpty {
-                        HStack { ForEach(photos, id: \.self) { Photo(url: $0) } }
-                    }
-                    if let q = message.replyQuote {
-                        QuoteBlock(quote: q) { jump(q.id) }
-                    }
-                    if !message.displayContent.isEmpty {
-                        if isUser {
-                            // As on the web: your messages in a faint bubble on the right.
-                            Text(MarkdownView.inline(message.displayContent))
-                                .font(.system(size: 14))
-                                .strikethrough(message.isCancelled)
-                                .lineSpacing(3)
-                                .textSelection(.enabled)
-                                .padding(.horizontal, 14).padding(.vertical, 9)
-                                .foregroundStyle(WebTheme.fg)
-                                .background(WebTheme.fg.opacity(0.07),
-                                            in: UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16,
-                                                                       bottomTrailingRadius: 6, topTrailingRadius: 16, style: .continuous))
-                        } else {
-                            // The agent's reply as one card, so each reads as a block.
-                            let shape = UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 16,
-                                                               bottomTrailingRadius: 16, topTrailingRadius: 16, style: .continuous)
-                            MarkdownView(message.displayContent)
-                                .foregroundStyle(message.isCancelled ? WebTheme.fg3 : WebTheme.fg)
-                                .strikethrough(message.isCancelled)
-                                .padding(.horizontal, 16).padding(.vertical, 12)
-                                .background(WebTheme.surface, in: shape)
-                                .overlay(shape.strokeBorder(WebTheme.line))
+                    // The message as one element; the footer below stays out of it, so its buttons are reachable.
+                    VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
+                        if let from = message.fromAgentName {
+                            Text(message.isMentionReply ? "\(from) · answering your mention" : "From \(from)")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(Theme.accent)
+                        }
+                        let photos = message.photos.compactMap { store.uploadURL(agentId: message.agentId, file: $0) }
+                        if !photos.isEmpty {
+                            HStack { ForEach(photos, id: \.self) { Photo(url: $0) } }
+                        }
+                        if let q = message.replyQuote {
+                            QuoteBlock(quote: q) { jump(q.id) }
+                        }
+                        if !message.displayContent.isEmpty {
+                            if isUser {
+                                // As on the web: your messages in a faint bubble on the right.
+                                Text(MarkdownView.inline(message.displayContent))
+                                    .font(.system(size: 14))
+                                    .strikethrough(message.isCancelled)
+                                    .lineSpacing(3)
+                                    .textSelection(.enabled)
+                                    .padding(.horizontal, 14).padding(.vertical, 9)
+                                    .foregroundStyle(WebTheme.fg)
+                                    .background(WebTheme.fg.opacity(0.07),
+                                                in: UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16,
+                                                                           bottomTrailingRadius: 6, topTrailingRadius: 16, style: .continuous))
+                            } else {
+                                // The agent's reply as one card, so each reads as a block.
+                                let shape = UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 16,
+                                                                   bottomTrailingRadius: 16, topTrailingRadius: 16, style: .continuous)
+                                MarkdownView(message.displayContent)
+                                    .foregroundStyle(message.isCancelled ? WebTheme.fg3 : WebTheme.fg)
+                                    .strikethrough(message.isCancelled)
+                                    .padding(.horizontal, 16).padding(.vertical, 12)
+                                    .background(WebTheme.surface, in: shape)
+                                    .overlay(shape.strokeBorder(WebTheme.line))
+                            }
                         }
                     }
+                    // Selectable text isn't read by a combined element, so the label says it.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(spoken)
+                    .accessibilityAction(named: "Copy") { copy() }
+                    .accessibilityAction(named: "Reply") { reply?() }
+                    .accessibilityActions {
+                        // Only in its own state: Cancel while queued, Copy to box once cancelled.
+                        if mark == .queued { Button("Cancel this queued message", action: cancelQueued) }
+                        if mark == .cancelled { Button("Copy to box", action: copyToBox) }
+                    }
+                    .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
+                    .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
                     // The footer (#666): yours (right) end with the time, the others' (left) start with it.
                     HStack(spacing: 4) {
                         if isUser, mark != nil { queueStatus; separator }
-                        Text(message.createdAt, style: .time).foregroundStyle(WebTheme.fg3)
+                        Text(message.createdAt, style: .time).foregroundStyle(WebTheme.fg3).accessibilityHidden(true)
                         if !isUser, mark != nil { separator; queueStatus }
                     }
                     .font(.system(size: 10.5, design: .monospaced))
@@ -277,18 +293,6 @@ private struct MessageRow: View {
                 }
                 Button { copy() } label: { Label("Copy", systemImage: "doc.on.doc") }
             }
-            // Selectable text isn't read by a combined element, so the label says it.
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(spoken)
-            .accessibilityAction(named: "Copy") { copy() }
-            .accessibilityAction(named: "Reply") { reply?() }
-            .accessibilityActions {
-                // Only in its own state: Cancel while queued, Copy to box once cancelled.
-                if mark == .queued { Button("Cancel this queued message", action: cancelQueued) }
-                if mark == .cancelled { Button("Copy to box", action: copyToBox) }
-            }
-            .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
-            .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
         }
     }
 
@@ -300,7 +304,7 @@ private struct MessageRow: View {
     @ViewBuilder private var queueStatus: some View {
         switch mark {
         case .queued?:
-            Label(QueueMark.queuedText, systemImage: "hourglass").foregroundStyle(Theme.attentionInk)
+            Label(QueueMark.queuedText, systemImage: "hourglass").foregroundStyle(Theme.attentionInk).accessibilityHidden(true)
             Button(action: cancelQueued) { Label("Cancel", systemImage: "xmark") }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Theme.attentionInk)
@@ -308,7 +312,7 @@ private struct MessageRow: View {
                 .help(message.fromAgentName.map { "Cancel this queued message from \($0)" } ?? "Cancel this queued message")
                 .accessibilityIdentifier("cancelQueued")
         case .cancelled?:
-            Text(QueueMark.cancelledText).foregroundStyle(WebTheme.fg3)
+            Text(QueueMark.cancelledText).foregroundStyle(WebTheme.fg3).accessibilityHidden(true)
             Button(action: copyToBox) { Label("Copy to box", systemImage: "doc.on.doc") }
                 .buttonStyle(.borderless)
                 .foregroundStyle(WebTheme.fg2)
