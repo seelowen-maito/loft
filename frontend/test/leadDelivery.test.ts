@@ -19,7 +19,7 @@ after(() => vite.close());
 const view = (over: object = {}, log: object[] = []) => ({
   project: "loft",
   options: { enabled: false, resumes_per_hour: 2, resumes_per_day: 6, running_deliveries: 2, ...over },
-  ceilings: { resumes_per_hour: 6, resumes_per_day: 24, running_deliveries: 5 },
+  ceilings: { resumes_per_hour: 6, resumes_per_day: 24, running_deliveries: 10 },
   log,
 });
 

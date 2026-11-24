@@ -7,7 +7,7 @@ Only the user starts a Delivery (Start delivery) or resumes a stalled one (Needs
 
 ## Decision
 - **The Lead exercises Start and Resume**, through two MCP tools (`start_delivery`, `resume_delivery`, later tickets), **only in a project whose option "The Lead can start and resume Deliveries" is on**. The user still owns the roadmap, publishing, Needs you, pausing and merging.
-- **The option is per project, off by default**, with three limits, each under a fixed ceiling and at least 1: resumes per hour (default 2, ceiling 6), resumes per day (default 6, ceiling 24) and Deliveries running at once (default 2, ceiling 5). A project never changed has no row and reads as the defaults, so new and existing projects start off.
+- **The option is per project, off by default**, with three limits, each under a fixed ceiling and at least 1: resumes per hour (default 2, ceiling 6), resumes per day (default 6, ceiling 24) and Deliveries running at once (default 2, ceiling 10). A project never changed has no row and reads as the defaults, so new and existing projects start off.
 - **Only the user changes it**, through `PUT /api/projects/lead-delivery`, a user endpoint (ADR 0004). No MCP tool reads or writes it for an agent to change; a test checks that no tool mentions it. An agent's `curl` to that endpoint stays open, as ADR 0004 accepts for every user endpoint.
 - **Every change is logged** (`lead_delivery_log`): who (`user`), when, and the values before and after; a request that changes nothing logs nothing. `GET /api/projects/lead-delivery?project=` returns the options, the ceilings and the latest 50 lines, which the project's settings show.
 
