@@ -44,6 +44,9 @@ public protocol LoftAPI: Sendable {
     /// `PATCH /api/agents/{id}` with some of its editable fields (today `fresh_context`).
     func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent
     func stopRun(agentId: String) async throws
+    /// `POST /api/agents/{id}/messages/{mid}/cancel`: takes a message back out of the queue; false when the run
+    /// already took it.
+    func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool
     /// Bytes in the agent's workspace: what deleting it with the agent frees.
     func workspaceSize(agentId: String) async throws -> Int64
     /// Deletes the agent; with `purgeFiles` its workspace folder too.
@@ -341,6 +344,10 @@ public struct LiveLoftAPI: LoftAPI {
         try decode(Agent.self, try await send("PATCH", "/agents/\(id)", body: .object(fields)))
     }
     public func stopRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/stop") }
+    public func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool {
+        struct Ok: Decodable { let ok: Bool }
+        return try decode(Ok.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/cancel")).ok
+    }
     public func workspaceSize(agentId: String) async throws -> Int64 {
         struct Size: Decodable { let bytes: Int64 }
         return try await (get("/agents/\(agentId)/workspace-size") as Size).bytes
