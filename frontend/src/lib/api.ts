@@ -793,7 +793,7 @@ export const api = {
   markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
   /** Takes an agent's message back out of the queue before a run takes it; `ok` is false when one already did. */
   cancelQueued: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/cancel`),
-  /** Send now: the user's queued message into the agent's run in progress; `ok` is false when it stays queued (the run is ending). */
+  /** Send now: the user's queued message into the agent's run in progress; `ok` is false when it stays queued (the run is ending, or takes no input). */
   sendNow: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/send-now`),
   /** Goal active's button: sends `/goal clear` as the user's message, into the run in progress when there is one. */
   clearGoal: (agent: string) => req<{ ok: boolean; message: Message | null }>("POST", `/agents/${agent}/goal/clear`),

@@ -978,7 +978,7 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
           <X className="size-3.5" aria-hidden /> Cancel
         </button>
         {!sender && (
-          <button type="button" className="msg-act text-accent hover:bg-accent/[0.12] hover:text-accent" title="Deliver it into the run in progress now, instead of when it ends" disabled={sendNow.busy || cancel.busy} onClick={() => void sendNow.run(() => api.sendNow(agent.id, m.id)).then((r) => r && !r.ok && sendNow.setError("The run is ending: it waits for the next one"))}>
+          <button type="button" className="msg-act text-accent hover:bg-accent/[0.12] hover:text-accent" title="Deliver it into the run in progress now, instead of when it ends" disabled={sendNow.busy || cancel.busy} onClick={() => void sendNow.run(() => api.sendNow(agent.id, m.id)).then((r) => r && !r.ok && sendNow.setError("This run takes no more messages: it waits for the next one"))}>
             <SendHorizontal className="size-3.5" aria-hidden /> Send now
           </button>
         )}
