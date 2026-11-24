@@ -3045,7 +3045,10 @@ pub(crate) mod tests {
         assert_eq!(w.len(), 1, "{w:?}");
         for want in [
             "[Loft Delivery: spec #40] This is not a message from the user. You are the Dev on this Delivery: build ticket #41 \"Store\" (https://github.com/octo/dl-start/issues/41).",
-            "Work on the spec branch `spec/40-rounds`: pull it, commit there and push. Open no PR: the spec PR https://github.com/octo/dl-start/pull/500 is the spec's only one.",
+            "Work on the spec branch `spec/40-rounds`: pull it and commit there. Open no PR: the spec PR https://github.com/octo/dl-start/pull/500 is the spec's only one.",
+            // #461: one push per submission, with the base merged in and the tests run first.
+            "- Push once per submission, when the work is done: `git fetch origin`, `git merge origin/<base>` (`<base>` is the spec PR's base branch) into the branch (merge, not rebase), resolve any conflicts and run the tests, then pull the branch again (other Devs may push to it while you work) and push it with `git push origin spec/40-rounds`. Every push runs the repo's CI: never push work in progress.",
+            "commit what you have, without pushing it, and call `mcp__loft__wait_ticket` with 41,",
             "each message ending with `Refs #41`",
             "Your own instructions can add anything to this brief, like how to build and check the work in this project, but they can't change the Delivery's tools, its branch or how the work closes or merges.",
         ] {
@@ -4075,6 +4078,11 @@ pub(crate) mod tests {
         assert!(!w[0].contains("checks pass"), "{}", w[0]);
         let submit = crate::delivery::mcp_tools().into_iter().find(|t| t["name"] == "submit_ticket").unwrap();
         assert!(submit["description"].as_str().unwrap().contains("Don't wait for the CI"));
+        // #461: a waiting ticket's work stays local; it goes up in the one push of its submission.
+        let wait = crate::delivery::mcp_tools().into_iter().find(|t| t["name"] == "wait_ticket").unwrap();
+        assert!(wait["description"].as_str().unwrap().contains("Commit what you have first, but don't push it: every push runs the CI, and you push once, when you submit the ticket."));
+        assert!(!wait["description"].as_str().unwrap().contains("Push what you have"));
+        assert!(!w[0].contains("push what you have"), "{}", w[0]);
     }
 
     #[tokio::test]
@@ -4237,6 +4245,10 @@ pub(crate) mod tests {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/ci-red";
         let (dev, team) = building(&st, &fake, "ci-red", &["qa"]).await;
+        // The spec PR's base, which the changes brief names for the merge before the push.
+        let mut pr = st.db.list_pull_requests(None).unwrap().into_iter().find(|p| p.slug == slug && p.number == 500).expect("the spec PR is tracked");
+        pr.base_ref = "main".into();
+        st.db.save_pull_request(&pr).unwrap();
         fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
         ci_on(&fake, slug, "spec/40-rounds", json!([run("completed", Some("failure"))]));
         fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("thread 'store::total' panicked: off by one"));
@@ -4252,7 +4264,8 @@ pub(crate) mod tests {
             "The CI failed on `c1c1c1c`, the newest commit of the spec branch `spec/40-rounds`, which includes the ticket. Failed: `test`.",
             "### `test`: failure\nhttps://github.com/octo/ci/actions/runs/1/job/77\n1 test failed\n",
             "panicked: off by one",
-            "call `mcp__loft__submit_ticket` again with 41",
+            // #461: the fix goes up in one push, with the base merged in and the tests run first.
+            "Fix it on the spec branch `spec/40-rounds` with new commits, each ending with `Refs #41`. Push once per submission, when the work is done: `git fetch origin`, `git merge origin/main` into the branch (merge, not rebase), resolve any conflicts and run the tests, then pull the branch again (other Devs may push to it while you work) and push it with `git push origin spec/40-rounds`. Every push runs the repo's CI: never push work in progress. Then call `mcp__loft__submit_ticket` again with 41",
         ] {
             assert!(w.last().unwrap().contains(want), "missing {want:?} in {}", w.last().unwrap());
         }
@@ -4951,7 +4964,8 @@ pub(crate) mod tests {
         for want in [
             "[Loft Delivery: ticket #41] This is not a message from the user. You are the Dev on this Delivery: build ticket #41 \"Store\"",
             "- Read the ticket first, and build only what the ticket asks.",
-            "Work on the ticket branch `ticket/41-store`: pull it, commit there and push. Open no PR: the PR https://github.com/octo/solo-start/pull/500 is the ticket's only one.",
+            "Work on the ticket branch `ticket/41-store`: pull it and commit there. Open no PR: the PR https://github.com/octo/solo-start/pull/500 is the ticket's only one.",
+            "`git merge origin/<base>` (`<base>` is the PR's base branch) into the branch (merge, not rebase), resolve any conflicts and run the tests, then pull the branch again (other Devs may push to it while you work) and push it with `git push origin ticket/41-store`.",
         ] {
             assert!(w[0].contains(want), "missing {want:?} in {}", w[0]);
         }
@@ -5231,7 +5245,8 @@ pub(crate) mod tests {
         assert_eq!(w.len(), 1);
         for want in [
             "[Loft Delivery: spec \"Offline mode\"] This is not a message from the user. You are the Dev on this Delivery: build ticket \"Store\" (Loft issue ".to_string(),
-            format!("Work on the spec branch `spec/1-offline-mode` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin spec/1-offline-mode`. There is no PR.", dir.canonicalize().unwrap().display()),
+            format!("Work on the spec branch `spec/1-offline-mode` of the project's own repo `{}`, your clone's `origin`: fetch it and commit there. There is no PR.", dir.canonicalize().unwrap().display()),
+            "`git merge origin/main` into the branch (merge, not rebase), resolve any conflicts and run the tests, then pull the branch again (other Devs may push to it while you work) and push it with `git push origin spec/1-offline-mode`.".to_string(),
             format!("each message ending with `Refs {}`", store.id),
             format!("call `mcp__loft__submit_ticket` with \"{}\"", store.id),
         ] {
@@ -7573,7 +7588,8 @@ pub(crate) mod tests {
             "[Loft Delivery: ticket #41] This is not a message from the user. You are the Dev on this Delivery: the CI failed on the PR https://github.com/octo/solo-ci/pull/500 after Loft marked it ready, so this is a final round of changes (round 1 of 3)",
             "The CI failed on `c1c1c1c`, the newest commit of the ticket branch `ticket/41-store`, after Loft marked the PR ready. Failed: `test`.",
             "panicked: off by one",
-            "Fix it on the ticket branch `ticket/41-store` with new commits, each ending with `Refs #41`, push, then call `mcp__loft__submit_ticket` with 500",
+            "Fix it on the ticket branch `ticket/41-store` with new commits, each ending with `Refs #41`. Push once per submission, when the work is done: `git fetch origin`, `git merge origin/<base>` (`<base>` is the PR's base branch) into the branch",
+            "push it with `git push origin ticket/41-store`. Every push runs the repo's CI: never push work in progress. Then call `mcp__loft__submit_ticket` with 500",
         ] {
             assert!(w.last().unwrap().contains(want), "missing {want:?} in {}", w.last().unwrap());
         }

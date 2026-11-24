@@ -807,6 +807,27 @@ fn own_rules(what: &str) -> String {
     format!("Your own instructions can add anything to this brief, like how to {what} in this project, but they can't change the Delivery's tools, its branch or how the work closes or merges. Decide with sensible defaults and carry on: don't end your run on a question. If a decision truly belongs to the user, mark the ticket blocked with the question (`mcp__loft__update_issue`, status `blocked`, the question in `error`) instead.")
 }
 
+/// The base ticket `t`'s branch merges into, as `origin/<name>`: the PR's base, or a plan kept in Loft's own. When
+/// Loft doesn't know it yet, `origin/<base>` and what `<base>` stands for.
+fn origin_base(state: &AppState, d: &Delivery, t: Option<&DeliveryTicket>) -> String {
+    let base = match (d.local, t) {
+        (true, Some(t)) if !t.repo.is_empty() => d.bases.get(&t.repo).cloned().unwrap_or_default(),
+        (true, _) => d.base.clone(),
+        _ => tracked_pr(state, d).map(|p| p.base_ref).unwrap_or_default(),
+    };
+    if base.is_empty() { format!("origin/<base>` (`<base>` is the {}'s base branch)", if d.local { "spec branch" } else { pr_name(d) }) } else { format!("origin/{base}`") }
+}
+
+/// How a Dev hands its commits in: one push per submission, with the base merged in and the tests run first.
+/// Every push runs the repo's CI, so a partial push costs a whole run.
+fn one_push(state: &AppState, d: &Delivery, t: Option<&DeliveryTicket>) -> String {
+    format!(
+        "Push once per submission, when the work is done: `git fetch origin`, `git merge {base} into the branch (merge, not rebase), resolve any conflicts and run the tests, then pull the branch again (other Devs may push to it while you work) and push it with `git push origin {branch}`. Every push runs the repo's CI: never push work in progress.",
+        base = origin_base(state, d, t),
+        branch = d.branch,
+    )
+}
+
 /// The Dev role brief, sent with the wake that hands a ticket to the Dev.
 fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
     let repo = &d.repo;
@@ -818,24 +839,25 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
         _ => format!(" and its spec #{}", d.spec),
     };
     let work = if d.local {
-        format!("Work on the {} `{}` of the project's own repo `{}`, your clone's `origin`: fetch it, commit there and push it back with `git push origin {}`. There is no PR.", branch_name(d), d.branch, repo_shown(state, d, &t.repo), d.branch)
+        format!("Work on the {} `{}` of the project's own repo `{}`, your clone's `origin`: fetch it and commit there. There is no PR.", branch_name(d), d.branch, repo_shown(state, d, &t.repo))
     } else {
-        format!("Work on the {} `{}`: pull it, commit there and push.{pr}", branch_name(d), d.branch)
+        format!("Work on the {} `{}`: pull it and commit there.{pr}", branch_name(d), d.branch)
     };
     format!(
         "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: build ticket {ticket}.\n\
          - Read the ticket{spec} first, and build only what the ticket asks.\n\
          - {work}\n\
-         - Other Devs may push to the branch while you work: pull it again right before you push.\n\
+         - {push}\n\
          - One or more commits, each message ending with `{refs}`.\n\
          - {own}\n\
          - When the commits are on GitHub and your local tests pass, call `mcp__loft__submit_ticket` with {arg} and all the ticket's commit SHAs, oldest first. Don't wait for the CI: Loft follows it. Loft hands the commits to the team's reviewers and closes the ticket when they pass{green}: never close it yourself.\n\
-         - If the ticket can't go on until another issue closes or another agent answers, push what you have and call `mcp__loft__wait_ticket` with {arg}, what it waits on and why, then end your run. Never end your run mid-ticket without `submit_ticket` or `wait_ticket`: Loft would report the Delivery as stalled. Loft wakes you on the ticket when that issue closes or that agent messages you.",
+         - If the ticket can't go on until another issue closes or another agent answers, commit what you have, without pushing it, and call `mcp__loft__wait_ticket` with {arg}, what it waits on and why, then end your run. Never end your run mid-ticket without `submit_ticket` or `wait_ticket`: Loft would report the Delivery as stalled. Loft wakes you on the ticket when that issue closes or that agent messages you.",
         about = subject(d),
         ticket = ticket_ref(d, t),
         refs = refs(d, t),
         arg = ticket_arg(d, t),
         own = own_rules("build and check the work"),
+        push = one_push(state, d, Some(t)),
         green = if ci_per_ticket(state, d) { " and the CI is green" } else { " (this project's CI mode is `at the end`: Loft checks the CI once the PR is ready)" },
     )
 }
@@ -1323,7 +1345,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }, "required": ["number", "commits"] }
     }), json!({
         "name": "wait_ticket",
-        "description": "As the Dev on a Delivery: report that the ticket you're building can't go on until an issue closes (in any repo) or another agent answers. Push what you have first. Loft shows the ticket as waiting, not stalled, may hand you another ready ticket meanwhile, and wakes you on this ticket when that issue closes or that agent messages you. End your run after calling it. The issue must be open and readable by Loft; if it's deleted, or the agent is, the Delivery stalls so the user can step in.",
+        "description": "As the Dev on a Delivery: report that the ticket you're building can't go on until an issue closes (in any repo) or another agent answers. Commit what you have first, but don't push it: every push runs the CI, and you push once, when you submit the ticket. Loft shows the ticket as waiting, not stalled, may hand you another ready ticket meanwhile, and wakes you on this ticket when that issue closes or that agent messages you. End your run after calling it. The issue must be open and readable by Loft; if it's deleted, or the agent is, the Delivery stalls so the user can step in.",
         "inputSchema": { "type": "object", "properties": {
             "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft." },
             "on": { "type": "string", "description": "What it waits on: an issue as `owner/repo#N`, `#N` (on the ticket's repo) or its link, or an agent's name." },
@@ -1860,7 +1882,7 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
         let why = to_user(state, &d, &t, rounds, notes, notes).await?;
         return Ok(format!("Posted your changes on {on}.{labelled} That's round {rounds} of changes on {name}, so it waits for the user now{why}."));
     }
-    let brief = changes_brief(&d, &t, rounds, &format!("{} ({label})", me.name), notes);
+    let brief = changes_brief(state, &d, &t, rounds, &format!("{} ({label})", me.name), notes);
     let back = send_back(state, &d, n, rounds, notes, brief).await?;
     Ok(format!("Posted your changes on {on}.{labelled}{back}"))
 }
@@ -1868,12 +1890,13 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
 /// The wake that sends ticket `t` back to the Dev for changes round `rounds`, asked for by `who` (a reviewer,
 /// or the CI) with `notes`. It names the ticket and the commits it judged, so it stands on its own after a
 /// cleared context.
-fn changes_brief(d: &Delivery, t: &DeliveryTicket, rounds: u32, who: &str, notes: &str) -> String {
+fn changes_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, rounds: u32, who: &str, notes: &str) -> String {
     let commits = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
     format!(
         "[Loft Delivery: {about}] This is not a message from the user. {who} asked for changes on ticket {ticket} (round {rounds} of {MAX_ROUNDS}), submitted as {commits}:\n\n{notes}\n\n\
-         Fix it on the {bname} `{branch}` with new commits, each ending with `{refs}`, push, then call `mcp__loft__submit_ticket` again with {arg} and all the ticket's commits, oldest first.\n{own}",
+         Fix it on the {bname} `{branch}` with new commits, each ending with `{refs}`. {push} Then call `mcp__loft__submit_ticket` again with {arg} and all the ticket's commits, oldest first.\n{own}",
         own = own_rules("build and check the work"),
+        push = one_push(state, d, Some(t)),
         about = subject(d),
         bname = branch_name(d),
         ticket = if d.local { ticket_ref(d, t) } else { format!("#{} \"{}\"", t.number, t.title) },
@@ -2303,7 +2326,7 @@ async fn ci_failed(state: &AppState, d: &Delivery, t: &DeliveryTicket, head: &st
         let why = to_user(state, d, t, rounds, &notes, &format!("the CI failed: {checks}")).await?;
         return Ok(format!("\nThe CI failed on {name} ({checks}).{posted} That's round {rounds} of changes, so it waits for the user now{why}."));
     }
-    let back = send_back(state, d, n, rounds, &notes, changes_brief(d, t, rounds, "The CI", &notes)).await?;
+    let back = send_back(state, d, n, rounds, &notes, changes_brief(state, d, t, rounds, "The CI", &notes)).await?;
     Ok(format!("\nThe CI failed on {name} ({checks}).{posted}{back}"))
 }
 
@@ -2416,7 +2439,7 @@ async fn ready_ci_failed(state: &AppState, d: &Delivery, head: &str, names: &[St
         let because = if rounds >= MAX_ROUNDS { format!("That's round {rounds} of changes on it") } else { "Nobody can fix it: the team has no Dev and the agent that planned it is gone".to_string() };
         return Ok(format!("\nThe CI failed on the ready {what} ({checks}).{posted} {because}, so it waits for the user now{why}."));
     };
-    crate::agents::wake_on_ticket(state, &dev.id, &ticket_key(&d, None), true, fixes_brief(&d), wake_for(&d, Step::FinalFixes { round: rounds }));
+    crate::agents::wake_on_ticket(state, &dev.id, &ticket_key(&d, None), true, fixes_brief(state, &d), wake_for(&d, Step::FinalFixes { round: rounds }));
     Ok(format!("\nThe CI failed on the ready {what} ({checks}).{posted} {} is fixing it in a final round ({rounds} of {MAX_ROUNDS}), and Loft follows the CI again after.", dev.name))
 }
 
@@ -2637,14 +2660,14 @@ async fn build_done(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> Vec<S
 
 /// The Dev brief for the final Code Review's fixes, for a Resume: the Code reviewer's notes are on the spec
 /// PR (or the spec's Loft issue), since Loft doesn't keep them.
-fn fixes_brief(d: &Delivery) -> String {
+fn fixes_brief(state: &AppState, d: &Delivery) -> String {
     // None yet after a Resume on a final review that waited for the user: its rounds start over.
     let rounds = if d.final_rounds > 0 { format!(" (round {} of {MAX_ROUNDS})", d.final_rounds) } else { String::new() };
     if d.final_ci == "fixing" {
         let notes = if d.last_notes.trim().is_empty() { String::new() } else { format!("\n\n{}", d.last_notes.trim()) };
         return format!(
             "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: the CI failed on the {pname} https://github.com/{repo}/pull/{pr} after Loft marked it ready, so this is a final round of changes{rounds}, like one from the final Code Review.{notes}\n\n\
-             Fix it on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first. The PR stays ready; Loft follows its CI again until it's green.\n{own}",
+             Fix it on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`. {push} Then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first. The PR stays ready; Loft follows its CI again until it's green.\n{own}",
             about = subject(d),
             pname = pr_name(d),
             repo = d.repo,
@@ -2653,22 +2676,24 @@ fn fixes_brief(d: &Delivery) -> String {
             branch = d.branch,
             spec = d.spec,
             own = own_rules("build and check the work"),
+        push = one_push(state, d, None),
         );
     }
     if d.local {
         return format!(
             "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the spec branch `{branch}`{rounds}. Its notes are its last note on the spec's Loft issue {spec_id}.\n\
-             Fix them on that branch with new commits, each ending with `Refs {spec_id}`, push them to `origin`, then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.\n{own}",
+             Fix them on that branch with new commits, each ending with `Refs {spec_id}`. {push} Then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.\n{own}",
             about = subject(d),
             branch = d.branch,
             spec_id = d.spec_id,
             own = own_rules("build and check the work"),
+        push = one_push(state, d, None),
         );
     }
     let pr = d.pr.unwrap_or_default();
     format!(
         "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the {pname} https://github.com/{repo}/pull/{pr}{rounds}. Its notes are its last comment there.\n\
-         Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.\n{own}",
+         Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`. {push} Then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.\n{own}",
         about = subject(d),
         pname = pr_name(d),
         repo = d.repo,
@@ -2676,6 +2701,7 @@ fn fixes_brief(d: &Delivery) -> String {
         branch = d.branch,
         spec = d.spec,
         own = own_rules("build and check the work"),
+        push = one_push(state, d, None),
     )
 }
 
@@ -2799,7 +2825,7 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
             format!(" {} is fixing {what} again, with a fresh {MAX_ROUNDS} rounds of changes.", dev.name)
         }
         None => {
-            let brief = format!("{}{}{notes}", fixes_brief(&saved), resume_section(&stopped, &[]));
+            let brief = format!("{}{}{notes}", fixes_brief(state, &saved), resume_section(&stopped, &[]));
             crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&saved, None), brief, wake_for(&saved, Step::FinalFixes { round: 0 }));
             if saved.final_ci == "fixing" {
                 format!(" {} is fixing the CI of the ready PR, with a fresh {MAX_ROUNDS} rounds of changes; then Loft follows the CI again.", dev.name)
@@ -2858,7 +2884,7 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
                 Err(e) => format!("Loft couldn't read the {} ({e}): check what's already on it yourself.", branch_name(&d)),
             };
             let d = unstall(&|d| d.dev = dev.id.clone())?;
-            let brief = format!("{}{}", fixes_brief(&d), resume_section(&stalled, &[found]));
+            let brief = format!("{}{}", fixes_brief(state, &d), resume_section(&stalled, &[found]));
             crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&d, None), brief, wake_for(&d, Step::FinalFixes { round: d.final_rounds }));
             let what = if d.final_ci == "fixing" { "the CI of the ready PR" } else { "what the final Code Review found" };
             format!(" {} is fixing {what} again.", dev.name)
@@ -3754,8 +3780,9 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     let brief = if d.local {
         format!(
             "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the spec branch `{branch}` (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
-             Fix them on that branch with new commits, each ending with `Refs {spec_id}`, push them to `origin`, then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.\n{own}",
+             Fix them on that branch with new commits, each ending with `Refs {spec_id}`. {push} Then call `mcp__loft__submit_ticket` with \"{spec_id}\" and the new commits, oldest first.\n{own}",
         own = own_rules("build and check the work"),
+        push = one_push(state, &d, None),
             about = subject(&d),
             spec_id = d.spec_id,
             who = me.name,
@@ -3764,8 +3791,9 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
     } else {
         format!(
             "[Loft Delivery: {about}] This is not a message from the user. {who} (Code reviewer) asked for changes on the {pname} https://github.com/{slug}/pull/{pr} (round {rounds} of {MAX_ROUNDS}):\n\n{notes}\n\n\
-             Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.\n{own}",
+             Fix them on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`. {push} Then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first.\n{own}",
         own = own_rules("build and check the work"),
+        push = one_push(state, &d, None),
             about = subject(&d),
             pname = pr_name(&d),
             bname = branch_name(&d),
