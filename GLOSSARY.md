@@ -60,6 +60,10 @@ _Avoid_: Role prompt, template
 One stretch of an agent working, from what woke it (a message, an issue, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
 
+**Send now**:
+Delivering one of the user's queued messages into the agent's run in progress, as Claude Code's Ctrl+Enter does in the terminal, instead of waiting for the run to end. Once sent it can't be cancelled. Loft does it by itself when a goal or Stop hook keeps the run going while it waits for the user; agents' messages and Delivery steps always wait in the queue.
+_Avoid_: Interrupt, inject, steer
+
 **Session**:
 The conversation an agent carries from run to run until the user clears it; Compact summarises it in place. Every model call in a run resends the whole session, mostly from the prompt cache.
 _Avoid_: Conversation, thread
