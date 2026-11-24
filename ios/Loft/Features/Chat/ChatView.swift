@@ -990,7 +990,6 @@ private struct MessageBubble: View {
                             .font(.caption2)
                             .foregroundStyle(Theme.accent)
                             .transition(.opacity)
-                            .accessibilityIdentifier("savedNote")
                     }
                     if !isUser && message.role == "assistant" { UnreadAloudNote(message: message) }
                     if isUser, !message.mentionedNames.isEmpty {

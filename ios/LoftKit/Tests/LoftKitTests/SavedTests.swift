@@ -97,3 +97,17 @@ final class SavedTests: XCTestCase {
         } catch {}
     }
 }
+
+/// Open in chat right after launch: the chat may only be in the disk cache, with no word yet on earlier pages.
+final class SavedOpenInChatTests: XCTestCase {
+    @MainActor
+    func testLoadMessageLoadsAChatNotLoadedYet() async throws {
+        let api = FixtureAPI()
+        let store = LoftStore(api: api, cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)))
+        let latest = try await api.messages(agentId: "orch", limit: 100, before: nil)
+        let id = try XCTUnwrap(latest.first?.id)
+        XCTAssertNil(store.historyHasMore["orch"])
+        let found = await store.loadMessage(id, in: "orch")
+        XCTAssertTrue(found)
+    }
+}

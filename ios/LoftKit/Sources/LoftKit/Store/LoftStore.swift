@@ -618,6 +618,8 @@ public final class LoftStore {
     /// Loads earlier pages until message `id` is in the chat, for a saved item's Open in chat (at most `pages` pages).
     /// True when it's there.
     public func loadMessage(_ id: Int64, in agentId: String, pages: Int = 10) async -> Bool {
+        // A chat restored from the disk cache doesn't know yet whether it has earlier pages: load its latest page first.
+        if historyHasMore[agentId] == nil { try? await loadConversation(agentId) }
         for _ in 0..<pages {
             guard let first = messages[agentId]?.first, first.id > id else { break }
             guard historyHasMore[agentId] == true, (try? await loadOlder(agentId)) != nil else { break }
