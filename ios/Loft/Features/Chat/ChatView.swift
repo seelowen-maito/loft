@@ -880,6 +880,16 @@ private struct MessageBubble: View {
         }
     }
 
+    private var footerTime: some View {
+        Text(isUser ? message.createdAt.formatted(date: .omitted, time: .shortened)
+             : "\(message.fromAgentName == nil && message.role != "user" ? agent.name + " · " : "")\(message.createdAt.formatted(date: .omitted, time: .shortened))")
+            .foregroundStyle(.tertiary)
+    }
+
+    @ViewBuilder private var footerActions: some View {
+        if !isUser && message.role == "assistant" { SpeakButton(message: message) }
+    }
+
     /// The footer's queue status (#668): the queued mark with Cancel, or the cancelled mark with Copy to box.
     @ViewBuilder private var queueStatus: some View {
         switch mark {
@@ -1006,14 +1016,19 @@ private struct MessageBubble: View {
                                 Button { UIPasteboard.general.string = message.displayContent } label: { Label("Copy", systemImage: "doc.on.doc") }
                             }
                     }
-                    HStack(spacing: 6) {
-                        // Yours (right): the queue status, then the time; the others' (left): the time, then the status.
-                        if isUser, mark != nil { queueStatus; Divider().frame(height: 12) }
-                        Text(isUser ? message.createdAt.formatted(date: .omitted, time: .shortened)
-                             : "\(message.fromAgentName == nil && message.role != "user" ? agent.name + " · " : "")\(message.createdAt.formatted(date: .omitted, time: .shortened))")
-                            .foregroundStyle(.tertiary)
-                        if !isUser, mark != nil { Divider().frame(height: 12); queueStatus }
-                        if !isUser && message.role == "assistant" { SpeakButton(message: message) }
+                    // One row: yours (right) the queue status, then the time; the others' (left) the time, then the status.
+                    // On a narrow phone it wraps, with the status above and the time and actions on the last line (#666).
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 6) {
+                            if isUser, mark != nil { queueStatus; Divider().frame(height: 12) }
+                            footerTime
+                            if !isUser, mark != nil { Divider().frame(height: 12); queueStatus }
+                            footerActions
+                        }
+                        VStack(alignment: isUser ? .trailing : .leading, spacing: 0) {
+                            HStack(spacing: 6) { queueStatus }
+                            HStack(spacing: 6) { footerTime; footerActions }
+                        }
                     }
                     .font(.caption2)
                     .accessibilityIdentifier("messageFooter")
