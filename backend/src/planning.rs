@@ -4996,7 +4996,7 @@ pub(crate) mod tests {
         assert_eq!(fake.seen("/graphql").len(), 1);
         assert_eq!(st.db.get_delivery(slug, 41).unwrap().unwrap().state, "ready");
         let done = done_items(&st);
-        assert!(done.len() == 1 && done[0]["title"] == "Delivery done: Store" && done[0]["reason"] == "Every ticket is closed and its reviews passed: PR #500 is ready for review.", "{done:#?}");
+        assert!(done.len() == 1 && done[0]["title"] == "Delivery done: Store" && done[0]["reason"] == "Every ticket is closed and its reviews passed: PR #500 is ready for review. GitHub Actions: 0 min on its ticket branch `ticket/41-store`.", "{done:#?}");
         assert!(fake.seen(&format!("/repos/{slug}/issues/41")).iter().all(|s| s.method != "PATCH"), "still open until the merge");
     }
 
@@ -5027,7 +5027,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -7062,7 +7062,7 @@ pub(crate) mod tests {
         let items = done_items(&st);
         assert_eq!(items.len(), 1, "{items:#?}");
         let item = &items[0];
-        assert_eq!((&item["title"], &item["reason"], &item["urgency"]), (&json!("Delivery done: Rounds"), &json!("Every ticket is closed and its reviews passed: spec PR #500 is ready for review."), &json!(1)));
+        assert_eq!((&item["title"], &item["reason"], &item["urgency"]), (&json!("Delivery done: Rounds"), &json!(format!("Every ticket is closed and its reviews passed: spec PR #500 is ready for review. GitHub Actions: 0 min on its spec branch `{}`.", d.branch)), &json!(1)));
         let acts = item["actions"].as_array().unwrap();
         assert_eq!(acts.iter().map(|a| a["label"].clone()).collect::<Vec<_>>(), [json!("Open issue"), json!("Open PR"), json!("Done")]);
         assert_eq!(acts[1]["target"], json!({ "url": format!("https://github.com/{slug}/pull/500") }));
@@ -7373,5 +7373,74 @@ pub(crate) mod tests {
         crate::delivery::follow_all(&st).await;
         let d = delivery(&st, slug);
         assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.done_at.as_str()), ("settled", "", ""));
+    }
+
+    // ---- Actions minutes per Delivery (#471) ----
+
+    /// A finished job of `secs` seconds.
+    fn job(secs: i64) -> Value {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-11-24T10:00:00Z").unwrap();
+        json!({ "status": "completed", "conclusion": "success", "started_at": start.to_rfc3339(), "completed_at": (start + chrono::Duration::seconds(secs)).to_rfc3339(), "labels": ["ubuntu-latest"] })
+    }
+
+    #[tokio::test]
+    async fn a_deliverys_actions_minutes_are_its_branch_jobs_rounded_up_on_its_card_and_in_its_done_summary() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-minutes";
+        let runs = format!("/repos/{slug}/actions/runs");
+        let jobs = |id: i64| format!("/repos/{slug}/actions/runs/{id}/jobs");
+        fake.route("GET", &runs, 200, json!({ "total_count": 2, "workflow_runs": [
+            { "id": 1, "run_attempt": 1, "status": "completed" },
+            { "id": 2, "run_attempt": 1, "status": "in_progress" },
+        ] }));
+        // 2 min 1 s is 3 minutes; a skipped job and one still running cost none yet.
+        let skipped = json!({ "status": "completed", "conclusion": "skipped", "started_at": "2026-11-24T10:00:00Z", "completed_at": "2026-11-24T10:00:00Z" });
+        fake.route("GET", &jobs(1), 200, json!({ "total_count": 2, "jobs": [job(121), skipped] }));
+        fake.route("GET", &jobs(2), 200, json!({ "total_count": 2, "jobs": [job(30), { "status": "in_progress", "started_at": "2026-11-24T10:00:00Z", "completed_at": null }] }));
+        let check_runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        ready_with_ci(&st, &fake, "ci-minutes", json!([run("in_progress", None)])).await;
+
+        // The poller reads the spec branch's runs since the Delivery began: the card shows the minutes so far.
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], json!(4));
+        let listed = fake.seen(&runs).iter().find(|s| s.path.starts_with(&format!("{runs}?"))).unwrap().path.clone();
+        assert!(listed.contains(&format!("branch={}&created=%3E%3D{}", d.branch, &d.created_at[..10])), "{listed}");
+        // Within `ACTIONS_EVERY` the poller doesn't read them again.
+        let reads = fake.seen(&format!("{runs}?")).len();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(fake.seen(&format!("{runs}?")).len(), reads);
+
+        // Run 2 finishes on a rerun with a 5-minute job more, and the CI is green: the done summary carries the total,
+        // read then, and run 1 (completed, same attempt) isn't read again.
+        fake.route("GET", &runs, 200, json!({ "total_count": 2, "workflow_runs": [
+            { "id": 1, "run_attempt": 1, "status": "completed" },
+            { "id": 2, "run_attempt": 2, "status": "completed" },
+        ] }));
+        fake.route("GET", &jobs(2), 200, json!({ "total_count": 3, "jobs": [job(30), job(45), job(300)] }));
+        fake.route("GET", &check_runs, 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert!(!d.done_at.is_empty(), "{d:?}");
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], json!(10));
+        assert_eq!(fake.seen(&jobs(1)).len(), 1);
+        let line = format!("GitHub Actions: 10 min on its spec branch `{}`.", d.branch);
+        let wakes = done_wakes(&st);
+        assert!(wakes.len() == 1 && wakes[0].contains(&format!("\n- {line}\n")), "{wakes:?}");
+        let items = done_items(&st);
+        assert!(items[0]["reason"].as_str().unwrap().ends_with(&line), "{items:?}");
+    }
+
+    #[tokio::test]
+    async fn a_plan_kept_in_loft_shows_no_actions_minutes() {
+        let st = state();
+        let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": "loft:demo", "spec": 1, "state": "running", "local": true, "branch": "spec/1-x", "created_at": crate::db::now() })).unwrap();
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], Value::Null);
+        assert_eq!(crate::delivery::minutes_line(&d), None);
+        (d.local, d.repo) = (false, "octo/x".into());
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], json!(0));
+        d.state = "planned".into();
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], Value::Null, "not before it starts");
     }
 }

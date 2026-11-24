@@ -601,6 +601,10 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 Value::Null,
             ),
         };
+        let reason = match crate::delivery::minutes_line(&d) {
+            Some(m) => format!("{reason} {m}"),
+            None => reason,
+        };
         let mut links: Vec<Value> = issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default();
         links.extend(Some(link).filter(|l| !l.is_null()));
         items.push(Item {

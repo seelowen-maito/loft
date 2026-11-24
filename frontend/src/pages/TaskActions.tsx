@@ -14,7 +14,7 @@ import { MentionMenu } from "../components/MentionMenu";
 import { ActionButton } from "../components/ActionButton";
 import { StartWarning } from "../components/StartWarning";
 import { Callout, ErrorLine, ResultLine } from "../components/Callout";
-import { deliveryButtons } from "../lib/deliveryState";
+import { actionsMinutesLine, deliveryButtons } from "../lib/deliveryState";
 import { DeliveryLine } from "../components/DeliveryLine";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { latestOnly } from "../lib/latest";
@@ -166,11 +166,14 @@ function useIssueDelivery(t: Task) {
   return [d, latest.set, reload] as const;
 }
 
-/** Where a started Delivery stands: running, waiting for CI (how long, linked to its checks), stalled (and why), paused, needs you, final review or done. */
+/** Where a started Delivery stands: running, waiting for CI (how long, linked to its checks), stalled (and why), paused, needs you, final review or done,
+ *  and the GitHub Actions minutes its branch spent so far. */
 function DeliveryState({ d }: { d: IssueDelivery | null }) {
+  const minutes = actionsMinutesLine(d);
   return (
     <>
       <DeliveryLine d={d} className="mt-1" />
+      {minutes && <div className="mt-1 text-[12.5px] text-fg-3" data-delivery-minutes>{minutes}</div>}
       {d?.behind && <div className="mt-1 text-[12.5px] text-warn" data-delivery-behind>{d.behind.count} behind {d.behind.base}: the Dev merges it in before submitting.</div>}
     </>
   );

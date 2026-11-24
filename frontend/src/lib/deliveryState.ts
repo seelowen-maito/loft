@@ -54,6 +54,14 @@ export function deliveryStateLine(
   return { tone: "running", text: "Running." };
 }
 
+/** The card's line of GitHub Actions minutes its branch spent so far (the total once it's done), or null when the
+ *  server sends none (before it started, a plan kept in Loft, an older server). */
+export function actionsMinutesLine(d: Pick<IssueDelivery, "state" | "started" | "actions_minutes"> | null): string | null {
+  if (!d?.started || typeof d.actions_minutes !== "number") return null;
+  const done = ["ready", "settled", "merged"].includes(d.state);
+  return `GitHub Actions: ${d.actions_minutes} min${done ? "" : " so far"}`;
+}
+
 /** The buttons a started Delivery's card shows, each only when the server says it applies: Pause while it runs
  *  (final review included), Resume when it's stalled or paused, or a ticket or final review waits for the user,
  *  and Reopen delivery when it's done and tickets published since are open. */

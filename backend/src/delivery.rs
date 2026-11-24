@@ -72,6 +72,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             final_rounds: 0,
             final_ci: String::new(),
             final_ci_since: String::new(),
+            actions_runs: Default::default(),
             reviewed_to: String::new(),
             last_notes: String::new(),
             migrated: false,
@@ -2038,6 +2039,9 @@ const CI_GRACE_MINUTES: i64 = 10;
 /// The last lines of a failed job's log a changes round carries; the whole log is at the check's link.
 const LOG_LINES: usize = 300;
 
+/// How often Loft reads the Actions minutes of a Delivery's branch.
+const ACTIONS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Whether `since` (RFC 3339, or nothing) is more than `CI_GRACE_MINUTES` ago.
 fn past_grace(since: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(since).map_or(true, |t| chrono::Utc::now().signed_duration_since(t) > chrono::Duration::minutes(CI_GRACE_MINUTES))
@@ -2330,7 +2334,15 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
             if d.final_rounds > 0 {
                 let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{repo}/issues/{}/labels/changes-requested", d.pr.unwrap_or_default()), None).await;
             }
-            update(state, repo, spec, |d| (d.final_ci, d.final_ci_since) = (String::new(), String::new())).ok_or("The Delivery record couldn't be saved.")?;
+            // The done summary says what it spent, all of it.
+            let runs = read_minutes(state, d).await;
+            update(state, repo, spec, |d| {
+                (d.final_ci, d.final_ci_since) = (String::new(), String::new());
+                if let Some(runs) = runs {
+                    d.actions_runs = runs;
+                }
+            })
+            .ok_or("The Delivery record couldn't be saved.")?;
             done(state, repo, spec);
             Ok(format!("\nThe ready {}: {why}, so the user is told it can be merged.", final_tag(d)))
         }
@@ -2427,6 +2439,40 @@ pub(crate) async fn follow_all(state: &AppState) {
             Err(e) if e.starts_with("GitHub paused") => {}
             Err(e) => tracing::warn!("delivery {}#{}: CI of the ready PR: {e}", d.repo, d.spec),
         }
+    }
+    follow_minutes(state).await;
+}
+
+/// Whether Loft counts the Actions minutes of `d`'s branch: a Delivery on GitHub that started, until its PR
+/// merges or closes.
+fn counts_minutes(d: &Delivery) -> bool {
+    !d.local && !d.branch.is_empty() && !matches!(d.state.as_str(), "planned" | "settled" | "merged")
+}
+
+/// The Actions minutes of `d`'s branch now (see [`crate::actions::of_branch`]), or None when they didn't change
+/// or GitHub couldn't say: the next read tries again.
+async fn read_minutes(state: &AppState, d: &Delivery) -> Option<std::collections::BTreeMap<String, crate::actions::RunMinutes>> {
+    state.rt.lock().unwrap().actions_read.insert(format!("{}#{}", d.repo, d.spec), std::time::Instant::now());
+    match crate::actions::of_branch(state, &d.repo, &d.branch, &d.created_at, &d.actions_runs).await {
+        Ok(runs) => Some(runs).filter(|r| *r != d.actions_runs),
+        Err(e) => {
+            tracing::warn!("delivery {}#{}: Actions minutes: {e}", d.repo, d.spec);
+            None
+        }
+    }
+}
+
+/// Reads the Actions minutes of each Delivery that counts them and wasn't read in the last `ACTIONS_EVERY`, and
+/// saves the ones that changed.
+async fn follow_minutes(state: &AppState) {
+    for d in state.db.all_deliveries().unwrap_or_default().into_iter().filter(counts_minutes) {
+        let due = state.rt.lock().unwrap().actions_read.get(&format!("{}#{}", d.repo, d.spec)).is_none_or(|at| at.elapsed() >= ACTIONS_EVERY);
+        if !due {
+            continue;
+        }
+        let Some(runs) = read_minutes(state, &d).await else { continue };
+        let _held = state.publish_locks.of(&d.repo).lock_owned().await;
+        update(state, &d.repo, d.spec, |d| d.actions_runs = runs);
     }
 }
 
@@ -3247,7 +3293,7 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
 
 /// What an issue page shows of its Delivery: its state (with why it stalled, its state line, whether Pause and Resume apply, and
 /// whether a ticket or its final review waits for the user), whether it started, who has it, its PR (and its checks page),
-/// since when it waits for CI and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
+/// since when it waits for CI, the Actions minutes its branch spent so far (null for a plan kept in Loft) and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
 pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let on_ci = d.current.and_then(|n| d.ticket(n)).is_some_and(waiting_for_ci);
     let dev = state.db.get_agent(&d.dev).ok().flatten().filter(|_| !on_ci);
@@ -3266,6 +3312,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "pr": d.pr,
         "checks_url": checks_url(d),
         "ci_since": delivery_ci_since(d),
+        "actions_minutes": (!d.local && d.state != "planned").then(|| crate::actions::total(&d.actions_runs)),
         "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
     });
     if !d.standalone {
@@ -3739,6 +3786,12 @@ pub(crate) fn done(state: &AppState, repo: &str, spec: i64) {
     }
 }
 
+/// What a Delivery on GitHub spent on Actions, for its done summary; None for a plan kept in Loft.
+pub(crate) fn minutes_line(d: &Delivery) -> Option<String> {
+    let n = crate::actions::total(&d.actions_runs);
+    (!d.local).then(|| format!("GitHub Actions: {n} min on its {} `{}`.", branch_name(d), d.branch))
+}
+
 /// The summary the done wake carries: the spec, its PR (or branch), and the tickets closed.
 fn done_brief(state: &AppState, d: &Delivery, lead: bool) -> String {
     let issue = if d.local {
@@ -3758,8 +3811,9 @@ fn done_brief(state: &AppState, d: &Delivery, lead: bool) -> String {
     };
     let closed: Vec<String> = d.tickets.iter().filter(|t| t.state == "closed").map(|t| if d.local { format!("\"{}\"", t.title) } else { format!("#{} \"{}\"", t.number, t.title) }).collect();
     let closed = if d.standalone || closed.is_empty() { String::new() } else { format!("\n- Tickets closed: {}.", closed.join(", ")) };
+    let minutes = minutes_line(d).map(|m| format!("\n- {m}")).unwrap_or_default();
     format!(
-        "[Loft Delivery: {about}] This is not a message from the user. The Delivery of {named} is done.{lead}\n- {ready}{closed}\n\
+        "[Loft Delivery: {about}] This is not a message from the user. The Delivery of {named} is done.{lead}\n- {ready}{closed}{minutes}\n\
          Nothing is left to build: tell the user in a line or two."
     )
 }

@@ -144,6 +144,8 @@ export type IssueDelivery = {
   checks_url?: string | null;
   /** When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included; null when none is. An older server doesn't send it. */
   ci_since?: string | null;
+  /** The GitHub Actions minutes its branch spent so far, each job rounded up as GitHub bills it; null before it started or in a plan kept in Loft. An older server doesn't send it. */
+  actions_minutes?: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
   /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */
