@@ -50,13 +50,92 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
     })))
 }
 
-/// One item, and whether the message it came from is still in its agent's chat (`source_exists`).
+/// One item, whether the message it came from is still in its agent's chat (`source_exists`), and the pull request
+/// of its last export to docs (`pr`, or null).
 pub async fn get(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
     let item = state.db.get_saved(id)?.ok_or_else(not_found)?;
     let source_exists = state.db.get_message(&item.agent_id, item.message_id)?.is_some();
+    let pr = match &item.export_pr {
+        Some(pr) => state.db.get_pull_request(pr)?,
+        None => None,
+    };
     let mut v = json!(item);
     v["source_exists"] = json!(source_exists);
+    v["pr"] = json!(pr);
     Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+pub struct ExportTo {
+    project: String,
+}
+
+/// `docs/<slug>.md` for an item: its title in lowercase words joined by `-`, or `saved-<id>` when it has none.
+fn doc_path(i: &SavedItem) -> String {
+    let mut slug = String::new();
+    for w in i.title.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()) {
+        if !slug.is_empty() && slug.len() + w.len() >= 60 {
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        slug.push_str(&w.to_lowercase());
+    }
+    if slug.is_empty() { format!("docs/saved-{}.md", i.id) } else { format!("docs/{slug}.md") }
+}
+
+/// Exports an item to a project's docs: a new branch off the default one with `docs/<slug>.md` (made, or updated when
+/// it's already there) holding the content and a line back to the item, and a pull request from it. Each export
+/// opens a new PR, which becomes the item's. Answers the PR, as the PR cards have it.
+pub async fn export(State(state): State<AppState>, Path(id): Path<i64>, Json(b): Json<ExportTo>) -> ApiResult<Value> {
+    let item = state.db.get_saved(id)?.ok_or_else(not_found)?;
+    let slug = crate::repos::github_repo(&state, &b.project).await.map_err(|e| bad(format!("{e}, so Loft can't open a pull request there.")))?;
+    let failed = |e: anyhow::Error| bad(format!("Couldn't export to {slug}: {e}"));
+    let repo = |path: String| format!("/repos/{slug}{path}");
+    let base = crate::github::get(&state, &repo(String::new())).await.map_err(failed)?["default_branch"].as_str().unwrap_or("main").to_string();
+    let head = crate::github::get(&state, &repo(format!("/git/ref/heads/{base}"))).await.map_err(failed)?;
+    let branch = format!("docs/saved-{id}-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+    let post = reqwest::Method::POST;
+    let r#ref = json!({ "ref": format!("refs/heads/{branch}"), "sha": head["object"]["sha"] });
+    crate::github::request(&state, post.clone(), &repo("/git/refs".into()), Some(r#ref)).await.map_err(failed)?;
+
+    let path = doc_path(&item);
+    // Already in the docs: the PR updates it.
+    let existing = match crate::github::get(&state, &repo(format!("/contents/{path}?ref={branch}"))).await {
+        Ok(f) => f["sha"].as_str().map(String::from),
+        Err(e) if crate::github::is_gone(&e) => None,
+        Err(e) => return Err(failed(e)),
+    };
+    let port = state.cfg.port;
+    let link = match tokio::task::spawn_blocking(move || crate::tailnet::web_url(port)).await.ok().flatten() {
+        Some(web) => format!("[{}]({web}/saved/{id})", item.title),
+        None => format!("{} (saved item {id})", item.title),
+    };
+    let doc = format!("{}\n\n---\n\n_From Loft's Saved: {link}._\n", item.content.trim_end());
+    use base64::Engine;
+    let mut put = json!({
+        "message": format!("Docs: {} from Loft's Saved", item.title),
+        "content": base64::engine::general_purpose::STANDARD.encode(doc),
+        "branch": branch,
+    });
+    if let Some(sha) = &existing {
+        put["sha"] = json!(sha);
+    }
+    crate::github::request(&state, reqwest::Method::PUT, &repo(format!("/contents/{path}")), Some(put)).await.map_err(failed)?;
+    let verb = if existing.is_some() { "Updates" } else { "Adds" };
+    let made = crate::github::request(&state, post, &repo("/pulls".into()), Some(json!({
+        "title": format!("Docs: {}", item.title),
+        "head": branch,
+        "base": base,
+        "body": format!("{verb} `{path}` with \"{}\", kept in Loft's Saved.", item.title),
+    })))
+    .await
+    .map_err(failed)?;
+    let number = made["number"].as_i64().ok_or_else(|| bad(format!("GitHub opened the pull request on {slug} but didn't return its number.")))?;
+    let pr = crate::prs::register(&state, &item.agent_id, &slug, number, None).await.map_err(failed)?;
+    state.db.set_saved_export(id, &pr.id)?;
+    Ok(Json(json!(pr)))
 }
 
 #[derive(Deserialize)]
@@ -232,6 +311,104 @@ mod tests {
         assert_eq!(delete(State(st.clone()), Path(gone.id)).await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
         // The message it came from stays in the chat.
         assert!(st.db.get_message(&a.id, m.id).unwrap().is_some());
+    }
+
+    /// A project folder that's a git repo with this `origin`, or none.
+    fn project(st: &AppState, name: &str, origin: Option<&str>) {
+        let dir = st.settings.boot().projects_dir.join(name);
+        assert!(dir.starts_with(std::env::temp_dir()), "tests never write into the real projects folder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        if let Some(o) = origin {
+            git(&["remote", "add", "origin", o]);
+        }
+    }
+
+    fn decoded(put: &Value) -> String {
+        use base64::Engine;
+        String::from_utf8(base64::engine::general_purpose::STANDARD.decode(put["content"].as_str().unwrap()).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn exports_to_docs_as_a_pull_request_and_again_updates_the_same_file() {
+        let st = crate::planning::tests::state();
+        let fake = crate::github::tests::own_fake(&st);
+        project(&st, "site", Some("git@github.com:octo/site.git"));
+        let a = agent(&st, "Dev");
+        let m = st.db.add_message(&a.id, None, "assistant", "text", "Run `./start.sh`.\n", json!({})).unwrap();
+        let i = save(&st, &a.id, m.id, "How to deploy!", "Tutorial").await.unwrap();
+
+        let r = "/repos/octo/site";
+        fake.route("GET", r, 200, json!({ "default_branch": "trunk" }));
+        fake.route("GET", &format!("{r}/git/ref/heads/trunk"), 200, json!({ "object": { "sha": "trunk-sha" } }));
+        fake.route("POST", &format!("{r}/git/refs"), 201, json!({}));
+        // Not in the docs yet, then there (the first PR merged).
+        fake.in_turn("GET", &format!("{r}/contents/docs/how-to-deploy.md"), vec![(404, json!({ "message": "Not Found" })), (200, json!({ "sha": "file-sha" }))]);
+        fake.route("PUT", &format!("{r}/contents/docs/how-to-deploy.md"), 201, json!({}));
+        fake.in_turn("POST", &format!("{r}/pulls"), vec![(201, json!({ "number": 7 })), (201, json!({ "number": 8 }))]);
+        fake.route("GET", &format!("{r}/pulls/7"), 200, json!({ "number": 7, "title": "Docs: How to deploy!", "state": "open" }));
+        fake.route("GET", &format!("{r}/pulls/8"), 200, json!({ "number": 8, "title": "Docs: How to deploy!", "state": "open" }));
+
+        let Json(pr) = export(State(st.clone()), Path(i.id), Json(ExportTo { project: "site".into() })).await.unwrap();
+        assert_eq!((pr["slug"].as_str(), pr["number"].as_i64(), pr["url"].as_str()), (Some("octo/site"), Some(7), Some("https://github.com/octo/site/pull/7")));
+
+        // A branch off the default one, the file on it, and the PR from it.
+        let refs: Vec<Value> = fake.seen(&format!("{r}/git/refs")).into_iter().map(|s| s.body).collect();
+        let branch = refs[0]["ref"].as_str().unwrap().strip_prefix("refs/heads/").unwrap().to_string();
+        assert!(branch.starts_with(&format!("docs/saved-{}-", i.id)), "{branch}");
+        assert_eq!(refs[0]["sha"], "trunk-sha");
+        let puts: Vec<Value> = fake.seen(&format!("{r}/contents/")).into_iter().filter(|s| s.method == "PUT").map(|s| s.body).collect();
+        assert_eq!((puts[0]["branch"].as_str(), puts[0].get("sha")), (Some(branch.as_str()), None));
+        let doc = decoded(&puts[0]);
+        assert!(doc.starts_with("Run `./start.sh`.\n\n---\n\n_From Loft's Saved: "), "{doc}");
+        assert!(doc.contains(&format!("saved item {}", i.id)) || doc.contains(&format!("/saved/{})", i.id)), "a line back to the item: {doc}");
+        let pulls: Vec<Value> = fake.seen(&format!("{r}/pulls")).into_iter().filter(|s| s.method == "POST").map(|s| s.body).collect();
+        assert_eq!(pulls[0], json!({ "title": "Docs: How to deploy!", "head": branch, "base": "trunk", "body": "Adds `docs/how-to-deploy.md` with \"How to deploy!\", kept in Loft's Saved." }));
+
+        // The item's page has the PR, for its card.
+        let Json(v) = get(State(st.clone()), Path(i.id)).await.unwrap();
+        assert_eq!((v["pr"]["number"].as_i64(), v["pr"]["state"].as_str()), (Some(7), Some("open")));
+
+        // Again: the same file, updated, in a new PR from a new branch.
+        let Json(pr) = export(State(st.clone()), Path(i.id), Json(ExportTo { project: "site".into() })).await.unwrap();
+        assert_eq!(pr["number"], 8);
+        let puts: Vec<Value> = fake.seen(&format!("{r}/contents/")).into_iter().filter(|s| s.method == "PUT").map(|s| s.body).collect();
+        assert_eq!(puts.len(), 2);
+        assert_eq!(puts[1]["sha"], "file-sha");
+        let pulls: Vec<Value> = fake.seen(&format!("{r}/pulls")).into_iter().filter(|s| s.method == "POST").map(|s| s.body).collect();
+        assert!(pulls[1]["body"].as_str().unwrap().starts_with("Updates `docs/how-to-deploy.md`"));
+        let Json(v) = get(State(st.clone()), Path(i.id)).await.unwrap();
+        assert_eq!(v["pr"]["number"], 8);
+    }
+
+    #[tokio::test]
+    async fn a_project_without_a_github_repo_says_so_and_sends_nothing() {
+        let st = crate::planning::tests::state();
+        let fake = crate::github::tests::own_fake(&st);
+        project(&st, "local", None);
+        project(&st, "elsewhere", Some("https://gitlab.com/octo/elsewhere.git"));
+        let a = agent(&st, "Dev");
+        let m = st.db.add_message(&a.id, None, "assistant", "text", "Keep", json!({})).unwrap();
+        let i = save(&st, &a.id, m.id, "Kept", "").await.unwrap();
+        for (p, says) in [("local", "has no `origin` remote"), ("elsewhere", "isn't on GitHub"), ("nope", "isn't a git repo")] {
+            let e = export(State(st.clone()), Path(i.id), Json(ExportTo { project: p.into() })).await.unwrap_err();
+            assert_eq!(e.0, axum::http::StatusCode::BAD_REQUEST);
+            assert!(e.1.contains(says) && e.1.ends_with("so Loft can't open a pull request there."), "{}", e.1);
+        }
+        assert!(fake.seen("/").is_empty());
+        let Json(v) = get(State(st.clone()), Path(i.id)).await.unwrap();
+        assert!(v["pr"].is_null());
+    }
+
+    #[test]
+    fn the_doc_is_named_after_the_title() {
+        let mut i = SavedItem { id: 4, title: "How to: deploy the *backend* (v2)".into(), tag: String::new(), content: String::new(), agent_id: String::new(), agent_name: String::new(), message_id: 0, created_at: String::new(), updated_at: None, export_pr: None };
+        assert_eq!(doc_path(&i), "docs/how-to-deploy-the-backend-v2.md");
+        i.title = "Ünïcode ✨".into();
+        assert_eq!(doc_path(&i), "docs/n-code.md");
+        i.title = "✨".into();
+        assert_eq!(doc_path(&i), "docs/saved-4.md");
     }
 
     #[tokio::test]

@@ -228,3 +228,64 @@ test("Delete asks first, then removes the item and goes back to the list", async
   assert.match(r.div.textContent!, /Nothing saved yet/);
   r.unmount();
 });
+
+const pr = (number: number) => ({
+  id: `pr-${number}`, agent_id: "dev", slug: "octo/site", number, url: `https://github.com/octo/site/pull/${number}`, tool_use_id: null, title: "Docs: Deploy",
+  state: "open", draft: false, mergeable: true, mergeable_state: "clean", merge_methods: ["squash"], head_ref: "docs/saved-8-1", base_ref: "main", author: "octo",
+  additions: 3, deletions: 0, changed_files: 1, commits: 1, comments: 0, checks: null, merged_by: null, merged_at: null, closed_at: null, error: null,
+  checked_at: new Date().toISOString(), created_at: "2026-11-23T10:00:00Z",
+});
+
+test("Export to docs picks a project, opens the PR and shows its card on the item", async () => {
+  answer = (url) => {
+    if (url === "/api/repos") return { body: [{ name: "notes", github: null }, { name: "site", github: "octo/site" }] };
+    if (url === "/api/saved/8/export") return { body: pr(12) };
+    return { body: { ...item(8, "Deploy", "Tutorial"), source_exists: true, pr: null } };
+  };
+  const r = page("/saved/8");
+  await settle();
+  assert.equal(r.div.querySelector('a[href^="https://github.com"]'), null);
+  click(button(r.div, "Export to docs"));
+  await settle();
+  const dialog = document.querySelector('[role="dialog"]')!;
+  const select = dialog.querySelector<HTMLSelectElement>('select[aria-label="Project"]')!;
+  // The first project on GitHub is picked; one without says why it can't be.
+  assert.equal(select.value, "site");
+  assert.deepEqual([...select.options].map((o) => o.textContent), ["notes (no GitHub repo)", "site (octo/site)"]);
+  act(() => {
+    select.value = "notes";
+    select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+  });
+  assert.match(dialog.querySelector('[role="note"]')!.textContent!, /notes has no GitHub repo/);
+  assert.equal(button(dialog, "Open PR").disabled, true);
+  act(() => {
+    select.value = "site";
+    select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+  });
+  assert.equal(dialog.querySelector('[role="note"]'), null);
+  await act(async () => dialog.querySelector("form")!.requestSubmit());
+  assert.deepEqual(calls.find((c) => c.method === "POST"), { method: "POST", url: "/api/saved/8/export", body: { project: "site" } });
+  await settle();
+  assert.equal(document.querySelector('[role="dialog"]'), null);
+  assert.match(r.div.textContent!, /Exported to docs: octo\/site#12/);
+  assert.equal(r.div.querySelector('a[href="https://github.com/octo/site/pull/12"]')!.getAttribute("target"), "_blank");
+  r.unmount();
+});
+
+test("an exported item shows its PR when opened, and an export error stays in the dialog", async () => {
+  answer = (url) => {
+    if (url === "/api/repos") return { body: [{ name: "site", github: "octo/site" }] };
+    if (url === "/api/saved/9/export") return { status: 400, body: { error: "Couldn't export to octo/site: GitHub 403: Resource not accessible" } };
+    return { body: { ...item(9, "Deploy", "Tutorial"), source_exists: true, pr: pr(11) } };
+  };
+  const r = page("/saved/9");
+  await settle();
+  assert.match(r.div.textContent!, /Exported to docs: octo\/site#11/);
+  click(button(r.div, "Export to docs"));
+  await settle();
+  const dialog = document.querySelector('[role="dialog"]')!;
+  await act(async () => dialog.querySelector("form")!.requestSubmit());
+  await settle();
+  assert.match(dialog.querySelector('[role="alert"]')!.textContent!, /Resource not accessible/);
+  r.unmount();
+});

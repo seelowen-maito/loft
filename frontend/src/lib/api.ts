@@ -472,6 +472,8 @@ export type SavedItem = {
   message_id: number;
   created_at: string;
   updated_at: string | null;
+  /** The pull request of its last export to docs (an id in /pull-requests). */
+  export_pr: string | null;
 };
 
 /** The home line's figures next to the per-agent summaries (`GET /agents/summary?totals=true`). */
@@ -882,8 +884,10 @@ export const api = {
   saveMessage: (agentId: string, messageId: number, title: string, tag: string) =>
     req<SavedItem>("POST", "/saved", { agent_id: agentId, message_id: messageId, title, tag }),
   savedList: (q = "", tag = "") => req<{ items: SavedItem[]; tags: string[] }>("GET", `/saved?${new URLSearchParams({ q, tag })}`),
-  /** `source_exists`: the message it came from is still in its agent's chat. */
-  savedItem: (id: number) => req<SavedItem & { source_exists: boolean }>("GET", `/saved/${id}`),
+  /** `source_exists`: the message it came from is still in its agent's chat; `pr`: its last export to docs. */
+  savedItem: (id: number) => req<SavedItem & { source_exists: boolean; pr: PullRequest | null }>("GET", `/saved/${id}`),
+  /** Opens a pull request adding (or updating) `docs/<slug>.md` on the project's repo. */
+  exportSaved: (id: number, project: string) => req<PullRequest>("POST", `/saved/${id}/export`, { project }),
   updateSaved: (id: number, title: string, tag: string, content: string) => req<SavedItem>("PUT", `/saved/${id}`, { title, tag, content }),
   deleteSaved: (id: number) => req<{ ok: boolean }>("DELETE", `/saved/${id}`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
