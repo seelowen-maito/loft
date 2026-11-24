@@ -1296,6 +1296,17 @@ pub fn send_now(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
     Ok(true)
 }
 
+/// Send now for each of the user's messages in `agent_id`'s queue, in order, as when a goal or Stop hook blocks.
+/// A run that takes no input keeps them queued.
+fn send_queued_now(state: &AppState, agent_id: &str) {
+    let ids: Vec<i64> = state.rt.lock().unwrap().queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+    for id in ids {
+        if let Err(e) = send_now(state, agent_id, id) {
+            tracing::warn!("send now {id} for {agent_id}: {e:#}");
+        }
+    }
+}
+
 /// The Goal active button: sends `/goal clear` as the user's message, into the run in progress when there is one
 /// (Send now, so it clears even while the goal keeps the run going), or as the next run otherwise.
 pub fn clear_goal(state: &AppState, agent_id: &str) -> Option<Message> {
@@ -2181,6 +2192,9 @@ async fn run_process(
                     if goal.is_some() && !throwaway {
                         set_goal(state, agent_id, goal);
                     }
+                    // The run waits on an answer the queue would only give it once it ends: the user's queued
+                    // messages are what it waits for, so they go in now (agents' messages keep waiting).
+                    send_queued_now(state, agent_id);
                 }
             }
             Some("user") => {
@@ -2723,6 +2737,8 @@ pub(crate) mod tests {
     /// is blocked once and waits for a `go` file before the goal passes (a completed turn, nothing said);
     /// "goal-cap" is blocked by the goal and by a command Stop hook until claude's own limit ends the turn;
     /// "goal-hold" is blocked and waits for a message sent now: `/goal clear` clears it in a turn of its own.
+    /// "hold-block" asks for a password, waits for a `go` file, is blocked by a Stop hook and then takes two lines
+    /// from its stdin; "hold-plain" asks the same and replies at `go`, with no block.
     /// "/goal clear" as the prompt clears it, without a model turn; both then wait for their stdin to close.
     /// "/context" answers with no turns and nothing in its result, then waits for its stdin to close too.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
@@ -2776,6 +2792,26 @@ case "$prompt" in *send-now*|*send-lost*)
   echo '{"type":"result","subtype":"success","result":"Got it","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.02}'
   cat > /dev/null
   echo yes > stdin-closed
+  exit 0;;
+esac
+case "$prompt" in *hold-block*|*hold-plain*)
+  echo '{"type":"assistant","message":{"id":"h1","content":[{"type":"text","text":"What is the password?"}]}}'
+  while [ ! -f go ]; do sleep 0.05; done
+  case "$prompt" in *hold-plain*)
+    echo '{"type":"result","subtype":"success","result":"What is the password?","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+    cat > /dev/null
+    exit 0;;
+  esac
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: no password yet."}]},"isSynthetic":true}'
+  IFS= read -r one
+  IFS= read -r two
+  printf '%s\n%s\n' "$one" "$two" >> sent.log
+  printf '%s\n%s\n' "$one" "$two" | sed 's/}$/,"isReplay":true}/'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":1,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  echo '{"type":"assistant","message":{"id":"h2","content":[{"type":"text","text":"Got it: '"$(printf '%s\n' "$one" | text) $(printf '%s\n' "$two" | text)"'"}]}}'
+  echo '{"type":"result","subtype":"success","result":"Got it","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.02}'
+  cat > /dev/null
   exit 0;;
 esac
 goal='the user said the password'
@@ -3661,6 +3697,50 @@ esac
         let later = enqueue_chat(&st, &a.id, "later".into(), json!({})).unwrap().id;
         assert!(!send_now(&st, &a.id, later).unwrap());
         assert!(st.rt.lock().unwrap().queued_messages[&a.id].iter().any(|(i, _)| *i == later));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hook_block_sends_the_users_queued_messages_now_and_not_the_agents() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        wake(&st, &a.id, "hold-block".into(), "agent");
+        until("the question", 10, || asked(&st, &a.id, 1)).await;
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        let one = enqueue_chat(&st, &a.id, "The password".into(), json!({})).unwrap().id;
+        message_from_agent(&st, &lead, &a, "Status?");
+        let two = enqueue_chat(&st, &a.id, "is BANANA-42.".into(), json!({})).unwrap().id;
+        assert!(sent_log(&ws).is_empty(), "no block yet: they wait in the queue");
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the agent to answer them in the run", 10, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "Got it: The password is BANANA-42.")).await;
+        idle(&st, &a.id).await;
+        let sent: Vec<String> = sent_log(&ws).lines().map(|l| user_text(&serde_json::from_str(l).unwrap())).collect();
+        assert_eq!(sent, ["The password", "is BANANA-42."], "in the order they were queued, with no click");
+        for id in [one, two] {
+            assert_eq!(st.db.get_message(&a.id, id).unwrap().unwrap().meta["sent_now"], true);
+        }
+        let p = prompts(&st, &a.id);
+        assert!(p.contains("Status?") && !p.contains("BANANA-42"), "the agent's message got the next run: {p}");
+        assert_eq!(notices(&st, &a.id), ["Stop hook: Objective not met: no password yet."]);
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_a_hook_block_the_users_queued_message_waits_for_the_next_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("hold-plain".into()), "user");
+        until("the question", 10, || asked(&st, &a.id, 1)).await;
+        let mine = enqueue_chat(&st, &a.id, "BANANA-42".into(), json!({})).unwrap().id;
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the next run to take it", 20, || prompts(&st, &a.id).contains("BANANA-42")).await;
+        idle(&st, &a.id).await;
+        assert!(sent_log(&ws).is_empty());
+        assert!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta.get("sent_now").is_none());
+    }
+
+    fn sent_log(ws: &std::path::Path) -> String {
+        std::fs::read_to_string(ws.join("sent.log")).unwrap_or_default()
     }
 
     fn goal_of(st: &AppState, id: &str) -> Option<String> {
