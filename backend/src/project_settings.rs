@@ -49,6 +49,16 @@ pub const TICKET_REVIEWERS: &str = "ticket_reviewers";
 pub const MAX_ROUNDS: &str = "max_rounds";
 /// How many minutes a commit with no check at all waits for one before Loft takes it as "no CI ran".
 pub const CI_GRACE: &str = "ci_grace_minutes";
+/// The model new agents of the project start on; empty: each its template's.
+pub const TEAM_MODEL: &str = "team_model";
+/// The effort new agents of the project start on; empty: each its template's.
+pub const TEAM_EFFORT: &str = "team_effort";
+/// The model the subagents of new agents of the project run on; empty: each its template's.
+pub const TEAM_SUBAGENT_MODEL: &str = "team_subagent_model";
+/// Whether the project's agents build Rust through the shared sccache.
+pub const SCCACHE: &str = "sccache";
+/// The team defaults, each with the agent field it sets.
+const TEAM: &[(&str, &str)] = &[(TEAM_MODEL, "model"), (TEAM_EFFORT, "effort"), (TEAM_SUBAGENT_MODEL, "subagent_model")];
 
 /// The roles that can review each ticket, in the order they are woken, each with what the page says of it.
 pub const REVIEWER_ROLES: &[(&str, &str)] = &[
@@ -105,7 +115,66 @@ const DEFS: &[Def] = &[
         default: "10",
         kind: Kind::Number { min: 1, max: 120, unit: "minutes" },
     },
+    Def {
+        key: TEAM_MODEL,
+        label: "Team model",
+        help: "The model new agents of the project start on. Each agent stays editable on its own; \"Apply to the team now\" moves the ones it has.",
+        choices: &[
+            ("", "Each agent's own", "New agents start on their template's model."),
+            ("sonnet", "Sonnet", "Balanced."),
+            ("opus", "Opus", "Most capable."),
+            ("fable", "Fable", "Anthropic's Fable model."),
+            ("haiku", "Haiku", "Fastest."),
+        ],
+        default: "",
+        kind: Kind::Choice,
+    },
+    Def {
+        key: TEAM_EFFORT,
+        label: "Team effort",
+        help: "The effort new agents of the project start on.",
+        choices: &[
+            ("", "Each agent's own", "New agents start on their template's effort."),
+            ("low", "Low", "Quickest and cheapest."),
+            ("medium", "Medium", "Some thinking."),
+            ("high", "High", "More thinking."),
+            ("xhigh", "Extra high", "Even more thinking."),
+            ("max", "Max", "The most thinking, and the most cost."),
+        ],
+        default: "",
+        kind: Kind::Choice,
+    },
+    Def {
+        key: TEAM_SUBAGENT_MODEL,
+        label: "Team subagent model",
+        help: "The model the subagents of new agents of the project run on, Explore included.",
+        choices: &[
+            ("", "Each agent's own", "New agents start on their template's subagent model."),
+            ("sonnet", "Sonnet", "Balanced."),
+            ("opus", "Opus", "Most capable."),
+            ("fable", "Fable", "Anthropic's Fable model."),
+            ("haiku", "Haiku", "Fastest, and keeps searches cheap."),
+        ],
+        default: "",
+        kind: Kind::Choice,
+    },
+    Def {
+        key: SCCACHE,
+        label: "Rust build cache",
+        help: "Whether the project's agents build Rust through sccache, sharing compiled dependencies with the other agents. It's used only once sccache is installed; it counts from each agent's next run.",
+        choices: &[
+            ("on", "On", "Agents share compiled Rust dependencies through sccache."),
+            ("off", "Off", "Agents build Rust without sccache."),
+        ],
+        default: "on",
+        kind: Kind::Choice,
+    },
 ];
+
+/// A choice as text: in backticks, or "empty" for the empty one.
+fn quoted(v: &str) -> String {
+    if v.is_empty() { "empty".into() } else { format!("`{v}`") }
+}
 
 fn def(key: &str) -> Option<&'static Def> {
     DEFS.iter().find(|d| d.key == key)
@@ -192,6 +261,46 @@ pub fn ci_at_the_end(state: &AppState, project: &str) -> bool {
     !project.trim().is_empty() && value_of(state, project, CI_MODE) == AT_THE_END
 }
 
+/// Whether `project`'s agents build Rust through sccache (when it's installed): yes unless the project turned it off.
+pub fn sccache_on(state: &AppState, project: &str) -> bool {
+    project.trim().is_empty() || value_of(state, project.trim(), SCCACHE) != "off"
+}
+
+/// `project`'s team defaults that are set, as the agent fields they set (`model`, `effort`, `subagent_model`) and
+/// their values. A default left at "each agent's own" isn't there.
+pub fn team_defaults(state: &AppState, project: &str) -> Vec<(&'static str, String)> {
+    if project.trim().is_empty() {
+        return vec![];
+    }
+    TEAM.iter().map(|(key, field)| (*field, value_of(state, project.trim(), key))).filter(|(_, v)| !v.is_empty()).collect()
+}
+
+/// Gives every agent whose main project is `project` the project's team defaults that are set. The agents it
+/// changed; an error when no default is set.
+pub fn apply_to_team(state: &AppState, project: &str) -> Result<Vec<Agent>, String> {
+    let defaults = team_defaults(state, project);
+    if defaults.is_empty() {
+        return Err("No team default is set: pick a team model, effort or subagent model first.".into());
+    }
+    let mut changed = vec![];
+    for mut a in state.db.list_agents().map_err(|e| e.to_string())?.into_iter().filter(|a| !a.builtin && a.project.trim() == project.trim()) {
+        let before = (a.model.clone(), a.effort.clone(), a.subagent_model.clone());
+        for (field, v) in &defaults {
+            match *field {
+                "model" => a.model = v.clone(),
+                "effort" => a.effort = v.clone(),
+                _ => a.subagent_model = v.clone(),
+            }
+        }
+        if (a.model.clone(), a.effort.clone(), a.subagent_model.clone()) != before {
+            state.db.save_agent(&a).map_err(|e| e.to_string())?;
+            crate::agents::emit_agent(state, &a);
+            changed.push(a);
+        }
+    }
+    Ok(changed)
+}
+
 /// Who changed a setting, as the page shows it: the agent (by its name now, or the one it had then once it's
 /// gone), or none for the user.
 fn changed_json(state: &AppState, s: &ProjectSetting) -> Value {
@@ -243,7 +352,7 @@ pub fn set(state: &AppState, project: &str, key: &str, value: &Value, by: Option
         }
         Kind::Choice => {
             let v = value.as_str().map(str::trim).filter(|v| d.choices.iter().any(|c| c.0 == *v));
-            json!(v.ok_or_else(|| format!("{} takes {}.", d.label, d.choices.iter().map(|c| format!("`{}`", c.0)).collect::<Vec<_>>().join(" or ")))?)
+            json!(v.ok_or_else(|| format!("{} takes {}.", d.label, d.choices.iter().map(|c| quoted(c.0)).collect::<Vec<_>>().join(" or ")))?)
         }
         Kind::Reviewers => json!(reviewers_in(value).map_err(|bad| {
             let roles = REVIEWER_ROLES.iter().map(|(k, _)| format!("`{k}`")).collect::<Vec<_>>().join(", ");
@@ -339,6 +448,21 @@ pub async fn put(State(state): State<AppState>, Json(c): Json<Change>) -> ApiRes
 }
 
 #[derive(Deserialize)]
+pub struct ProjectBody {
+    project: String,
+}
+
+/// `POST /api/project-settings/apply-team`: gives the project's agents its team defaults that are set. Its settings,
+/// with the agents changed in `applied`.
+pub async fn apply_team(State(state): State<AppState>, Json(b): Json<ProjectBody>) -> ApiResult<Value> {
+    let project = known_project(&state, &b.project)?;
+    let changed = apply_to_team(&state, &project).map_err(bad)?;
+    let mut v = view(&state, &project);
+    v["applied"] = json!(changed.iter().map(|a| json!({ "id": a.id, "name": a.name })).collect::<Vec<_>>());
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
 pub struct NewReviewer {
     project: String,
     role: String,
@@ -375,7 +499,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "set_project_setting",
-            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10).",
+            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10). `team_model`, `team_effort` and `team_subagent_model` are what new agents of the project start on: a model (`sonnet`, `opus`, `fable`, `haiku`), an effort (`low`, `medium`, `high`, `xhigh`, `max`) and the model their subagents run on, or empty for each agent's own (the default); the agents the team has keep theirs until the user applies them to the team on the settings page. `sccache` is `on` (the default) or `off`: whether the project's agents build Rust through the shared sccache.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "The project; your main project when omitted." },
                 "key": { "type": "string", "description": "The setting, like `ci_mode`." },
@@ -405,7 +529,7 @@ fn tool_text(state: &AppState, project: &str) -> String {
         .map(|d| {
             let choices = match d.kind {
                 Kind::Branch => "one of the repo's branches, or empty for its default branch on GitHub".to_string(),
-                Kind::Choice => d.choices.iter().map(|(v, _, h)| format!("`{v}` ({})", h.trim_end_matches('.'))).collect::<Vec<_>>().join(", "),
+                Kind::Choice => d.choices.iter().map(|(v, _, h)| format!("{} ({})", quoted(v), h.trim_end_matches('.'))).collect::<Vec<_>>().join(", "),
                 Kind::Reviewers => format!(
                     "a list of {}, or an empty one for none; a role with no agent on the team is skipped",
                     REVIEWER_ROLES.iter().map(|(k, h)| format!("`{k}` ({})", h.trim_end_matches('.'))).collect::<Vec<_>>().join(", ")
@@ -416,7 +540,7 @@ fn tool_text(state: &AppState, project: &str) -> String {
                 let who = if s.changed_by.is_empty() { "the user".to_string() } else { state.db.get_agent(&s.changed_by).ok().flatten().map_or_else(|| s.changed_by_name.clone(), |a| a.name) };
                 format!(" Changed by {who} at {}.", s.changed_at)
             });
-            let shown = |v: &str| if d.kind == Kind::Branch && v.is_empty() { "`` (the repo's default branch on GitHub)".to_string() } else { format!("`{v}`") };
+            let shown = |v: &str| if d.kind == Kind::Branch && v.is_empty() { "`` (the repo's default branch on GitHub)".to_string() } else { quoted(v) };
             let (value, default) = if d.kind == Kind::Reviewers {
                 let list = |l: &[&str]| format!("`[{}]`", l.join(", "));
                 (list(&ticket_reviewers(state, project)), list(DEFAULT_REVIEWERS))

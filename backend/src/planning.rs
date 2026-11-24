@@ -8202,4 +8202,99 @@ pub(crate) mod tests {
         crate::delivery::follow_all(&st).await;
         assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
     }
+
+    // ---- Team model and sccache (#466) ----
+
+    #[tokio::test]
+    async fn a_new_agent_of_the_project_starts_on_its_team_defaults_and_apply_moves_the_team() {
+        use crate::project_settings::{apply_team, get, put};
+        let st = state();
+        planner_on(&st, "pteam", None);
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("web")).unwrap();
+        let read = || get(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({ "project": "pteam" })).unwrap()));
+        let change = |key: &str, value: Value| put(State(st.clone()), Json(serde_json::from_value(json!({ "project": "pteam", "key": key, "value": value })).unwrap()));
+        let apply = |project: &str| apply_team(State(st.clone()), Json(serde_json::from_value(json!({ "project": project })).unwrap()));
+        let one = |v: &Value, key: &str| v["settings"].as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().clone();
+        let create = |p: Value| crate::api::create_agent(State(st.clone()), Json(p));
+        let fields = |id: &str| {
+            let a = st.db.get_agent(id).unwrap().unwrap();
+            (a.model, a.effort, a.subagent_model)
+        };
+        let s = |v: &str| v.to_string();
+
+        // Loft's defaults: each agent its own, and sccache on.
+        let Json(v) = read().await.unwrap();
+        for key in ["team_model", "team_effort", "team_subagent_model"] {
+            let t = one(&v, key);
+            assert_eq!((&t["kind"], &t["value"], &t["default"]), (&json!("choice"), &json!(""), &json!("")), "{t}");
+            assert_eq!(t["choices"][0]["label"], "Each agent's own");
+        }
+        assert_eq!((&one(&v, "sccache")["value"], &one(&v, "sccache")["default"]), (&json!("on"), &json!("on")));
+        let Json(a) = create(json!({ "name": "Plain", "project": "pteam" })).await.unwrap();
+        assert_eq!(fields(a["id"].as_str().unwrap()), (s("sonnet"), s(""), s("")), "no team default: Loft's own");
+        // Nothing to apply yet.
+        let err = apply("pteam").await.unwrap_err();
+        assert_eq!((err.0, err.1.as_str()), (axum::http::StatusCode::BAD_REQUEST, "No team default is set: pick a team model, effort or subagent model first."));
+
+        // The team agents it has before the defaults change: they keep theirs until applied.
+        let dev = busy(&st, "Builder", "pteam", "dev");
+        let mut qa = busy(&st, "Checker", "pteam", "qa");
+        qa.effort = "low".into();
+        st.db.save_agent(&qa).unwrap();
+        let mut elsewhere = busy(&st, "Other", "web", "dev");
+        elsewhere.projects = vec!["web".into(), "pteam".into()];
+        st.db.save_agent(&elsewhere).unwrap();
+
+        let Json(v) = change("team_model", json!("opus")).await.unwrap();
+        assert_eq!((&one(&v, "team_model")["value"], &one(&v, "team_model")["changed"]["agent"]), (&json!("opus"), &Value::Null));
+        change("team_effort", json!("high")).await.unwrap();
+        assert_eq!(change("team_effort", json!("huge")).await.unwrap_err().1, "Team effort takes empty or `low` or `medium` or `high` or `xhigh` or `max`.");
+        assert_eq!(fields(&dev.id), (dev.model.clone(), s(""), s("")), "a team default alone changes no agent the team has");
+
+        // A new agent of the project starts on them; one it names a model for keeps that model; another project's doesn't.
+        let Json(a) = create(json!({ "name": "Fresh", "project": "pteam", "role": "dev" })).await.unwrap();
+        assert_eq!(fields(a["id"].as_str().unwrap()), (s("opus"), s("high"), s("")));
+        let Json(a) = create(json!({ "name": "Picked", "project": "pteam", "model": "haiku" })).await.unwrap();
+        assert_eq!(fields(a["id"].as_str().unwrap()), (s("haiku"), s("high"), s("")));
+        let Json(a) = create(json!({ "name": "Away", "project": "web" })).await.unwrap();
+        assert_eq!(fields(a["id"].as_str().unwrap()), (s("sonnet"), s(""), s("")));
+
+        // Apply to the team now: the agents whose main project it is, not one that only also works on it.
+        change("team_subagent_model", json!("haiku")).await.unwrap();
+        let Json(v) = apply("pteam").await.unwrap();
+        let applied: Vec<&str> = v["applied"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect();
+        for name in ["Builder", "Checker", "Fresh", "Picked", "Plain"] {
+            assert!(applied.contains(&name), "{name} in {applied:?}");
+        }
+        assert!(!applied.contains(&"Other") && !applied.contains(&"Away"), "{applied:?}");
+        assert_eq!(one(&v, "team_model")["value"], "opus", "the settings come back with it");
+        for id in [&dev.id, &qa.id] {
+            assert_eq!(fields(id), (s("opus"), s("high"), s("haiku")));
+        }
+        assert_eq!(fields(&elsewhere.id), (elsewhere.model.clone(), s(""), s("")));
+
+        // Each agent stays editable on its own; a default back at "each agent's own" leaves that field alone.
+        crate::api::update_agent(State(st.clone()), axum::extract::Path(dev.id.clone()), Json(json!({ "model": "sonnet" }))).await.unwrap();
+        assert_eq!(fields(&dev.id).0, "sonnet");
+        change("team_model", json!("")).await.unwrap();
+        change("team_effort", json!("medium")).await.unwrap();
+        let Json(v) = apply("pteam").await.unwrap();
+        assert!(v["applied"].as_array().unwrap().iter().any(|a| a["name"] == "Builder"));
+        assert_eq!(fields(&dev.id), (s("sonnet"), s("medium"), s("haiku")));
+        assert_eq!(apply("nowhere").await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_lead_sets_the_team_defaults_and_sccache_with_the_tool() {
+        let st = state();
+        planner_on(&st, "pteam-lead", None);
+        let lead = busy(&st, "Lead", "pteam-lead", "lead");
+        let out = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "team_model", "value": "fable" })).await.unwrap();
+        assert!(out.contains("- Team model (`team_model`): `fable`. Loft's default: empty. Choices: empty (New agents start on their template's model), `sonnet`"), "{out}");
+        let out = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "sccache", "value": "off" })).await.unwrap();
+        assert!(out.contains("- Rust build cache (`sccache`): `off`. Loft's default: `on`. Choices: `on` (Agents share compiled Rust dependencies through sccache), `off` (Agents build Rust without sccache). Changed by Lead at "), "{out}");
+        assert_eq!(settings_tool(&st, &lead, "set_project_setting", json!({ "key": "sccache", "value": "maybe" })).await.unwrap_err(), "Rust build cache takes `on` or `off`.");
+        assert!(!crate::project_settings::sccache_on(&st, "pteam-lead") && crate::project_settings::sccache_on(&st, "other") && crate::project_settings::sccache_on(&st, ""));
+        assert_eq!(crate::project_settings::team_defaults(&st, "pteam-lead"), vec![("model", "fable".to_string())]);
+    }
 }

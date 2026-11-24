@@ -469,7 +469,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },
                 "replace_prompt": { "type": "boolean", "description": "Use `prompt` instead of the template's instructions rather than after them." },
                 "personality": { "type": "string" },
-                "model": { "type": "string", "enum": ["haiku", "sonnet", "opus"] },
+                "model": { "type": "string", "enum": ["haiku", "sonnet", "opus", "fable"] },
                 "interval_minutes": { "type": "integer", "description": "Minutes between scheduled check-ins (0 = only when messaged, otherwise at least 60). Defaults to the template's." },
                 "quiet_hours": { "type": "array", "description": "When scheduled check-ins pause, Defaults to none: the agent runs around the clock. Only set it when the user asks.", "items": { "type": "object", "properties": {
                     "days": { "type": "array", "items": { "type": "integer" }, "description": "0 = Monday … 6 = Sunday" },
@@ -632,9 +632,11 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         None if custom.is_empty() => return Err("prompt is required without a template".into()),
         None => custom,
     };
-    let model = Some(s("model")).filter(|m| !m.is_empty()).unwrap_or_else(|| tpl.map_or("sonnet", |t| t.model).to_string());
-    if !["haiku", "sonnet", "opus"].contains(&model.as_str()) {
-        return Err("model must be haiku, sonnet or opus".into());
+    // The project's team model, when it has one, before the template's.
+    let team = crate::project_settings::team_defaults(state, &project).into_iter().find(|(f, _)| *f == "model").map(|(_, m)| m);
+    let model = Some(s("model")).filter(|m| !m.is_empty()).or(team).unwrap_or_else(|| tpl.map_or("sonnet", |t| t.model).to_string());
+    if !["haiku", "sonnet", "opus", "fable"].contains(&model.as_str()) {
+        return Err("model must be haiku, sonnet, opus or fable".into());
     }
     let interval = args["interval_minutes"].as_i64().unwrap_or_else(|| tpl.map_or(0, |t| t.interval_minutes));
     if interval != 0 && interval < MIN_INTERVAL {
@@ -779,6 +781,26 @@ mod tests {
         let err = create_agent(&st, &lead, &json!({ "template": "dev", "project": "homebase" })).await.unwrap_err();
         assert!(err.starts_with("Planning agents don't create agents: that stays with loft."), "{err}");
         assert!(!st.db.list_agents().unwrap().iter().any(|a| a.name == "Dev"));
+    }
+
+    #[tokio::test]
+    async fn loft_creates_a_project_agent_on_the_projects_team_defaults() {
+        let st = state();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        st.db.save_agent(&me).unwrap();
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("teamed")).unwrap();
+        crate::project_settings::set(&st, "teamed", crate::project_settings::TEAM_MODEL, &json!("fable"), None).unwrap();
+        crate::project_settings::set(&st, "teamed", crate::project_settings::TEAM_EFFORT, &json!("xhigh"), None).unwrap();
+        let made = |name: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.name == name).unwrap();
+        // The team's model over the template's (Security's is sonnet), and its effort.
+        create_agent(&st, &me, &json!({ "template": "security", "project": "teamed" })).await.unwrap();
+        let a = made("Security");
+        assert_eq!((a.model.as_str(), a.effort.as_str(), a.subagent_model.as_str()), ("fable", "xhigh", ""));
+        // A model the call names wins.
+        create_agent(&st, &me, &json!({ "template": "tests", "project": "teamed", "model": "haiku" })).await.unwrap();
+        let a = made("QA");
+        assert_eq!((a.model.as_str(), a.effort.as_str()), ("haiku", "xhigh"));
     }
 
     #[tokio::test]

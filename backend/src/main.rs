@@ -100,6 +100,7 @@ fn api_routes() -> Router<AppState> {
         .route("/project-settings", get(project_settings::get).put(project_settings::put))
         .route("/project-settings/branches", get(project_settings::branches))
         .route("/project-settings/reviewer", post(project_settings::create_reviewer))
+        .route("/project-settings/apply-team", post(project_settings::apply_team))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))

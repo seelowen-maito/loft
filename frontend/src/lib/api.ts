@@ -665,6 +665,8 @@ export type ProjectSetting =
   | (ProjectSettingBase & { kind: "reviewers"; default: string[]; value: string[]; reviewers: ReviewerRow[] })
   | (ProjectSettingBase & { kind: "number"; default: number; value: number; min: number; max: number; unit: string });
 export type ProjectSettingsView = { project: string; settings: ProjectSetting[] };
+/** The team defaults new agents of a project start on, shown together with "Apply to the team now". */
+export const TEAM_SETTINGS = ["team_model", "team_effort", "team_subagent_model"];
 export type ProjectBranches = { repo: string; default_branch: string; branches: string[] };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -766,6 +768,8 @@ export const api = {
   projectSettings: (project: string) => req<ProjectSettingsView>("GET", `/project-settings?project=${encodeURIComponent(project)}`),
   setProjectSetting: (project: string, key: string, value: string | string[] | number) => req<ProjectSettingsView>("PUT", "/project-settings", { project, key, value }),
   /** Asks Loft's own agent `loft` to set up an agent in a reviewer role the project's team has no one in. */
+  /** Gives the agents whose main project it is the project's team defaults that are set; `applied` names the ones it changed. */
+  applyTeamDefaults: (project: string) => req<ProjectSettingsView & { applied: { id: string; name: string }[] }>("POST", "/project-settings/apply-team", { project }),
   createReviewer: (project: string, role: string) => req<{ agent: { id: string; name: string }; message: string }>("POST", "/project-settings/reviewer", { project, role }),
   projectBranches: (project: string) => req<ProjectBranches>("GET", `/project-settings/branches?project=${encodeURIComponent(project)}`),
 

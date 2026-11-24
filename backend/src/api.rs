@@ -419,6 +419,16 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         created_by,
     };
     apply_patch(state, &mut a, p)?;
+    // The project's team defaults, for what the patch leaves out.
+    for (field, v) in crate::project_settings::team_defaults(state, &a.project) {
+        if p.get(field).is_none() {
+            match field {
+                "model" => a.model = v,
+                "effort" => a.effort = v,
+                _ => a.subagent_model = v,
+            }
+        }
+    }
     std::fs::create_dir_all(workspace(state, &id)).map_err(anyhow::Error::from)?;
     std::fs::write(
         workspace(state, &id).join("README.md"),

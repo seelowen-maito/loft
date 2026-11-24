@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ArrowLeft, Plus } from "lucide-react";
-import { api, type ProjectBranches, type ProjectSetting, type ProjectSettingsView, type ReviewerRow } from "../lib/api";
+import { api, TEAM_SETTINGS, type ProjectBranches, type ProjectSetting, type ProjectSettingsView, type ReviewerRow } from "../lib/api";
 import { SettingsCard } from "../components/SettingsCard";
 import { Sticker } from "../components/Sticker";
 import { ErrorLine } from "../components/Callout";
@@ -33,9 +33,13 @@ export default function ProjectSettingsPage() {
         </div>
         {err && <ErrorLine error={err} />}
         {!view && !err && <div className="skeleton h-60 rounded-2xl" />}
-        {view?.settings.map((s) => (
-          <SettingCard key={s.key} project={project} setting={s} onSaved={setView} />
-        ))}
+        {view?.settings.map((s) =>
+          !TEAM_SETTINGS.includes(s.key) ? (
+            <SettingCard key={s.key} project={project} setting={s} onSaved={setView} />
+          ) : s.key === TEAM_SETTINGS[0] ? (
+            <TeamCard key="team" project={project} settings={view.settings.filter((t) => TEAM_SETTINGS.includes(t.key))} onSaved={setView} />
+          ) : null,
+        )}
       </div>
     </div>
   );
@@ -96,16 +100,82 @@ function SettingCard({ project, setting: s, onSaved }: { project: string; settin
           })}
         </div>
       )}
-      <p className="font-mono text-[11px] text-fg-3">
-        {s.changed ? (
-          <>
-            Set to {label()} by {s.changed.agent ? s.changed.agent.name : "you"}{" "}
-            <span title={fmtDateTime(s.changed.at)}>{relTime(s.changed.at)}</span>
-          </>
-        ) : (
-          <>Never changed: Loft's default</>
+      <Changed setting={s} label={label()} />
+    </SettingsCard>
+  );
+}
+
+/** Who last changed a setting and when, or that it's still Loft's default. */
+function Changed({ setting: s, label, what }: { setting: ProjectSetting; label: string; what?: string }) {
+  return (
+    <p className="font-mono text-[11px] text-fg-3">
+      {s.changed ? (
+        <>
+          {what ? `${what} set to` : "Set to"} {label} by {s.changed.agent ? s.changed.agent.name : "you"}{" "}
+          <span title={fmtDateTime(s.changed.at)}>{relTime(s.changed.at)}</span>
+        </>
+      ) : (
+        <>Never changed: Loft's default</>
+      )}
+    </p>
+  );
+}
+
+/** The team defaults in one card: the model, effort and subagent model new agents of the project start on, each a
+ *  dropdown, and "Apply to the team now", which gives them to the agents the team has. Each agent stays editable. */
+function TeamCard({ project, settings, onSaved }: { project: string; settings: ProjectSetting[]; onSaved: (v: ProjectSettingsView) => void }) {
+  const save = useAction();
+  const apply = useAction();
+  const [applied, setApplied] = useState<{ id: string; name: string }[] | null>(null);
+  const choose = (s: ProjectSetting, value: string) => {
+    if (value === s.value) return;
+    setApplied(null);
+    save.run(async () => onSaved(await api.setProjectSetting(project, s.key, value)));
+  };
+  const set = settings.some((s) => s.value !== "");
+  const latest = settings.filter((s) => s.changed).sort((a, b) => (b.changed!.at > a.changed!.at ? 1 : -1))[0];
+  const short = (s: ProjectSetting) => s.label.replace(/^Team (\w)/, (_, c: string) => c.toUpperCase());
+  const choiceLabel = (s: ProjectSetting) => s.choices.find((c) => c.value === s.value)?.label ?? String(s.value);
+  return (
+    <SettingsCard
+      title="Team model"
+      description="What new agents of the project start on. The agents the team has keep theirs until you apply these, and each agent stays editable on its own."
+      error={save.error ?? apply.error}
+    >
+      <div className="grid gap-3 sm:grid-cols-3">
+        {settings.map((s) => (
+          <label key={s.key} className="block space-y-1.5" title={s.help}>
+            <span className="eyebrow">{short(s)}</span>
+            <select className="input w-full disabled:opacity-60" aria-label={s.label} value={String(s.value)} disabled={save.busy} onChange={(e) => choose(s, e.target.value)}>
+              {s.choices.map((c) => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
+            </select>
+            <span className="block text-[11.5px] text-fg-3">{s.choices.find((c) => c.value === s.value)?.help}</span>
+          </label>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          className="btn disabled:opacity-60"
+          disabled={!set || apply.busy || save.busy}
+          title={set ? "Gives the agents whose main project this is the defaults that are set" : "Pick a model, effort or subagent model first"}
+          onClick={() => apply.run(async () => {
+            const { applied, ...v } = await api.applyTeamDefaults(project);
+            onSaved(v);
+            setApplied(applied);
+          })}
+        >
+          {apply.busy ? "Applying…" : "Apply to the team now"}
+        </button>
+        {applied && (
+          <span role="status" className="text-[12px] text-fg-3 [overflow-wrap:anywhere]">
+            {applied.length ? `Applied to ${applied.map((a) => a.name).join(", ")}.` : "The team already has them."}
+          </span>
         )}
-      </p>
+      </div>
+      {latest ? <Changed setting={latest} what={short(latest)} label={choiceLabel(latest)} /> : <Changed setting={settings[0]} label="" />}
     </SettingsCard>
   );
 }

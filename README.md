@@ -81,6 +81,8 @@ Each project also has its own **Project settings**, opened with **Settings** in 
 - **Ticket reviewers**: one row per reviewer role (QA, Security, Code reviewer) with the team's agent in it, its sticker and a switch for "reviews each ticket". QA and Security are on by default. The Code reviewer always does the final review of the whole spec PR; switched on, it also reviews each ticket. A Delivery waits only for the reviewers switched on. A role with no agent shows dimmed with **Create**, which asks Loft's own agent to set one up.
 - **Rounds of changes**: 1 to 5 (3 by default), the rounds of changes a Delivery ticket, or the final review, gets before it waits for you. A change counts from the next round on.
 - **CI grace**: how long a commit with no check at all waits for one when the repo has workflows (10 minutes by default, up to 120), before Loft takes it as no CI ran and carries on.
+- **Team model**: the model, effort and subagent model new agents of the project start on (by default each agent's own, from its template). **Apply to the team now** gives the ones that are set to the agents whose main project it is; each agent stays editable on its own.
+- **Rust build cache**: on (the default), the project's agents build Rust through the shared sccache once it's installed; off, they build without it, from each agent's next run.
 
 ### Use it from other devices
 

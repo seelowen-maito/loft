@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
 import { api, ROLES, type Agent } from "../../lib/api";
 import { cx } from "../../lib/format";
@@ -19,11 +19,27 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
   const [moved, setMoved] = useState<{ agent: Agent; notice: string } | null>(null);
   const set = (k: keyof typeof form, v: string | number) => setForm((f) => ({ ...f, [k]: v }));
   const team = teamOf({ group: form.group, project: form.projects[0] ?? "" });
+  // The main project's team model, when it has one: the agent starts on it unless the user picks a model here.
+  const [teamModel, setTeamModel] = useState("");
+  const [modelPicked, setModelPicked] = useState(false);
+  const main = form.projects[0] ?? "";
+  useEffect(() => {
+    setTeamModel("");
+    if (!main) return;
+    let live = true;
+    api.projectSettings(main)
+      .then((v) => live && setTeamModel(String(v.settings.find((s) => s.key === "team_model")?.value ?? "")))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [main]);
+  const model = !modelPicked && teamModel ? teamModel : form.model;
   const close = () => (moved ? onCreated(moved.agent) : onClose());
 
   const create = () =>
     creating.run(async () => {
-      const { notice, ...a } = await api.createAgent(createPayload(withTyped(form, typed)));
+      const { notice, ...a } = await api.createAgent(createPayload(withTyped({ ...form, model }, typed)));
       if (notice) setMoved({ agent: a, notice });
       else onCreated(a);
     });
@@ -101,7 +117,10 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1.5">
             <span className="eyebrow">Model</span>
-            <select className="input" value={form.model} onChange={(e) => set("model", e.target.value)}>
+            <select className="input" value={model} title={model === teamModel && !modelPicked ? `${main}'s team model` : undefined} onChange={(e) => {
+              setModelPicked(true);
+              set("model", e.target.value);
+            }}>
               {MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
             </select>
           </label>
