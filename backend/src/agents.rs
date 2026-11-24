@@ -997,6 +997,11 @@ pub fn needs_action_from_loft(state: &AppState, to: &Agent, text: &str) {
 /// The most FYIs put in front of one prompt; older ones are only counted.
 const MAX_FYIS_PER_PROMPT: usize = 20;
 
+/// A prompt that is a slash command, like `/goal clear` or `/context`: claude may answer it itself, without a turn.
+fn is_command(prompt: &str) -> bool {
+    prompt.starts_with('/')
+}
+
 /// Put the pending FYIs, oldest first, in front of the prompt: the newest MAX_FYIS_PER_PROMPT,
 /// after a line saying how many older ones were left out.
 fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
@@ -2259,10 +2264,11 @@ async fn run_process(
                     // The run ends here, unless a message sent now is still on its way in: claude answers it first.
                     let grace = if close_input(state, agent_id, &mut stdin) { EXIT_GRACE } else { FOLLOW_UP_GRACE };
                     exit_by = Some(tokio::time::Instant::now() + grace);
-                } else if !aborted && bg.is_empty() {
-                    // No turns and nothing said: a command claude answers itself, like `/context`, or the empty
-                    // replay of a resume. Claude exits once its input closes, or after the real turn that follows,
-                    // however long that takes: no deadline.
+                } else if !aborted && bg.is_empty() && is_command(&first_text) {
+                    // No turns and nothing said to a command claude answers itself, like `/context`: claude exits
+                    // once its input closes, no deadline. Any other prompt got the empty replay of a resume: the
+                    // real turn follows, however long the model thinks first, and takes messages sent now until
+                    // its own result closes the input.
                     close_input(state, agent_id, &mut stdin);
                 } else if replied {
                     if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
@@ -2736,7 +2742,8 @@ pub(crate) mod tests {
     /// The goal scenarios send the lines the probe for #476 recorded from the real claude: "goal-pass" sets a goal,
     /// is blocked once and waits for a `go` file before the goal passes (a completed turn, nothing said);
     /// "goal-cap" is blocked by the goal and by a command Stop hook until claude's own limit ends the turn;
-    /// "goal-hold" is blocked and waits for a message sent now: `/goal clear` clears it in a turn of its own.
+    /// "goal-hold" is blocked and waits for a message sent now: `/goal clear` clears it in a turn of its own;
+    /// "goal-hold-resumed" does the same after the empty result (no turns, nothing said) a resume replays first.
     /// "hold-block" asks for a password, waits for a `go` file, is blocked by a Stop hook and then takes two lines
     /// from its stdin; "hold-plain" asks the same and replies at `go`, with no block.
     /// "/goal clear" as the prompt clears it, without a model turn; both then wait for their stdin to close.
@@ -2824,6 +2831,9 @@ cleared() {
   echo yes > stdin-closed
   exit 0
 }
+case "$prompt" in *goal-hold-resumed*)
+  echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}';;
+esac
 case "$prompt" in *goal-pass*|*goal-cap*|*goal-hold*)
   synthetic "Goal set: $goal" s
   echo '{"type":"assistant","message":{"id":"p1","model":"claude-haiku-5-5","content":[{"type":"text","text":"What is the password?"}]}}'
@@ -3802,6 +3812,23 @@ esac
         idle(&st, &a.id).await;
         let line: Value = serde_json::from_str(std::fs::read_to_string(ws.join("sent.log")).unwrap().trim()).unwrap();
         assert_eq!((user_text(&line).as_str(), line["priority"].as_str()), ("/goal clear", Some("now")));
+        assert!(ws.join("stdin-closed").exists());
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resumed_run_takes_messages_sent_now_after_its_empty_replay() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-hold-resumed".into()), "user");
+        until("the goal's block", 10, || goal_of(&st, &a.id).is_some() && !notices(&st, &a.id).is_empty()).await;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true, "the replay's empty result didn't close the run's input");
+        until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        let line: Value = serde_json::from_str(sent_log(&ws).trim()).unwrap();
+        assert_eq!(user_text(&line), "/goal clear");
         assert!(ws.join("stdin-closed").exists());
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
         assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
