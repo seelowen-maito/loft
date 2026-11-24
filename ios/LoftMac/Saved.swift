@@ -32,8 +32,11 @@ struct SavedSection: View {
             try? await Task.sleep(for: .milliseconds(200))
             guard !Task.isCancelled else { return }
             do {
-                list = try await store.savedList(query: query.trimmingCharacters(in: .whitespaces), tag: tag)
+                let l = try await store.savedList(query: query.trimmingCharacters(in: .whitespaces), tag: tag)
+                list = l
                 error = nil
+                // Its last item deleted, the tag's chip is gone: show All (this reloads).
+                tag = Saved.keptFilter(tag, tags: l.tags)
             } catch {
                 self.error = APIError.from(error).title
             }

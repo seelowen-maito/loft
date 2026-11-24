@@ -73,6 +73,12 @@ public enum Saved {
         }
     }
 
+    /// The tag filter once the list is back: a tag no item has any more (its last one was deleted) goes back to All,
+    /// so the filter never sits on a chip that's gone (#681).
+    public static func keptFilter(_ tag: String, tags: [String]) -> String {
+        tag.isEmpty || tagOptions(tags).contains(tag) ? tag : ""
+    }
+
     /// The list's preview of an item's content: plain words, without Markdown's marks.
     public static func excerpt(_ content: String, chars: Int = 160) -> String {
         // A table's separator row and a horizontal rule aren't words.

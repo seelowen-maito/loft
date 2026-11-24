@@ -32,6 +32,13 @@ final class SavedTests: XCTestCase {
         XCTAssertEqual(Saved.tagOptions(["decision", "Recipes", " ", "recipes"]), ["Tutorial", "Good to know", "Decision", "Recipes"])
     }
 
+    func testTheFilterGoesBackToAllWhenItsTagIsGone() {
+        XCTAssertEqual(Saved.keptFilter("Recipes", tags: ["Recipes", "Infra"]), "Recipes")
+        XCTAssertEqual(Saved.keptFilter("Recipes", tags: ["Infra"]), "")
+        XCTAssertEqual(Saved.keptFilter("Tutorial", tags: []), "Tutorial")  // a suggested tag keeps its chip
+        XCTAssertEqual(Saved.keptFilter("", tags: []), "")
+    }
+
     func testExcerptIsPlainWords() {
         XCTAssertEqual(Saved.excerpt("# Title\n\n| a | b |\n|---|---|\n| **1** | `2` |"), "Title a b 1 2")
         XCTAssertEqual(Saved.excerpt(String(repeating: "a", count: 200), chars: 10), "aaaaaaaaaa…")
