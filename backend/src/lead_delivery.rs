@@ -13,7 +13,7 @@ use crate::state::AppState;
 /// The ceilings: a limit above one is refused, and so is one below 1.
 pub const MAX_PER_HOUR: u32 = 6;
 pub const MAX_PER_DAY: u32 = 24;
-pub const MAX_RUNNING: u32 = 5;
+pub const MAX_RUNNING: u32 = 10;
 
 /// How many log lines the endpoint returns.
 const LOG_LIMIT: usize = 50;
@@ -170,6 +170,21 @@ mod tests {
         assert_eq!(v["log"], json!([]));
         // The ceilings themselves, and 1, are fine.
         put(&st, json!({ "project": "loft", "resumes_per_hour": MAX_PER_HOUR, "resumes_per_day": MAX_PER_DAY, "running_deliveries": 1 })).await.ok().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_running_deliveries_ceiling_is_ten() {
+        let st = crate::tasks::tests::state();
+        assert_eq!(MAX_RUNNING, 10);
+        for n in 1..=10 {
+            let v = put(&st, json!({ "project": "loft", "running_deliveries": n })).await.ok().unwrap();
+            assert_eq!(v["options"]["running_deliveries"], n);
+            assert_eq!(v["ceilings"]["running_deliveries"], 10);
+        }
+        let err = put(&st, json!({ "project": "loft", "running_deliveries": 11 })).await.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(options(&st, "loft").running_deliveries, 10, "the refused 11 changed nothing");
+        assert_eq!(Options::default().running_deliveries, 2, "the default stays 2");
     }
 
     #[tokio::test]
