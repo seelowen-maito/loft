@@ -72,8 +72,9 @@ struct ChatView: View {
                     ForEach(Array(shown.enumerated()), id: \.element.id) { i, m in
                         // The sticker shows once per run of replies from the same agent.
                         MessageRow(message: m, agent: agent, showsSticker: i == 0 || Self.speaker(shown[i - 1]) != Self.speaker(m),
-                                   reply: store.info?.supports(.reply) == true && m.isQuotable
+                                   reply: store.info?.supports(.reply) == true && m.isQuotable && !m.isCancelled
                                        ? { replyingTo = MessageQuote(of: m, agentName: agent.name) } : nil,
+                                   copyToBox: { draft = QueueMark.copiedToBox(draft, m) },
                                    jump: { id in
                                        // One older than the loaded pages can't be scrolled to: say so, as the web does.
                                        if shown.contains(where: { $0.id == id }) {
@@ -183,7 +184,13 @@ private struct MessageRow: View {
     var showsSticker = true
     /// Reply to this message (nil when it can't be quoted), and jump to the one it quotes.
     var reply: (() -> Void)?
+    /// Copy to box on a cancelled message: its text goes into the message box, after any draft.
+    var copyToBox: () -> Void = {}
     var jump: (Int64) -> Void = { _ in }
+    @State private var cancelling = false
+    @State private var cancelError: String?
+
+    private var mark: QueueMark? { QueueMark(message, in: agent) }
 
     /// The user's own message. Another agent's handover, delegation or FYI also comes as role user, with who sent
     /// it: that one is incoming, on the left, as on the iPhone and the web.
@@ -232,6 +239,7 @@ private struct MessageRow: View {
                             // As on the web: your messages in a faint bubble on the right.
                             Text(MarkdownView.inline(message.displayContent))
                                 .font(.system(size: 14))
+                                .strikethrough(message.isCancelled)
                                 .lineSpacing(3)
                                 .textSelection(.enabled)
                                 .padding(.horizontal, 14).padding(.vertical, 9)
@@ -244,13 +252,23 @@ private struct MessageRow: View {
                             let shape = UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 16,
                                                                bottomTrailingRadius: 16, topTrailingRadius: 16, style: .continuous)
                             MarkdownView(message.displayContent)
-                                .foregroundStyle(WebTheme.fg)
+                                .foregroundStyle(message.isCancelled ? WebTheme.fg3 : WebTheme.fg)
+                                .strikethrough(message.isCancelled)
                                 .padding(.horizontal, 16).padding(.vertical, 12)
                                 .background(WebTheme.surface, in: shape)
                                 .overlay(shape.strokeBorder(WebTheme.line))
                         }
                     }
-                    Text(message.createdAt, style: .time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
+                    // The footer (#666): yours (right) end with the time, the others' (left) start with it.
+                    HStack(spacing: 4) {
+                        if isUser, mark != nil { queueStatus; separator }
+                        Text(message.createdAt, style: .time).foregroundStyle(WebTheme.fg3)
+                        if !isUser, mark != nil { separator; queueStatus }
+                    }
+                    .font(.system(size: 10.5, design: .monospaced))
+                    if let cancelError {
+                        Text(cancelError).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.failureInk)
+                    }
                 }
             }
             .contextMenu {
@@ -264,8 +282,51 @@ private struct MessageRow: View {
             .accessibilityLabel(spoken)
             .accessibilityAction(named: "Copy") { copy() }
             .accessibilityAction(named: "Reply") { reply?() }
+            .accessibilityAction(named: "Cancel this queued message") { if mark == .queued { cancelQueued() } }
+            .accessibilityAction(named: "Copy to box") { if mark == .cancelled { copyToBox() } }
             .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
             .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
+        }
+    }
+
+    private var separator: some View {
+        Rectangle().fill(WebTheme.line).frame(width: 1, height: 12).padding(.horizontal, 4).accessibilityHidden(true)
+    }
+
+    /// The footer's queue status (#668): the queued mark with Cancel, or the cancelled mark with Copy to box.
+    @ViewBuilder private var queueStatus: some View {
+        switch mark {
+        case .queued?:
+            Label(QueueMark.queuedText, systemImage: "hourglass").foregroundStyle(Theme.attentionInk)
+            Button(action: cancelQueued) { Label("Cancel", systemImage: "xmark") }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Theme.attentionInk)
+                .disabled(cancelling)
+                .help(message.fromAgentName.map { "Cancel this queued message from \($0)" } ?? "Cancel this queued message")
+                .accessibilityIdentifier("cancelQueued")
+        case .cancelled?:
+            Text(QueueMark.cancelledText).foregroundStyle(WebTheme.fg3)
+            Button(action: copyToBox) { Label("Copy to box", systemImage: "doc.on.doc") }
+                .buttonStyle(.borderless)
+                .foregroundStyle(WebTheme.fg2)
+                .help("Copy this message back into the box")
+                .accessibilityIdentifier("copyToBox")
+        case nil:
+            EmptyView()
+        }
+    }
+
+    /// Takes the message back out of the agent's queue; a run that already took it says so under the message.
+    private func cancelQueued() {
+        cancelling = true
+        cancelError = nil
+        Task {
+            do {
+                if try await !store.cancelQueued(agentId: agent.id, messageId: message.id) { cancelError = QueueMark.tooLateText }
+            } catch {
+                cancelError = APIError.from(error).title
+            }
+            cancelling = false
         }
     }
 
@@ -287,6 +348,7 @@ private struct MessageRow: View {
         if !message.photos.isEmpty { parts.append(message.photos.count == 1 ? "Image" : "\(message.photos.count) images") }
         if let q = message.replyQuote { parts.append("Replying to \(q.authorLabel): \(q.excerpt)") }
         parts.append(message.displayContent)
+        if mark == .queued { parts.append(QueueMark.queuedText) } else if mark == .cancelled { parts.append(QueueMark.cancelledText) }
         parts.append(message.createdAt.formatted(date: .omitted, time: .shortened))
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }

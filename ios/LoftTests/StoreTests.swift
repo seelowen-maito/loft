@@ -54,6 +54,8 @@ final class MockAPI: LoftAPI, @unchecked Sendable {
     }
     func runNow(agentId: String) async throws {}
     func stopRun(agentId: String) async throws {}
+    var cancelOk = true
+    func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool { try check(); return cancelOk }
     var deleted: [(String, Bool)] = []
     func deleteAgent(id: String, purgeFiles: Bool) async throws { try check(); deleted.append((id, purgeFiles)) }
     /// Restarting a run that waits on background work ends the wait, as the server does.
@@ -329,5 +331,33 @@ final class StoreTests: XCTestCase {
         store.apply(.delivery(repo: "o/r", spec: 7))
         for _ in 0..<150 where api.summaryLoads == before + 2 { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(api.summaryLoads, before + 3, "a Delivery event")
+    }
+
+    /// Cancel on a queued message (#668): it leaves the queue and shows cancelled at once.
+    func testCancellingAQueuedMessageShowsItCancelled() async throws {
+        let api = MockAPI()
+        api.agentList[0].queuedMessages = [1]
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        try await store.loadConversation("a1")
+        XCTAssertEqual(QueueMark(try XCTUnwrap(store.conversation("a1").first), in: try XCTUnwrap(store.agent("a1"))), .queued)
+        let ok = try await store.cancelQueued(agentId: "a1", messageId: 1)
+        XCTAssertTrue(ok)
+        let m = try XCTUnwrap(store.conversation("a1").first)
+        XCTAssertTrue(m.isCancelled)
+        XCTAssertEqual(QueueMark(m, in: try XCTUnwrap(store.agent("a1"))), .cancelled)
+    }
+
+    /// A Cancel the run beat to the message changes nothing, and says it was too late.
+    func testATooLateCancelLeavesTheMessageAsItIs() async throws {
+        let api = MockAPI()
+        api.agentList[0].queuedMessages = [1]
+        api.cancelOk = false
+        let store = try await connectedStore(api)
+        defer { store.deactivate() }
+        try await store.loadConversation("a1")
+        let ok = try await store.cancelQueued(agentId: "a1", messageId: 1)
+        XCTAssertFalse(ok)
+        XCTAssertFalse(try XCTUnwrap(store.conversation("a1").first).isCancelled)
     }
 }
