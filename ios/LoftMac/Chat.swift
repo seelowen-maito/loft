@@ -184,6 +184,9 @@ private struct MessageRow: View {
     /// Reply to this message (nil when it can't be quoted), and jump to the one it quotes.
     var reply: (() -> Void)?
     var jump: (Int64) -> Void = { _ in }
+    @State private var saving = false
+
+    private var canSave: Bool { store.info?.supports(.saved) == true && Saved.canSave(message) }
 
     /// The user's own message. Another agent's handover, delegation or FYI also comes as role user, with who sent
     /// it: that one is incoming, on the left, as on the iPhone and the web.
@@ -258,12 +261,17 @@ private struct MessageRow: View {
                     Button { reply() } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
                 }
                 Button { copy() } label: { Label("Copy", systemImage: "doc.on.doc") }
+                if canSave {
+                    Button { saving = true } label: { Label("Save", systemImage: "bookmark") }
+                }
             }
+            .sheet(isPresented: $saving) { SaveMessageSheet(message: message) }
             // Selectable text isn't read by a combined element, so the label says it.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(spoken)
             .accessibilityAction(named: "Copy") { copy() }
             .accessibilityAction(named: "Reply") { reply?() }
+            .accessibilityAction(named: "Save") { if canSave { saving = true } }
             .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
             .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
         }

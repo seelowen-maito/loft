@@ -85,13 +85,13 @@ final class LoftMacUITests: MacUITestCase {
         shot("Multi-line sent")
     }
 
-    /// #468: a click on each sidebar item shows its section, ⌘1–⌘5 go to each, and the arrow keys move between them.
+    /// #468: a click on each sidebar item shows its section, ⌘1–⌘6 go to each, and the arrow keys move between them.
     func testSidebarClicksOpenEachSection() {
         launch(["-ui-testing", "-no-ai"])
         XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
         let screens = [
             ("Overview", "overviewStats"), ("Issues", "boardColumn-issues"), ("Needs you", "needsYou-question:1"),
-            ("Settings", "messagingRulesToggle"), ("Agents", "agentsList"),
+            ("Saved", "savedSearch"), ("Settings", "messagingRulesToggle"), ("Agents", "agentsList"),
         ]
         for (title, screen) in screens {
             card("section-\(title)").click()
@@ -99,7 +99,7 @@ final class LoftMacUITests: MacUITestCase {
             XCTAssertTrue(sidebarRow(title).isSelected, "\(title) is highlighted")
         }
         shot("Sidebar Agents")
-        for (key, (title, screen)) in zip(["1", "3", "4", "5", "2"], screens) {
+        for (key, (title, screen)) in zip(["1", "3", "4", "5", "6", "2"], screens) {
             app.typeKey(key, modifierFlags: .command)
             XCTAssertTrue(card(screen).waitForExistence(timeout: 5), "⌘\(key) shows \(title)")
             XCTAssertTrue(sidebarRow(title).isSelected, "\(title) is highlighted")
