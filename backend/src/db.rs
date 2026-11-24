@@ -300,6 +300,10 @@ pub struct Agent {
     /// Tokens in the Claude session's context as of its last reply. None until a run reports one.
     #[serde(default)]
     pub context_tokens: Option<u64>,
+    /// The `/goal` condition active in its Claude session, as its runs last showed it: set by `/goal`, gone when
+    /// the goal passes or is cleared. None when there's none.
+    #[serde(default)]
+    pub goal: Option<String>,
     pub last_run_at: Option<String>,
     /// When its last run ended, so the idle time survives a restart. None until a run ends.
     #[serde(default)]

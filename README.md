@@ -94,6 +94,8 @@ Each agent runs headless Claude Code in its own folder under `~/.local/share/lof
 
 A message you send while the agent is running waits in the queue until the run ends, and you can still cancel it there. **Send now** on one of your queued messages delivers it into the run in progress instead, like Ctrl+Enter in the terminal: the agent answers it in that run, even while a `/goal` or Stop hook keeps the run going, and it can't be cancelled any more. Messages from other agents and Delivery steps always wait in the queue.
 
+Each time a `/goal` or Stop hook sends the agent back to work, the chat says why in a system line ("Goal not met: …"). While the agent's Session has a goal, its header shows **Goal active** (hover for the condition) and the agents list marks it; the chip's ✕ sends `/goal clear`, into the run in progress if there is one.
+
 A run that takes 5 turns in a row without calling a tool, as when a `/goal` or Stop hook keeps sending the agent back with the same answer, is stopped, the chat says why, and the next queued message runs.
 
 ## Development

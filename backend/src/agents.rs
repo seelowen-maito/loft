@@ -769,6 +769,7 @@ fn fresh_threshold(setting: &str) -> u64 {
 fn reset_session_fields(a: &mut Agent) {
     a.session_id = None;
     a.context_tokens = None;
+    a.goal = None;
     a.grill_briefed = false;
     a.memory_index = None;
 }
@@ -1295,6 +1296,57 @@ pub fn send_now(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
     Ok(true)
 }
 
+/// The Goal active button: sends `/goal clear` as the user's message, into the run in progress when there is one
+/// (Send now, so it clears even while the goal keeps the run going), or as the next run otherwise.
+pub fn clear_goal(state: &AppState, agent_id: &str) -> Option<Message> {
+    let msg = enqueue_chat(state, agent_id, "/goal clear".into(), json!({}))?;
+    // A run that takes no more input gets it next, from the queue.
+    let _ = send_now(state, agent_id, msg.id);
+    Some(msg)
+}
+
+/// Records the agent's `/goal` as a run showed it, and pushes it to the clients when it changed.
+fn set_goal(state: &AppState, agent_id: &str, goal: Option<String>) {
+    if state.db.get_agent(agent_id).ok().flatten().is_none_or(|a| a.goal == goal) {
+        return;
+    }
+    if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| a.goal = goal) {
+        emit_agent(state, &a);
+    }
+}
+
+/// What a claude-made reply line says about the goal: `Goal set: <condition>` (or `Goal active: …` on `/goal`
+/// after a resume) sets it, `Goal cleared: …` and `No goal set` drop it. None when it says nothing about it.
+fn goal_change(text: &str) -> Option<Option<String>> {
+    if let Some(g) = text.strip_prefix("Goal set:").or_else(|| text.strip_prefix("Goal active:")) {
+        return Some(Some(g.trim().trim_end_matches("(not yet evaluated)").trim().to_string()));
+    }
+    (text.starts_with("Goal cleared") || text.starts_with("No goal set")).then_some(None)
+}
+
+/// A Stop hook's block: the synthetic user line claude adds each time a Stop hook or a `/goal` sends it back to
+/// work, `Stop hook feedback:\n<reason>`, or `…\n[<condition>]: <reason>` for a goal. Returns the goal's
+/// condition, if a goal sent it (`goal` is the one Loft knows, to cut it off exactly), and the reason.
+fn hook_block(ev: &Value, goal: Option<&str>) -> Option<(Option<String>, String)> {
+    if ev["type"] != "user" || ev["isSynthetic"] != true {
+        return None;
+    }
+    let text = user_text(ev);
+    let rest = text.strip_prefix("Stop hook feedback:")?.trim();
+    let known = goal.and_then(|g| rest.strip_prefix(&format!("[{g}]:")).map(|r| (g.to_string(), r)));
+    let goal = known.or_else(|| rest.strip_prefix('[')?.split_once("]:").map(|(g, r)| (g.to_string(), r)));
+    Some(match goal {
+        Some((g, r)) => (Some(g), r.trim().to_string()),
+        None => (None, rest.to_string()),
+    })
+}
+
+/// The chat's line for a Stop hook's block: why the agent keeps going.
+fn hook_block_line(goal: bool, reason: &str) -> String {
+    let reason = if reason.is_empty() { "no reason given" } else { reason };
+    if goal { format!("Goal not met: {}", truncate(reason, 600)) } else { format!("Stop hook: {}", truncate(reason, 600)) }
+}
+
 /// The run is over in Loft's books: drops its info, and puts the user's messages sent now that claude never took
 /// back at the front of the queue, as they were, for the next run. Returns the info.
 fn end_run_info(state: &AppState, agent_id: &str) -> Option<crate::state::RunInfo> {
@@ -1662,6 +1714,8 @@ impl Brake {
     fn see(&mut self, ev: &Value) -> bool {
         let blocks = ev["message"]["content"].as_array().map(Vec::as_slice).unwrap_or_default();
         match ev["type"].as_str() {
+            // Claude's own replies to commands like `/goal` aren't model turns.
+            Some("assistant") if ev["message"]["model"] == "<synthetic>" => {}
             Some("assistant") => {
                 let id = ev["message"]["id"].as_str().map(String::from);
                 let tools = blocks.iter().any(|b| b["type"] == "tool_use");
@@ -1854,6 +1908,8 @@ async fn run_process(
     let mut brake = Brake::default();
     // The brake stopped the run: it ends like a stop, with the reason in the chat, and the queue goes on.
     let mut braked = false;
+    // Claude ended the turn over its own limit of Stop hook blocks in a row: the goal didn't pass, it stays.
+    let mut capped = false;
     state.rt.lock().unwrap().runs.insert(
         agent_id.to_string(),
         crate::state::RunInfo { last_output_at: now(), for_user, send_now: takes_input.then_some(send_tx), ..Default::default() },
@@ -1969,6 +2025,7 @@ async fn run_process(
                         a.memory_index = None;
                     })?;
                 }
+                Some("notification") if ev["key"] == "stop-hook-block-cap" => capped = true,
                 Some("permission_denied") => {
                     run_msg(quiet, state, agent_id, rid, "system", "notice", ev["message"].as_str().unwrap_or("Permission denied"), json!({ "tool": ev["tool_name"] }));
                 }
@@ -2036,6 +2093,11 @@ async fn run_process(
                     set_context_tokens(state, agent_id, Some(n));
                 }
                 let blocks = ev["message"]["content"].as_array().cloned().unwrap_or_default();
+                if ev["message"]["model"] == "<synthetic>" && sub.is_none() && !throwaway {
+                    if let Some(g) = blocks.iter().filter_map(|b| b["text"].as_str()).find_map(goal_change) {
+                        set_goal(state, agent_id, g);
+                    }
+                }
                 for b in blocks {
                     let meta_sub = json!({ "subagent": sub });
                     match b["type"].as_str() {
@@ -2110,6 +2172,18 @@ async fn run_process(
                     }
                 }
             }
+            Some("user") if sub.is_none() && ev["isSynthetic"] == true => {
+                let known = if throwaway { None } else { state.db.get_agent(agent_id).ok().flatten().and_then(|a| a.goal) };
+                if let Some((goal, reason)) = hook_block(&ev, known.as_deref()) {
+                    run_msg(quiet, state, agent_id, rid, "system", "notice", &hook_block_line(goal.is_some(), &reason), json!({
+                        "hook_block": true, "goal": goal,
+                    }));
+                    // A goal's block says it's active, even one set before Loft knew (a resumed Session's).
+                    if goal.is_some() && !throwaway {
+                        set_goal(state, agent_id, goal);
+                    }
+                }
+            }
             Some("user") => {
                 let blocks = ev["message"]["content"].as_array().cloned().unwrap_or_default();
                 for b in blocks {
@@ -2153,8 +2227,21 @@ async fn run_process(
                 let aborted = ev["terminal_reason"].as_str().is_some_and(|r| r.starts_with("aborted"));
                 got_result |= !aborted;
                 // Resuming a session whose background task was stopped first replays an empty result
-                // (no turns); the real turn follows, however long the model thinks first.
-                replied = !aborted && ev["num_turns"].as_u64() != Some(0);
+                // (no turns); the real turn follows, however long the model thinks first. A command claude
+                // answers itself, like `/goal clear`, takes no turns either, but says something: that's the reply.
+                let said = ev["result"].as_str().is_some_and(|r| !r.trim().is_empty());
+                replied = !aborted && (ev["num_turns"].as_u64() != Some(0) || said);
+                if !throwaway {
+                    if ev["num_turns"].as_u64() == Some(0) {
+                        if let Some(g) = ev["result"].as_str().and_then(goal_change) {
+                            set_goal(state, agent_id, g);
+                        }
+                    } else if ev["terminal_reason"] == "completed" && !capped {
+                        // A turn ends while a goal is active only once it passed, and claude says nothing then.
+                        set_goal(state, agent_id, None);
+                    }
+                }
+                capped = false;
                 if replied && bg.is_empty() {
                     // The run ends here, unless a message sent now is still on its way in: claude answers it first.
                     let grace = if close_input(state, agent_id, &mut stdin) { EXIT_GRACE } else { FOLLOW_UP_GRACE };
@@ -2628,6 +2715,11 @@ pub(crate) mod tests {
     /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
     /// "goal-loop" asks for a password over and over, each text-only turn sent back by a Stop hook, and never ends
     /// on its own; "goal-tools" does the same with a tool call after four turns and three more after it, then replies.
+    /// The goal scenarios send the lines the probe for #476 recorded from the real claude: "goal-pass" sets a goal,
+    /// is blocked once and waits for a `go` file before the goal passes (a completed turn, nothing said);
+    /// "goal-cap" is blocked by the goal and by a command Stop hook until claude's own limit ends the turn;
+    /// "goal-hold" is blocked and waits for a message sent now: `/goal clear` clears it in a turn of its own.
+    /// "/goal clear" as the prompt clears it, without a model turn; both then wait for their stdin to close.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 text() { perl -CO -MJSON::PP -ne 'my $c = JSON::PP->new->utf8->decode($_)->{message}{content}; print ref $c ? join("", map { $_->{text} // "" } @$c) : $c'; }
@@ -2681,6 +2773,46 @@ case "$prompt" in *send-now*|*send-lost*)
   echo yes > stdin-closed
   exit 0;;
 esac
+goal='the user said the password'
+synthetic() { echo '{"type":"assistant","message":{"id":"syn-'$2'","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"'"$1"'"}]}}'; }
+goal_block() { printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\n['"$goal"']: insufficient evidence: no password yet."}]},"isSynthetic":true}'; }
+cleared() {
+  synthetic "Goal cleared: $goal" c
+  echo '{"type":"result","subtype":"success","result":"Goal cleared: '"$goal"'","num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0
+}
+case "$prompt" in *goal-pass*|*goal-cap*|*goal-hold*)
+  synthetic "Goal set: $goal" s
+  echo '{"type":"assistant","message":{"id":"p1","model":"claude-haiku-5-5","content":[{"type":"text","text":"What is the password?"}]}}'
+  goal_block;;
+esac
+case "$prompt" in *goal-pass*)
+  while [ ! -f go ]; do sleep 0.05; done
+  echo '{"type":"assistant","message":{"id":"p2","content":[{"type":"text","text":"Thanks, that is it."}]}}'
+  echo '{"type":"result","subtype":"success","result":"Thanks, that is it.","num_turns":2,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+  exit 0;;
+esac
+case "$prompt" in *goal-cap*)
+  echo '{"type":"assistant","message":{"id":"p2","content":[{"type":"text","text":"What is the password?"}]}}'
+  echo '{"type":"system","subtype":"hook_response","hook_name":"Stop","hook_event":"Stop","output":"{}","exit_code":0,"outcome":"success"}'
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: the tests are still red."}]},"isSynthetic":true}'
+  echo '{"type":"system","subtype":"informational","content":"A hook blocked the turn from ending 9 consecutive times—overriding and ending turn."}'
+  echo '{"type":"system","subtype":"notification","key":"stop-hook-block-cap","text":"A hook blocked the turn from ending 9 consecutive times—overriding and ending turn."}'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":3,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+  exit 0;;
+esac
+case "$prompt" in *goal-hold*)
+  IFS= read -r next
+  printf '%s\n' "$next" >> sent.log
+  printf '%s\n' "$next" | sed 's/}$/,"isReplay":true}/'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":1,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  case "$(printf '%s\n' "$next" | text)" in "/goal clear") cleared;; esac
+  exit 1;;
+esac
+case "$prompt" in "/goal clear") cleared;; esac
 case "$prompt" in *crash*) exit 1;; esac
 case "$prompt" in *leftover*) sleep 20 & exit 1;; esac
 case "$prompt" in *sigterm*) kill -TERM $$;; esac
@@ -3518,6 +3650,86 @@ esac
         let later = enqueue_chat(&st, &a.id, "later".into(), json!({})).unwrap().id;
         assert!(!send_now(&st, &a.id, later).unwrap());
         assert!(st.rt.lock().unwrap().queued_messages[&a.id].iter().any(|(i, _)| *i == later));
+    }
+
+    fn goal_of(st: &AppState, id: &str) -> Option<String> {
+        st.db.get_agent(id).unwrap().unwrap().goal
+    }
+
+    fn notices(st: &AppState, id: &str) -> Vec<String> {
+        st.db.list_messages(id, 100, None).unwrap().into_iter().filter(|m| m.meta["hook_block"] == true).map(|m| m.content).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_block_says_why_in_the_chat_and_goal_active_lasts_until_the_goal_passes() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-pass".into()), "user");
+        until("the goal's block", 10, || !notices(&st, &a.id).is_empty()).await;
+        assert_eq!(goal_of(&st, &a.id).as_deref(), Some("the user said the password"), "Goal active while the run goes on");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        let line = msgs.iter().find(|m| m.meta["hook_block"] == true).unwrap();
+        assert_eq!((line.role.as_str(), line.kind.as_str()), ("system", "notice"));
+        assert_eq!(line.content, "Goal not met: insufficient evidence: no password yet.", "the reason, without the goal's condition");
+        assert_eq!(line.meta["goal"], "the user said the password");
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        assert_eq!(goal_of(&st, &a.id), None, "the turn ended: the goal passed, though claude said nothing");
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_goal_over_claudes_limit_stays_active_until_the_button_clears_it() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        run(&st, &a.id, "goal-cap", 1).await;
+        assert_eq!(notices(&st, &a.id), ["Goal not met: insufficient evidence: no password yet.", "Stop hook: Objective not met: the tests are still red."]);
+        assert_eq!(goal_of(&st, &a.id).as_deref(), Some("the user said the password"), "claude's limit ended the turn, not the goal");
+        // No run in progress: the button's /goal clear is the next run, which claude answers without a model turn.
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!((m.role.as_str(), m.content.as_str()), ("user", "/goal clear"));
+        until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "the run ended on claude's answer, not hung on its open input");
+        assert!(prompts(&st, &a.id).contains("/goal clear"));
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.content == "Goal cleared: the user said the password"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_button_clears_a_goal_blocking_the_run_in_progress() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-hold".into()), "user");
+        until("the goal's block", 10, || goal_of(&st, &a.id).is_some() && !notices(&st, &a.id).is_empty()).await;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true, "sent into the run, not queued behind it");
+        until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        let line: Value = serde_json::from_str(std::fs::read_to_string(ws.join("sent.log")).unwrap().trim()).unwrap();
+        assert_eq!((user_text(&line).as_str(), line["priority"].as_str()), ("/goal clear", Some("now")));
+        assert!(ws.join("stdin-closed").exists());
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
+    }
+
+    #[test]
+    fn hook_feedback_and_goal_replies_are_read_from_claudes_lines() {
+        let fb = |t: &str| json!({ "type": "user", "isSynthetic": true, "message": { "role": "user", "content": [{ "type": "text", "text": t }] } });
+        assert_eq!(hook_block(&fb("Stop hook feedback:\nObjective not met: no tests."), None), Some((None, "Objective not met: no tests.".into())));
+        assert_eq!(hook_block(&fb("Stop hook feedback:\n[Tests pass]: still red"), None), Some((Some("Tests pass".into()), "still red".into())));
+        // A condition with brackets of its own is cut off whole when Loft knows it.
+        let g = "Fix [the] bug";
+        assert_eq!(hook_block(&fb("Stop hook feedback:\n[Fix [the] bug]: not yet"), Some(g)), Some((Some(g.into()), "not yet".into())));
+        assert_eq!(hook_block(&json!({ "type": "user", "message": { "content": "Stop hook feedback:\nx" } }), None), None, "only claude's own line");
+        assert_eq!(hook_block(&fb("Hello"), None), None);
+        assert_eq!(goal_change("Goal set: Tests pass"), Some(Some("Tests pass".into())));
+        assert_eq!(goal_change("Goal active: Tests pass (not yet evaluated)"), Some(Some("Tests pass".into())));
+        assert_eq!(goal_change("Goal cleared: Tests pass"), Some(None));
+        assert_eq!(goal_change("No goal set. Usage: /goal <condition>"), Some(None));
+        assert_eq!(goal_change("Done."), None);
+        assert_eq!(hook_block_line(true, ""), "Goal not met: no reason given");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -46,6 +46,7 @@ import { useMention } from "../../components/MentionMenu";
 import { useTagMenu } from "../../components/TagMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
+import { GoalChip } from "./GoalChip";
 import { CANCELLED_MARK, QUEUED_MARK, SENT_NOW_MARK, sendState, taskText } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
@@ -527,8 +528,10 @@ export function Chat({
               </HoverTip>
             )}
           </div>
-          <div className="mt-1 flex min-w-0 items-center gap-3">
+          {/* Wraps on a phone when the Goal active chip leaves no room for the context size. */}
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
             <StatusPill agent={agent} elapsed />
+            <GoalChip agent={agent} />
             {/* The schedule and run time are details: on a phone the context size gets the room, to warn. */}
             <span
               className="flex shrink-0 items-center gap-1 font-mono text-[11px] text-fg-3 max-md:hidden"

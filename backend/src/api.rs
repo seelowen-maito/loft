@@ -404,6 +404,7 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         status_text: String::new(),
         session_id: None,
         context_tokens: None,
+        goal: None,
         last_run_at: None,
         last_run_ended_at: None,
         next_run_at: None,
@@ -616,6 +617,14 @@ pub async fn send_queued_now(State(state): State<AppState>, Path((id, message)):
     Ok(Json(json!({ "ok": agents::send_now(&state, &id, message)? })))
 }
 
+/// `POST /api/agents/{id}/goal/clear`: the Goal active button. Sends `/goal clear` as the user's message, into the
+/// run in progress when there is one (Send now), or as the next run.
+pub async fn clear_goal(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let message = agents::clear_goal(&state, &id);
+    Ok(Json(json!({ "ok": message.is_some(), "message": message })))
+}
+
 pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     // Deny any permission prompts that are blocking this agent so the process can exit.
     for p in state.db.list_permissions(Some(&id))?.into_iter().filter(|p| p.status == "pending") {
@@ -745,6 +754,8 @@ pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::Path
         a.session_id = Some(s.id.clone());
         a.session_cost_usd = total;
         a.context_tokens = s.context_tokens;
+        // The goal of that Session isn't known until its next run shows it.
+        a.goal = None;
         a.grill_briefed = false;
         a.memory_index = None;
     })?.ok_or_else(not_found)?;

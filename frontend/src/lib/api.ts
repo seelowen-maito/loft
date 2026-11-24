@@ -47,6 +47,8 @@ export type Agent = {
   session_id: string | null;
   /** Tokens in the Claude session's context as of its last reply; null until a run reports it. */
   context_tokens?: number | null;
+  /** The `/goal` condition active in its Session (Goal active); null when there's none. */
+  goal?: string | null;
   last_run_at: string | null;
   next_run_at: string | null;
   total_cost_usd: number;
@@ -793,6 +795,8 @@ export const api = {
   cancelQueued: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/cancel`),
   /** Send now: the user's queued message into the agent's run in progress; `ok` is false when it stays queued (the run is ending). */
   sendNow: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/send-now`),
+  /** Goal active's button: sends `/goal clear` as the user's message, into the run in progress when there is one. */
+  clearGoal: (agent: string) => req<{ ok: boolean; message: Message | null }>("POST", `/agents/${agent}/goal/clear`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
   /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */
