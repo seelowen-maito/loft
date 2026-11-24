@@ -1699,7 +1699,7 @@ struct Brake {
     turns: u32,
     /// The model turn being read (its message id; claude may split one turn over several lines) and whether it called a tool.
     open: Option<(Option<String>, bool)>,
-    /// The last Stop hook feedback, which says why claude kept going .
+    /// The last Stop hook feedback, which says why claude kept going (a goal's reason, without its condition).
     reason: Option<String>,
 }
 
@@ -1732,11 +1732,9 @@ impl Brake {
             }
             Some("user") if !blocks.iter().any(|b| b["type"] == "tool_result") => {
                 self.close();
-                let text = blocks.iter().filter_map(|b| b["text"].as_str()).collect::<String>();
-                let text = ev["message"]["content"].as_str().unwrap_or(&text);
                 if ev["isSynthetic"] == true {
-                    if let Some(r) = text.strip_prefix("Stop hook feedback:") {
-                        self.reason = Some(r.trim().to_string());
+                    if let Some((_, r)) = hook_block(ev, None) {
+                        self.reason = Some(r);
                     }
                 } else {
                     // A message from the user is new input, not a loop.
@@ -3793,7 +3791,7 @@ esac
         }
         assert!(!b.see(&text("k4")));
         assert!(b.see(&feedback), "the 5th turn's feedback stops it");
-        assert_eq!(b.notice(), "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: [goal]: not yet");
+        assert_eq!(b.notice(), "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: not yet");
     }
 
     fn fields(st: &AppState, id: &str) -> Value {
