@@ -95,6 +95,8 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     }
     // Everything below plans for one project: `me` as if that were its only one. A ticket can name
     // another of the agent's projects, checked against `all` (the agent as it is).
+    // A grill started for a new Project publishes to that project (`grill::scope`).
+    let me = &crate::grill::scoped(state, me);
     let all = me;
     let me = &match for_project(me, args) {
         Ok(a) => a,
@@ -2503,6 +2505,26 @@ pub(crate) mod tests {
         assert!(g.contains("Repo: <project>") && g.contains("its repo, what it delivers") && g.contains("## Repos") && g.contains("one ticket per repo"), "{g}");
     }
 
+    #[tokio::test]
+    async fn the_planning_guide_puts_a_walking_skeleton_first_for_a_new_project_only() {
+        let st = state();
+        let a = crate::tasks::tests::agent(&st, "guide");
+        let g = mcp_call(&st, &a, "planning_guide", &json!({})).await.unwrap().unwrap();
+        let rule = g.lines().find(|l| l.starts_with("- New Project only")).expect("a new-project tickets rule");
+        for want in [
+            "a folder with no git repo when its grill started", "the first ticket is a walking skeleton",
+            "builds, runs one end-to-end test and has a CI workflow that passes", "Every other ticket of the spec is blocked by it",
+            "The breakdown round lists it first", "Every other project keeps the rules above unchanged, with no skeleton ticket",
+        ] {
+            assert!(rule.contains(want), "missing {want}: {rule}");
+        }
+        // Today's rules are all still there, for every project.
+        for want in ["- Vertical slices:", "- Blockers: a ticket is blocked by another only when it can't start before that one lands", "- Approve first:", "Publish these N tickets?"] {
+            assert!(g.contains(want), "missing {want}");
+        }
+        assert_eq!(crate::grill::brief().matches("the first ticket is a walking skeleton").count(), 1, "the brief carries the same rule");
+    }
+
     /// The summary message `grill_end` just posted.
     fn summary(st: &AppState, a: &Agent) -> crate::db::Message {
         st.db.list_messages(&a.id, 50, None).unwrap().into_iter().rev().find(|m| m.meta["grill"]["final"] == true).unwrap()
@@ -4328,6 +4350,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_newer_submit_does_not_postpone_the_ci_wait_of_a_ticket_that_waited_longer() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-own-wait";
+        let (_dev, _) = building_both(&st, &fake, "ci-own-wait", &[]).await;
+        // Active workflow, no check on the commit: each ticket waits the grace from its own submit.
+        fake.route("GET", &format!("/repos/{slug}/actions/workflows"), 200, json!({ "total_count": 1, "workflows": [{ "name": "CI", "state": "active" }] }));
+        let ago = |m: i64| (chrono::Utc::now() - chrono::Duration::minutes(m)).to_rfc3339();
+        let waiting = |t: &mut crate::db::DeliveryTicket, commit: &str, minutes: i64| {
+            t.state = "review".into();
+            t.commits = vec![commit.into()];
+            t.submitted_at = ago(minutes);
+            t.verdicts = [("ci".to_string(), "pending".to_string())].into();
+        };
+        // #41 submitted 11 minutes ago, #42 4 minutes ago (7 minutes after #41 would have been 4 minutes before).
+        crate::delivery::update(&st, slug, 40, |d| {
+            waiting(d.ticket_mut(41).unwrap(), "fed4321abc", 11);
+            waiting(d.ticket_mut(42).unwrap(), "0123abcd", 4);
+        });
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41).0, "closed", "#41 closes on its own wait");
+        assert_eq!(standing(&st, slug, 42).0, "review", "#42 still waits for its own");
+
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(42).unwrap().submitted_at = ago(11));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 42).0, "closed");
+    }
+
+    #[tokio::test]
     async fn a_red_ci_on_a_commit_with_two_open_tickets_goes_to_the_oldest() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/ci-two";
@@ -5014,7 +5064,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "stall_resets_at": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -6220,6 +6270,499 @@ pub(crate) mod tests {
         run_starts(&st, qa);
         crate::delivery::run_ended(&st, &qa.id, false).await;
         assert_eq!(delivery(&st, slug).stalled_at, at);
+    }
+
+    /// A failed run stalls its Delivery for the reason its error says: the plan's usage limit (with when it frees),
+    /// an API error, or a plain failure. Needs you and the Lead's notice say so in words.
+    #[tokio::test]
+    async fn a_failed_runs_error_picks_the_stall_reason_and_both_notices_say_it() {
+        let cases = [
+            ("usage_limit", "Claude AI usage limit reached|1795000000", "the plan's usage limit was reached; it frees at "),
+            ("api_error", r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#, "the Claude API failed (overloaded, 529 or a server error)"),
+            ("run_failed", "boom", "the run Loft woke for its step failed"),
+        ];
+        for (reason, error, words) in cases {
+            let st = state();
+            let fake = own_fake(&st);
+            let name = format!("st-{}", reason.replace('_', "-"));
+            let (dev, _) = building(&st, &fake, &name, &["qa"]).await;
+            let lead = busy(&st, "Lofty", &name, "lead");
+            run_starts(&st, &dev);
+            crate::delivery::run_ended_with(&st, &dev.id, Some(error)).await;
+            let d = delivery(&st, &format!("octo/{name}"));
+            assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("stalled", reason));
+            assert_eq!(!d.stall_resets_at.is_empty(), reason == "usage_limit", "{d:?}");
+            let item = &stalled_items(&st)[0];
+            let text = item["reason"].as_str().unwrap();
+            assert!(text.to_lowercase().starts_with(&words.to_lowercase()), "{text}");
+            let w = woken(&st, &lead);
+            assert!(w.iter().any(|w| w.contains("The Delivery stalled at #41: ") && w.contains(words)), "{w:?}");
+            if reason == "usage_limit" {
+                let at = chrono::DateTime::from_timestamp(1795000000, 0).unwrap();
+                assert_eq!(d.stall_resets_at, at.to_rfc3339());
+                assert!(text.contains(&at.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string()), "{text}");
+            }
+            // Resuming clears the time with the reason.
+            crate::delivery::resume(&st, &format!("octo/{name}"), 40).await.unwrap();
+            assert_eq!(delivery(&st, &format!("octo/{name}")).stall_resets_at, "");
+        }
+    }
+
+    /// A usage limit whose message names no time frees when the plan's 5-hour window does.
+    #[tokio::test]
+    async fn a_usage_limit_without_a_time_frees_when_the_plans_five_hour_window_does() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, _) = building(&st, &fake, "st-window", &["qa"]).await;
+        let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+        crate::usage::fake(&st, json!({ "windows": [{ "key": "five_hour", "label": "session", "percent": 100.0, "resets_at": reset.to_rfc3339() }], "error": null })).await;
+        run_starts(&st, &dev);
+        crate::delivery::run_ended_with(&st, &dev.id, Some("Claude usage limit reached")).await;
+        let d = delivery(&st, "octo/st-window");
+        assert_eq!((d.stall_reason.as_str(), d.stall_resets_at.as_str()), ("usage_limit", reset.to_rfc3339().as_str()));
+    }
+
+    /// Turns the Lead's option on for `project` (the user's endpoint does it in the product).
+    async fn lead_may_resume(st: &AppState, project: &str, on: bool) {
+        crate::lead_delivery::put_route(State(st.clone()), Json(json!({ "project": project, "enabled": on }))).await.ok().unwrap();
+    }
+
+    fn lead_tool_names(st: &AppState, a: &Agent) -> Vec<String> {
+        crate::mcp::tools_for(st, &a.id).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// The thread of the spec's Loft issue: the status entries.
+    fn thread(st: &AppState, issue: &crate::db::Task) -> Vec<String> {
+        st.db.list_task_comments(&issue.id, 100, None).unwrap().into_iter().filter(|c| c.kind == "status" && c.text.starts_with("Resumed by")).map(|c| c.text).collect()
+    }
+
+    #[tokio::test]
+    async fn resume_delivery_is_off_the_tool_list_and_refused_until_the_projects_option_is_on() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, _) = building(&st, &fake, "rd-off", &["qa"]).await;
+        let lead = busy(&st, "Lofty", "rd-off", "lead");
+        run_starts(&st, &dev);
+        crate::delivery::run_ended_with(&st, &dev.id, Some("boom")).await;
+        let slug = "octo/rd-off";
+        assert_eq!(delivery(&st, slug).state, "stalled");
+
+        // Off (the default): nobody lists it, the Lead's call is refused, and the notice keeps the old words.
+        for a in [&lead, &dev] {
+            assert!(!lead_tool_names(&st, a).contains(&"resume_delivery".into()));
+        }
+        let err = tool(&st, &lead, "resume_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+        assert!(err.contains("option") && err.contains("off"), "{err}");
+        assert!(woken(&st, &lead).iter().any(|w| w.contains("Only the user can resume it")), "{:?}", woken(&st, &lead));
+        assert_eq!(delivery(&st, slug).state, "stalled");
+
+        // On: only the Lead of that project lists it; a Dev's call is refused; another project's Lead has none.
+        lead_may_resume(&st, "rd-off", true).await;
+        let other = busy(&st, "Other Lead", "somewhere-else", "lead");
+        assert!(lead_tool_names(&st, &lead).contains(&"resume_delivery".into()));
+        assert!(!lead_tool_names(&st, &dev).contains(&"resume_delivery".into()));
+        assert!(!lead_tool_names(&st, &other).contains(&"resume_delivery".into()));
+        assert!(tool(&st, &dev, "resume_delivery", json!({ "ticket": 40 })).await.is_err());
+        assert!(tool(&st, &other, "resume_delivery", json!({ "ticket": 40 })).await.is_err());
+
+        // Off again: the next call is refused at once.
+        lead_may_resume(&st, "rd-off", false).await;
+        assert!(tool(&st, &lead, "resume_delivery", json!({ "ticket": 40 })).await.is_err());
+        assert_eq!(delivery(&st, slug).state, "stalled");
+    }
+
+    #[tokio::test]
+    async fn the_lead_resumes_each_transient_stall_and_the_spec_thread_says_who_when_and_why() {
+        for (reason, error) in [("run_failed", Some("boom")), ("api_error", Some("API Error: 529 Overloaded")), ("no_call", None), ("restart", None)] {
+            let st = state();
+            let fake = own_fake(&st);
+            let name = format!("rd-{}", reason.replace('_', "-"));
+            let slug = format!("octo/{name}");
+            let (dev, _) = building(&st, &fake, &name, &["qa"]).await;
+            let lead = busy(&st, "Lofty", &name, "lead");
+            let issue = spec_issue(&st, &fake, &name, &slug);
+            lead_may_resume(&st, &name, true).await;
+            run_starts(&st, &dev);
+            match reason {
+                "restart" => crate::delivery::stall_lost_runs(&st),
+                _ => crate::delivery::run_ended_with(&st, &dev.id, error).await,
+            }
+            let d = delivery(&st, &slug);
+            assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("stalled", reason));
+            // The notice says the Lead can resume it, and how.
+            let w = woken(&st, &lead);
+            assert!(w.iter().any(|w| w.contains("You can resume it now") && w.contains("`mcp__loft__resume_delivery` with ticket 40") && !w.contains("Only the user can resume")), "{reason}: {w:?}");
+
+            let out = tool(&st, &lead, "resume_delivery", json!({ "ticket": "#40" })).await.unwrap();
+            assert!(out.starts_with("Resumed spec #40."), "{out}");
+            let d = delivery(&st, &slug);
+            assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("running", ""), "{reason}");
+            let lines = thread(&st, &issue);
+            assert_eq!(lines.len(), 1, "{reason}: {lines:?}");
+            assert!(lines[0].starts_with("Resumed by Lofty (Lead) at ") && lines[0].contains(&format!("({reason})")), "{}", lines[0]);
+            // Nothing to resume any more.
+            assert!(tool(&st, &lead, "resume_delivery", json!({ "ticket": 40 })).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_lead_resumes_a_usage_limit_only_after_it_frees() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, _) = building(&st, &fake, "rd-limit", &["qa"]).await;
+        let lead = busy(&st, "Lofty", "rd-limit", "lead");
+        lead_may_resume(&st, "rd-limit", true).await;
+        let frees = chrono::Utc::now() + chrono::Duration::hours(2);
+        run_starts(&st, &dev);
+        crate::delivery::run_ended_with(&st, &dev.id, Some(&format!("Claude AI usage limit reached|{}", frees.timestamp()))).await;
+        let slug = "octo/rd-limit";
+        let w = woken(&st, &lead);
+        assert!(w.iter().any(|w| w.contains("You can resume it from ") && w.contains("not before")), "{w:?}");
+
+        let err = tool(&st, &lead, "resume_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+        assert!(err.contains("usage limit") && err.contains(&frees.with_timezone(&chrono::Local).format("%H:%M").to_string()), "{err}");
+        assert_eq!(delivery(&st, slug).state, "stalled");
+
+        // The clock passes the time it frees.
+        crate::delivery::update(&st, slug, 40, |d| d.stall_resets_at = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()).unwrap();
+        tool(&st, &lead, "resume_delivery", json!({ "ticket": 40 })).await.unwrap();
+        assert_eq!(delivery(&st, slug).state, "running");
+    }
+
+    #[tokio::test]
+    async fn the_lead_is_refused_every_stall_that_is_not_transient_with_its_reason() {
+        let cases: [(&str, &str, bool, &str); 7] = [
+            ("wait_gone", "stalled", false, "waited on an issue or agent that is gone"),
+            ("blocker_gone", "stalled", false, "gone or that Loft can no longer read"),
+            ("ci_missing", "stalled", false, "aren't on its branch"),
+            ("no_call", "stalled", true, "asking the user a question"),
+            ("", "paused", false, "is paused"),
+            ("", "needs_human", false, "waits for the user"),
+            ("usage_limit", "stalled", false, "doesn't know when it frees"),
+        ];
+        for (reason, state_name, asks, words) in cases {
+            let st = state();
+            let fake = own_fake(&st);
+            let name = format!("rd-no-{}-{}-{}", reason.replace('_', "-"), state_name.replace('_', "-"), asks);
+            let slug = format!("octo/{name}");
+            let (dev, _) = building(&st, &fake, &name, &["qa"]).await;
+            let lead = busy(&st, "Lofty", &name, "lead");
+            lead_may_resume(&st, &name, true).await;
+            let ask = asks.then(|| crate::db::StallAsk { agent: dev.id.clone(), ticket: Some(41), question: "Which field?".into(), text: "Which field?".into() });
+            crate::delivery::update(&st, &slug, 40, |d| {
+                d.resume_to = "running".into();
+                (d.state, d.stall_reason, d.stall_ask) = (state_name.into(), reason.into(), ask);
+            })
+            .unwrap();
+            let err = tool(&st, &lead, "resume_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+            assert!(err.contains(words), "{reason}/{state_name}: {err}");
+            assert_eq!(delivery(&st, &slug).state, state_name, "{reason}: nothing was resumed");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_notice_to_the_lead_says_when_it_cannot_resume_and_why() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, _) = building(&st, &fake, "rd-notice", &["qa"]).await;
+        let lead = busy(&st, "Lofty", "rd-notice", "lead");
+        lead_may_resume(&st, "rd-notice", true).await;
+        run_starts(&st, &dev);
+        // The agent ended its run with a question: the Lead is told it can't resume.
+        let rid = uuid::Uuid::new_v4().to_string();
+        crate::agents::add_msg(&st, &dev.id, Some(&rid), "system", "run_start", "", json!({ "trigger": "delivery" }));
+        crate::agents::add_msg(&st, &dev.id, Some(&rid), "assistant", "text", "Built it.\n\nWhich field name?", json!({}));
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        let w = woken(&st, &lead);
+        assert!(w.iter().any(|w| w.contains("You can't resume it") && w.contains("asking the user a question")), "{w:?}");
+    }
+
+    // ---- The brakes on the Lead's resumes (ADR 0006) ----
+
+    /// A Delivery #40 stalled on `run_failed`, the Lead's earlier resumes `(minutes ago, reason)`, and the Lead.
+    async fn braked(name: &str, per_hour: u32, per_day: u32, earlier: &[(i64, &str)]) -> (AppState, Agent, crate::db::Task, String) {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = format!("octo/{name}");
+        let (dev, _) = building(&st, &fake, name, &["qa"]).await;
+        let lead = busy(&st, "Lofty", name, "lead");
+        let issue = spec_issue(&st, &fake, name, &slug);
+        lead_may_resume(&st, name, true).await;
+        crate::lead_delivery::put_route(State(st.clone()), Json(json!({ "project": name, "resumes_per_hour": per_hour, "resumes_per_day": per_day }))).await.ok().unwrap();
+        run_starts(&st, &dev);
+        crate::delivery::run_ended_with(&st, &dev.id, Some("boom")).await;
+        let stalled = chrono::DateTime::parse_from_rfc3339(&delivery(&st, &slug).stalled_at).unwrap().with_timezone(&chrono::Utc);
+        crate::delivery::update(&st, &slug, 40, |d| {
+            d.lead_resumes = earlier.iter().map(|(m, r)| crate::db::LeadResumed { at: (stalled - chrono::Duration::minutes(*m)).to_rfc3339(), reason: r.to_string() }).collect();
+        })
+        .unwrap();
+        (st, lead, issue, slug)
+    }
+
+    fn brake_lines(st: &AppState, issue: &crate::db::Task) -> Vec<String> {
+        st.db.list_task_comments(&issue.id, 100, None).unwrap().into_iter().filter(|c| c.kind == "status" && c.text.starts_with("Resume by")).map(|c| c.text).collect()
+    }
+
+    /// The Lead's call at a simulated `now`.
+    async fn resume_at(st: &AppState, lead: &Agent, now: chrono::DateTime<chrono::Utc>) -> Result<String, String> {
+        crate::delivery::resume_by_lead(st, lead, &json!({ "ticket": 40 }), now).await
+    }
+
+    #[tokio::test]
+    async fn the_hour_brake_refuses_the_lead_tells_the_user_and_the_user_can_still_resume() {
+        let (st, lead, issue, slug) = braked("br-hour", 1, 6, &[(20, "run_failed")]).await;
+        let before = stalled_items(&st);
+        assert_eq!(before.len(), 1);
+        let err = resume_at(&st, &lead, chrono::Utc::now()).await.unwrap_err();
+        assert!(err.contains("stays stalled") && err.contains("last hour"), "{err}");
+        let d = delivery(&st, &slug);
+        assert_eq!(d.state, "stalled");
+        // Needs you: a new item saying which brake; the thread has a line.
+        let items = stalled_items(&st);
+        assert_eq!(items.len(), 1);
+        assert_ne!(items[0]["id"], before[0]["id"], "a new item is pushed again");
+        assert!(items[0]["reason"].as_str().unwrap().contains("held back") && items[0]["reason"].as_str().unwrap().contains("last hour"), "{items:?}");
+        assert!(items[0]["push"]["body"].as_str().unwrap_or_default().contains("last hour") || items[0].to_string().contains("last hour"));
+        let lines = brake_lines(&st, &issue);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("last hour"), "{}", lines[0]);
+        // Asking again says no again, with no second line or item.
+        assert!(resume_at(&st, &lead, chrono::Utc::now()).await.is_err());
+        assert_eq!(brake_lines(&st, &issue).len(), 1);
+        assert_eq!(stalled_items(&st)[0]["id"], items[0]["id"]);
+        // The user's Resume still works.
+        resume_from_needs_you(&st).await.unwrap();
+        let d = delivery(&st, &slug);
+        assert_eq!((d.state.as_str(), d.brake.as_str()), ("running", ""));
+    }
+
+    #[tokio::test]
+    async fn the_hour_brake_lifts_when_the_clock_passes_the_hour() {
+        let (st, lead, issue, slug) = braked("br-hour-clock", 1, 6, &[(20, "run_failed")]).await;
+        assert!(resume_at(&st, &lead, chrono::Utc::now()).await.is_err());
+        resume_at(&st, &lead, chrono::Utc::now() + chrono::Duration::minutes(45)).await.unwrap();
+        assert_eq!(delivery(&st, &slug).state, "running");
+        assert_eq!(thread(&st, &issue).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_day_brake_refuses_after_the_days_resumes_and_lifts_a_day_later() {
+        let (st, lead, issue, slug) = braked("br-day", 6, 2, &[(180, "run_failed"), (300, "api_error")]).await;
+        let err = resume_at(&st, &lead, chrono::Utc::now()).await.unwrap_err();
+        assert!(err.contains("last day"), "{err}");
+        assert_eq!(delivery(&st, &slug).state, "stalled");
+        assert!(brake_lines(&st, &issue)[0].contains("last day"));
+        assert!(stalled_items(&st)[0]["reason"].as_str().unwrap().contains("last day"));
+        resume_at(&st, &lead, chrono::Utc::now() + chrono::Duration::hours(25)).await.unwrap();
+        assert_eq!(delivery(&st, &slug).state, "running");
+    }
+
+    #[tokio::test]
+    async fn a_stall_for_the_same_reason_within_ten_minutes_of_a_lead_resume_is_not_resumed_again() {
+        let (st, lead, issue, slug) = braked("br-repeat", 6, 24, &[(5, "run_failed")]).await;
+        let err = resume_at(&st, &lead, chrono::Utc::now()).await.unwrap_err();
+        assert!(err.contains("same reason") && err.contains("loop"), "{err}");
+        assert_eq!(delivery(&st, &slug).state, "stalled");
+        assert!(brake_lines(&st, &issue)[0].contains("same reason"));
+        assert!(stalled_items(&st)[0]["reason"].as_str().unwrap().contains("same reason"));
+        // The user's Resume still works.
+        resume_from_needs_you(&st).await.unwrap();
+        assert_eq!(delivery(&st, &slug).state, "running");
+    }
+
+    #[tokio::test]
+    async fn a_stall_more_than_ten_minutes_after_a_lead_resume_or_for_another_reason_is_resumed() {
+        for earlier in [(11, "run_failed"), (3, "api_error")] {
+            let (st, lead, _, slug) = braked(&format!("br-ok-{}", earlier.0), 6, 24, &[earlier]).await;
+            resume_at(&st, &lead, chrono::Utc::now()).await.unwrap();
+            assert_eq!(delivery(&st, &slug).state, "running", "{earlier:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resume_within_the_limits_says_the_counts_in_the_thread_and_raises_no_item() {
+        let (st, lead, issue, slug) = braked("br-counts", 2, 6, &[(30, "api_error"), (200, "run_failed")]).await;
+        resume_at(&st, &lead, chrono::Utc::now()).await.unwrap();
+        let d = delivery(&st, &slug);
+        assert_eq!((d.state.as_str(), d.brake.as_str()), ("running", ""));
+        let lines = thread(&st, &issue);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("2 in the last hour, 3 in the last day"), "{}", lines[0]);
+        assert!(brake_lines(&st, &issue).is_empty());
+        assert!(stalled_items(&st).is_empty(), "no stall item, so no push");
+    }
+
+    /// The start thread lines of the issue.
+    fn start_lines(st: &AppState, issue: &crate::db::Task) -> Vec<String> {
+        st.db.list_task_comments(&issue.id, 100, None).unwrap().into_iter().filter(|c| c.kind == "status" && c.text.starts_with("Delivery started by")).map(|c| c.text).collect()
+    }
+
+    /// A spec #40 on GitHub with these sub-issues, a Dev and a Lead on its project, the option on.
+    fn startable(st: &AppState, fake: &Fake, name: &str, subs: Value) -> (crate::db::Task, Agent, Agent) {
+        let slug = format!("octo/{name}");
+        planner_on(st, name, Some(&format!("git@github.com:{slug}.git")));
+        spec_pr_on(fake, &slug);
+        let dev = busy(st, "Builder", name, "dev");
+        let lead = busy(st, "Lofty", name, "lead");
+        let spec = spec_40_on(st, fake, name, &slug, subs);
+        (spec, dev, lead)
+    }
+
+    #[tokio::test]
+    async fn start_delivery_is_off_the_tool_list_and_refused_until_the_projects_option_is_on() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-off";
+        let (spec, dev, lead) = startable(&st, &fake, "sd-off", json!([gh_ticket(slug, 41, "open", "x")]));
+        let go = |a: &Agent| {
+            let (st, a) = (st.clone(), a.clone());
+            async move { tool(&st, &a, "start_delivery", json!({ "ticket": 40 })).await }
+        };
+
+        // Off (the default): nobody lists it and the Lead's call is refused; nothing started.
+        for a in [&lead, &dev] {
+            assert!(!lead_tool_names(&st, a).contains(&"start_delivery".into()));
+        }
+        let err = go(&lead).await.unwrap_err();
+        assert!(err.contains("option") && err.contains("off"), "{err}");
+        assert!(st.db.get_delivery(slug, 40).unwrap().is_none_or(|d| d.state == "planned"));
+
+        // On: only the Lead of that project lists it; a Dev and another project's Lead are refused.
+        lead_may_resume(&st, "sd-off", true).await;
+        let other = busy(&st, "Other Lead", "somewhere-else", "lead");
+        assert!(lead_tool_names(&st, &lead).contains(&"start_delivery".into()));
+        assert!(!lead_tool_names(&st, &dev).contains(&"start_delivery".into()));
+        assert!(!lead_tool_names(&st, &other).contains(&"start_delivery".into()));
+        assert!(go(&dev).await.unwrap_err().contains("Only the team's Lead"));
+        assert!(go(&other).await.unwrap_err().contains("project you lead"));
+
+        // Off again: the next call is refused at once.
+        lead_may_resume(&st, "sd-off", false).await;
+        assert!(go(&lead).await.unwrap_err().contains("off"));
+        assert!(st.db.get_delivery(slug, 40).unwrap().is_none_or(|d| d.state == "planned"));
+        let _ = spec;
+    }
+
+    #[tokio::test]
+    async fn the_lead_starts_a_spec_delivery_like_the_button_and_the_thread_says_who_when_and_why() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-spec";
+        let (spec, _dev, lead) = startable(&st, &fake, "sd-spec", json!([gh_ticket(slug, 41, "open", "x"), gh_ticket(slug, 42, "open", "x")]));
+        lead_may_resume(&st, "sd-spec", true).await;
+
+        let out = tool(&st, &lead, "start_delivery", json!({ "ticket": "#40", "reason": "the user approved it" })).await.unwrap();
+        assert!(out.starts_with("Started the Delivery of spec \"Rounds\""), "{out}");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.pr), ("running", Some(500)));
+        assert_eq!(posts(&fake, slug, "pulls")[0]["head"], "spec/40-rounds", "the spec branch and draft PR, as the button makes them");
+        assert!(woken(&st, &lead).iter().any(|w| w.contains("hand out its tickets")), "{:?}", woken(&st, &lead));
+        let lines = start_lines(&st, &spec);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("Delivery started by Lofty (Lead) at ") && lines[0].ends_with("the user approved it."), "{}", lines[0]);
+
+        // Already started: refused with the reason, no second line.
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+        assert!(err.contains("already started") && err.contains("running"), "{err}");
+        assert_eq!(start_lines(&st, &spec).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_lead_starts_a_standalone_ticket_delivery() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-solo";
+        planner_on(&st, "sd-solo", Some("git@github.com:octo/sd-solo.git"));
+        spec_pr_on(&fake, slug);
+        let dev = busy(&st, "Builder", "sd-solo", "dev");
+        let lead = busy(&st, "Lofty", "sd-solo", "lead");
+        let ticket = gh_ticket(slug, 41, "open", "## What to build\n\nStore.");
+        fake.route("GET", &format!("/repos/{slug}/issues/41"), 200, ticket.clone());
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        let (t, _) = crate::mirror::bring_in(&st, "sd-solo", slug, &ticket).unwrap();
+        lead_may_resume(&st, "sd-solo", true).await;
+
+        let out = tool(&st, &lead, "start_delivery", json!({ "ticket": 41 })).await.unwrap();
+        assert!(out.starts_with("Started the Delivery of ticket \"Ticket 41\""), "{out}");
+        assert_eq!(st.db.get_delivery(slug, 41).unwrap().unwrap().state, "running");
+        // The team has a Lead and a Dev, so the Lead hands the ticket out, as with the button.
+        assert!(woken(&st, &lead).iter().any(|w| w.contains("hand out")) || woken(&st, &dev).iter().any(|w| w.contains("#41")));
+        let lines = start_lines(&st, &t);
+        assert!(lines.len() == 1 && lines[0].contains("the Lead judged it ready"), "{lines:?}");
+        // A ticket that isn't labelled ready-for-agent is refused.
+        let mut plain = gh_ticket(slug, 43, "open", "x");
+        plain["labels"] = json!([]);
+        fake.route("GET", &format!("/repos/{slug}/issues/43"), 200, plain.clone());
+        crate::mirror::bring_in(&st, "sd-solo", slug, &plain).unwrap();
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 43 })).await.unwrap_err();
+        assert!(err.contains("ready-for-agent") && err.contains("Ticket 43"), "{err}");
+        assert!(st.db.get_delivery(slug, 43).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_lead_is_refused_a_spec_with_no_tickets_a_ticket_not_ready_for_agent_or_none_ready() {
+        // No ticket at all, or only closed ones.
+        for (name, subs, words) in [
+            ("sd-none", json!([]), "no open tickets"),
+            ("sd-closed", json!([gh_ticket("octo/sd-closed", 41, "closed", "x")]), "no open tickets"),
+        ] {
+            let st = state();
+            let fake = own_fake(&st);
+            let (_, _, lead) = startable(&st, &fake, name, subs);
+            lead_may_resume(&st, name, true).await;
+            let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+            assert!(err.contains(words), "{name}: {err}");
+            assert!(st.db.get_delivery(&format!("octo/{name}"), 40).unwrap().is_none_or(|d| d.state == "planned"), "{name}");
+        }
+        // One ticket out of ready-for-agent.
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-label";
+        let mut off = gh_ticket(slug, 42, "open", "x");
+        off["labels"] = json!([{ "name": "needs-triage" }]);
+        let (_, _, lead) = startable(&st, &fake, "sd-label", json!([gh_ticket(slug, 41, "open", "x"), off]));
+        lead_may_resume(&st, "sd-label", true).await;
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+        assert!(err.contains("#42") && err.contains("ready-for-agent"), "{err}");
+        assert!(st.db.get_delivery(slug, 40).unwrap().is_none_or(|d| d.state == "planned"));
+        // Every open ticket blocked: no ticket is ready.
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-blocked";
+        let mut blocked = gh_ticket(slug, 41, "open", "x");
+        blocked["issue_dependencies_summary"] = json!({ "blocked_by": 1 });
+        let (_, _, lead) = startable(&st, &fake, "sd-blocked", json!([blocked]));
+        fake.route("GET", &format!("/repos/{slug}/issues/41/dependencies/blocked_by"), 200, json!([{ "number": 99, "state": "open", "repository_url": format!("{}/repos/octo/other", crate::github::api_base()) }]));
+        lead_may_resume(&st, "sd-blocked", true).await;
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 40 })).await.unwrap_err();
+        assert!(err.contains("no ticket ready"), "{err}");
+        assert_ne!(st.db.get_delivery(slug, 40).unwrap().map(|d| d.state), Some("running".into()));
+    }
+
+    #[tokio::test]
+    async fn the_lead_is_refused_above_the_maximum_of_running_deliveries_and_told_which_run() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/sd-max";
+        let (_dev, _) = building(&st, &fake, "sd-max", &["qa"]).await;
+        assert_eq!(delivery(&st, slug).state, "running");
+        let lead = busy(&st, "Lofty", "sd-max", "lead");
+        let ticket = gh_ticket(slug, 50, "open", "x");
+        fake.route("GET", &format!("/repos/{slug}/issues/50"), 200, ticket.clone());
+        fake.route("POST", &format!("/repos/{slug}/issues/50/labels"), 200, json!([]));
+        let (t, _) = crate::mirror::bring_in(&st, "sd-max", slug, &ticket).unwrap();
+        lead_may_resume(&st, "sd-max", true).await;
+        crate::lead_delivery::put_route(State(st.clone()), Json(json!({ "project": "sd-max", "running_deliveries": 1 }))).await.ok().unwrap();
+
+        let err = tool(&st, &lead, "start_delivery", json!({ "ticket": 50 })).await.unwrap_err();
+        assert!(err.contains("already runs 1 of 1") && err.contains("spec #40"), "{err}");
+        assert!(st.db.get_delivery(slug, 50).unwrap().is_none(), "nothing started");
+        assert!(start_lines(&st, &t).is_empty());
+
+        // Room for a second one: it starts.
+        crate::lead_delivery::put_route(State(st.clone()), Json(json!({ "project": "sd-max", "running_deliveries": 2 }))).await.ok().unwrap();
+        tool(&st, &lead, "start_delivery", json!({ "ticket": 50 })).await.unwrap();
+        assert_eq!(st.db.get_delivery(slug, 50).unwrap().unwrap().state, "running");
     }
 
     #[tokio::test]

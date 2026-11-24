@@ -44,6 +44,8 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
     if name != "preview_new_repo" && name != "create_repo" {
         return None;
     }
+    // A grill started for a new Project publishes that folder (`grill::scope`).
+    let me = &crate::grill::scoped(state, me);
     Some(if name == "preview_new_repo" { preview(state, me).await } else { create(state, me, args).await })
 }
 
@@ -57,6 +59,17 @@ pub fn needs_repo(state: &AppState, a: &Agent) -> bool {
     // Blocking: the grill asks from sync code, and reading one config value is quick.
     let origin = std::process::Command::new("git").arg("-C").arg(&dir).args(crate::repos::SAFE_GIT).args(["remote", "get-url", "origin"]).output();
     dir.is_dir() && !origin.is_ok_and(|o| o.status.success())
+}
+
+/// True when the agent's project folder exists but is not a git repo at all: a new Project, so its grill
+/// starts with the clarifying and foundation Rounds. A repo with no remote is not new, it only gets the
+/// repo offer `needs_repo` asks for.
+pub fn is_new_project(state: &AppState, a: &Agent) -> bool {
+    if a.project.trim().is_empty() {
+        return false;
+    }
+    let dir = project_dir(state, a);
+    dir.is_dir() && !dir.join(".git").exists()
 }
 
 fn project_dir(state: &AppState, a: &Agent) -> PathBuf {
@@ -598,6 +611,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_grill_for_a_new_project_publishes_that_folder_not_the_main_project() {
+        let st = state();
+        let fake = own_fake(&st);
+        owners_on(&fake);
+        // The Lead's main project is already on GitHub; the new project's folder isn't a repo yet.
+        let (a, main) = new_project(&st, "gf-main", &[("a.txt", "a")]);
+        git(&main, &["init", "-q"]);
+        git(&main, &["remote", "add", "origin", "https://github.com/octo-me/gf-main.git"]);
+        let fresh = st.settings.boot().projects_dir.join("gf-fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("idea.md"), "# Idea\n").unwrap();
+        let r = remote(&st, "gf-fresh");
+        fake.route("POST", "/user/repos", 201, json!({ "clone_url": r, "html_url": "https://github.com/octo-me/gf-fresh", "private": true }));
+
+        let project = crate::grill::NewProject { name: "gf-fresh".into(), path: "~/projects/gf-fresh".into() };
+        let wake = crate::grill::start_for_project(&st, &a, "New project gf-fresh: an idea", project).unwrap().unwrap();
+        assert!(wake.contains("no GitHub repo yet") && wake.contains("new project `gf-fresh`"), "{wake}");
+        assert!(wake.contains("it is a new project") && wake.contains("Clarifying Round, Foundation Rounds and Foundation docs"), "{wake}");
+
+        let p = call(&st, &a, "preview_new_repo", json!({})).await.unwrap();
+        assert!(p.contains("Default name: gf-fresh.") && p.contains("`idea.md`"), "{p}");
+        let text = "Create the GitHub repo `octo-me/gf-fresh` and publish this folder?";
+        let qid = ask_q(&st, &a, json!({ "text": text, "speak": "Create the repo?", "recommendation": "Yes, private under octo-me", "kind": "single_choice", "options": ["Yes, private under octo-me", "No, not now"] }), Some("yes"), true);
+        call(&st, &a, "create_repo", json!({ "question_id": qid })).await.unwrap();
+        assert_eq!(pushed(&r), [".gitignore", "idea.md"]);
+        assert!(!main.join(".gitignore").exists(), "the main project is untouched");
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().project, "gf-main");
+    }
+
+    #[tokio::test]
     async fn an_organization_owner_and_a_git_repo_without_a_remote() {
         let st = state();
         let fake = own_fake(&st);
@@ -856,7 +899,39 @@ mod tests {
             let start = crate::grill::on_user_message(&st, &a, "grill me", Some(&json!({ "role": "start_request" })), json!({})).unwrap();
             let Routed::Handled { wake: Some(wake), .. } = start else { panic!() };
             assert!(!wake.contains("no GitHub repo yet"));
+            assert!(!wake.contains("it is a new project"), "{wake}");
         }
+    }
+
+    #[test]
+    fn only_a_folder_with_no_git_repo_gets_the_clarifying_and_foundation_rounds() {
+        let st = state();
+        let wake_for = |a: &Agent| match crate::grill::on_user_message(&st, a, "grill me", Some(&json!({ "role": "start_request" })), json!({})).unwrap() {
+            Routed::Handled { wake: Some(w), .. } => w,
+            _ => panic!(),
+        };
+        // No git at all: a new Project.
+        let (fresh, _) = new_project(&st, "gf-nogit", &[("idea.md", "# Idea\n")]);
+        assert!(is_new_project(&st, &fresh));
+        let w = wake_for(&fresh);
+        assert!(w.contains("no GitHub repo yet") && w.contains("no git repo at all") && w.contains("the foundation questions follow before the spec is offered"), "{w}");
+        assert!(w.contains("the foundation docs and its `CLAUDE.md` go on your docs branch, passed as `docs_branch` to publish_spec") && w.contains("Foundation docs)"), "{w}");
+        assert!(w.contains("Its first ticket is a walking skeleton that blocks every other one"), "{w}");
+
+        // A git repo with no remote keeps today's grill: the repo offer, nothing more.
+        let (local, dir) = new_project(&st, "gf-localgit", &[("a.txt", "a")]);
+        git(&dir, &["init", "-q"]);
+        assert!(needs_repo(&st, &local) && !is_new_project(&st, &local));
+        let w = wake_for(&local);
+        assert!(w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("Foundation Rounds") && !w.contains("foundation docs") && !w.contains("walking skeleton"), "{w}");
+
+        // A project already on GitHub gets neither.
+        let (done, dir) = new_project(&st, "gf-hasorigin", &[("a.txt", "a")]);
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["remote", "add", "origin", "https://github.com/octo/gf-hasorigin.git"]);
+        assert!(!is_new_project(&st, &done));
+        let w = wake_for(&done);
+        assert!(!w.contains("no GitHub repo yet") && !w.contains("no git repo at all") && !w.contains("foundation docs") && !w.contains("walking skeleton"), "{w}");
     }
 
     #[test]
@@ -865,6 +940,43 @@ mod tests {
         for want in [
             "# Planning: new project", "Create the GitHub repo `<owner>/<project>` and publish this folder?", "mcp__loft__preview_new_repo", "mcp__loft__create_repo",
             "never write into it", "ask the question again", "read the project's existing documents",
+        ] {
+            assert!(p.contains(want), "missing {want}");
+        }
+    }
+
+    #[test]
+    fn the_planning_prompt_requires_the_foundation_docs_for_a_new_project_only() {
+        let p = crate::grill::brief();
+        let section = &p[p.find("- Foundation docs:").expect("a Foundation docs part")..];
+        let section = &section[..section.find("\n\n").unwrap_or(section.len())];
+        for want in [
+            "`docs/architecture.md`", "`docs/security.md`", "`docs/conventions.md`", "One ADR per stack or architecture choice in `docs/adr/`", "`GLOSSARY.md`",
+            "commit them before the spec is published", "pass it as `docs_branch` to `mcp__loft__publish_spec`", "Don't publish the spec without them",
+            // The CLAUDE.md points at all of them.
+            "`CLAUDE.md`: a new Project has none. It tells agents to read `docs/architecture.md`, `docs/security.md`, `docs/conventions.md`, the ADRs in `docs/adr/` and `GLOSSARY.md`",
+        ] {
+            assert!(section.contains(want), "missing {want}: {section}");
+        }
+        // Only for a folder with no git repo; the existing-CLAUDE.md rule holds for everyone.
+        let new_part = &p[p.find("When the project folder is not a git repo at all").unwrap()..];
+        assert!(new_part.find("- Foundation docs:").unwrap() < new_part.find("{TICKETS}").unwrap_or(usize::MAX));
+        assert!(p.contains("A project that already has a git repo, even one with no GitHub remote, keeps the usual grill"));
+        assert!(p.contains("Never touch an existing `CLAUDE.md`."));
+    }
+
+    #[test]
+    fn the_planning_prompt_asks_the_clarifying_and_foundation_questions_for_a_new_project_only() {
+        let p = crate::grill::brief();
+        for want in [
+            // When it applies, and when it doesn't.
+            "not a git repo at all", "A project that already has a git repo, even one with no GitHub remote, keeps the usual grill",
+            // The first Round: clarifying questions beside the new-repo question, each with a recommendation.
+            "Clarifying Round: the first round asks the clarifying questions together with the new-repo question, each with a recommendation",
+            "who it's for and what it must do on day one", "the stack, pre-filled from the idea", "where it runs", "auth, data sensitivity, compliance",
+            // The foundations, each a Round question with a recommendation, before the spec is offered.
+            "Foundation Rounds", "the stack, the architecture, the security baseline, testing, CI and deployment",
+            "Each of the six needs a round question with a recommendation", "before all six are answered", "There are no per-stack templates",
         ] {
             assert!(p.contains(want), "missing {want}");
         }
