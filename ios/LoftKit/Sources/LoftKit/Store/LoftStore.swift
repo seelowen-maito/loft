@@ -970,10 +970,11 @@ public final class LoftStore {
     public func stopRun(_ agentId: String) async throws { try await requireWrite().stopRun(agentId: agentId) }
 
     /// Cancels a queued message before the agent's run takes it (#668). False when the run already took it.
-    /// Shows it cancelled at once; the server's agent and message events say the same.
+    /// Either way it leaves the queue at once, and a cancelled one shows cancelled; the server's events say the same.
     public func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool {
-        guard try await requireWrite().cancelQueued(agentId: agentId, messageId: messageId) else { return false }
+        let ok = try await requireWrite().cancelQueued(agentId: agentId, messageId: messageId)
         if let i = agents.firstIndex(where: { $0.id == agentId }) { agents[i].queuedMessages?.removeAll { $0 == messageId } }
+        guard ok else { return false }
         if var m = messages[agentId]?.first(where: { $0.id == messageId }) {
             var o: [String: JSONValue] = if case .object(let o)? = m.meta { o } else { [:] }
             o["cancelled"] = true

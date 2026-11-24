@@ -1031,7 +1031,6 @@ private struct MessageBubble: View {
                         }
                     }
                     .font(.caption2)
-                    .accessibilityIdentifier("messageFooter")
                     if let cancelError {
                         Text(cancelError).font(.caption2).foregroundStyle(Theme.failure).accessibilityIdentifier("cancelError")
                     }
@@ -1049,8 +1048,11 @@ private struct MessageBubble: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(isUser ? "You" : message.fromAgentName ?? agent.name)\(message.isFYI ? ", FYI" : ""): \(message.displayContent)")
             .accessibilityValue(mark == .queued ? QueueMark.queuedText : mark == .cancelled ? QueueMark.cancelledText : "")
-            .accessibilityAction(named: "Cancel this queued message") { if mark == .queued { cancelQueued() } }
-            .accessibilityAction(named: "Copy to box") { if mark == .cancelled { copyToBox(message) } }
+            .accessibilityActions {
+                // Only in its own state: Cancel while queued, Copy to box once cancelled.
+                if mark == .queued { Button("Cancel this queued message", action: cancelQueued) }
+                if mark == .cancelled { Button("Copy to box") { copyToBox(message) } }
+            }
             .accessibilityAction(named: "Read aloud") { if !isUser { speaker.speak(message) } }
             .accessibilityAction(named: "Reply") { reply?(message) }
             .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }

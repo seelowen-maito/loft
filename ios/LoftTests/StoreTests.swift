@@ -348,7 +348,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(QueueMark(m, in: try XCTUnwrap(store.agent("a1"))), .cancelled)
     }
 
-    /// A Cancel the run beat to the message changes nothing, and says it was too late.
+    /// A Cancel the run beat to the message doesn't cancel it, but the queued mark goes at once.
     func testATooLateCancelLeavesTheMessageAsItIs() async throws {
         let api = MockAPI()
         api.agentList[0].queuedMessages = [1]
@@ -358,6 +358,8 @@ final class StoreTests: XCTestCase {
         try await store.loadConversation("a1")
         let ok = try await store.cancelQueued(agentId: "a1", messageId: 1)
         XCTAssertFalse(ok)
-        XCTAssertFalse(try XCTUnwrap(store.conversation("a1").first).isCancelled)
+        let m = try XCTUnwrap(store.conversation("a1").first)
+        XCTAssertFalse(m.isCancelled)
+        XCTAssertNil(QueueMark(m, in: try XCTUnwrap(store.agent("a1"))))
     }
 }

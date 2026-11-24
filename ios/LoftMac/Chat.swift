@@ -282,8 +282,11 @@ private struct MessageRow: View {
             .accessibilityLabel(spoken)
             .accessibilityAction(named: "Copy") { copy() }
             .accessibilityAction(named: "Reply") { reply?() }
-            .accessibilityAction(named: "Cancel this queued message") { if mark == .queued { cancelQueued() } }
-            .accessibilityAction(named: "Copy to box") { if mark == .cancelled { copyToBox() } }
+            .accessibilityActions {
+                // Only in its own state: Cancel while queued, Copy to box once cancelled.
+                if mark == .queued { Button("Cancel this queued message", action: cancelQueued) }
+                if mark == .cancelled { Button("Copy to box", action: copyToBox) }
+            }
             .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
             .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
         }
