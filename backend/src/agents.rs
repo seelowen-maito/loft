@@ -2246,6 +2246,11 @@ async fn run_process(
                     // The run ends here, unless a message sent now is still on its way in: claude answers it first.
                     let grace = if close_input(state, agent_id, &mut stdin) { EXIT_GRACE } else { FOLLOW_UP_GRACE };
                     exit_by = Some(tokio::time::Instant::now() + grace);
+                } else if !aborted && bg.is_empty() {
+                    // No turns and nothing said: a command claude answers itself, like `/context`, or the empty
+                    // replay of a resume. Claude exits once its input closes, or after the real turn that follows,
+                    // however long that takes: no deadline.
+                    close_input(state, agent_id, &mut stdin);
                 } else if replied {
                     if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
                         i.waiting_since = Some(now());
@@ -2720,6 +2725,7 @@ pub(crate) mod tests {
     /// "goal-cap" is blocked by the goal and by a command Stop hook until claude's own limit ends the turn;
     /// "goal-hold" is blocked and waits for a message sent now: `/goal clear` clears it in a turn of its own.
     /// "/goal clear" as the prompt clears it, without a model turn; both then wait for their stdin to close.
+    /// "/context" answers with no turns and nothing in its result, then waits for its stdin to close too.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 text() { perl -CO -MJSON::PP -ne 'my $c = JSON::PP->new->utf8->decode($_)->{message}{content}; print ref $c ? join("", map { $_->{text} // "" } @$c) : $c'; }
@@ -2813,6 +2819,12 @@ case "$prompt" in *goal-hold*)
   exit 1;;
 esac
 case "$prompt" in "/goal clear") cleared;; esac
+case "$prompt" in /context)
+  echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
+esac
 case "$prompt" in *crash*) exit 1;; esac
 case "$prompt" in *leftover*) sleep 20 & exit 1;; esac
 case "$prompt" in *sigterm*) kill -TERM $$;; esac
@@ -3712,6 +3724,21 @@ esac
         assert!(ws.join("stdin-closed").exists());
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
         assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_claude_answers_itself_with_nothing_said_still_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("/context".into()), "user");
+        until("the run to start", 10, || prompts(&st, &a.id).contains("/context")).await;
+        enqueue(&st, &a.id, Some("chatty".into()), "user");
+        until("the queued message to run next", 10, || prompts(&st, &a.id).contains("chatty")).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input after its answer");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error" && m.content != "Stopped"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.content == "On it."), "the queued run replied");
     }
 
     #[test]
