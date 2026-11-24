@@ -8203,6 +8203,94 @@ pub(crate) mod tests {
         assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
     }
 
+    #[tokio::test]
+    async fn a_red_ci_on_a_ticket_counts_against_the_projects_rounds_of_changes() {
+        let (fake, st) = (fake_github(), state());
+        let (name, slug) = ("ci-limit", "octo/ci-limit");
+        let (dev, team) = building(&st, &fake, name, &["qa"]).await;
+        fake.route("POST", &format!("/repos/{slug}/issues/41/labels"), 200, json!([]));
+        ci_on(&fake, slug, "spec/40-rounds", json!([run("completed", Some("failure"))]));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("panicked: off by one"));
+        crate::project_settings::set(&st, name, "max_rounds", &json!(2), None).unwrap();
+
+        // Round 1 of the project's 2.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        crate::delivery::follow_all(&st).await;
+        assert!(woken(&st, &dev).last().unwrap().contains("The CI asked for changes on ticket #41 \"Store\" (round 1 of 2)"), "{:?}", woken(&st, &dev));
+        assert_eq!(standing(&st, slug, 41).0, "started");
+
+        // Round 2: red again once QA passes, and that's the project's last.
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let before = woken(&st, &dev).len();
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("The CI failed on #41 (`test`). That's round 2 of changes, so it waits for the user now."), "{out}");
+        assert_eq!((standing(&st, slug, 41).0.as_str(), woken(&st, &dev).len()), ("needs_human", before));
+    }
+
+    #[tokio::test]
+    async fn a_ready_prs_red_ci_counts_against_the_projects_rounds_of_changes() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("ready-ci-limit", "octo/ready-ci-limit");
+        let (dev, _) = ready_with_ci(&st, &fake, name, json!([run("in_progress", None)])).await;
+        crate::project_settings::set(&st, name, "max_rounds", &json!(2), None).unwrap();
+        let red = || json!([run("completed", Some("failure"))]);
+
+        // Round 1 of the project's 2.
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": red() }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).final_rounds), ("final_fixes", 1));
+        assert!(woken(&st, &dev).last().unwrap().contains("so this is a final round of changes (round 1 of 2)"), "{:?}", woken(&st, &dev));
+
+        // The fix pushed and red again: round 2 is the project's last.
+        branch_at(&fake, slug, "spec/40-rounds", "feed1234", FIX_HEAD);
+        pr_at(&fake, slug, FIX_HEAD, red());
+        let before = woken(&st, &dev).len();
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        assert!(out.contains("That's round 2 of changes on it, so it waits for the user now"), "{out}");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_rounds, woken(&st, &dev).len()), ("needs_human", 2, before));
+    }
+
+    #[tokio::test]
+    async fn a_ready_pr_waits_for_the_projects_ci_grace() {
+        let ago = |m: i64| (chrono::Utc::now() - chrono::Duration::minutes(m)).to_rfc3339();
+
+        // No check on the ready PR's head and an active workflow: past today's 10 minutes it still waits, within
+        // the project's 30.
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("ready-grace", "octo/ready-grace");
+        crate::project_settings::set(&st, name, "ci_grace_minutes", &json!(30), None).unwrap();
+        ready_with_ci(&st, &fake, name, json!([run("in_progress", None)])).await;
+        fake.route("GET", &format!("/repos/{slug}/actions/workflows"), 200, json!({ "total_count": 1, "workflows": [{ "name": "CI", "state": "active" }] }));
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": [] }));
+        crate::delivery::update(&st, slug, 40, |d| d.final_ci_since = ago(11));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.final_ci.as_str(), d.done_at.as_str()), ("following", ""));
+        crate::delivery::update(&st, slug, 40, |d| d.final_ci_since = ago(31));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert!(d.final_ci.is_empty() && !d.done_at.is_empty(), "no CI ran: done. {d:?}");
+
+        // A CI fix that never reaches the PR waits as long before the final fixes stall.
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("ready-grace-lost", "octo/ready-grace-lost");
+        crate::project_settings::set(&st, name, "ci_grace_minutes", &json!(30), None).unwrap();
+        let (dev, _) = ready_with_ci(&st, &fake, name, json!([run("completed", Some("failure"))])).await;
+        branch_at(&fake, slug, "spec/40-rounds", "feed1234", FIX_HEAD);
+        tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        crate::delivery::update(&st, slug, 40, |d| d.final_ci_since = ago(11));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).final_ci.as_str()), ("ready", "following"));
+        crate::delivery::update(&st, slug, 40, |d| d.final_ci_since = ago(31));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("stalled", "ci_missing"));
+    }
+
     // ---- Team model and sccache (#466) ----
 
     #[tokio::test]
