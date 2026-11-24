@@ -214,8 +214,9 @@ function NumberPicker({ setting: s, busy, onChoose }: { setting: ProjectSetting 
       </div>
     );
   }
-  const n = Math.round(Number(draft));
-  const valid = draft.trim() !== "" && Number.isFinite(n) && n >= s.min && n <= s.max;
+  // A whole number in range, like the API takes: a decimal is put back like an out-of-range value.
+  const n = Number(draft);
+  const valid = draft.trim() !== "" && Number.isInteger(n) && n >= s.min && n <= s.max;
   const commit = () => (valid ? onChoose(n) : setDraft(String(s.value)));
   return (
     <div className="space-y-1.5">
@@ -226,6 +227,7 @@ function NumberPicker({ setting: s, busy, onChoose }: { setting: ProjectSetting 
           aria-label={s.label}
           min={s.min}
           max={s.max}
+          step={1}
           value={draft}
           disabled={busy}
           onChange={(e) => setDraft(e.target.value)}
