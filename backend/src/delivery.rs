@@ -70,6 +70,8 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             current: None,
             dev: String::new(),
             final_rounds: 0,
+            final_ci: String::new(),
+            final_ci_since: String::new(),
             reviewed_to: String::new(),
             last_notes: String::new(),
             migrated: false,
@@ -769,6 +771,7 @@ pub(crate) fn stalled_reason(state: &AppState, d: &Delivery) -> String {
     let in_flight: Vec<&DeliveryTicket> = d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "closing")).collect();
     let what = match d.resume_to.as_str() {
         "final_review" => "the final Code Review".to_string(),
+        "final_fixes" if d.final_ci == "fixing" => "the fixes for the CI of the ready PR".to_string(),
         "final_fixes" => "the fixes from the final Code Review".to_string(),
         _ if in_flight.is_empty() => "its next step".to_string(),
         _ => list_of(&in_flight.iter().map(|t| match t.state.as_str() {
@@ -2060,6 +2063,9 @@ fn ci_since(t: &DeliveryTicket) -> Option<&str> {
 /// When the Delivery's earliest ticket waiting for CI started waiting, or None when none is: the elapsed time on
 /// its card, for a spec and a standalone ticket alike.
 fn delivery_ci_since(d: &Delivery) -> Option<&str> {
+    if follows_ready_ci(d) {
+        return Some(d.final_ci_since.as_str()).filter(|s| !s.is_empty());
+    }
     d.tickets.iter().filter_map(ci_since).filter_map(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|at| (at, s))).min().map(|(_, s)| s)
 }
 
@@ -2288,9 +2294,99 @@ async fn ci_failed(state: &AppState, d: &Delivery, t: &DeliveryTicket, head: &st
     Ok(format!("\nThe CI failed on {name} ({checks}).{posted}{back}"))
 }
 
-/// Follows the CI of every running Delivery's tickets that wait for it, on a tick of its own: a ticket
-/// closes, or goes back to the Dev, within a minute of its CI finishing, without waiting for the PR card's
-/// poll or spending an agent's run.
+/// Whether Loft follows the CI of `d`'s ready PR: its reviews passed and Loft marked the spec PR (or a
+/// standalone ticket's PR) ready, so only its CI is left before the Delivery is done.
+pub(crate) fn follows_ready_ci(d: &Delivery) -> bool {
+    d.state == "ready" && d.final_ci == "following" && !d.local && d.pr.is_some()
+}
+
+/// Follows the CI of `d`'s ready PR, on its head commit on GitHub. Green, or no CI at all, and the Delivery is
+/// done: the user is told the PR can be merged. Red is a final round for the Dev with the failure's log, like
+/// the final Code Review's. A PR merged or closed meanwhile leaves nothing to follow: the Delivery is settled. The caller holds the repo's publish lock. The lines for the reply, empty when
+/// nothing changed.
+async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
+    if !follows_ready_ci(d) {
+        return Ok(String::new());
+    }
+    let (repo, spec, pr) = (d.repo.as_str(), d.spec, d.pr.unwrap_or_default());
+    let p = match crate::github::get(state, &format!("/repos/{repo}/pulls/{pr}")).await {
+        Ok(p) => p,
+        Err(e) if crate::github::is_gone(&e) => Value::Null,
+        Err(e) => return Err(e.to_string()),
+    };
+    if p["state"] != "open" {
+        update(state, repo, spec, |d| (d.state, d.final_ci, d.final_ci_since) = ("settled".into(), String::new(), String::new()));
+        return Ok(format!("\nThe ready {} merged or closed: Loft stopped following its CI.", final_tag(d)));
+    }
+    let head = p["head"]["sha"].as_str().ok_or_else(|| format!("GitHub gave PR #{pr} no head commit"))?.to_string();
+    // Exhaustive like `follow_ci`'s: what stalls a ticket's CI stalls the ready PR's too.
+    match ci_of(state, repo, &head, &d.final_ci_since).await.map_err(|e| e.to_string())? {
+        Ci::Running => Ok(String::new()),
+        ci @ (Ci::Green | Ci::Absent) => {
+            let why = match ci {
+                Ci::Green => format!("its CI is green on `{}`", short(&head)),
+                _ => "the repo runs no CI on its branch".to_string(),
+            };
+            if d.final_rounds > 0 {
+                let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{repo}/issues/{}/labels/changes-requested", d.pr.unwrap_or_default()), None).await;
+            }
+            update(state, repo, spec, |d| (d.final_ci, d.final_ci_since) = (String::new(), String::new())).ok_or("The Delivery record couldn't be saved.")?;
+            done(state, repo, spec);
+            Ok(format!("\nThe ready {}: {why}, so the user is told it can be merged.", final_tag(d)))
+        }
+        Ci::Red(runs, statuses) => {
+            let (names, log) = failure_of(state, repo, &runs, &statuses).await;
+            ready_ci_failed(state, d, &head, &names, &log).await
+        }
+    }
+}
+
+/// [`follow_ready_ci`] for a reply: its lines, empty when nothing changed. A GitHub error is logged and counts
+/// as nothing: the poller tries again.
+pub(crate) async fn follow_ready_ci_or(state: &AppState, d: &Delivery) -> String {
+    follow_ready_ci(state, d).await.unwrap_or_else(|e| {
+        tracing::warn!("delivery {}#{}: CI of the ready PR: {e}", d.repo, d.spec);
+        String::new()
+    })
+}
+
+/// The CI of `d`'s ready PR failed on commit `head`: a final round for the Dev with the failure's log, counted
+/// against `MAX_ROUNDS` like the final Code Review's, and the last one waits for the user. The PR stays ready,
+/// and Loft follows its CI again once the Dev submits the fix. The lines for the reply.
+async fn ready_ci_failed(state: &AppState, d: &Delivery, head: &str, names: &[String], log: &str) -> Result<String, String> {
+    let (pr, what) = (d.pr.unwrap_or_default(), final_tag(d));
+    let checks = names.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ");
+    let body = format!("**CI** failed on `{}`, the newest commit of the ready {}: {checks}.", short(head), pr_name(d));
+    let posted = match crate::github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{pr}/comments", d.repo), Some(json!({ "body": body }))).await {
+        Ok(_) => label_issue(state, &d.repo, pr, "changes-requested").await.err().map(|e| format!(" Posted on #{pr}, but {e}.")).unwrap_or_default(),
+        Err(e) => format!(" Couldn't post it on #{pr}: {e}."),
+    };
+    let dev = state.db.get_agent(&d.dev).ok().flatten().or_else(|| builder(state, d, &d.dev));
+    let rounds = d.final_rounds + 1;
+    let stuck = rounds >= MAX_ROUNDS || dev.is_none();
+    let notes = format!("The CI failed on `{}`, the newest commit of the {} `{}`, after Loft marked the {} ready. Failed: {checks}.\n\n{log}", short(head), branch_name(d), d.branch, pr_name(d));
+    let d = update(state, &d.repo, d.spec, |d| {
+        d.final_rounds = rounds;
+        d.state = if stuck { "needs_human" } else { "final_fixes" }.into();
+        (d.final_ci, d.final_ci_since) = ("fixing".into(), String::new());
+        d.last_notes = notes.clone();
+        if let Some(dev) = &dev {
+            d.dev = dev.id.clone();
+        }
+    })
+    .ok_or("The Delivery record couldn't be saved.")?;
+    let Some(dev) = dev.filter(|_| !stuck) else {
+        let why = needs_human(state, &d, None, rounds, &notes).await;
+        let because = if rounds >= MAX_ROUNDS { format!("That's round {rounds} of changes on it") } else { "Nobody can fix it: the team has no Dev and the agent that planned it is gone".to_string() };
+        return Ok(format!("\nThe CI failed on the ready {what} ({checks}).{posted} {because}, so it waits for the user now{why}."));
+    };
+    crate::agents::wake_on_ticket(state, &dev.id, &ticket_key(&d, None), true, fixes_brief(&d), wake_for(&d, Step::FinalFixes { round: rounds }));
+    Ok(format!("\nThe CI failed on the ready {what} ({checks}).{posted} {} is fixing it in a final round ({rounds} of {MAX_ROUNDS}), and Loft follows the CI again after.", dev.name))
+}
+
+/// Follows the CI of every running Delivery's tickets that wait for it, and of every ready PR, on a tick of its
+/// own: a ticket closes, or goes back to the Dev, within a minute of its CI finishing, without waiting for the
+/// PR card's poll or spending an agent's run.
 pub async fn ci_poller(state: AppState) {
     let mut tick = tokio::time::interval(CI_EVERY);
     crate::github::as_source("delivery", async {
@@ -2317,6 +2413,19 @@ pub(crate) async fn follow_all(state: &AppState) {
             Ok(_) => {}
             Err(e) if e.starts_with("GitHub paused") => {}
             Err(e) => tracing::warn!("delivery {}#{}: CI: {e}", d.repo, d.spec),
+        }
+    }
+    for d in state.db.deliveries_in_state("ready").unwrap_or_default() {
+        if !follows_ready_ci(&d) {
+            continue;
+        }
+        let _held = state.publish_locks.of(&d.repo).lock_owned().await;
+        let Some(d) = state.db.get_delivery(&d.repo, d.spec).ok().flatten() else { continue };
+        match follow_ready_ci(state, &d).await {
+            Ok(line) if !line.is_empty() => tracing::info!("delivery {}#{}: {}", d.repo, d.spec, line.trim()),
+            Ok(_) => {}
+            Err(e) if e.starts_with("GitHub paused") => {}
+            Err(e) => tracing::warn!("delivery {}#{}: CI of the ready PR: {e}", d.repo, d.spec),
         }
     }
 }
@@ -2461,6 +2570,21 @@ async fn build_done(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> Vec<S
 fn fixes_brief(d: &Delivery) -> String {
     // None yet after a Resume on a final review that waited for the user: its rounds start over.
     let rounds = if d.final_rounds > 0 { format!(" (round {} of {MAX_ROUNDS})", d.final_rounds) } else { String::new() };
+    if d.final_ci == "fixing" {
+        let notes = if d.last_notes.trim().is_empty() { String::new() } else { format!("\n\n{}", d.last_notes.trim()) };
+        return format!(
+            "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: the CI failed on the {pname} https://github.com/{repo}/pull/{pr} after Loft marked it ready, so this is a final round of changes{rounds}, like one from the final Code Review.{notes}\n\n\
+             Fix it on the {bname} `{branch}` with new commits, each ending with `Refs #{spec}`, push, then call `mcp__loft__submit_ticket` with {pr} and the new commits, oldest first. The PR stays ready; Loft follows its CI again until it's green.\n{own}",
+            about = subject(d),
+            pname = pr_name(d),
+            repo = d.repo,
+            pr = d.pr.unwrap_or_default(),
+            bname = branch_name(d),
+            branch = d.branch,
+            spec = d.spec,
+            own = own_rules("build and check the work"),
+        );
+    }
     if d.local {
         return format!(
             "[Loft Delivery: {about}] This is not a message from the user. You are the Dev on this Delivery: fix what the Code reviewer asked for on the spec branch `{branch}`{rounds}. Its notes are its last note on the spec's Loft issue {spec_id}.\n\
@@ -2588,7 +2712,14 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
         _ => format!("the {} https://github.com/{repo}/pull/{}", pr_name(&d), d.pr.unwrap_or_default()),
     };
     let stopped = format!("{what} waited for the user after {rounds} rounds of changes; they looked at it, so it gets a fresh {MAX_ROUNDS} rounds");
-    let notes = if notes.is_empty() { format!("\n\nLoft doesn't have the last notes asking for changes: read them on {at}.") } else { format!("\n\nThe last notes asking for changes, also on {at}:\n\n{notes}") };
+    let notes = if t.is_none() && d.final_ci == "fixing" {
+        // The CI fixes brief carries the failure and its log.
+        String::new()
+    } else if notes.is_empty() {
+        format!("\n\nLoft doesn't have the last notes asking for changes: read them on {at}.")
+    } else {
+        format!("\n\nThe last notes asking for changes, also on {at}:\n\n{notes}")
+    };
     let line = match &t {
         Some(t) => {
             let done = build_done(state, &d, t).await;
@@ -2600,7 +2731,11 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
         None => {
             let brief = format!("{}{}{notes}", fixes_brief(&saved), resume_section(&stopped, &[]));
             crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&saved, None), brief, wake_for(&saved, Step::FinalFixes { round: 0 }));
-            format!(" {} is fixing what the final Code Review found, with a fresh {MAX_ROUNDS} rounds of changes; then the Code reviewer looks again.", dev.name)
+            if saved.final_ci == "fixing" {
+                format!(" {} is fixing the CI of the ready PR, with a fresh {MAX_ROUNDS} rounds of changes; then Loft follows the CI again.", dev.name)
+            } else {
+                format!(" {} is fixing what the final Code Review found, with a fresh {MAX_ROUNDS} rounds of changes; then the Code reviewer looks again.", dev.name)
+            }
         }
     };
     Ok(format!("Resumed {}.{line}{unlabelled}", subject(&saved)))
@@ -2655,7 +2790,8 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
             let d = unstall(&|d| d.dev = dev.id.clone())?;
             let brief = format!("{}{}", fixes_brief(&d), resume_section(&stalled, &[found]));
             crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&d, None), brief, wake_for(&d, Step::FinalFixes { round: d.final_rounds }));
-            format!(" {} is fixing what the final Code Review found again.", dev.name)
+            let what = if d.final_ci == "fixing" { "the CI of the ready PR" } else { "what the final Code Review found" };
+            format!(" {} is fixing {what} again.", dev.name)
         }
         _ => {
             let inflight: Vec<DeliveryTicket> = d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "closing")).cloned().collect();
@@ -3077,9 +3213,15 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
             ("stalled", stalled.as_str())
         }
         "paused" => ("paused", "Paused: Loft sends no wakes until you resume it."),
+        "needs_human" if d.final_ci == "fixing" => ("needs_you", "Needs you: too many rounds of changes for the CI of the ready PR."),
         "needs_human" => ("needs_you", "Needs you: too many rounds of changes in the final review."),
         "final_review" => ("final", "Final review: the Code reviewer is reviewing the whole PR."),
+        "final_fixes" if d.final_ci == "fixing" => ("final", "Final round: the Dev is fixing the CI that failed on the ready PR."),
         "final_fixes" => ("final", "Final review: the Dev is fixing what the Code reviewer found."),
+        _ if follows_ready_ci(d) => {
+            stalled = format!("Waiting for CI on the ready {}", final_tag(d));
+            ("ci", stalled.as_str())
+        }
         "ready" | "settled" if reopenable(d) => ("done", "Done, but tickets published since are open: Reopen delivery builds them."),
         "ready" | "settled" | "merged" => ("done", "Done: every review passed."),
         _ if d.tickets.iter().any(|t| t.state == "needs_human") => ("needs_you", "Needs you: a ticket had too many rounds of changes."),
@@ -3391,6 +3533,7 @@ pub async fn reopen(state: &AppState, repo: &str, spec: i64) -> Result<String, S
     let d = update(state, repo, spec, |d| {
         d.state = "running".into();
         (d.done_at, d.ready_retry, d.final_rounds, d.current) = (String::new(), false, 0, None);
+        (d.final_ci, d.final_ci_since) = (String::new(), String::new());
         d.reviewed_to = head.clone();
     })
     .ok_or("The Delivery record couldn't be saved.")?;
@@ -3436,8 +3579,9 @@ async fn final_of(state: &AppState, me: &crate::db::Agent, args: &Value) -> Resu
     Ok((slug, format!("#{n}"), d, held))
 }
 
-/// `submit_ticket` for fixes asked for in the final Code Review: wakes the Code reviewer to look again.
-/// None when #number isn't a spec PR waiting for fixes, so it's a ticket.
+/// `submit_ticket` for fixes asked for in the final Code Review: wakes the Code reviewer to look again. Fixes for
+/// the CI of the ready PR go back to Loft following it instead. None when #number isn't a spec PR waiting for
+/// fixes, so it's a ticket.
 async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, commits: &[String]) -> Option<Result<String, String>> {
     let (slug, n, d, _held) = final_of(state, me, args).await.ok()?;
     let d = d.filter(|d| d.step_state() == "final_fixes")?;
@@ -3450,6 +3594,19 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
     if let Err(e) = refuse_behind(state, &d).await {
         return Some(Err(e));
     }
+    let shas = commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
+    // A fix for the ready PR's CI: Loft follows the CI again, with no new Code Review.
+    if d.final_ci == "fixing" {
+        let Some(d) = update(state, &slug, d.spec, |d| {
+            d.unstall();
+            d.state = "ready".into();
+            (d.final_ci, d.final_ci_since) = ("following".into(), crate::db::now());
+        }) else {
+            return Some(Err("The Delivery record couldn't be saved.".into()));
+        };
+        let followed = follow_ready_ci_or(state, &d).await;
+        return Some(Ok(format!("Submitted the CI fixes for the ready {}: {shas}. Loft follows its CI again, and tells the user it can be merged once it's green.{followed}", final_tag(&d))));
+    }
     let Some(cr) = with_role(state, &d, "code_reviewer") else {
         return Some(Err("The team has no Code reviewer any more: ask the user to look at the spec PR.".into()));
     };
@@ -3459,7 +3616,6 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
     }) else {
         return Some(Err("The Delivery record couldn't be saved.".into()));
     };
-    let shas = commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
     let step = Step::FinalReview { round: d.final_rounds };
     crate::agents::wake_on_ticket(state, &cr.id, &ticket_key(&d, None), false, format!("{}\n- The fixes: {shas}.", final_brief(state, &d)), wake_for(&d, step));
     Some(Ok(format!("Submitted the fixes for {}: {} (Code reviewer) is looking again.", final_tag(&d), cr.name)))
@@ -3500,7 +3656,7 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
         }
         let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{slug}/issues/{pr}/labels/changes-requested"), None).await;
         let ready = match crate::planning::ready_if_done(state, &d).await {
-            Ok(Some(_)) => format!(" Spec PR #{pr} is ready for review now, and the user is told it can be merged."),
+            Ok(Some(_)) => format!(" Spec PR #{pr} is ready for review now, and the user is told it can be merged once its CI is green."),
             Ok(None) => format!(" Spec PR #{pr} was no longer a draft, so it was left as it is."),
             Err(e) => format!(" But {e}: Loft tries again on its next poll."),
         };
@@ -3554,7 +3710,7 @@ pub(crate) fn local_ready(state: &AppState, d: &Delivery) -> String {
     format!(" The {} `{}` is ready to merge into {}: the user is offered Merge.", branch_name(d), d.branch, merge_into(d))
 }
 
-/// The Delivery is done: Loft marked its spec PR ready, or set a plan kept in Loft to ready. Only the first
+/// The Delivery is done: Loft marked its spec PR ready and its CI is green, or set a plan kept in Loft to ready. Only the first
 /// time (a retried ready call finds `done_at` set): Needs you gets its Delivery done item, and the agent that
 /// planned it and the team's Lead (once, when they're the same) are woken with a summary, in a run whose reply is an Unread reply.
 pub(crate) fn done(state: &AppState, repo: &str, spec: i64) {

@@ -71,9 +71,17 @@ pub struct Delivery {
     /// The agent building the current ticket: the team's Dev, or the planner without one.
     #[serde(default)]
     pub dev: String,
-    /// Changes rounds of the final Code Review of the whole spec PR.
+    /// Changes rounds of the final Code Review of the whole spec PR, and then, once it's ready, of its CI.
     #[serde(default)]
     pub final_rounds: u32,
+    /// After Loft marked the spec PR (or a standalone ticket's PR) ready: "following" while Loft follows its CI,
+    /// which must be green before the Delivery is done, and "fixing" while the Dev fixes a red one (the
+    /// Delivery is in its final fixes, or stalled, paused or waiting for the user in them). Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_ci: String,
+    /// Since when Loft follows the ready PR's CI (RFC 3339): a commit with no check waits for one from then.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_ci_since: String,
     /// After Reopen delivery: the spec branch's newest commit when it reopened. Its commits passed a final
     /// review already, so the next one reviews only what came after. Empty before any reopen.
     #[serde(default)]
@@ -1627,6 +1635,8 @@ impl Db {
                 current: None,
                 dev: String::new(),
                 final_rounds: 0,
+                final_ci: String::new(),
+                final_ci_since: String::new(),
                 reviewed_to: String::new(),
                 last_notes: String::new(),
                 migrated: true,

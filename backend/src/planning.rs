@@ -750,7 +750,8 @@ pub(crate) async fn ready_if_done(state: &AppState, d: &crate::db::Delivery) -> 
 }
 
 /// Marks the Delivery's spec PR ready for review when it's still an open draft, and has Loft watch it, so
-/// it reaches Needs you (with a push) once it can be merged. The caller knows every ticket is closed; a
+/// it reaches Needs you (with a push) once it can be merged. Loft then follows its CI: the Delivery is done
+/// once it's green. The caller knows every ticket is closed; a
 /// Delivery migrated from before Deliveries (or with no tickets listed) checks the spec's sub-issues on
 /// GitHub instead.
 async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<i64>, String> {
@@ -779,12 +780,21 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
     if let Some(e) = v["errors"].as_array().and_then(|es| es.first()) {
         return Err(format!("couldn't mark spec PR #{pr} ready for review: {}", e["message"].as_str().unwrap_or("GitHub refused")));
     }
-    settle("ready");
+    // Ready, but done only once its CI is green: Loft follows it from now on.
+    let Some(d) = crate::delivery::update(state, slug, spec, |d| {
+        d.state = "ready".into();
+        (d.final_ci, d.final_ci_since, d.final_rounds) = ("following".into(), crate::db::now(), 0);
+    }) else {
+        return Ok(Some(pr));
+    };
     // Watched like a PR an agent opened: Needs you lists it, with a push and a Merge button, once GitHub
     // says it can be merged.
-    crate::delivery::track_pr(state, d).await;
-    // Done now, whatever GitHub says of its checks or conflicts.
-    crate::delivery::done(state, slug, spec);
+    crate::delivery::track_pr(state, &d).await;
+    // A repo with no CI is done now; the poller follows one that runs.
+    let followed = crate::delivery::follow_ready_ci_or(state, &d).await;
+    if !followed.is_empty() {
+        tracing::info!("delivery {slug}#{spec}: {}", followed.trim());
+    }
     Ok(Some(pr))
 }
 
@@ -1608,7 +1618,7 @@ pub(crate) mod tests {
     fn spec_with_tickets(st: &AppState, fake: &Fake, slug: &str) -> String {
         delivery_40(st, slug);
         let body = format!("## What to build\n\nX.\n\n## Branch\n\nCommit on the spec branch `spec/40-rounds`. It ships in the spec PR https://github.com/{slug}/pull/500.");
-        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "body": "Closes #40" }));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "body": "Closes #40", "head": { "sha": CI_HEAD } }));
         for n in [41, 42] {
             fake.route("GET", &format!("/repos/{slug}/issues/{n}"), 200, gh_ticket(slug, n, "open", &body));
             fake.route("POST", &format!("/repos/{slug}/issues/{n}/comments"), 201, json!({}));
@@ -4587,6 +4597,8 @@ pub(crate) mod tests {
         fake.route("GET", &format!("/repos/{slug}/issues/42"), 200, gh_ticket(&slug, 42, "open", "## What to build\n\nAPI."));
         fake.route("PATCH", &format!("/repos/{slug}/issues/42"), 200, gh_ticket(&slug, 42, "closed", "## What to build\n\nAPI."));
         fake.route("POST", "/graphql", 200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }));
+        // Its head is the branch's: once the spec PR is ready, Loft follows its CI there (none in these tests).
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "head": { "sha": CI_HEAD } }));
         out
     }
 
@@ -4709,7 +4721,7 @@ pub(crate) mod tests {
             (200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "mergeable": true, "mergeable_state": "clean", "title": "Rounds", "head": { "ref": "spec/40-rounds", "sha": "feed1234" }, "base": { "ref": "main" }, "user": { "login": "octo-me" } })),
         ]);
         let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
-        assert!(out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged."), "{out}");
+        assert!(out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged once its CI is green."), "{out}");
         assert_eq!(fake.seen("/graphql").len(), 1);
         assert_eq!(fake.seen(&format!("/repos/{slug}/issues/40/sub_issues")).len(), sub_reads, "the tickets aren't read again from GitHub");
         assert!(fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().any(|s| s.method == "DELETE"));
@@ -4790,7 +4802,7 @@ pub(crate) mod tests {
         let marked = readies();
         fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, spec_pr(slug, true));
         let out = tool(&st, &cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Docs only." })).await.unwrap();
-        assert!(out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged."), "{out}");
+        assert!(out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged once its CI is green."), "{out}");
         assert_eq!(readies(), marked + 1);
         let d = delivery(&st, slug);
         assert_eq!(d.state, "ready");
@@ -4955,8 +4967,9 @@ pub(crate) mod tests {
         let (a, m, team) = standalone(&st, &fake, "solo-flow", &["dev", "qa", "security", "code_reviewer"]).await;
         let (dev, qa, sec, cr) = (&team[0], &team[1], &team[2], &team[3]);
         press(&st, &a, &m).await.unwrap();
-        // Its CI runs on the ticket branch.
+        // Its CI runs on the ticket branch, its PR's head.
         ci_on(&fake, slug, "ticket/41-store", json!([]));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "head": { "sha": CI_HEAD } }));
 
         tool(&st, dev, "submit_ticket", submit_41()).await.unwrap();
         assert!(woken(&st, qa)[0].contains("on the ticket branch `ticket/41-store` (PR https://github.com/octo/solo-flow/pull/500)"));
@@ -6431,7 +6444,7 @@ pub(crate) mod tests {
         let v = resume_card(&st, &spec).await.unwrap();
         assert_eq!(v["message"], "Resumed spec #40. Builder is building #41 again.");
         assert_eq!((&v["state"], &v["can_resume"], &v["stall_reason"]), (&json!("running"), &json!(false), &Value::Null));
-        let commits = fake.seen(&format!("/repos/{slug}/commits"));
+        let commits = fake.seen(&format!("/repos/{slug}/commits?"));
         assert_eq!(commits[0].path, format!("/repos/{slug}/commits?sha=spec/40-rounds&per_page=100"));
         let d = delivery(&st, slug);
         assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.tickets[0].state.as_str()), ("running", "", "", "started"));
@@ -7029,9 +7042,9 @@ pub(crate) mod tests {
         let spec = spec_issue(&st, &fake, "done-flow", slug);
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
         tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
-        let draft = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true });
+        let draft = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "head": { "sha": CI_HEAD } });
         // Ready, but with conflicts and checks still running: GitHub won't call it mergeable.
-        let conflicted = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "mergeable": false, "mergeable_state": "dirty", "title": "Rounds", "html_url": format!("https://github.com/{slug}/pull/500"), "head": { "ref": "spec/40-rounds", "sha": "feed1234" }, "base": { "ref": "main" }, "user": { "login": "octo-me" } });
+        let conflicted = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "mergeable": false, "mergeable_state": "dirty", "title": "Rounds", "html_url": format!("https://github.com/{slug}/pull/500"), "head": { "ref": "spec/40-rounds", "sha": CI_HEAD }, "base": { "ref": "main" }, "user": { "login": "octo-me" } });
         fake.in_turn("GET", &format!("/repos/{slug}/pulls/500"), vec![(200, draft.clone()), (200, draft), (200, conflicted)]);
         fake.in_turn("POST", "/graphql", vec![(200, json!({ "errors": [{ "message": "Something went wrong" }] })), (200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }))]);
 
@@ -7099,7 +7112,7 @@ pub(crate) mod tests {
         spec_issue(&st, &fake, "done-retry", slug);
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
         tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
-        let draft = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true });
+        let draft = json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "head": { "sha": CI_HEAD } });
         fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, draft);
         fake.in_turn("POST", "/graphql", vec![(200, json!({ "errors": [{ "message": "Something went wrong" }] })), (200, json!({ "data": { "markPullRequestReadyForReview": { "pullRequest": { "isDraft": false } } } }))]);
 
@@ -7232,5 +7245,133 @@ pub(crate) mod tests {
                 None => assert!(wakes.is_empty(), "{wakes:?}"),
             }
         }
+    }
+
+    // ---- CI after ready (#460) ----
+
+    /// `name`'s Delivery (tickets #41 and #42, a Code reviewer) through its final Code Review's pass, with these
+    /// check runs on the spec PR's head from then on: the spec PR is marked ready. Its Dev, and its planner
+    /// (busy, so its done wake queues).
+    async fn ready_with_ci(st: &AppState, fake: &Fake, name: &str, runs: Value) -> (Agent, Agent) {
+        let slug = format!("octo/{name}");
+        let (dev, team) = building_both(st, fake, name, &["code_reviewer"]).await;
+        let planner = planner_of(st, &slug);
+        spec_issue(st, fake, name, &slug);
+        tool(st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": runs }));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("thread 'store::total' panicked: off by one"));
+        let out = tool(st, &team[0], "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged once its CI is green."), "{out}");
+        (dev, planner)
+    }
+
+    #[tokio::test]
+    async fn a_red_ci_after_ready_is_a_final_round_for_the_dev_and_done_waits_for_green() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-ci";
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        let (dev, planner) = ready_with_ci(&st, &fake, "ready-ci", json!([run("in_progress", None)])).await;
+
+        // Ready while its CI runs: not done, and the card waits for CI.
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.done_at.as_str()), ("ready", "following", ""));
+        assert!(done_items(&st).is_empty() && done_wakes(&st).is_empty(), "no \"ready to merge\" before the CI is green");
+        let v = crate::delivery::delivery_json(&st, &d);
+        assert_eq!(v["state_line"], json!({ "tone": "ci", "text": "Waiting for CI on the ready spec PR #500" }));
+        assert_eq!((&v["ci_since"], &v["checks_url"]), (&json!(d.final_ci_since), &json!("https://github.com/octo/ready-ci/pull/500/checks")));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).final_ci, "following", "still running");
+
+        // Red: a final round for the Dev, with the failure's log.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("completed", Some("failure"))] }));
+        let before = woken(&st, &dev).len();
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.final_rounds), ("final_fixes", "fixing", 1));
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1);
+        for want in [
+            "[Loft Delivery: spec #40] This is not a message from the user. You are the Dev on this Delivery: the CI failed on the spec PR https://github.com/octo/ready-ci/pull/500 after Loft marked it ready, so this is a final round of changes (round 1 of 3)",
+            "Failed: `test`.",
+            "thread 'store::total' panicked: off by one",
+            "call `mcp__loft__submit_ticket` with 500 and the new commits",
+        ] {
+            assert!(w.last().unwrap().contains(want), "missing {want:?} in {}", w.last().unwrap());
+        }
+        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**CI** failed on `c1c1c1c`, the newest commit of the ready spec PR: `test`.");
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
+        assert!(done_items(&st).is_empty());
+        let v = crate::delivery::delivery_json(&st, &d);
+        assert_eq!((&v["state_line"]["text"], &v["can_pause"]), (&json!("Final round: the Dev is fixing the CI that failed on the ready PR."), &json!(true)));
+
+        // The fix: Loft follows the CI again, with no new Code Review.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("in_progress", None)] }));
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        assert_eq!(out, "Submitted the CI fixes for the ready spec PR #500: `feed123`. Loft follows its CI again, and tells the user it can be merged once it's green.");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str()), ("ready", "following"));
+        assert!(done_items(&st).is_empty());
+
+        // Green: done, once, and the label comes off.
+        let unlabels = || fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().filter(|s| s.method == "DELETE").count();
+        let unlabelled = unlabels();
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert!(d.state == "ready" && d.final_ci.is_empty() && !d.done_at.is_empty(), "{d:?}");
+        assert_eq!(done_items(&st).len(), 1);
+        assert_eq!(woken(&st, &planner).iter().filter(|w| w.contains("is done.")).count(), 1);
+        assert_eq!(unlabels(), unlabelled + 1);
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["state_line"]["text"], "Done: every review passed.");
+        let reads = fake.seen(&runs).len();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(fake.seen(&runs).len(), reads, "nothing is followed once it's done");
+    }
+
+    #[tokio::test]
+    async fn a_ready_prs_ci_red_round_after_round_waits_for_the_user_and_resume_gives_fresh_rounds() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-ci-rounds";
+        // Red already when it's marked ready: round 1 goes out at once.
+        let (dev, _) = ready_with_ci(&st, &fake, "ready-ci-rounds", json!([run("completed", Some("failure"))])).await;
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).final_rounds), ("final_fixes", 1));
+
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        assert!(out.ends_with("Builder is fixing it in a final round (2 of 3), and Loft follows the CI again after."), "{out}");
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed5678"] })).await.unwrap();
+        assert!(out.contains("That's round 3 of changes on it, so it waits for the user now"), "{out}");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.final_rounds), ("needs_human", "fixing", 3));
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["needs-human"] }));
+        let v = crate::delivery::delivery_json(&st, &d);
+        assert_eq!((&v["state_line"]["text"], &v["can_resume"]), (&json!("Needs you: too many rounds of changes for the CI of the ready PR."), &json!(true)));
+        assert!(done_items(&st).is_empty());
+
+        // Resume: a fresh set of rounds, the Dev woken with the failure again.
+        let before = woken(&st, &dev).len();
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(out, "Resumed spec #40. Builder is fixing the CI of the ready PR, with a fresh 3 rounds of changes; then Loft follows the CI again.");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.final_rounds), ("final_fixes", "fixing", 0));
+        let w = woken(&st, &dev);
+        assert_eq!(w.len(), before + 1);
+        let brief = w.last().unwrap();
+        assert!(brief.contains("so this is a final round of changes, like one from the final Code Review.") && brief.contains("panicked: off by one"), "{brief}");
+        assert!(!brief.contains("The last notes asking for changes"), "the log isn't repeated: {brief}");
+    }
+
+    #[tokio::test]
+    async fn a_ready_pr_merged_before_its_ci_finished_is_no_longer_followed() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-ci-merged";
+        ready_with_ci(&st, &fake, "ready-ci-merged", json!([run("in_progress", None)])).await;
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "state": "closed", "merged": true, "head": { "sha": CI_HEAD } }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.done_at.as_str()), ("settled", "", ""));
     }
 }
