@@ -2282,7 +2282,8 @@ async fn run_process(
                     }
                 }
                 capped = false;
-                if replied && bg.is_empty() {
+                // An error ends the run too, though it may come with no turns and nothing said (the first API call failed).
+                if (replied || ev["is_error"] == true) && bg.is_empty() {
                     // The run ends here, unless a message sent now is still on its way in: claude answers it first.
                     let grace = if close_input(state, agent_id, &mut stdin) { EXIT_GRACE } else { FOLLOW_UP_GRACE };
                     exit_by = Some(tokio::time::Instant::now() + grace);
@@ -2770,6 +2771,7 @@ pub(crate) mod tests {
     /// from its stdin; "hold-plain" asks the same and replies at `go`, with no block.
     /// "/goal clear" as the prompt clears it, without a model turn; both then wait for their stdin to close.
     /// "/context" answers with no turns and nothing in its result, then waits for its stdin to close too.
+    /// "api-down" ends in an error with no turns and no `result`, as when the first API call fails, then waits the same way.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 text() { perl -CO -MJSON::PP -ne 'my $c = JSON::PP->new->utf8->decode($_)->{message}{content}; print ref $c ? join("", map { $_->{text} // "" } @$c) : $c'; }
@@ -2911,6 +2913,12 @@ esac
 case "$prompt" in *slow*)
   echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}'
   sleep 1;;
+esac
+case "$prompt" in *api-down*)
+  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
 esac
 case "$prompt" in *fail*)
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"session_id":"s1","total_cost_usd":0}'
@@ -3890,6 +3898,20 @@ esac
         assert_eq!(goal_of(&st, &a.id), None);
         assert!(st.rt.lock().unwrap().queued_messages.get(&a.id).is_none_or(|q| q.iter().all(|(i, _)| *i != chatty)));
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_error_with_no_turns_and_nothing_said_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("api-down".into()), "user");
+        until("the run to start", 10, || prompts(&st, &a.id).contains("api-down")).await;
+        enqueue(&st, &a.id, Some("chatty".into()), "user");
+        until("the queued message to run next", 10, || prompts(&st, &a.id).contains("chatty")).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input on the error");
+        assert_eq!(error_text(&st, &a.id).as_deref(), Some("error_during_execution"));
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "On it."), "the queued run replied");
     }
 
     #[tokio::test(flavor = "multi_thread")]
