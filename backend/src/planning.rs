@@ -5252,6 +5252,7 @@ pub(crate) mod tests {
         ] {
             assert!(w[0].contains(&want), "missing {want:?} in {}", w[0]);
         }
+        assert!(w[0].contains("closes the ticket when they pass: never close it yourself."), "no CI to wait for: {}", w[0]);
         assert!(notes_on(&st, &store.id).iter().any(|n| n.starts_with("Started by Loft's Delivery: with dev agent")), "{:?}", notes_on(&st, &store.id));
         assert_eq!(st.db.get_delivery(&d.repo, d.spec).unwrap().unwrap().base, "main");
         assert!(fake.seen("/").is_empty(), "no GitHub at all");
@@ -7321,6 +7322,22 @@ pub(crate) mod tests {
         st.db.delete_agent(&lead.id).unwrap();
         assert_eq!(ci(&read("pset").await.unwrap().0)["changed"]["agent"]["name"], "Lead");
         assert!(crate::mcp::tools(&st).as_array().unwrap().iter().any(|t| t["name"] == "set_project_setting"));
+    }
+
+    /// #462 review: the Dev's brief names the CI only where tickets wait for it, and the CI mode only on GitHub.
+    #[tokio::test]
+    async fn a_devs_brief_waits_for_the_ci_per_ticket_by_default_and_names_no_mode_in_a_plan_kept_in_loft() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (dev, _) = building(&st, &fake, "ci-brief", &["qa"]).await;
+        let w = woken(&st, &dev);
+        assert!(w[0].contains("closes the ticket when they pass and the CI is green: never close it yourself."), "{}", w[0]);
+
+        let (a, m, team, _dir) = local_plan(&st, "ci-brief-local", &["dev"]).await;
+        crate::project_settings::set(&st, "ci-brief-local", "ci_mode", &json!("per_ticket"), None).unwrap();
+        press(&st, &a, &m).await.unwrap();
+        let w = woken(&st, &team[0]);
+        assert!(w[0].contains("closes the ticket when they pass: never close it yourself.") && !w[0].contains("CI mode") && !w[0].contains("PR is ready"), "{}", w[0]);
     }
 
     #[tokio::test]

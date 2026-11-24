@@ -858,7 +858,13 @@ fn dev_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket) -> String {
         arg = ticket_arg(d, t),
         own = own_rules("build and check the work"),
         push = one_push(state, d, Some(t)),
-        green = if ci_per_ticket(state, d) { " and the CI is green" } else { " (this project's CI mode is `at the end`: Loft checks the CI once the PR is ready)" },
+        green = if d.local {
+            ""
+        } else if crate::project_settings::ci_at_the_end(state, &d.project) {
+            " (this project's CI mode is `at the end`: Loft checks the CI once the PR is ready)"
+        } else {
+            " and the CI is green"
+        },
     )
 }
 
@@ -1338,7 +1344,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }, "required": ["ticket", "dev"] }
     }), json!({
         "name": "submit_ticket",
-        "description": "As the Dev on a Delivery: hand in the ticket Loft gave you once its commits are pushed to the spec branch and your local tests pass. Don't wait for the CI: Loft follows it. Loft wakes the team's QA and Security to review them, hands you the next unblocked ticket meanwhile, and closes the ticket when they pass and the CI is green. On changes or a red CI, Loft wakes you with their notes or the failure's log, after you submit the ticket you're building: fix with new commits and submit again. Fixes asked for in the final Code Review are submitted with the spec PR's number.",
+        "description": "As the Dev on a Delivery: hand in the ticket Loft gave you once its commits are pushed to the spec branch and your local tests pass. Don't wait for the CI: Loft follows it. Loft wakes the team's QA and Security to review them, hands you the next unblocked ticket meanwhile, and closes the ticket when they pass and, unless the project's CI mode is `at the end`, the CI is green. On changes or a red CI, Loft wakes you with their notes or the failure's log, after you submit the ticket you're building: fix with new commits and submit again. Fixes asked for in the final Code Review are submitted with the spec PR's number.",
         "inputSchema": { "type": "object", "properties": {
             "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft; for final Code Review fixes, the spec PR's number, or the spec's Loft issue id." },
             "commits": { "type": "array", "items": { "type": "string" }, "description": "The SHAs of all the ticket's commits, oldest first." }
