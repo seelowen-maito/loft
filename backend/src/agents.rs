@@ -1699,7 +1699,7 @@ struct Brake {
     turns: u32,
     /// The model turn being read (its message id; claude may split one turn over several lines) and whether it called a tool.
     open: Option<(Option<String>, bool)>,
-    /// The last Stop hook feedback, which says why claude kept going.
+    /// The last Stop hook feedback, which says why claude kept going .
     reason: Option<String>,
 }
 
@@ -2087,8 +2087,9 @@ async fn run_process(
                     }
                 }
                 // Everything sent as input this turn is the context: fresh, cache-read and cache-written tokens.
+                // Not claude's own replies (`<synthetic>`, like "Goal cleared: …"): their usage is all zeros.
                 let u = &ev["message"]["usage"];
-                if sub.is_none() && u.is_object() && !throwaway {
+                if sub.is_none() && u.is_object() && !throwaway && ev["message"]["model"] != "<synthetic>" {
                     let n = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().filter_map(|k| u[*k].as_u64()).sum();
                     set_context_tokens(state, agent_id, Some(n));
                 }
@@ -2780,7 +2781,7 @@ case "$prompt" in *send-now*|*send-lost*)
   exit 0;;
 esac
 goal='the user said the password'
-synthetic() { echo '{"type":"assistant","message":{"id":"syn-'$2'","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"'"$1"'"}]}}'; }
+synthetic() { echo '{"type":"assistant","message":{"id":"syn-'$2'","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"'"$1"'"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'; }
 goal_block() { printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\n['"$goal"']: insufficient evidence: no password yet."}]},"isSynthetic":true}'; }
 cleared() {
   synthetic "Goal cleared: $goal" c
@@ -3698,6 +3699,7 @@ esac
         assert_eq!(notices(&st, &a.id), ["Goal not met: insufficient evidence: no password yet.", "Stop hook: Objective not met: the tests are still red."]);
         assert_eq!(goal_of(&st, &a.id).as_deref(), Some("the user said the password"), "claude's limit ended the turn, not the goal");
         // No run in progress: the button's /goal clear is the next run, which claude answers without a model turn.
+        set(&st, &a.id, |a| a.context_tokens = Some(5000));
         let m = clear_goal(&st, &a.id).unwrap();
         assert_eq!((m.role.as_str(), m.content.as_str()), ("user", "/goal clear"));
         until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
@@ -3707,6 +3709,7 @@ esac
         let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
         assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
         assert!(msgs.iter().any(|m| m.content == "Goal cleared: the user said the password"));
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().context_tokens, Some(5000), "the synthetic reply's zero usage isn't the context size");
     }
 
     #[tokio::test(flavor = "multi_thread")]
