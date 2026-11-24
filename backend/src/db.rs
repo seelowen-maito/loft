@@ -82,6 +82,10 @@ pub struct Delivery {
     /// Since when Loft follows the ready PR's CI (RFC 3339): a commit with no check waits for one from then.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub final_ci_since: String,
+    /// The last commit of the fix the Dev submitted for a red CI on the ready PR: Loft follows the CI once the
+    /// PR's head includes it. Empty before any fix.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_ci_fix: String,
     /// The GitHub Actions workflow runs of its branch (the spec branch, or a standalone ticket's), by run id, with
     /// the minutes each took: what the Delivery spent on Actions so far. See `crate::actions`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -1645,6 +1649,7 @@ impl Db {
                 final_rounds: 0,
                 final_ci: String::new(),
                 final_ci_since: String::new(),
+                final_ci_fix: String::new(),
                 actions_runs: Default::default(),
                 reviewed_to: String::new(),
                 last_notes: String::new(),

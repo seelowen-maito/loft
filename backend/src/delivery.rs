@@ -72,6 +72,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             final_rounds: 0,
             final_ci: String::new(),
             final_ci_since: String::new(),
+            final_ci_fix: String::new(),
             actions_runs: Default::default(),
             reviewed_to: String::new(),
             last_notes: String::new(),
@@ -2304,9 +2305,9 @@ pub(crate) fn follows_ready_ci(d: &Delivery) -> bool {
     d.state == "ready" && d.final_ci == "following" && !d.local && d.pr.is_some()
 }
 
-/// Follows the CI of `d`'s ready PR, on its head commit on GitHub. Green, or no CI at all, and the Delivery is
-/// done: the user is told the PR can be merged. Red is a final round for the Dev with the failure's log, like
-/// the final Code Review's. A PR merged or closed meanwhile leaves nothing to follow: the Delivery is settled. The caller holds the repo's publish lock. The lines for the reply, empty when
+/// Follows the CI of `d`'s ready PR, on its head commit on GitHub, once that includes the Dev's last CI fix. Green,
+/// or no CI at all, and the Delivery is done: the user is told the PR can be merged. Red is a final round for the
+/// Dev with the failure's log, like the final Code Review's. A PR merged or closed meanwhile leaves nothing to follow: the Delivery is settled. The caller holds the repo's publish lock. The lines for the reply, empty when
 /// nothing changed.
 async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     if !follows_ready_ci(d) {
@@ -2319,10 +2320,25 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
         Err(e) => return Err(e.to_string()),
     };
     if p["state"] != "open" {
-        update(state, repo, spec, |d| (d.state, d.final_ci, d.final_ci_since) = ("settled".into(), String::new(), String::new()));
+        update(state, repo, spec, |d| (d.state, d.final_ci, d.final_ci_since, d.final_ci_fix) = ("settled".into(), String::new(), String::new(), String::new()));
         return Ok(format!("\nThe ready {} merged or closed: Loft stopped following its CI.", final_tag(d)));
     }
     let head = p["head"]["sha"].as_str().ok_or_else(|| format!("GitHub gave PR #{pr} no head commit"))?.to_string();
+    // A fix not on the PR yet: its checks are still the red commit's. Like a ticket's (`follow_ci`), it waits for the
+    // push, and past the grace it stalls the final fixes.
+    if !d.final_ci_fix.is_empty() && !includes(state, repo, &head, &d.final_ci_fix).await.map_err(|e| e.to_string())? {
+        if !past_grace(&d.final_ci_since) {
+            return Ok(String::new());
+        }
+        let fix = short(&d.final_ci_fix).to_string();
+        let back = update(state, repo, spec, |d| {
+            d.state = "final_fixes".into();
+            (d.final_ci, d.final_ci_since, d.final_ci_fix) = ("fixing".into(), String::new(), String::new());
+        })
+        .ok_or("The Delivery record couldn't be saved.")?;
+        stall(state, &back, "ci_missing", vec![], None, None);
+        return Ok(format!("\nThe ready {} doesn't have the CI fix `{fix}`, so Loft can't follow its CI: the Delivery stalled.", final_tag(d)));
+    }
     // Exhaustive like `follow_ci`'s: what stalls a ticket's CI stalls the ready PR's too.
     match ci_of(state, repo, &head, &d.final_ci_since).await.map_err(|e| e.to_string())? {
         Ci::Running => Ok(String::new()),
@@ -2337,7 +2353,7 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
             // The done summary says what it spent, all of it.
             let runs = read_minutes(state, d).await;
             update(state, repo, spec, |d| {
-                (d.final_ci, d.final_ci_since) = (String::new(), String::new());
+                (d.final_ci, d.final_ci_since, d.final_ci_fix) = (String::new(), String::new(), String::new());
                 if let Some(runs) = runs {
                     d.actions_runs = runs;
                 }
@@ -2380,7 +2396,7 @@ async fn ready_ci_failed(state: &AppState, d: &Delivery, head: &str, names: &[St
     let d = update(state, &d.repo, d.spec, |d| {
         d.final_rounds = rounds;
         d.state = if stuck { "needs_human" } else { "final_fixes" }.into();
-        (d.final_ci, d.final_ci_since) = ("fixing".into(), String::new());
+        (d.final_ci, d.final_ci_since, d.final_ci_fix) = ("fixing".into(), String::new(), String::new());
         d.last_notes = notes.clone();
         if let Some(dev) = &dev {
             d.dev = dev.id.clone();
@@ -3580,7 +3596,7 @@ pub async fn reopen(state: &AppState, repo: &str, spec: i64) -> Result<String, S
     let d = update(state, repo, spec, |d| {
         d.state = "running".into();
         (d.done_at, d.ready_retry, d.final_rounds, d.current) = (String::new(), false, 0, None);
-        (d.final_ci, d.final_ci_since) = (String::new(), String::new());
+        (d.final_ci, d.final_ci_since, d.final_ci_fix) = (String::new(), String::new(), String::new());
         d.reviewed_to = head.clone();
     })
     .ok_or("The Delivery record couldn't be saved.")?;
@@ -3644,10 +3660,14 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
     let shas = commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
     // A fix for the ready PR's CI: Loft follows the CI again, with no new Code Review.
     if d.final_ci == "fixing" {
+        if let Err(e) = refuse_unpushed(state, &d, commits).await {
+            return Some(Err(e));
+        }
         let Some(d) = update(state, &slug, d.spec, |d| {
             d.unstall();
             d.state = "ready".into();
             (d.final_ci, d.final_ci_since) = ("following".into(), crate::db::now());
+            d.final_ci_fix = commits.last().cloned().unwrap_or_default();
         }) else {
             return Some(Err("The Delivery record couldn't be saved.".into()));
         };
@@ -3702,9 +3722,10 @@ async fn final_review(state: &AppState, me: &crate::db::Agent, args: &Value, ver
             return Ok(format!("Posted your pass on {on}.{ready}"));
         }
         let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{slug}/issues/{pr}/labels/changes-requested"), None).await;
+        let what = if d.standalone { "PR" } else { "Spec PR" };
         let ready = match crate::planning::ready_if_done(state, &d).await {
-            Ok(Some(_)) => format!(" Spec PR #{pr} is ready for review now, and the user is told it can be merged once its CI is green."),
-            Ok(None) => format!(" Spec PR #{pr} was no longer a draft, so it was left as it is."),
+            Ok(Some(_)) => format!(" {what} #{pr} is ready for review now, and the user is told it can be merged once its CI is green."),
+            Ok(None) => format!(" {what} #{pr} was no longer a draft, so it was left as it is."),
             Err(e) => format!(" But {e}: Loft tries again on its next poll."),
         };
         return Ok(format!("Posted your pass on {on}.{ready}"));

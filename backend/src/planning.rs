@@ -784,6 +784,7 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
     let Some(d) = crate::delivery::update(state, slug, spec, |d| {
         d.state = "ready".into();
         (d.final_ci, d.final_ci_since, d.final_rounds) = ("following".into(), crate::db::now(), 0);
+        d.final_ci_fix.clear();
     }) else {
         return Ok(Some(pr));
     };
@@ -7266,6 +7267,22 @@ pub(crate) mod tests {
         (dev, planner)
     }
 
+    /// The CI fix `fix` pushed: the Delivery's branch `branch` on GitHub is at `head`, which includes it.
+    fn branch_at(fake: &Fake, slug: &str, branch: &str, fix: &str, head: &str) {
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/{branch}"), 200, json!({ "object": { "sha": head } }));
+        fake.route("GET", &format!("/repos/{slug}/compare/{fix}...{head}"), 200, json!({ "status": "ahead" }));
+    }
+
+    /// The ready PR #500's head is `head`, with these check runs on it and no commit status.
+    fn pr_at(fake: &Fake, slug: &str, head: &str, runs: Value) {
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "head": { "sha": head } }));
+        fake.route("GET", &format!("/repos/{slug}/commits/{head}/check-runs"), 200, json!({ "check_runs": runs }));
+        fake.route("GET", &format!("/repos/{slug}/commits/{head}/status"), 200, json!({ "statuses": [] }));
+    }
+
+    /// The newest commit once the Dev pushed a CI fix.
+    const FIX_HEAD: &str = "f1f1f1f1f1";
+
     #[tokio::test]
     async fn a_red_ci_after_ready_is_a_final_round_for_the_dev_and_done_waits_for_green() {
         let st = state();
@@ -7306,18 +7323,34 @@ pub(crate) mod tests {
         let v = crate::delivery::delivery_json(&st, &d);
         assert_eq!((&v["state_line"]["text"], &v["can_pause"]), (&json!("Final round: the Dev is fixing the CI that failed on the ready PR."), &json!(true)));
 
-        // The fix: Loft follows the CI again, with no new Code Review.
-        fake.route("GET", &runs, 200, json!({ "check_runs": [run("in_progress", None)] }));
-        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        // The fix, submitted before it's pushed: refused, and nothing changes.
+        let fix = json!({ "number": 500, "commits": ["feed1234"] });
+        let err = tool(&st, &dev, "submit_ticket", fix.clone()).await.unwrap_err();
+        assert!(err.starts_with("`feed123` isn't on the spec branch `spec/40-rounds` on GitHub, so Loft took nothing in"), "{err}");
+        assert_eq!(delivery(&st, slug).state, "final_fixes");
+
+        // Pushed, but the PR's head is still the red commit (GitHub moves it a moment later): Loft follows the CI
+        // again, with no new Code Review, and waits for the fix to reach the PR. No round, no comment, no wake.
+        branch_at(&fake, slug, "spec/40-rounds", "feed1234", FIX_HEAD);
+        let (comments, wakes) = (posts(&fake, slug, "issues/500/comments").len(), woken(&st, &dev).len());
+        let out = tool(&st, &dev, "submit_ticket", fix).await.unwrap();
         assert_eq!(out, "Submitted the CI fixes for the ready spec PR #500: `feed123`. Loft follows its CI again, and tells the user it can be merged once it's green.");
+        crate::delivery::follow_all(&st).await;
         let d = delivery(&st, slug);
-        assert_eq!((d.state.as_str(), d.final_ci.as_str()), ("ready", "following"));
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.final_ci_fix.as_str(), d.final_rounds), ("ready", "following", "feed1234", 1));
+        assert_eq!((posts(&fake, slug, "issues/500/comments").len(), woken(&st, &dev).len()), (comments, wakes));
         assert!(done_items(&st).is_empty());
+
+        // The PR's head moves to the fix: followed, still running.
+        let runs = format!("/repos/{slug}/commits/{FIX_HEAD}/check-runs");
+        pr_at(&fake, slug, FIX_HEAD, json!([run("in_progress", None)]));
+        crate::delivery::follow_all(&st).await;
+        assert!(fake.seen(&runs).len() == 1 && delivery(&st, slug).final_ci == "following");
 
         // Green: done, once, and the label comes off.
         let unlabels = || fake.seen(&format!("/repos/{slug}/issues/500/labels/changes-requested")).iter().filter(|s| s.method == "DELETE").count();
         let unlabelled = unlabels();
-        fake.route("GET", &runs, 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        pr_at(&fake, slug, FIX_HEAD, json!([run("completed", Some("success"))]));
         crate::delivery::follow_all(&st).await;
         let d = delivery(&st, slug);
         assert!(d.state == "ready" && d.final_ci.is_empty() && !d.done_at.is_empty(), "{d:?}");
@@ -7339,8 +7372,14 @@ pub(crate) mod tests {
         let (dev, _) = ready_with_ci(&st, &fake, "ready-ci-rounds", json!([run("completed", Some("failure"))])).await;
         assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).final_rounds), ("final_fixes", 1));
 
+        // Each fix pushed, and red again on the PR's new head.
+        let red = || json!([run("completed", Some("failure"))]);
+        branch_at(&fake, slug, "spec/40-rounds", "feed1234", FIX_HEAD);
+        pr_at(&fake, slug, FIX_HEAD, red());
         let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
         assert!(out.ends_with("Builder is fixing it in a final round (2 of 3), and Loft follows the CI again after."), "{out}");
+        branch_at(&fake, slug, "spec/40-rounds", "feed5678", "f2f2f2f2f2");
+        pr_at(&fake, slug, "f2f2f2f2f2", red());
         let out = tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed5678"] })).await.unwrap();
         assert!(out.contains("That's round 3 of changes on it, so it waits for the user now"), "{out}");
         let d = delivery(&st, slug);
@@ -7361,6 +7400,79 @@ pub(crate) mod tests {
         let brief = w.last().unwrap();
         assert!(brief.contains("so this is a final round of changes, like one from the final Code Review.") && brief.contains("panicked: off by one"), "{brief}");
         assert!(!brief.contains("The last notes asking for changes"), "the log isn't repeated: {brief}");
+    }
+
+    #[tokio::test]
+    async fn a_ci_fix_that_never_reaches_the_ready_pr_stalls_its_final_fixes_without_a_round() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-ci-lost";
+        let (dev, _) = ready_with_ci(&st, &fake, "ready-ci-lost", json!([run("completed", Some("failure"))])).await;
+        // On the branch when submitted, but the PR's head stays the red commit (force-pushed away, say).
+        branch_at(&fake, slug, "spec/40-rounds", "feed1234", FIX_HEAD);
+        tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        let (comments, wakes) = (posts(&fake, slug, "issues/500/comments").len(), woken(&st, &dev).len());
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).final_ci, "following", "within the grace it waits");
+
+        // Past the grace: the final fixes stall, with no round spent.
+        crate::delivery::update(&st, slug, 40, |d| d.final_ci_since = (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339());
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str()), ("stalled", "final_fixes", "ci_missing"));
+        assert_eq!((d.final_ci.as_str(), d.final_ci_fix.as_str(), d.final_rounds), ("fixing", "", 1));
+        assert_eq!((posts(&fake, slug, "issues/500/comments").len(), woken(&st, &dev).len()), (comments, wakes));
+        assert_eq!(crate::delivery::stalled_reason(&st, &d), "Its submitted commits aren't on its branch on GitHub, so Loft can't follow its CI: push them, then Resume. Stopped at: the fixes for the CI of the ready PR.");
+
+        // Resume: the Dev fixes the CI again, in the same round.
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(out, "Resumed spec #40. Builder is fixing the CI of the ready PR again.");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.final_rounds), ("final_fixes", "fixing", 1));
+        assert!(woken(&st, &dev).last().unwrap().contains("the CI failed on the spec PR https://github.com/octo/ready-ci-lost/pull/500 after Loft marked it ready"));
+    }
+
+    #[tokio::test]
+    async fn a_standalone_tickets_ready_pr_with_a_red_ci_is_a_final_round_on_its_ticket_branch() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/solo-ci";
+        let (a, m, team) = standalone(&st, &fake, "solo-ci", &["dev", "code_reviewer"]).await;
+        let (dev, cr) = (&team[0], &team[1]);
+        press(&st, &a, &m).await.unwrap();
+        ci_on(&fake, slug, "ticket/41-store", json!([]));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true, "head": { "sha": CI_HEAD } }));
+        tool(&st, dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(woken(&st, cr).len(), 1, "the ticket passed: the Code reviewer reviews the whole PR");
+
+        // Red once it's ready: a final round for the Dev, on the ticket branch and its PR.
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": [run("completed", Some("failure"))] }));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("thread 'store::total' panicked: off by one"));
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "Clean." })).await.unwrap();
+        assert_eq!(out, "Posted your pass on #500. PR #500 is ready for review now, and the user is told it can be merged once its CI is green.");
+        let d = st.db.get_delivery(slug, 41).unwrap().unwrap();
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.final_rounds), ("final_fixes", "fixing", 1));
+        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**CI** failed on `c1c1c1c`, the newest commit of the ready PR: `test`.");
+        assert!(done_items(&st).is_empty());
+        let w = woken(&st, dev);
+        for want in [
+            "[Loft Delivery: ticket #41] This is not a message from the user. You are the Dev on this Delivery: the CI failed on the PR https://github.com/octo/solo-ci/pull/500 after Loft marked it ready, so this is a final round of changes (round 1 of 3)",
+            "The CI failed on `c1c1c1c`, the newest commit of the ticket branch `ticket/41-store`, after Loft marked the PR ready. Failed: `test`.",
+            "panicked: off by one",
+            "Fix it on the ticket branch `ticket/41-store` with new commits, each ending with `Refs #41`, push, then call `mcp__loft__submit_ticket` with 500",
+        ] {
+            assert!(w.last().unwrap().contains(want), "missing {want:?} in {}", w.last().unwrap());
+        }
+
+        // The fix, pushed and on the PR: green, and the Delivery is done.
+        branch_at(&fake, slug, "ticket/41-store", "feed1234", FIX_HEAD);
+        pr_at(&fake, slug, FIX_HEAD, json!([run("completed", Some("success"))]));
+        let out = tool(&st, dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
+        assert!(out.starts_with("Submitted the CI fixes for the ready PR #500: `feed123`.") && out.ends_with("The ready PR #500: its CI is green on `f1f1f1f`, so the user is told it can be merged."), "{out}");
+        let d = st.db.get_delivery(slug, 41).unwrap().unwrap();
+        assert!(d.state == "ready" && d.final_ci.is_empty() && !d.done_at.is_empty(), "{d:?}");
+        let done = done_items(&st);
+        assert!(done.len() == 1 && done[0]["title"] == "Delivery done: Store", "{done:#?}");
     }
 
     #[tokio::test]
