@@ -1571,6 +1571,81 @@ enum RunOutcome {
     StaleSession,
 }
 
+/// Model turns in a row with no tool call after which Loft stops a run: a goal or Stop hook that never passes
+/// keeps claude answering the same text, each turn billed, until its own limit of 9.
+const BRAKE_TURNS: u32 = 5;
+
+/// Counts the agent's own model turns in a row that call no tool, within one claude turn (a `result` ends it).
+/// Claude only takes another turn without a tool call when something pushes it on, like a Stop hook's feedback.
+#[derive(Default)]
+struct Brake {
+    turns: u32,
+    /// The model turn being read (its message id; claude may split one turn over several lines) and whether it called a tool.
+    open: Option<(Option<String>, bool)>,
+    /// The last Stop hook feedback, which says why claude kept going.
+    reason: Option<String>,
+}
+
+impl Brake {
+    fn close(&mut self) {
+        if let Some((_, tools)) = self.open.take() {
+            self.turns = if tools { 0 } else { self.turns + 1 };
+        }
+    }
+
+    /// Reads one of claude's top-level lines; true when the run should stop before another turn.
+    fn see(&mut self, ev: &Value) -> bool {
+        let blocks = ev["message"]["content"].as_array().map(Vec::as_slice).unwrap_or_default();
+        match ev["type"].as_str() {
+            Some("assistant") => {
+                let id = ev["message"]["id"].as_str().map(String::from);
+                let tools = blocks.iter().any(|b| b["type"] == "tool_use");
+                match &mut self.open {
+                    Some((open, t)) if id.is_some() && *open == id => *t |= tools,
+                    _ => {
+                        self.close();
+                        if self.turns >= BRAKE_TURNS {
+                            return true;
+                        }
+                        self.open = Some((id, tools));
+                    }
+                }
+            }
+            Some("user") if !blocks.iter().any(|b| b["type"] == "tool_result") => {
+                self.close();
+                let text = blocks.iter().filter_map(|b| b["text"].as_str()).collect::<String>();
+                let text = ev["message"]["content"].as_str().unwrap_or(&text);
+                if ev["isSynthetic"] == true {
+                    if let Some(r) = text.strip_prefix("Stop hook feedback:") {
+                        self.reason = Some(r.trim().to_string());
+                    }
+                } else {
+                    // A message from the user is new input, not a loop.
+                    self.turns = 0;
+                    self.reason = None;
+                }
+                return self.turns >= BRAKE_TURNS;
+            }
+            Some("result") => {
+                self.open = None;
+                self.turns = 0;
+                self.reason = None;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// What the chat says when the brake stops a run.
+    fn notice(&self) -> String {
+        let head = format!("Stopped the run: {BRAKE_TURNS} turns in a row without a tool call.");
+        match &self.reason {
+            Some(r) if !r.is_empty() => format!("{head} A goal or Stop hook kept it going: {}", truncate(r, 600)),
+            _ => format!("{head} It looked stuck in a loop."),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_process(
     state: &AppState,
@@ -1669,6 +1744,9 @@ async fn run_process(
     let preempt = Arc::new(Notify::new());
     // Claude has exited, but a process it left behind can keep its pipes open: read what's buffered until then.
     let mut drain_until: Option<tokio::time::Instant> = None;
+    let mut brake = Brake::default();
+    // The brake stopped the run: it ends like a stop, with the reason in the chat, and the queue goes on.
+    let mut braked = false;
     state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), for_user, ..Default::default() });
     loop {
         let waiting = replied && !bg.is_empty();
@@ -1742,6 +1820,14 @@ async fn run_process(
             }
         }
         let sub = ev["parent_tool_use_id"].as_str().map(|s| s.to_string());
+        if sub.is_none() && brake.see(&ev) {
+            tracing::info!("agent {agent_id}: stopping run {run_id}: {BRAKE_TURNS} turns in a row without a tool call");
+            run_msg(quiet, state, agent_id, rid, "system", "notice", &brake.notice(), json!({ "brake": true }));
+            terminate(&mut child).await;
+            loft_stopped = true;
+            braked = true;
+            break;
+        }
         match ev["type"].as_str() {
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
@@ -2005,7 +2091,10 @@ async fn run_process(
         }
     };
     let err = tokio::time::timeout(EXIT_GRACE, stderr_task).await.ok().and_then(|r| r.ok()).unwrap_or_default();
-    if !got_result {
+    if braked && !got_result {
+        run_msg(quiet, state, agent_id, rid, "system", "run_end", "", json!({ "stopped": true }));
+    }
+    if !got_result && !braked {
         if !killed && resume && agent.session_id.is_some() && !got_any && err.to_lowercase().contains("no conversation found") {
             return Ok(RunOutcome::StaleSession);
         }
@@ -2047,7 +2136,7 @@ async fn run_process(
             run_msg(quiet, state, agent_id, rid, "system", "run_end", "", json!({ "stopped": true }));
         }
     }
-    let (st, text) = if !killed && !got_result { ("error", "Last run failed") } else { ("idle", "") };
+    let (st, text) = if !killed && !braked && !got_result { ("error", "Last run failed") } else { ("idle", "") };
     set_status(state, agent_id, st, text);
     if for_user && !quiet && (!last_text.is_empty() || run_error.is_some()) {
         mark_replied(state, agent_id);
@@ -2392,6 +2481,8 @@ pub(crate) mod tests {
     /// A Redraw costs 0.25 on session "s-redraw" and waits for a `go` file before it replies.
     /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command, in a process session of
     /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
+    /// "goal-loop" asks for a password over and over, each text-only turn sent back by a Stop hook, and never ends
+    /// on its own; "goal-tools" does the same with a tool call after four turns and three more after it, then replies.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 prompt=$(cat)
@@ -2493,6 +2584,25 @@ case "$prompt" in *tool-status*)
 esac
 case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
+esac
+case "$prompt" in *goal-loop*|*goal-tools*)
+  feedback='{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: the user has not said the password yet."}]},"isSynthetic":true}'
+  turn() {
+    echo '{"type":"assistant","message":{"id":"m'$1'","content":[{"type":"thinking","thinking":"again"}]}}'
+    echo '{"type":"assistant","message":{"id":"m'$1'","content":[{"type":"text","text":"What is the password?"}]}}'
+    printf '%s\n' "$feedback"
+  }
+  case "$prompt" in *goal-loop*)
+    trap 'echo yes > terminated; exit 143' TERM
+    for i in 1 2 3 4 5 6 7 8 9; do turn $i; sleep 0.1; done
+    sleep 600 &
+    wait;;
+  esac
+  for i in 1 2 3 4; do turn $i; done
+  echo '{"type":"assistant","message":{"id":"t1","content":[{"type":"text","text":"Let me check."}]}}'
+  echo '{"type":"assistant","message":{"id":"t1","content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/x/notes.md"}}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"r1","content":"no password here"}]}}'
+  for i in 5 6 7; do turn $i; done;;
 esac
 case "$prompt" in *bash-cmd*)
   perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/zsh -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
@@ -3158,6 +3268,62 @@ esac
         assert!(std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("sent while it looked stuck"));
         let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
         assert!(msgs.iter().any(|m| m.kind == "notice" && m.content == "Stopped by user. The queued message runs next."));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn five_turns_in_a_row_without_a_tool_stop_the_run_and_the_queue_goes_on() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-loop".into()), "user");
+        until("the run to start", 10, || ws.join("prompts.log").exists()).await;
+        enqueue(&st, &a.id, Some("BANANA-42".into()), "user");
+        until("the queue to drain", 20, || !is_running(&st, &a.id) && std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("BANANA-42")).await;
+        assert!(ws.join("terminated").exists(), "claude was stopped");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        let asks = msgs.iter().filter(|m| m.kind == "text" && m.content == "What is the password?").count();
+        assert_eq!(asks, BRAKE_TURNS as usize, "stopped at the 5th turn's feedback, before a 6th");
+        let notice = msgs.iter().find(|m| m.kind == "notice" && m.meta["brake"] == true).expect("the chat says why it stopped");
+        assert_eq!(
+            notice.content,
+            "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: Objective not met: the user has not said the password yet."
+        );
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.kind == "text" && m.content == "started"), "the queued message got its run");
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().status, "idle");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_call_starts_the_count_over() {
+        let (st, a) = fake_claude_state();
+        run(&st, &a.id, "goal-tools", 1).await;
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.meta["brake"] != true), "{msgs:?}");
+        assert_eq!(msgs.iter().filter(|m| m.kind == "text" && m.content == "What is the password?").count(), 7);
+        assert!(msgs.iter().any(|m| m.kind == "text" && m.content == "started"), "the run ended with its reply");
+    }
+
+    #[test]
+    fn the_brake_counts_model_turns_not_lines_and_a_user_message_or_result_starts_over() {
+        let text = |id: &str| json!({ "type": "assistant", "message": { "id": id, "content": [{ "type": "text", "text": "hi" }] } });
+        let feedback = json!({ "type": "user", "isSynthetic": true, "message": { "content": [{ "type": "text", "text": "Stop hook feedback:\n[goal]: not yet" }] } });
+        let mut b = Brake::default();
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("m{i}"))) && !b.see(&text(&format!("m{i}"))) && !b.see(&feedback));
+        }
+        assert_eq!(b.turns, 4, "two lines of one turn count once");
+        assert!(!b.see(&json!({ "type": "user", "message": { "content": "the password" } })));
+        assert_eq!(b.turns, 0, "the user's message is new input");
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("n{i}"))) && !b.see(&feedback));
+        }
+        assert!(!b.see(&json!({ "type": "result", "num_turns": 4 })));
+        assert_eq!(b.turns, 0, "a finished turn starts over");
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("k{i}"))) && !b.see(&feedback));
+        }
+        assert!(!b.see(&text("k4")));
+        assert!(b.see(&feedback), "the 5th turn's feedback stops it");
+        assert_eq!(b.notice(), "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: [goal]: not yet");
     }
 
     fn fields(st: &AppState, id: &str) -> Value {
