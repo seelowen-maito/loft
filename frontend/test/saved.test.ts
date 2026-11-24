@@ -39,6 +39,12 @@ test("the preview leaves out a table's separator row and horizontal rules", () =
   assert.equal(excerpt("Step | Time\n--- | ---\nbuild | 2"), "Step Time build 2");
 });
 
+test("the preview of a line of 100,000 spaces comes back fast", () => {
+  const start = performance.now();
+  assert.equal(excerpt(`${" ".repeat(100_000)}x`), "x");
+  assert.ok(performance.now() - start < 500);
+});
+
 test("a saved item is mentioned as #saved-<id>-<slug>, and the # menu lists them only after `saved`", () => {
   const items = [
     { id: 12, title: "Deploy steps: v2!", tag: "Tutorial" },

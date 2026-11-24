@@ -76,7 +76,8 @@ public enum Saved {
     /// The list's preview of an item's content: plain words, without Markdown's marks.
     public static func excerpt(_ content: String, chars: Int = 160) -> String {
         // A table's separator row and a horizontal rule aren't words.
-        let rule = #/^\s*\|?\s*:?-{3,}/#
+        // One character class, not `\s*\|?\s*`: two `\s*` in a row backtrack in quadratic time on a long run of spaces (#681).
+        let rule = #/^[\s|]*:?-{3,}/#
         let text = content.split(separator: "\n", omittingEmptySubsequences: false).filter { $0.firstMatch(of: rule) == nil }.joined(separator: "\n")
         let words = text.replacing(#/[`*_>#|\[\]]/#, with: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
         return words.count > chars ? String(words.prefix(chars)) + "…" : words

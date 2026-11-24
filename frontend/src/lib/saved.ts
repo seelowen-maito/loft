@@ -38,7 +38,8 @@ export function linkedMessage(hash: string): number | null {
 /** The list's one-line preview of an item's content: plain words, without Markdown's marks. */
 export function excerpt(content: string, chars = 160): string {
   // A table's separator row and a horizontal rule aren't words.
-  const text = content.split("\n").filter((l) => !/^\s*\|?\s*:?-{3,}/.test(l)).join("\n");
+  // One character class, not `\s*\|?\s*`: two `\s*` in a row backtrack in quadratic time on a long run of spaces (#681).
+  const text = content.split("\n").filter((l) => !/^[\s|]*:?-{3,}/.test(l)).join("\n");
   const words = text.replace(/[`*_>#|[\]]/g, " ").split(/\s+/).filter(Boolean).join(" ");
   const c = [...words];
   return c.length > chars ? `${c.slice(0, chars).join("")}…` : words;

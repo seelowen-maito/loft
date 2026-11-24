@@ -35,6 +35,13 @@ final class SavedTests: XCTestCase {
     func testExcerptIsPlainWords() {
         XCTAssertEqual(Saved.excerpt("# Title\n\n| a | b |\n|---|---|\n| **1** | `2` |"), "Title a b 1 2")
         XCTAssertEqual(Saved.excerpt(String(repeating: "a", count: 200), chars: 10), "aaaaaaaaaa…")
+        XCTAssertEqual(Saved.excerpt("Step | Time\n--- | :---:\nbuild | 2\n\n---\nDone"), "Step Time build 2 Done")
+    }
+
+    func testExcerptOfALongLineOfSpacesIsFast() {
+        let start = Date()
+        XCTAssertEqual(Saved.excerpt(String(repeating: " ", count: 100_000) + "x"), "x")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1)
     }
 
     func testDecodesTheServersItem() throws {
