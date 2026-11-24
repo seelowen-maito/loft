@@ -24,6 +24,11 @@ struct ChatView: View {
     @State private var quickAck: (agentId: String, after: Int64, text: String, at: Date)?
     /// The message picked with Reply, quoted above the message box and sent with the next message (spec #572).
     @State private var replyingTo: MessageQuote?
+    /// The chat's first load is in: Open in chat waits for it, as its newer messages would pull the chat to the bottom.
+    @State private var loaded = false
+    /// The saved message Open in chat loads earlier pages for: scrolled to once its row is in the view, since a
+    /// scroll queued before the new rows are laid out loses to the bottom anchor (#630).
+    @State private var revealTo: Int64?
 
     private var shownQuickAck: String? {
         guard let a = quickAck, a.agentId == agent.id, Date().timeIntervalSince(a.at) < 120,
@@ -95,14 +100,26 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .accessibilityIdentifier("messageList")
-            // A saved item's Open in chat: scroll to its message once the chat has loaded, loading earlier pages
-            // until it's there.
-            .task(id: "\(agent.id) \(nav.chatFocus?.message ?? 0) \(shown.isEmpty)") {
-                guard let f = nav.chatFocus, f.agentId == agent.id, !shown.isEmpty else { return }
+            .onChange(of: shown.first?.id) {
+                guard let id = revealTo, shown.contains(where: { $0.id == id }) else { return }
+                revealTo = nil
+                DispatchQueue.main.async { withAnimation { proxy.scrollTo(id, anchor: .top) } }
+            }
+            // A saved item's Open in chat: scroll to its message once the chat's first load is in, loading earlier
+            // pages until it's there.
+            .task(id: "\(agent.id) \(nav.chatFocus?.message ?? 0) \(loaded)") {
+                guard let f = nav.chatFocus, f.agentId == agent.id, loaded else { return }
                 nav.chatFocus = nil
+                revealTo = f.message
+                let first = shown.first?.id
                 if await store.loadMessage(f.message, in: agent.id) {
-                    DispatchQueue.main.async { withAnimation { proxy.scrollTo(f.message, anchor: .top) } }
+                    // No earlier page came: its row is laid out already, so scroll now; else once the rows are in.
+                    if revealTo != nil, shown.first?.id == first {
+                        revealTo = nil
+                        DispatchQueue.main.async { withAnimation { proxy.scrollTo(f.message, anchor: .top) } }
+                    }
                 } else {
+                    revealTo = nil
                     nav.chatNote = (agent.id, "That message is no longer in the chat.")
                 }
             }
@@ -181,7 +198,9 @@ struct ChatView: View {
             suggested = (m.id, replies)
         }
         .task(id: agent.id) {
+            loaded = false
             do { try await store.loadConversation(agent.id); loadError = nil } catch { loadError = APIError.from(error) }
+            loaded = true
         }
     }
 }

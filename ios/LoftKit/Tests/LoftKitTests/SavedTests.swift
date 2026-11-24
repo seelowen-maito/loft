@@ -16,6 +16,13 @@ final class SavedTests: XCTestCase {
         XCTAssertFalse(Saved.canSave(message("assistant", "text", "  \n")))
     }
 
+    /// As the web: a message you took back out of the queue can't be saved.
+    func testACancelledMessageCantBeSaved() {
+        let m = ChatMessage(id: 1, agentId: "a", runId: nil, role: "user", kind: "text", content: "Skip the iPad layout",
+                            meta: ["cancelled": .bool(true)], createdAt: Date())
+        XCTAssertFalse(Saved.canSave(m))
+    }
+
     func testDefaultTitleIsTheFirstLineWithoutMarkdownMarks() {
         XCTAssertEqual(Saved.defaultTitle("\n# How to deploy\n\nRun it."), "How to deploy")
         XCTAssertEqual(Saved.defaultTitle("> a quote"), "a quote")

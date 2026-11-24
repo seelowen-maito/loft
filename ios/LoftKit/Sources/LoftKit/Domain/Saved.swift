@@ -47,9 +47,9 @@ public enum Saved {
     /// The tags the Save form offers; any other text works too.
     public static let suggestedTags = ["Tutorial", "Good to know", "Decision"]
 
-    /// Only chat text, yours or the agent's, can be saved.
+    /// Only chat text, yours or the agent's, can be saved; not a cancelled message.
     public static func canSave(_ m: ChatMessage) -> Bool {
-        m.isQuotable && !m.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        m.isQuotable && !m.isCancelled && !m.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// The Save form's title for a message: its first line without Markdown's heading, quote or list mark, cut at a word.

@@ -60,6 +60,8 @@ struct ChatView: View {
     private let dictate: Bool
     /// The message to scroll to once the chat has loaded, instead of the bottom (a saved item's Open in chat).
     @State private var focus: Int64?
+    /// The message `reveal` draws down to: scrolled to once its rows are in the view, as `keepTop` (#630).
+    @State private var revealTo: String?
     @Environment(VoiceSession.self) private var voice
 
     /// `-fixture-voice ask`: the Send it? question shows at once, for screenshots.
@@ -98,8 +100,13 @@ struct ChatView: View {
         let key = ChatItem.key(message: id)
         guard let i = all.firstIndex(where: { $0.id == key }) else { return false }
         keepTop = nil
-        shown = max(shown, all.count - i)
-        DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
+        if shown >= all.count - i {
+            DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
+        } else {
+            // Not drawn yet: a scroll queued now runs before its rows are laid out, and the bottom anchor wins.
+            revealTo = key
+            shown = all.count - i
+        }
         return true
     }
 
@@ -178,19 +185,26 @@ struct ChatView: View {
             .defaultScrollAnchor(.bottom)
             // Jump to the bottom once it has messages; new ones scroll it down below.
             .task(id: !items.isEmpty) {
-                guard !items.isEmpty else { return }
-                // Or to the saved message Open in chat came for, loading earlier pages until it's there.
-                if let id = focus {
-                    focus = nil
-                    _ = await store.loadMessage(id, in: agentId)
-                    if reveal(id, proxy) { return }
-                }
+                guard !items.isEmpty, focus == nil else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            // Or to the saved message Open in chat came for, once the chat's first load is in (on a cold launch it
+            // would bring newer messages and pull you to the bottom), loading earlier pages until it's there.
+            .task(id: loading) {
+                guard !loading, let id = focus else { return }
+                focus = nil
+                _ = await store.loadMessage(id, in: agentId)
+                if !reveal(id, proxy) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .scrollDismissesKeyboard(.interactively)
             // Scroll back to the kept item once the earlier page is in the view, not right after the tap: after a
             // server fetch a scroll queued then runs before the new page is laid out, and you land on its top (#630).
             .onChange(of: items.first?.id) {
+                if let key = revealTo {
+                    revealTo = nil
+                    DispatchQueue.main.async { withAnimation { proxy.scrollTo(key, anchor: .top) } }
+                    return
+                }
                 guard let keep = keepTop else { return }
                 keepTop = nil
                 DispatchQueue.main.async { proxy.scrollTo(keep, anchor: .top) }
