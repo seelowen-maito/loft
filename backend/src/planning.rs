@@ -4718,7 +4718,7 @@ pub(crate) mod tests {
         let w = woken(&st, &dev);
         assert_eq!(w.len(), before + 1);
         assert!(w.last().unwrap().contains("asked for changes on the spec PR https://github.com/octo/cr-flow/pull/500 (round 1 of 3):\n\nstore.rs:12 drops the error. split.rs:1 is long."), "{w:?}");
-        assert!(w.last().unwrap().contains("call `mcp__loft__submit_ticket` with 500"));
+        assert!(w.last().unwrap().contains("Fix them on the spec branch `spec/40-rounds` with new commits, each ending with `Refs #40`. Push once per submission, when the work is done: `git fetch origin`, `git merge origin/<base>` (`<base>` is the spec PR's base branch) into the branch (merge, not rebase), resolve any conflicts and run the tests, then pull the branch again (other Devs may push to it while you work) and push it with `git push origin spec/40-rounds`. Every push runs the repo's CI: never push work in progress. Then call `mcp__loft__submit_ticket` with 500 and the new commits"), "one push, after merging the base: {}", w.last().unwrap());
         assert!(fake.seen("/graphql").is_empty());
 
         // The fixes go back to the Code reviewer.
@@ -5318,6 +5318,19 @@ pub(crate) mod tests {
         assert!(out.contains("code_reviewer agent (Code reviewer) is reviewing the whole spec branch `spec/1-offline-mode` now."), "{out}");
         let w = woken(&st, cr);
         assert!(w.len() == 1 && w[0].contains("against `main` (`git diff main...spec/1-offline-mode`)") && w[0].contains(&format!("`mcp__loft__review_ticket` with \"{}\"", spec.id)), "{w:?}");
+
+        // Changes: the Dev merges `main` in and pushes the spec branch once.
+        tool(&st, cr, "review_ticket", json!({ "number": spec.id, "verdict": "changes", "notes": "Index the store." })).await.unwrap();
+        let w = woken(&st, dev);
+        let push = format!("Push once per submission, when the work is done: `git fetch origin`, `git merge origin/main` into the branch (merge, not rebase), resolve any conflicts and run the tests, then pull the branch again (other Devs may push to it while you work) and push it with `git push origin spec/1-offline-mode`. Every push runs the repo's CI: never push work in progress. Then call `mcp__loft__submit_ticket` with \"{}\"", spec.id);
+        assert!(w.last().unwrap().contains(&push), "one push, after merging the base: {}", w.last().unwrap());
+        // Its run stalls: Resume's brief says the same.
+        run_starts(&st, dev);
+        crate::delivery::run_ended(&st, &dev.id, false).await;
+        resume_from_needs_you(&st).await.unwrap();
+        let w = woken(&st, dev);
+        assert!(w.last().unwrap().contains("fix what the Code reviewer asked for on the spec branch `spec/1-offline-mode`") && w.last().unwrap().contains(&push), "{}", w.last().unwrap());
+        tool(&st, dev, "submit_ticket", json!({ "number": spec.id, "commits": ["abc1234def"] })).await.unwrap();
 
         let debt = json!([{ "title": "Index the store", "body": "Lookups scan." }]);
         let err = tool(&st, cr, "review_ticket", json!({ "number": spec.id, "verdict": "pass", "notes": "Clean.", "tech_debt": debt })).await.unwrap_err();
@@ -6544,6 +6557,7 @@ pub(crate) mod tests {
         assert_eq!(w.len(), 1);
         assert!(w[0].contains("fix what the Code reviewer asked for on the spec PR https://github.com/octo/rs-final/pull/500 (round 1 of 3). Its notes are its last comment there."), "{}", w[0]);
         assert!(w[0].contains("`feed123` Keep the error") && !w[0].contains("`abc1234` Store"), "{}", w[0]);
+        assert!(w[0].contains("Push once per submission, when the work is done: `git fetch origin`, `git merge origin/<base>` (`<base>` is the spec PR's base branch) into the branch (merge, not rebase), resolve any conflicts and run the tests, then pull the branch again (other Devs may push to it while you work) and push it with `git push origin spec/40-rounds`. Every push runs the repo's CI: never push work in progress. Then call `mcp__loft__submit_ticket` with 500"), "one push, after merging the base: {}", w[0]);
         tool(&st, &dev, "submit_ticket", json!({ "number": 500, "commits": ["feed1234"] })).await.unwrap();
         assert_eq!(delivery(&st, slug).state, "final_review");
     }
