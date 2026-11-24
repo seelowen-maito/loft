@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ArrowLeft } from "lucide-react";
-import { api, type ProjectSetting, type ProjectSettingsView } from "../lib/api";
+import { api, type ProjectBranches, type ProjectSetting, type ProjectSettingsView } from "../lib/api";
 import { SettingsCard } from "../components/SettingsCard";
 import { ErrorLine } from "../components/Callout";
 import { errorText, useAction } from "../lib/useAction";
@@ -47,39 +47,43 @@ function SettingCard({ project, setting: s, onSaved }: { project: string; settin
     if (value === s.value) return;
     save.run(async () => onSaved(await api.setProjectSetting(project, s.key, value)));
   };
-  const label = (v: string) => s.choices.find((c) => c.value === v)?.label ?? v;
+  const label = (v: string) => (s.kind === "branch" ? v || "the default branch" : (s.choices.find((c) => c.value === v)?.label ?? v));
   return (
     <SettingsCard title={s.label} description={s.help} error={save.error}>
-      <div role="radiogroup" aria-label={s.label} className="grid gap-2 sm:grid-cols-2">
-        {s.choices.map((c) => {
-          const on = c.value === s.value;
-          return (
-            <button
-              key={c.value}
-              type="button"
-              role="radio"
-              aria-checked={on}
-              disabled={save.busy}
-              onClick={() => choose(c.value)}
-              className={cx(
-                "flex items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors disabled:opacity-60",
-                on ? "border-accent/50 bg-accent/[0.07]" : "border-line bg-ink-900 hover:border-white/15",
-              )}
-            >
-              <span className={cx("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border", on ? "border-accent" : "border-fg-3")}>
-                {on && <span className="size-2 rounded-full bg-accent" />}
-              </span>
-              <span className="min-w-0">
-                <span className="flex flex-wrap items-center gap-2 text-[13.5px] text-fg">
-                  {c.label}
-                  {c.value === s.default && <span className="chip py-0 text-[10px]">Loft's default</span>}
+      {s.kind === "branch" ? (
+        <BranchPicker project={project} setting={s} busy={save.busy} onChoose={choose} />
+      ) : (
+        <div role="radiogroup" aria-label={s.label} className="grid gap-2 sm:grid-cols-2">
+          {s.choices.map((c) => {
+            const on = c.value === s.value;
+            return (
+              <button
+                key={c.value}
+                type="button"
+                role="radio"
+                aria-checked={on}
+                disabled={save.busy}
+                onClick={() => choose(c.value)}
+                className={cx(
+                  "flex items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors disabled:opacity-60",
+                  on ? "border-accent/50 bg-accent/[0.07]" : "border-line bg-ink-900 hover:border-white/15",
+                )}
+              >
+                <span className={cx("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border", on ? "border-accent" : "border-fg-3")}>
+                  {on && <span className="size-2 rounded-full bg-accent" />}
                 </span>
-                <span className="mt-0.5 block text-[11.5px] text-fg-3">{c.help}</span>
-              </span>
-            </button>
-          );
-        })}
-      </div>
+                <span className="min-w-0">
+                  <span className="flex flex-wrap items-center gap-2 text-[13.5px] text-fg">
+                    {c.label}
+                    {c.value === s.default && <span className="chip py-0 text-[10px]">Loft's default</span>}
+                  </span>
+                  <span className="mt-0.5 block text-[11.5px] text-fg-3">{c.help}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
       <p className="font-mono text-[11px] text-fg-3">
         {s.changed ? (
           <>
@@ -91,5 +95,37 @@ function SettingCard({ project, setting: s, onSaved }: { project: string; settin
         )}
       </p>
     </SettingsCard>
+  );
+}
+
+/** A branch setting: the repo's branches on GitHub, the empty choice standing for its default branch. A saved branch
+ *  GitHub no longer lists stays in the list, so the picker never shows a value it doesn't have. */
+function BranchPicker({ project, setting: s, busy, onChoose }: { project: string; setting: ProjectSetting; busy: boolean; onChoose: (v: string) => void }) {
+  const [list, setList] = useState<ProjectBranches | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    setList(null);
+    setErr(null);
+    api.projectBranches(project).then(setList).catch((e) => setErr(errorText(e)));
+  }, [project]);
+  const names = list ? list.branches : [];
+  const shown = s.value && !names.includes(s.value) ? [s.value, ...names] : names;
+  return (
+    <div className="space-y-2">
+      <select
+        aria-label={s.label}
+        value={s.value}
+        disabled={busy || !list}
+        onChange={(e) => onChoose(e.target.value)}
+        className="input w-full font-mono text-[13px] disabled:opacity-60 sm:w-80"
+      >
+        <option value="">{list ? `${list.default_branch} (default branch)` : "The default branch"}</option>
+        {shown.filter((b) => b !== list?.default_branch || b === s.value).map((b) => (
+          <option key={b} value={b}>{b}</option>
+        ))}
+      </select>
+      {!list && !err && <p className="text-[11.5px] text-fg-3">Reading the branches on GitHub…</p>}
+      {err && <p role="alert" className="text-[12.5px] text-bad [overflow-wrap:anywhere]">{err}</p>}
+    </div>
   );
 }

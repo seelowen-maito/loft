@@ -48,6 +48,10 @@ _Avoid_: Blocked (a ticket's blockers are set when it's published), parked
 A ticket in review whose reviewers have all passed, so only its CI on GitHub is left. Loft follows the CI itself and closes the ticket when it is green, or sends the Dev a fix round when it fails. No agent works on it meanwhile: the Delivery shows it as waiting for CI, not as running or stalled.
 _Avoid_: Waiting (that is a Dev's `wait_ticket`), pending, CI running
 
+**Base branch**:
+A project setting: the branch the next spec branches and standalone ticket branches start from and their PRs merge into. Empty, it's the repo's default branch on GitHub. A Delivery already under way keeps the base its PR has.
+_Avoid_: Target branch, trunk
+
 **CI mode**:
 A project setting for when a Delivery waits for CI: `per ticket` (each ticket closes only with its CI green, the default) or `at the end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready). It changes only what Loft waits for, never which workflows GitHub runs.
 _Avoid_: CI policy, CI level, light CI
@@ -155,11 +159,11 @@ An issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of th
 _Avoid_: Task, story, sub-task
 
 **Spec branch**:
-The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates when it publishes the spec on GitHub: from the grill's docs commits when there are any, otherwise from the default branch. Every ticket of the spec is one or more commits on it.
+The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates when it publishes the spec on GitHub: from the grill's docs commits when there are any, otherwise from the base branch. Every ticket of the spec is one or more commits on it.
 _Avoid_: Feature branch, shared branch
 
 **Spec PR**:
-The one pull request from a spec branch to the default branch, opened as a draft with `Closes #<spec>` when the spec is published. The spec ships when it merges.
+The one pull request from a spec branch to the base branch, opened as a draft with `Closes #<spec>` when the spec is published. The spec ships when it merges.
 _Avoid_: Feature PR, epic PR
 
 **Owner**:

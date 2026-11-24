@@ -648,9 +648,11 @@ export type SystemReading = {
 
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
 
-/** One of a project's settings: its choices, Loft's default, its value and, once changed, when and by which agent (none: the user). */
+/** One of a project's settings: its choices, Loft's default, its value and, once changed, when and by which agent (none: the user).
+ *  A `branch` setting takes one of the repo's branches (`projectBranches`) instead of `choices`; empty is the repo's default branch. */
 export type ProjectSetting = {
   key: string;
+  kind: "choice" | "branch";
   label: string;
   help: string;
   choices: { value: string; label: string; help: string }[];
@@ -659,6 +661,7 @@ export type ProjectSetting = {
   changed: { at: string; agent: { id: string; name: string } | null } | null;
 };
 export type ProjectSettingsView = { project: string; settings: ProjectSetting[] };
+export type ProjectBranches = { repo: string; default_branch: string; branches: string[] };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -758,6 +761,7 @@ export const api = {
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
   projectSettings: (project: string) => req<ProjectSettingsView>("GET", `/project-settings?project=${encodeURIComponent(project)}`),
   setProjectSetting: (project: string, key: string, value: string) => req<ProjectSettingsView>("PUT", "/project-settings", { project, key, value }),
+  projectBranches: (project: string) => req<ProjectBranches>("GET", `/project-settings/branches?project=${encodeURIComponent(project)}`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
   /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */

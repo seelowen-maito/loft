@@ -40,7 +40,7 @@ const MAX_TICKETS: usize = 50;
 pub fn mcp_tools() -> Vec<Value> {
     vec![json!({
         "name": "publish_spec",
-        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>`, from `docs_branch` when given or else with an empty \"Start spec #N\" commit on the default branch, and opens a draft spec PR from it to the default branch, with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe; a spec branch already there gets `docs_branch` merged in, and the result says if that couldn't be done.",
+        "description": "Publish the spec as a GitHub issue on your project's repo, labelled `spec` and assigned to the user. Loft creates it with the user's token and creates missing labels. When the project has no GitHub repo (no git, no GitHub `origin`, or GitHub not connected), it is saved as a Loft issue labelled `spec` instead, and nothing goes to GitHub. On GitHub it also creates the spec branch `spec/<N>-<slug>`, from `docs_branch` when given or else with an empty \"Start spec #N\" commit on the project's base branch, and opens a draft spec PR from it to that base branch (the `base_branch` Project setting, or the repo's default branch), with `Closes #<spec>`; if that fails the spec stays published and the result says why. Calling it again with the same title returns the spec already published instead of creating another and only makes the missing branch or PR, so a retry is safe; a spec branch already there gets `docs_branch` merged in, and the result says if that couldn't be done.",
         "inputSchema": { "type": "object", "properties": {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
             "project": { "type": "string", "description": "When you work in several projects: the one this is for (its repo gets it). Defaults to your starred main project." },
@@ -491,34 +491,57 @@ fn branch_of(kind: &str, n: i64, title: &str) -> String {
 }
 
 /// A branch name as git takes it: letters, digits and `-_./`, no `..`, not starting or ending with `/`.
-fn is_branch_name(b: &str) -> bool {
+pub(crate) fn is_branch_name(b: &str) -> bool {
     !b.is_empty() && b.len() <= 200 && b.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c)) && !b.contains("..") && !b.starts_with('/') && !b.ends_with('/') && !b.ends_with(".lock")
 }
 
-/// Makes sure spec #n has its spec branch and a draft spec PR to the default branch, all through the
-/// GitHub API. The branch starts at the head of the grill's docs branch when there is one, so the
-/// docs commits ship in the spec PR; otherwise at an empty commit on the default branch. Whatever is already there (recorded, or found on GitHub) is kept, so a retry only makes
+/// Makes sure spec #n has its spec branch and a draft spec PR to the project's base branch (its Project
+/// setting, or the default branch), all through the GitHub API. The branch starts at the head of the grill's
+/// docs branch when there is one, so the docs commits ship in the spec PR; otherwise at an empty commit on the base branch. Whatever is already there (recorded, or found on GitHub) is kept, so a retry only makes
 /// what's missing; a spec branch already there gets the docs branch merged in instead. The PR is recorded on the spec's Delivery, for its tickets to find. Ok is the
 /// reply's line naming both; Err says what failed.
 async fn spec_pr(state: &AppState, slug: &str, n: i64, title: &str, docs: Option<&str>) -> Result<String, String> {
     let branch = spec_branch(n, title);
-    let line = |pr: i64| format!("Spec branch: `{branch}`. Spec PR (draft, to the default branch): https://github.com/{slug}/pull/{pr}");
-    if let Some(pr) = state.db.get_delivery(slug, n).ok().flatten().and_then(|d| d.pr) {
-        return Ok(format!("{}{}", line(pr), docs_onto(state, slug, &branch, docs).await));
+    let line = |pr: i64, to: &str| format!("Spec branch: `{branch}`. Spec PR (draft, to {to}): https://github.com/{slug}/pull/{pr}");
+    if let Some(d) = state.db.get_delivery(slug, n).ok().flatten()
+        && let Some(pr) = d.pr
+    {
+        // Made before: it keeps the base it was opened with, whatever the Project settings say now.
+        let to = crate::delivery::pr_base(state, &d).map_or_else(|| "the default branch".to_string(), |b| format!("`{b}`"));
+        return Ok(format!("{}{}", line(pr, &to), docs_onto(state, slug, &branch, docs).await));
     }
-    let (pr, docs_note) = branch_and_pr(state, slug, n, title, "spec", docs).await?;
-    Ok(format!("{}{docs_note}", line(pr)))
+    let (pr, docs_note, chosen) = branch_and_pr(state, slug, n, title, "spec", docs).await?;
+    let to = chosen.map_or_else(|| "the default branch".to_string(), |b| format!("`{b}`, the project's base branch"));
+    Ok(format!("{}{docs_note}", line(pr, &to)))
 }
 
 /// Makes issue #n's `<kind>/<N>-<slug>` branch (a spec's, or a standalone ticket's) and its draft PR to
-/// the default branch with `Closes #n`, keeping whatever is already there, and records the PR on the
-/// Delivery of #n. The PR and a line about the docs branch (see [`spec_pr`]).
-pub(crate) async fn branch_and_pr(state: &AppState, slug: &str, n: i64, title: &str, kind: &str, docs: Option<&str>) -> Result<(i64, String), String> {
+/// the project's base branch with `Closes #n`, keeping whatever is already there, and records the PR on the
+/// Delivery of #n. The base is the project's `base_branch` setting, or the repo's default branch when it has
+/// none. The PR, a line about the docs branch (see [`spec_pr`]) and the base when it came from the setting.
+pub(crate) async fn branch_and_pr(state: &AppState, slug: &str, n: i64, title: &str, kind: &str, docs: Option<&str>) -> Result<(i64, String, Option<String>), String> {
     let branch = branch_of(kind, n, title);
     let gh = |path: String| async move { crate::github::get(state, &format!("/repos/{slug}{path}")).await };
     let post = |path: &'static str, body: Value| async move { crate::github::request(state, reqwest::Method::POST, &format!("/repos/{slug}{path}"), Some(body)).await };
-    let repo = gh(String::new()).await.map_err(|e| format!("couldn't read {slug} for its default branch: {e}"))?;
-    let base = repo["default_branch"].as_str().filter(|b| !b.is_empty()).ok_or_else(|| format!("GitHub didn't give the default branch of {slug}"))?.to_string();
+    let project = state.db.get_delivery(slug, n).ok().flatten().map(|d| d.project).unwrap_or_default();
+    let chosen = crate::project_settings::base_branch(state, &project);
+    let base = match &chosen {
+        Some(b) => {
+            // Checked before anything is made, so a base gone from GitHub leaves nothing half done.
+            gh(format!("/git/ref/heads/{b}")).await.map_err(|e| {
+                if crate::github::is_gone(&e) {
+                    format!("the base branch `{b}` from {}'s Project settings isn't on GitHub, so the {kind} branch `{branch}` wasn't created: pick another on the project's settings page", project.trim())
+                } else {
+                    format!("couldn't check {slug} for the base branch `{b}`: {e}")
+                }
+            })?;
+            b.clone()
+        }
+        None => {
+            let repo = gh(String::new()).await.map_err(|e| format!("couldn't read {slug} for its default branch: {e}"))?;
+            repo["default_branch"].as_str().filter(|b| !b.is_empty()).ok_or_else(|| format!("GitHub didn't give the default branch of {slug}"))?.to_string()
+        }
+    };
     let mut docs_note = String::new();
     match gh(format!("/git/ref/heads/{branch}")).await {
         Ok(_) => docs_note = docs_onto(state, slug, &branch, docs).await,
@@ -535,7 +558,7 @@ pub(crate) async fn branch_and_pr(state: &AppState, slug: &str, n: i64, title: &
                     let head = gh(format!("/git/ref/heads/{base}")).await.map_err(failed)?;
                     let sha = head["object"]["sha"].as_str().unwrap_or_default().to_string();
                     let commit = gh(format!("/git/commits/{sha}")).await.map_err(failed)?;
-                    // An empty commit: the tree of the default branch, so the branch has something to open a PR for.
+                    // An empty commit: the tree of the base branch, so the branch has something to open a PR for.
                     let made = post("/git/commits", json!({ "message": format!("Start {kind} #{n}"), "tree": commit["tree"]["sha"], "parents": [sha] })).await.map_err(failed)?;
                     made["sha"].clone()
                 }
@@ -559,7 +582,7 @@ pub(crate) async fn branch_and_pr(state: &AppState, slug: &str, n: i64, title: &
     if let Some(d) = crate::delivery::update(state, slug, n, |d| d.pr = Some(pr)) {
         crate::delivery::track_pr(state, &d).await;
     }
-    Ok((pr, docs_note))
+    Ok((pr, docs_note, chosen))
 }
 
 /// Merges the grill's docs branch into a spec branch made before it (a retry, say), so its glossary
@@ -7484,6 +7507,95 @@ pub(crate) mod tests {
         assert!(out.starts_with("Submitted #41. The team has no QA or Security, so it passed as submitted (the CI mode is `at the end`: Loft checks the CI once the PR is ready)."), "{out}");
         assert_eq!(standing(&st, slug, 41).0, "closed");
         assert!(fake.seen(&runs).is_empty());
+    }
+
+    // ---- Base branch (#465) ----
+
+    #[tokio::test]
+    async fn the_base_branch_setting_takes_one_of_the_repos_branches_listed_from_github() {
+        use crate::project_settings::{base_branch, branches, get, put};
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("base-pick", "octo/base-pick");
+        planner_on(&st, name, Some("git@github.com:octo/base-pick.git"));
+        let q = |project: &str| axum::extract::Query(serde_json::from_value(json!({ "project": project })).unwrap());
+        let change = |value: Value| put(State(st.clone()), Json(serde_json::from_value(json!({ "project": name, "key": "base_branch", "value": value })).unwrap()));
+        let base = |v: &Value| v["settings"].as_array().unwrap().iter().find(|s| s["key"] == "base_branch").unwrap().clone();
+
+        // Loft's default: empty, the repo's default branch on GitHub.
+        let Json(v) = get(State(st.clone()), q(name)).await.unwrap();
+        let s = base(&v);
+        assert_eq!((&s["kind"], &s["value"], &s["default"], &s["changed"]), (&json!("branch"), &json!(""), &json!(""), &Value::Null));
+        assert_eq!(base_branch(&st, name), None);
+
+        // The repo's branches, every page of them, by name, and which one is the default.
+        fake.route("GET", &format!("/repos/{slug}"), 200, json!({ "default_branch": "main" }));
+        let page: Vec<Value> = (0..100).map(|i| json!({ "name": format!("feature/{i:03}") })).collect();
+        fake.in_turn("GET", &format!("/repos/{slug}/branches"), vec![(200, json!(page)), (200, json!([{ "name": "main" }, { "name": "develop" }]))]);
+        let Json(b) = branches(State(st.clone()), q(name)).await.unwrap();
+        let names = b["branches"].as_array().unwrap();
+        assert_eq!((&b["repo"], &b["default_branch"], names.len()), (&json!(slug), &json!("main"), 102));
+        assert_eq!((&names[0], &names[1], &names[101]), (&json!("develop"), &json!("feature/000"), &json!("main")));
+        let read: Vec<String> = fake.seen(&format!("/repos/{slug}/branches")).into_iter().map(|s| s.path).collect();
+        assert_eq!(read, [format!("/repos/{slug}/branches?per_page=100&page=1"), format!("/repos/{slug}/branches?per_page=100&page=2")]);
+        assert_eq!(branches(State(st.clone()), q("nowhere")).await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+
+        // Saved only when it's a branch of the repo on GitHub.
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/develop"), 200, json!({ "object": { "sha": "develop-sha" } }));
+        let err = change(json!("gone")).await.unwrap_err();
+        assert_eq!((err.0, err.1.as_str()), (axum::http::StatusCode::BAD_REQUEST, "`gone` isn't a branch of octo/base-pick on GitHub."));
+        let err = change(json!("no..pe")).await.unwrap_err();
+        assert_eq!(err.1, "Base branch takes the name of one of the repo's branches, or an empty one for its default branch on GitHub.");
+        assert_eq!(base_branch(&st, name), None, "nothing refused was saved");
+        let Json(v) = change(json!("develop")).await.unwrap();
+        assert_eq!((&base(&v)["value"], &base(&v)["changed"]["agent"]), (&json!("develop"), &Value::Null));
+        assert_eq!(base_branch(&st, name).as_deref(), Some("develop"));
+
+        // The Lead's tool checks the same, and empty goes back to the default branch.
+        let lead = busy(&st, "Lead", name, "lead");
+        let err = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "base_branch", "value": "gone" })).await.unwrap_err();
+        assert_eq!(err, "`gone` isn't a branch of octo/base-pick on GitHub.");
+        let out = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "base_branch", "value": "" })).await.unwrap();
+        let line = "- Base branch (`base_branch`): `` (the repo's default branch on GitHub). Loft's default: `` (the repo's default branch on GitHub). Choices: one of the repo's branches, or empty for its default branch on GitHub. Changed by Lead at ";
+        assert!(out.contains(line), "{out}");
+        assert_eq!(base_branch(&st, name), None);
+    }
+
+    #[tokio::test]
+    async fn a_spec_published_after_the_base_branch_changes_starts_from_it_and_deliveries_under_way_keep_theirs() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("base-spec", "octo/base-spec");
+        let a = planner_on(&st, name, Some("git@github.com:octo/base-spec.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 40);
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "head": { "ref": "spec/40-before" }, "base": { "ref": "main" } }));
+        let out = publish(&st, &a, "Before").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/40-before`. Spec PR (draft, to the default branch): https://github.com/octo/base-spec/pull/500"), "{out}");
+
+        // The user picks `develop`: the next spec starts from it, and its spec PR merges into it.
+        fake.route("GET", &format!("/repos/{slug}/git/ref/heads/develop"), 200, json!({ "object": { "sha": "develop-sha" } }));
+        fake.route("GET", &format!("/repos/{slug}/git/commits/develop-sha"), 200, json!({ "sha": "develop-sha", "tree": { "sha": "develop-tree" } }));
+        crate::project_settings::set(&st, name, "base_branch", &json!("develop"), None).unwrap();
+        fake.route("POST", &format!("/repos/{slug}/issues"), 201, json!({ "number": 41 }));
+        fake.route("POST", &format!("/repos/{slug}/pulls"), 201, json!({ "number": 501 }));
+        let out = publish(&st, &a, "After").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/41-after`. Spec PR (draft, to `develop`, the project's base branch): https://github.com/octo/base-spec/pull/501"), "{out}");
+        assert_eq!(posts(&fake, slug, "git/commits").last().unwrap(), &json!({ "message": "Start spec #41", "tree": "develop-tree", "parents": ["develop-sha"] }));
+        let pulls = posts(&fake, slug, "pulls");
+        assert_eq!((pulls.len(), &pulls[0]["base"], &pulls[1]["base"], &pulls[1]["head"]), (2, &json!("main"), &json!("develop"), &json!("spec/41-after")));
+
+        // The Delivery already under way keeps its spec PR to `main`: publishing it again opens nothing.
+        let out = publish(&st, &a, "Before").await.unwrap();
+        assert!(out.ends_with("Spec branch: `spec/40-before`. Spec PR (draft, to `main`): https://github.com/octo/base-spec/pull/500"), "{out}");
+        assert_eq!((posts(&fake, slug, "pulls").len(), st.db.get_delivery(slug, 40).unwrap().unwrap().pr), (2, Some(500)));
+
+        // A base branch gone from GitHub since: nothing is made, and the reply says where to pick another.
+        crate::project_settings::set(&st, name, "base_branch", &json!("old"), None).unwrap();
+        fake.route("POST", &format!("/repos/{slug}/issues"), 201, json!({ "number": 42 }));
+        let refs = posts(&fake, slug, "git/refs").len();
+        let out = publish(&st, &a, "Gone").await.unwrap();
+        assert!(out.contains("The spec is published, but the base branch `old` from base-spec's Project settings isn't on GitHub, so the spec branch `spec/42-gone` wasn't created: pick another on the project's settings page."), "{out}");
+        assert_eq!((posts(&fake, slug, "git/refs").len(), posts(&fake, slug, "pulls").len()), (refs, 2));
     }
 
     // ---- CI after ready (#460) ----

@@ -1185,7 +1185,7 @@ While you grill, build the project's language and record its hard decisions.
   - <What gets easier, what gets harder, what was accepted.>
   ```
 
-- Where: only when your project has a repo. Work in your clone in your workspace, never in the project folder: on the first resolved term or decision, pull the default branch and create `docs/<topic>` (a short slug of the grill's topic), and commit each glossary or ADR change on it as you go.
+- Where: only when your project has a repo. Work in your clone in your workspace, never in the project folder: on the first resolved term or decision, pull the project's base branch (its `base_branch` Project setting, read with `mcp__loft__project_settings`; the default branch when it's empty) and create `docs/<topic>` (a short slug of the grill's topic), and commit each glossary or ADR change on it as you go.
 - If the repo has no `CLAUDE.md`, the docs branch adds a minimal one that tells agents to read `GLOSSARY.md` and `docs/adr/` and use their terms. Never touch an existing `CLAUDE.md`.
 - With a spec, no Docs PR: before `mcp__loft__publish_spec`, push the docs branch and pass it as `docs_branch`. Loft starts the spec branch from it, so the docs commits ship in the spec PR with the rest of the spec. Commit later glossary or ADR changes on the spec branch.
 - Without a spec, one Docs PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.

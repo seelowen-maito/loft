@@ -98,6 +98,7 @@ fn api_routes() -> Router<AppState> {
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
         .route("/project-settings", get(project_settings::get).put(project_settings::put))
+        .route("/project-settings/branches", get(project_settings::branches))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))

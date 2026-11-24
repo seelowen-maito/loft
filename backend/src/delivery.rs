@@ -1453,6 +1453,11 @@ fn tracked_pr(state: &AppState, d: &Delivery) -> Option<crate::db::PullRequest> 
     state.db.list_pull_requests(None).ok()?.into_iter().find(|p| p.slug == d.repo && p.number == n)
 }
 
+/// The branch the Delivery's PR merges into, once Loft has read it.
+pub(crate) fn pr_base(state: &AppState, d: &Delivery) -> Option<String> {
+    tracked_pr(state, d).map(|p| p.base_ref).filter(|b| !b.is_empty())
+}
+
 /// Refuses a submission whose branch is behind the base of its PR, by GitHub's compare (Loft runs no git in
 /// agents' clones), and keeps the count on the PR for its card and the Delivery's. When Loft can't tell (no
 /// PR, or GitHub didn't answer) it lets the submission through.
@@ -3546,7 +3551,8 @@ fn final_brief(state: &AppState, d: &Delivery) -> String {
     let again = if d.final_rounds > 0 { "\n- The Dev pushed fixes for your last notes: look again, at those fixes first." } else { "" };
     // Reopened for new tickets: what came before passed this review already.
     let scope = if d.reviewed_to.is_empty() {
-        "Pull the branch and review its whole diff against the default branch".to_string()
+        let base = pr_base(state, d).map_or_else(|| "the default branch".to_string(), |b| format!("`origin/{b}`"));
+        format!("Pull the branch and review its whole diff against {base}")
     } else {
         // The spec PR's base; origin/HEAD (the default branch) until Loft has read the PR.
         let base = tracked_pr(state, d).map(|p| p.base_ref).filter(|b| !b.is_empty()).unwrap_or_else(|| "HEAD".into());
