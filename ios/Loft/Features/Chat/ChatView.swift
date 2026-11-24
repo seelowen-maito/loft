@@ -857,6 +857,8 @@ private struct MessageBubble: View {
     var reply: ((ChatMessage) -> Void)?
     var jump: (Int64) -> Void = { _ in }
     @State private var saving = false
+    /// The saved item's title, shown under the message for a moment once Save is done.
+    @State private var savedAs: String?
 
     private var isUser: Bool { message.role == "user" && message.fromAgentName == nil }
     private var canSave: Bool { store.info?.supports(.saved) == true && Saved.canSave(message) }
@@ -960,7 +962,7 @@ private struct MessageBubble: View {
                                     Button { saving = true } label: { Label("Save", systemImage: "bookmark") }
                                 }
                             }
-                            .sheet(isPresented: $saving) { SaveMessageSheet(message: message) }
+                            .sheet(isPresented: $saving) { SaveMessageSheet(message: message) { savedAs = $0.title } }
                     }
                     HStack(spacing: 6) {
                         Text(isUser ? message.createdAt.formatted(date: .omitted, time: .shortened)
@@ -968,6 +970,13 @@ private struct MessageBubble: View {
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                         if !isUser && message.role == "assistant" { SpeakButton(message: message) }
+                    }
+                    if let savedAs {
+                        Label("Saved “\(savedAs)”", systemImage: "bookmark.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.accent)
+                            .transition(.opacity)
+                            .accessibilityIdentifier("savedNote")
                     }
                     if !isUser && message.role == "assistant" { UnreadAloudNote(message: message) }
                     if isUser, !message.mentionedNames.isEmpty {
@@ -985,6 +994,13 @@ private struct MessageBubble: View {
             .accessibilityAction(named: "Read aloud") { if !isUser { speaker.speak(message) } }
             .accessibilityAction(named: "Reply") { reply?(message) }
             .accessibilityAction(named: "Save") { if canSave { saving = true } }
+            // Save's confirmation, as the web's toast: under the message for a moment, and spoken.
+            .task(id: savedAs) {
+                guard let t = savedAs else { return }
+                AccessibilityNotification.Announcement("Saved “\(t)”").post()
+                try? await Task.sleep(for: .seconds(3))
+                withAnimation { savedAs = nil }
+            }
             .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
         }
     }

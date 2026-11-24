@@ -273,13 +273,16 @@ struct SaveMessageSheet: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let message: ChatMessage
+    /// Called with the new item once it's saved, for the chat's confirmation.
+    var saved: (SavedItem) -> Void = { _ in }
     @State private var title: String
     @State private var tag = Saved.suggestedTags[0]
     @State private var saving = false
     @State private var error: APIError?
 
-    init(message: ChatMessage) {
+    init(message: ChatMessage, saved: @escaping (SavedItem) -> Void = { _ in }) {
         self.message = message
+        self.saved = saved
         _title = State(initialValue: Saved.defaultTitle(message.displayContent))
     }
 
@@ -311,7 +314,7 @@ struct SaveMessageSheet: View {
         Task {
             defer { saving = false }
             do {
-                _ = try await store.saveMessage(message, title: title.trimmingCharacters(in: .whitespaces), tag: tag.trimmingCharacters(in: .whitespaces))
+                saved(try await store.saveMessage(message, title: title.trimmingCharacters(in: .whitespaces), tag: tag.trimmingCharacters(in: .whitespaces)))
                 dismiss()
             } catch {
                 self.error = APIError.from(error)

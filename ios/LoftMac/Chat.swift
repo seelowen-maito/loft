@@ -185,6 +185,8 @@ private struct MessageRow: View {
     var reply: (() -> Void)?
     var jump: (Int64) -> Void = { _ in }
     @State private var saving = false
+    /// The saved item's title, shown under the message for a moment once Save is done.
+    @State private var savedAs: String?
 
     private var canSave: Bool { store.info?.supports(.saved) == true && Saved.canSave(message) }
 
@@ -254,6 +256,13 @@ private struct MessageRow: View {
                         }
                     }
                     Text(message.createdAt, style: .time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
+                    if let savedAs {
+                        Label("Saved “\(savedAs)”", systemImage: "bookmark.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.accent)
+                            .transition(.opacity)
+                            .accessibilityIdentifier("savedNote")
+                    }
                 }
             }
             .contextMenu {
@@ -265,13 +274,20 @@ private struct MessageRow: View {
                     Button { saving = true } label: { Label("Save", systemImage: "bookmark") }
                 }
             }
-            .sheet(isPresented: $saving) { SaveMessageSheet(message: message) }
+            .sheet(isPresented: $saving) { SaveMessageSheet(message: message) { savedAs = $0.title } }
             // Selectable text isn't read by a combined element, so the label says it.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(spoken)
             .accessibilityAction(named: "Copy") { copy() }
             .accessibilityAction(named: "Reply") { reply?() }
             .accessibilityAction(named: "Save") { if canSave { saving = true } }
+            // Save's confirmation, as the web's toast: under the message for a moment, and spoken.
+            .task(id: savedAs) {
+                guard let t = savedAs else { return }
+                AccessibilityNotification.Announcement("Saved “\(t)”").post()
+                try? await Task.sleep(for: .seconds(3))
+                withAnimation { savedAs = nil }
+            }
             .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
             .accessibilityIdentifier(isUser ? "userMessage" : "agentMessage")
         }
