@@ -437,6 +437,8 @@ public enum ServerFeature: String {
     case leftProcesses = "left_processes"
     /// A message can reply to an earlier one in the chat (spec #572).
     case reply
+    /// Chat messages kept in Saved, with a title and a tag (spec #675).
+    case saved
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.

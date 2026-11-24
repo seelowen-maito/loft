@@ -263,6 +263,8 @@ extension View {
             .navigationDestination(for: ChatRoute.self) { ChatView(agentId: $0.agentId, draft: $0.draft, dictate: $0.dictate) }
             .navigationDestination(for: ActivityRoute.self) { _ in ActivityListView() }
             .navigationDestination(for: SettingsRoute.self) { _ in SettingsView() }
+            .navigationDestination(for: SavedRoute.self) { _ in SavedListView() }
+            .navigationDestination(for: SavedItemRoute.self) { SavedItemView(id: $0.id) }
             .navigationDestination(for: NeedsYouRoute.self) { NeedsYouListView(focus: $0.focus) }
     }
 

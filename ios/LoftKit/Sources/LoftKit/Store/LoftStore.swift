@@ -1147,6 +1147,15 @@ public final class LoftStore {
     public func herdrStatus() async throws -> JSONValue { try await requireWrite().herdrStatus() }
     public func herdrSetup() async throws -> JSONValue { try await requireWrite().herdrSetup() }
     public func herdrFocus(agentId: String) async throws { try await requireWrite().herdrFocus(agentId: agentId) }
+    public func savedList(query: String = "", tag: String = "") async throws -> SavedList { try await requireWrite().savedList(query: query, tag: tag) }
+    public func savedItem(id: Int64) async throws -> SavedItem { try await requireWrite().savedItem(id: id) }
+    public func saveMessage(_ m: ChatMessage, title: String, tag: String) async throws -> SavedItem {
+        try await requireWrite().saveMessage(agentId: m.agentId, messageId: m.id, title: title, tag: tag)
+    }
+    public func updateSaved(id: Int64, title: String, tag: String, content: String) async throws -> SavedItem {
+        try await requireWrite().updateSaved(id: id, title: title, tag: tag, content: content)
+    }
+    public func deleteSaved(id: Int64) async throws { try await requireWrite().deleteSaved(id: id) }
 
     /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
     public func saveIssueSettings(_ s: IssueSettings) async throws {

@@ -856,8 +856,10 @@ private struct MessageBubble: View {
     let agent: Agent
     var reply: ((ChatMessage) -> Void)?
     var jump: (Int64) -> Void = { _ in }
+    @State private var saving = false
 
     private var isUser: Bool { message.role == "user" && message.fromAgentName == nil }
+    private var canSave: Bool { store.info?.supports(.saved) == true && Saved.canSave(message) }
 
     var body: some View {
         switch message.kind {
@@ -954,7 +956,11 @@ private struct MessageBubble: View {
                                 }
                                 // The long press opens this menu instead of text selection: keep Copy in it.
                                 Button { UIPasteboard.general.string = message.displayContent } label: { Label("Copy", systemImage: "doc.on.doc") }
+                                if canSave {
+                                    Button { saving = true } label: { Label("Save", systemImage: "bookmark") }
+                                }
                             }
+                            .sheet(isPresented: $saving) { SaveMessageSheet(message: message) }
                     }
                     HStack(spacing: 6) {
                         Text(isUser ? message.createdAt.formatted(date: .omitted, time: .shortened)
@@ -978,6 +984,7 @@ private struct MessageBubble: View {
             .accessibilityLabel("\(isUser ? "You" : message.fromAgentName ?? agent.name)\(message.isFYI ? ", FYI" : ""): \(message.displayContent)")
             .accessibilityAction(named: "Read aloud") { if !isUser { speaker.speak(message) } }
             .accessibilityAction(named: "Reply") { reply?(message) }
+            .accessibilityAction(named: "Save") { if canSave { saving = true } }
             .accessibilityAction(named: "Go to the quoted message") { if let q = message.replyQuote { jump(q.id) } }
         }
     }
