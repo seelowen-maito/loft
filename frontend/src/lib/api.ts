@@ -650,16 +650,18 @@ export type Info = { projects_dir: string; storage_dir: string; github_token: bo
 
 /** One of a project's settings: its choices, Loft's default, its value and, once changed, when and by which agent (none: the user).
  *  A `branch` setting takes one of the repo's branches (`projectBranches`) instead of `choices`; empty is the repo's default branch. */
-export type ProjectSetting = {
+type ProjectSettingBase = {
   key: string;
-  kind: "choice" | "branch";
   label: string;
   help: string;
   choices: { value: string; label: string; help: string }[];
-  default: string;
-  value: string;
   changed: { at: string; agent: { id: string; name: string } | null } | null;
 };
+/** One role that can review each ticket: the project's agent in it (none when the team has none) and whether it does. */
+export type ReviewerRow = { role: string; label: string; note: string; agent: { id: string; name: string; avatar: Avatar } | null; on: boolean };
+export type ProjectSetting =
+  | (ProjectSettingBase & { kind: "choice" | "branch"; default: string; value: string })
+  | (ProjectSettingBase & { kind: "reviewers"; default: string[]; value: string[]; reviewers: ReviewerRow[] });
 export type ProjectSettingsView = { project: string; settings: ProjectSetting[] };
 export type ProjectBranches = { repo: string; default_branch: string; branches: string[] };
 
@@ -760,7 +762,9 @@ export const api = {
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
   projectSettings: (project: string) => req<ProjectSettingsView>("GET", `/project-settings?project=${encodeURIComponent(project)}`),
-  setProjectSetting: (project: string, key: string, value: string) => req<ProjectSettingsView>("PUT", "/project-settings", { project, key, value }),
+  setProjectSetting: (project: string, key: string, value: string | string[]) => req<ProjectSettingsView>("PUT", "/project-settings", { project, key, value }),
+  /** Asks Loft's own agent `loft` to set up an agent in a reviewer role the project's team has no one in. */
+  createReviewer: (project: string, role: string) => req<{ agent: { id: string; name: string }; message: string }>("POST", "/project-settings/reviewer", { project, role }),
   projectBranches: (project: string) => req<ProjectBranches>("GET", `/project-settings/branches?project=${encodeURIComponent(project)}`),
 
   agents: () => req<Agent[]>("GET", "/agents"),

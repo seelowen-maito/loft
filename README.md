@@ -78,6 +78,7 @@ Each project also has its own **Project settings**, opened with **Settings** in 
 
 - **CI mode**: `Per ticket` (the default) closes each Delivery ticket only once its CI is green; `At the end` closes tickets on their reviewers and checks the CI once the spec PR is ready, where a red CI is a final round for the Dev. It only changes what Loft waits for, never which workflows GitHub runs.
 - **Base branch**: a picker with the repo's branches on GitHub. The next spec PRs and standalone tickets start from it and merge into it; it starts at the repo's default branch, and Deliveries already under way keep the base they have.
+- **Ticket reviewers**: one row per reviewer role (QA, Security, Code reviewer) with the team's agent in it, its sticker and a switch for "reviews each ticket". QA and Security are on by default. The Code reviewer always does the final review of the whole spec PR; switched on, it also reviews each ticket. A Delivery waits only for the reviewers switched on. A role with no agent shows dimmed with **Create**, which asks Loft's own agent to set one up.
 
 ### Use it from other devices
 

@@ -1313,9 +1313,6 @@ async fn send_back(state: &AppState, d: &Delivery, n: i64, rounds: u32, notes: &
     Ok(format!(" The Dev is fixing {name} (round {rounds} of {MAX_ROUNDS})."))
 }
 
-/// The roles that review each ticket, in the order they are woken.
-const TICKET_REVIEWERS: &[&str] = &["qa", "security"];
-
 /// The agent with `role` that works in the Delivery's project (its main project or one of its projects), if any.
 fn with_role(state: &AppState, d: &Delivery, role: &str) -> Option<crate::db::Agent> {
     state.db.agent_with_role(&d.project, role).ok()?
@@ -1325,7 +1322,8 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
-/// The QA and Security role briefs, sent with the wake that asks for a ticket's review.
+/// The ticket reviewers' role briefs (QA, Security and, when the project turns it on, the Code reviewer), sent
+/// with the wake that asks for a ticket's review.
 fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) -> String {
     let repo = &d.repo;
     let commits = t.commits.iter().map(|c| format!("`{}`", short(c))).collect::<Vec<_>>().join(", ");
@@ -1334,6 +1332,7 @@ fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) 
     let posted = if d.local { "on the ticket's Loft issue".to_string() } else { format!("on the {}", pr_name(d)) };
     let (who, job) = match role {
         "qa" => ("QA", "Test that they deliver the ticket's acceptance criteria: run the tests and try the behaviour the ticket changes."),
+        "code_reviewer" => ("Code reviewer", "Review the code: correctness, edge cases, and whether it fits the code around it. You still review the whole spec PR once every ticket is closed."),
         _ => ("Security", "Check them for security problems an attacker could really use, tracing each input to where it's used. No speculative findings."),
     };
     format!(
@@ -1347,7 +1346,11 @@ fn review_brief(state: &AppState, d: &Delivery, t: &DeliveryTicket, role: &str) 
         ticket = ticket_ref(d, t),
         arg = ticket_arg(d, t),
         branch = d.branch,
-        own = own_rules(if role == "qa" { "test it" } else { "check its security" }),
+        own = own_rules(match role {
+            "qa" => "test it",
+            "code_reviewer" => "review code",
+            _ => "check its security",
+        }),
     )
 }
 
@@ -1362,7 +1365,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }, "required": ["ticket", "dev"] }
     }), json!({
         "name": "submit_ticket",
-        "description": "As the Dev on a Delivery: hand in the ticket Loft gave you once its commits are pushed to the spec branch and your local tests pass. Don't wait for the CI: Loft follows it. Loft wakes the team's QA and Security to review them, hands you the next unblocked ticket meanwhile, and closes the ticket when they pass and, unless the project's CI mode is `at the end`, the CI is green. On changes or a red CI, Loft wakes you with their notes or the failure's log, after you submit the ticket you're building: fix with new commits and submit again. Fixes asked for in the final Code Review are submitted with the spec PR's number.",
+        "description": "As the Dev on a Delivery: hand in the ticket Loft gave you once its commits are pushed to the spec branch and your local tests pass. Don't wait for the CI: Loft follows it. Loft wakes the project's ticket reviewers (its QA and Security, unless its Project settings say otherwise) to review them, hands you the next unblocked ticket meanwhile, and closes the ticket when they pass and, unless the project's CI mode is `at the end`, the CI is green. On changes or a red CI, Loft wakes you with their notes or the failure's log, after you submit the ticket you're building: fix with new commits and submit again. Fixes asked for in the final Code Review are submitted with the spec PR's number.",
         "inputSchema": { "type": "object", "properties": {
             "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft; for final Code Review fixes, the spec PR's number, or the spec's Loft issue id." },
             "commits": { "type": "array", "items": { "type": "string" }, "description": "The SHAs of all the ticket's commits, oldest first." }
@@ -1377,7 +1380,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }, "required": ["number", "on", "reason"] }
     }), json!({
         "name": "review_ticket",
-        "description": "As QA or Security on a Delivery: give your verdict on the ticket Loft asked you to review. As the Code reviewer: give your verdict on the whole spec PR, once every ticket is closed. Loft posts it on the spec PR as a comment with your notes and, for a ticket, a `qa-passed`, `security:passed` or `changes-requested` label. On changes it wakes the Dev with your notes. When every reviewer passed a ticket and its CI is green, Loft closes it; when the Code reviewer passes the spec PR, Loft marks it ready to merge.",
+        "description": "As QA or Security on a Delivery, or the Code reviewer when the project has it review each ticket: give your verdict on the ticket Loft asked you to review. As the Code reviewer: give your verdict on the whole spec PR, once every ticket is closed. Loft posts it on the spec PR as a comment with your notes and, for a ticket, a `qa-passed`, `security:passed`, `code-review:passed` or `changes-requested` label. On changes it wakes the Dev with your notes. When every reviewer passed a ticket and its CI is green, Loft closes it; when the Code reviewer passes the spec PR, Loft marks it ready to merge.",
         "inputSchema": { "type": "object", "properties": {
             "number": { "type": ["integer", "string"], "description": "The ticket's GitHub issue number, or its Loft issue id in a plan kept in Loft; for the Code reviewer, the spec PR's number, or the spec's Loft issue id." },
             "verdict": { "type": "string", "enum": ["pass", "changes"], "description": "\"changes\" for any finding; \"pass\" only when nothing is left to fix." },
@@ -1552,7 +1555,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
     refuse_behind(state, &d).await?;
     refuse_unpushed(state, &d, &commits).await?;
-    let reviewers: Vec<(&str, crate::db::Agent)> = TICKET_REVIEWERS.iter().filter_map(|r| with_role(state, &d, r).map(|a| (*r, a))).collect();
+    let reviewers: Vec<(&str, crate::db::Agent)> = crate::project_settings::ticket_reviewers(state, &d.project).into_iter().filter_map(|r| with_role(state, &d, r).map(|a| (r, a))).collect();
     // A plan kept in Loft has no GitHub CI to follow, and with the CI mode `at the end` it's followed once the PR is ready.
     let ci = ci_per_ticket(state, &d);
     let d = unstalled(state, d, n);
@@ -1574,7 +1577,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     if reviewers.is_empty() && !ci {
         let closed = finish(state, &d, n).await?;
         let end = if d.local { "" } else { " (the CI mode is `at the end`: Loft checks the CI once the PR is ready)" };
-        return Ok(format!("Submitted {name}. The team has no QA or Security, so it passed as submitted{end}.{closed}"));
+        return Ok(format!("Submitted {name}. No reviewer reviews each ticket here, so it passed as submitted{end}.{closed}"));
     }
     // Free of #n: the Dev moves on while it's reviewed, in a run of its own.
     let mut next = advance(state, &slug, d.spec).await;
@@ -1583,7 +1586,7 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     }
     if reviewers.is_empty() {
         let followed = follow_ci_or(state, &d, " Loft closes it when the CI is green, and wakes you if it fails.").await;
-        return Ok(format!("Submitted {name}. The team has no QA or Security, so only its CI is waited for.{followed}{next}"));
+        return Ok(format!("Submitted {name}. No reviewer reviews each ticket here, so only its CI is waited for.{followed}{next}"));
     }
     let t = d.ticket(n).expect("just saved");
     for (role, a) in &reviewers {
@@ -1824,7 +1827,9 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     if args["tech_debt"].as_array().is_some_and(|a| !a.is_empty()) {
         return Err("tech_debt is gone: put every finding in `notes`, each with its file, line and fix, with verdict \"changes\". The Dev fixes them on the same PR.".into());
     }
-    if me.role == "code_reviewer" {
+    // The Code reviewer's verdict is on the whole spec PR, unless it names a ticket: then the project has it review
+    // each ticket too.
+    if me.role == "code_reviewer" && final_of(state, me, args).await.map_or(true, |(_, _, d, _)| d.is_some()) {
         return final_review(state, me, args, verdict, notes).await;
     }
     let (slug, n, d, _held) = ticket_of(state, me, args, "review_ticket").await?;
@@ -1832,13 +1837,16 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let role = me.role.as_str();
     let t = d.ticket(n).expect("of_ticket found it").clone();
     let name = tag(&d, &t);
+    if role == "code_reviewer" && !t.verdicts.contains_key(role) {
+        return Err(format!("{name} isn't waiting for your review: the Code reviewer reviews the whole spec PR once every ticket is closed, and each ticket only when the project's Project settings have it."));
+    }
     if t.state != "review" {
         return Err(format!("{name} isn't waiting for a review: nothing was posted."));
     }
     match t.verdicts.get(role).map(String::as_str) {
         Some("pending") => {}
         Some(_) => return Err(format!("You already passed {name} in this round: nothing was posted.")),
-        None => return Err(format!("{name} isn't waiting for a {} review: QA and Security review tickets.", crate::planning::role_label(role))),
+        None => return Err(format!("{name} isn't waiting for a {} review: only the project's ticket reviewers review tickets.", crate::planning::role_label(role))),
     }
     // A run woken for an earlier round reviewed that round's commits: a red CI or another reviewer may have
     // sent the ticket back since, and its verdict isn't on the fixes. A run with no Delivery wake (a user's
@@ -1861,6 +1869,7 @@ async fn review(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let sha = t.commits.last().map(|c| short(c).to_string()).unwrap_or_default();
     let (head, label_tag) = match (verdict, role) {
         ("pass", "qa") => (format!("**{label}** ({}) passed ticket {name} at `{sha}`.", me.name), "qa-passed"),
+        ("pass", "code_reviewer") => (format!("**{label}** ({}) passed ticket {name} at `{sha}`.", me.name), "code-review:passed"),
         ("pass", _) => (format!("**{label}** ({}) passed ticket {name} at `{sha}`.", me.name), "security:passed"),
         _ => (format!("**{label}** ({}) asks for changes on ticket {name} at `{sha}`.", me.name), "changes-requested"),
     };
@@ -1940,6 +1949,7 @@ async fn label_issue(state: &AppState, slug: &str, n: i64, name: &str) -> Result
     let (color, about) = match name {
         "qa-passed" => ("0e8a16", "QA passed a ticket"),
         "security:passed" => ("1d76db", "Security passed a ticket"),
+        "code-review:passed" => ("5319e7", "The Code reviewer passed a ticket"),
         "changes-requested" => ("d93f0b", "A reviewer asked for changes"),
         _ => ("b60205", "Stuck: needs the user"),
     };
@@ -2959,7 +2969,7 @@ async fn resume_ticket(state: &AppState, repo: &str, spec: i64, t: &DeliveryTick
                 crate::agents::resume_on_ticket(state, &dev.id, &ticket_key(&d, Some(t.number)), brief, wake_for(&d, Step::Build { ticket: t.number, round: t.rounds }));
                 format!(" {} is building {} again.", dev.name, tag(&d, &t))
     } else if t.state == "review" {
-                let pending: Vec<&str> = TICKET_REVIEWERS.iter().copied().filter(|r| t.verdicts.get(*r).is_some_and(|v| v == "pending")).collect();
+                let pending: Vec<&str> = crate::project_settings::REVIEWER_ROLES.iter().map(|(r, _)| *r).filter(|r| t.verdicts.get(*r).is_some_and(|v| v == "pending")).collect();
                 let reviewers = pending
                     .iter()
                     .map(|r| with_role(state, &d, r).map(|a| (*r, a)).ok_or_else(|| format!("Nothing was resumed: {} waits for a {} verdict, and the team has no {0} any more.", tag(&d, &t), crate::planning::role_label(r))))

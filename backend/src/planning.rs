@@ -3886,7 +3886,7 @@ pub(crate) mod tests {
         let (fake, st) = (fake_github(), state());
         let (dev, _) = building(&st, &fake, "rv-alone", &[]).await;
         let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
-        assert!(out.starts_with("Submitted #41. The team has no QA or Security, so only its CI is waited for.\n#41: the repo runs no CI on its branch.") && out.contains("Next: #42 is with Builder."), "{out}");
+        assert!(out.starts_with("Submitted #41. No reviewer reviews each ticket here, so only its CI is waited for.\n#41: the repo runs no CI on its branch.") && out.contains("Next: #42 is with Builder."), "{out}");
         assert_eq!(standing(&st, "octo/rv-alone", 41), ("closed".into(), Some(42), None));
     }
 
@@ -3966,7 +3966,7 @@ pub(crate) mod tests {
         assert_eq!(tool(&st, &dev, "submit_ticket", json!({ "number": 41, "commits": [] })).await.unwrap_err(), "commits is required: the SHAs of the ticket's commits");
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
         assert_eq!(tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap_err(), "#41 can't be submitted: it's already submitted and waiting for its reviewers.");
-        assert_eq!(tool(&st, &team[1], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't a spec PR waiting for its Code Review: the Code reviewer reviews the whole spec PR once every ticket is closed.");
+        assert_eq!(tool(&st, &team[1], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't waiting for your review: the Code reviewer reviews the whole spec PR once every ticket is closed, and each ticket only when the project's Project settings have it.");
         assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "maybe", "notes": "x" })).await.unwrap_err(), "verdict must be \"pass\" or \"changes\"");
         // The old tool is gone.
         let names: Vec<String> = crate::mcp::tools(&st).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
@@ -4722,7 +4722,7 @@ pub(crate) mod tests {
         tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
         tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
         let debt = json!([{ "title": "Split delivery.rs", "body": "It grew past 600 lines." }]);
-        assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't a spec PR waiting for its Code Review: the Code reviewer reviews the whole spec PR once every ticket is closed.");
+        assert_eq!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't waiting for your review: the Code reviewer reviews the whole spec PR once every ticket is closed, and each ticket only when the project's Project settings have it.");
 
         // tech_debt is refused, with nothing posted or filed, and the review still waits.
         let issues = posts(&fake, slug, "issues").len();
@@ -7504,7 +7504,7 @@ pub(crate) mod tests {
         let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
         fake.route("GET", &runs, 200, json!({ "check_runs": [run("in_progress", None)] }));
         let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
-        assert!(out.starts_with("Submitted #41. The team has no QA or Security, so it passed as submitted (the CI mode is `at the end`: Loft checks the CI once the PR is ready)."), "{out}");
+        assert!(out.starts_with("Submitted #41. No reviewer reviews each ticket here, so it passed as submitted (the CI mode is `at the end`: Loft checks the CI once the PR is ready)."), "{out}");
         assert_eq!(standing(&st, slug, 41).0, "closed");
         assert!(fake.seen(&runs).is_empty());
     }
@@ -7956,5 +7956,114 @@ pub(crate) mod tests {
         assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], json!(0));
         d.state = "planned".into();
         assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], Value::Null, "not before it starts");
+    }
+
+    // ---- Ticket reviewers (#463) ----
+
+    #[tokio::test]
+    async fn ticket_reviewers_default_to_qa_and_security_and_list_each_roles_agent() {
+        use crate::project_settings::{create_reviewer, get, put, ticket_reviewers};
+        let st = state();
+        let name = "rv-set";
+        planner_on(&st, name, None);
+        let tester = busy(&st, "Tester", name, "qa");
+        let read = || get(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({ "project": name })).unwrap()));
+        let change = |value: Value| put(State(st.clone()), Json(serde_json::from_value(json!({ "project": name, "key": "ticket_reviewers", "value": value })).unwrap()));
+        let revs = |v: &Value| v["settings"].as_array().unwrap().iter().find(|s| s["key"] == "ticket_reviewers").unwrap().clone();
+
+        // Loft's default is today's: QA and Security, each row with the team's agent in that role, if any.
+        let s = revs(&read().await.unwrap().0);
+        assert_eq!((&s["kind"], &s["value"], &s["default"], &s["changed"]), (&json!("reviewers"), &json!(["qa", "security"]), &json!(["qa", "security"]), &Value::Null));
+        let rows = s["reviewers"].as_array().unwrap();
+        let row = |i: usize| (rows[i]["role"].clone(), rows[i]["label"].clone(), rows[i]["agent"]["name"].clone(), rows[i]["on"].clone());
+        assert_eq!(row(0), (json!("qa"), json!("QA"), json!("Tester"), json!(true)));
+        assert_eq!(rows[0]["agent"]["id"], json!(tester.id));
+        assert!(rows[0]["agent"]["avatar"]["svg"].is_string(), "its sticker: {}", rows[0]);
+        assert_eq!(row(1), (json!("security"), json!("Security"), Value::Null, json!(true)), "no Security on the team: the page offers to create one");
+        assert_eq!(row(2), (json!("code_reviewer"), json!("Code reviewer"), Value::Null, json!(false)));
+        assert!(rows[2]["note"].as_str().unwrap().starts_with("Always does the final review"), "{}", rows[2]);
+
+        // The user turns the Code reviewer on: kept in the order reviewers are woken.
+        let s = revs(&change(json!(["code_reviewer", "qa"])).await.unwrap().0);
+        assert_eq!((&s["value"], &s["changed"]["agent"]), (&json!(["qa", "code_reviewer"]), &Value::Null));
+        assert_eq!(s["reviewers"][2]["on"], true);
+        assert_eq!(ticket_reviewers(&st, name), ["qa", "code_reviewer"]);
+        assert_eq!(ticket_reviewers(&st, "other"), ["qa", "security"]);
+
+        // Refused: a role that doesn't review tickets, or something that isn't a list of roles.
+        let err = change(json!(["qa", "dev"])).await.unwrap_err();
+        assert_eq!(err.1, "Ticket reviewers takes a list of the roles that review each ticket, from `qa`, `security`, `code_reviewer`; an empty one for none. `dev` isn't one.");
+        assert!(change(json!(3)).await.unwrap_err().1.starts_with("Ticket reviewers takes a list"));
+        assert_eq!(ticket_reviewers(&st, name), ["qa", "code_reviewer"], "nothing refused was saved");
+        assert_eq!(revs(&change(json!([])).await.unwrap().0)["value"], json!([]), "none at all");
+
+        // The Lead's tool takes a list, or the roles in one string.
+        let lead = busy(&st, "Lead", name, "lead");
+        let out = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "ticket_reviewers", "value": "security, code_reviewer" })).await.unwrap();
+        assert!(out.contains("- Ticket reviewers (`ticket_reviewers`): `[security, code_reviewer]`. Loft's default: `[qa, security]`. Choices: a list of `qa` ("), "{out}");
+        assert!(out.contains("Changed by Lead at "), "{out}");
+        settings_tool(&st, &lead, "set_project_setting", json!({ "key": "ticket_reviewers", "value": ["qa"] })).await.unwrap();
+        assert_eq!(revs(&read().await.unwrap().0)["changed"]["agent"]["name"], "Lead");
+        assert_eq!(ticket_reviewers(&st, name), ["qa"]);
+
+        // Create asks Loft's own agent for a role the team has no one in.
+        let create = |role: &str| create_reviewer(State(st.clone()), Json(serde_json::from_value(json!({ "project": name, "role": role })).unwrap()));
+        st.rt.lock().unwrap().running.insert(crate::setup::LOFT_ID.into(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        crate::setup::ensure_loft(&st);
+        let Json(v) = create("security").await.unwrap();
+        assert_eq!(v["agent"]["id"], crate::setup::LOFT_ID);
+        let message = v["message"].as_str().unwrap().to_string();
+        assert!(message.starts_with("Set up a Security agent for the rv-set project (the rv-set group): its team has none yet, and it would review each ticket of its Deliveries."), "{message}");
+        let to_loft: Vec<String> = st.rt.lock().unwrap().queued.get(crate::setup::LOFT_ID).cloned().unwrap_or_default();
+        assert!(to_loft.contains(&message), "{to_loft:?}");
+        assert!(create("code_reviewer").await.unwrap().0["message"].as_str().unwrap().contains("do the final review of each Delivery's spec PR"));
+        assert_eq!(create("qa").await.unwrap_err().1, "rv-set already has a QA: Tester.");
+        assert_eq!(create("dev").await.unwrap_err().1, "`dev` isn't a role that reviews tickets.");
+        let nowhere = create_reviewer(State(st.clone()), Json(serde_json::from_value(json!({ "project": "nowhere", "role": "qa" })).unwrap()));
+        assert_eq!(nowhere.await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_waits_only_for_the_ticket_reviewers_turned_on_and_the_code_reviewer_still_reviews_at_the_end() {
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("rv-cr-each", "octo/rv-cr-each");
+        let (dev, team) = building_both(&st, &fake, name, &["qa", "code_reviewer"]).await;
+        let (qa, cr) = (&team[0], &team[1]);
+        crate::project_settings::set(&st, name, "ticket_reviewers", &json!(["code_reviewer"]), None).unwrap();
+
+        // QA is off, so only the Code reviewer reviews the ticket.
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.starts_with("Submitted #41: code_reviewer agent (Code reviewer) are reviewing it, and Loft follows its CI."), "{out}");
+        assert!(woken(&st, qa).is_empty(), "QA isn't woken");
+        let w = woken(&st, cr);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("You are Code reviewer on this Delivery: review ticket #41 \"Store\"") && w[0].contains("You still review the whole spec PR once every ticket is closed."), "{}", w[0]);
+        assert!(w[0].contains("call `mcp__loft__review_ticket` with 41"), "{}", w[0]);
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&d.tickets[0].verdicts).unwrap(), json!({ "ci": "pending", "code_reviewer": "pending" }));
+        assert_eq!(tool(&st, qa, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "x" })).await.unwrap_err(), "#41 isn't waiting for a QA review: only the project's ticket reviewers review tickets.");
+
+        // Its pass on the ticket closes it.
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "Reads well." })).await.unwrap();
+        assert!(out.contains("Closed #41"), "{out}");
+        assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**Code reviewer** (code_reviewer agent) passed ticket #41 at `fed4321`.\n\nReads well.");
+        assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["code-review:passed"] }));
+        assert_eq!(standing(&st, slug, 41).0, "closed");
+
+        // Changes on a ticket go back to the Dev like any reviewer's.
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 42, "verdict": "changes", "notes": "api.rs:3 drops the error." })).await.unwrap();
+        assert!(out.ends_with("The Dev is fixing #42 (round 1 of 3)."), "{out}");
+        tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd", "1234567abc"] })).await.unwrap();
+        tool(&st, cr, "review_ticket", json!({ "number": 42, "verdict": "pass", "notes": "Fixed." })).await.unwrap();
+        assert_eq!(standing(&st, slug, 42).0, "closed");
+
+        // Every ticket closed: the final review of the whole spec PR is still the Code reviewer's.
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(d.step_state(), "final_review");
+        assert!(woken(&st, cr).last().unwrap().contains("review the whole spec PR"), "{:?}", woken(&st, cr));
+        tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "ready");
     }
 }
