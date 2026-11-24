@@ -107,6 +107,53 @@ mod tests {
         assert_eq!(job_minutes(&own), 0, "GitHub doesn't bill a self-hosted runner");
     }
 
+    /// A finished job of a minute.
+    fn minute() -> Value {
+        json!({ "conclusion": "success", "started_at": "2026-11-24T10:00:00Z", "completed_at": "2026-11-24T10:01:00Z", "labels": ["ubuntu-latest"] })
+    }
+
+    /// A completed run, first attempt.
+    fn run(id: i64) -> Value {
+        json!({ "id": id, "run_attempt": 1, "status": "completed" })
+    }
+
+    #[tokio::test]
+    async fn a_branch_over_one_page_of_runs_or_jobs_counts_every_page() {
+        let st = crate::github::tests::state_with_token();
+        let fake = crate::github::tests::own_fake(&st);
+        let repo = "octo/many-runs";
+        let runs = format!("/repos/{repo}/actions/runs");
+        let jobs = |id: i64| format!("/repos/{repo}/actions/runs/{id}/jobs");
+        // 130 runs over two pages; GitHub's total_count can be more than it lists, so the short page ends the listing.
+        let page = |ids: std::ops::RangeInclusive<i64>| json!({ "total_count": 1000, "workflow_runs": ids.map(run).collect::<Vec<_>>() });
+        fake.in_turn("GET", &runs, vec![(200, page(1..=100)), (200, page(101..=130)), (200, page(500..=500))]);
+        for id in 2..=130 {
+            fake.route("GET", &jobs(id), 200, json!({ "total_count": 1, "jobs": [minute()] }));
+        }
+        // Run 1 has 105 jobs over two pages.
+        let jobs_page = |n: usize| json!({ "total_count": 105, "jobs": vec![minute(); n] });
+        fake.in_turn("GET", &jobs(1), vec![(200, jobs_page(100)), (200, jobs_page(5)), (200, jobs_page(100))]);
+
+        let out = of_branch(&st, repo, "spec/1-x", "2026-11-24T09:00:00Z", &BTreeMap::new()).await.unwrap();
+        assert_eq!(out.len(), 130);
+        assert_eq!(out["1"], RunMinutes { attempt: 1, minutes: 105, done: true });
+        assert_eq!(total(&out), 105 + 129);
+        let listed: Vec<_> = fake.seen(&format!("{runs}?")).into_iter().map(|s| s.path).collect();
+        assert!(listed.len() == 2 && listed[0].ends_with("&page=1") && listed[1].ends_with("&page=2"), "{listed:?}");
+        let read: Vec<_> = fake.seen(&format!("{}?", jobs(1))).into_iter().map(|s| s.path).collect();
+        assert!(read.len() == 2 && read[1].ends_with("&page=2"), "{read:?}");
+
+        // A full page that is all GitHub has ends the listing too.
+        let fake = crate::github::tests::own_fake(&st);
+        fake.in_turn("GET", &runs, vec![(200, json!({ "total_count": 100, "workflow_runs": (1..=100).map(run).collect::<Vec<_>>() })), (200, page(500..=500))]);
+        for id in 1..=100 {
+            fake.route("GET", &jobs(id), 200, json!({ "total_count": 1, "jobs": [minute()] }));
+        }
+        let out = of_branch(&st, repo, "spec/1-x", "2026-11-24T09:00:00Z", &BTreeMap::new()).await.unwrap();
+        assert_eq!((out.len(), total(&out)), (100, 100));
+        assert_eq!(fake.seen(&format!("{runs}?")).len(), 1);
+    }
+
     #[test]
     fn a_branch_name_is_encoded_for_the_query() {
         assert_eq!(encode("spec/454-ci-seguro"), "spec/454-ci-seguro");

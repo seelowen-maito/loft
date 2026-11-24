@@ -7545,6 +7545,57 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_github_error_keeps_a_deliverys_actions_minutes_and_the_next_read_tries_again() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-minutes-error";
+        let runs = format!("/repos/{slug}/actions/runs");
+        let jobs = |id: i64| format!("/repos/{slug}/actions/runs/{id}/jobs");
+        let listing = |ids: &[i64]| json!({ "total_count": ids.len(), "workflow_runs": ids.iter().map(|id| json!({ "id": id, "run_attempt": 1, "status": "in_progress" })).collect::<Vec<_>>() });
+        fake.route("GET", &runs, 200, listing(&[1, 2]));
+        fake.route("GET", &jobs(1), 200, json!({ "total_count": 1, "jobs": [job(121)] }));
+        fake.route("GET", &jobs(2), 200, json!({ "total_count": 1, "jobs": [job(60)] }));
+        ready_with_ci(&st, &fake, "ci-minutes-error", json!([run("in_progress", None)])).await;
+        crate::delivery::follow_all(&st).await;
+        let minutes = |st: &AppState| crate::delivery::delivery_json(st, &delivery(st, slug))["actions_minutes"].clone();
+        assert_eq!(minutes(&st), json!(4));
+        let again = |st: &AppState| st.rt.lock().unwrap().actions_read.clear();
+
+        // GitHub fails the listing, then one run's jobs: what the Delivery had stays.
+        for (path, status) in [(runs.clone(), 502), (jobs(2), 500)] {
+            if path == jobs(2) {
+                fake.route("GET", &runs, 200, listing(&[1, 2]));
+            }
+            fake.route("GET", &path, status, json!({ "message": "Server Error" }));
+            again(&st);
+            let reads = fake.seen(&format!("{path}?")).len();
+            crate::delivery::follow_all(&st).await;
+            assert!(fake.seen(&format!("{path}?")).len() > reads, "{path} was read");
+            assert_eq!(minutes(&st), json!(4), "after a {status} on {path}");
+        }
+
+        // Within `ACTIONS_EVERY` it waits; after it, the next read counts again. Run 1 is no longer listed: it keeps
+        // what it took.
+        fake.route("GET", &runs, 200, listing(&[2]));
+        fake.route("GET", &jobs(2), 200, json!({ "total_count": 2, "jobs": [job(60), job(60)] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(minutes(&st), json!(4));
+        again(&st);
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(minutes(&st), json!(5));
+
+        // Once its PR merges, the Delivery's minutes are no longer read.
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "state": "closed", "merged": true, "head": { "sha": CI_HEAD } }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).state, "settled");
+        again(&st);
+        let reads = fake.seen(&format!("{runs}?")).len();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(fake.seen(&format!("{runs}?")).len(), reads);
+        assert_eq!(minutes(&st), json!(5));
+    }
+
+    #[tokio::test]
     async fn a_plan_kept_in_loft_shows_no_actions_minutes() {
         let st = state();
         let mut d: crate::db::Delivery = serde_json::from_value(json!({ "repo": "loft:demo", "spec": 1, "state": "running", "local": true, "branch": "spec/1-x", "created_at": crate::db::now() })).unwrap();
