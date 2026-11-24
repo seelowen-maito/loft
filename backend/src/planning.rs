@@ -4350,6 +4350,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_newer_submit_does_not_postpone_the_ci_wait_of_a_ticket_that_waited_longer() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-own-wait";
+        let (_dev, _) = building_both(&st, &fake, "ci-own-wait", &[]).await;
+        // Active workflow, no check on the commit: each ticket waits the grace from its own submit.
+        fake.route("GET", &format!("/repos/{slug}/actions/workflows"), 200, json!({ "total_count": 1, "workflows": [{ "name": "CI", "state": "active" }] }));
+        let ago = |m: i64| (chrono::Utc::now() - chrono::Duration::minutes(m)).to_rfc3339();
+        let waiting = |t: &mut crate::db::DeliveryTicket, commit: &str, minutes: i64| {
+            t.state = "review".into();
+            t.commits = vec![commit.into()];
+            t.submitted_at = ago(minutes);
+            t.verdicts = [("ci".to_string(), "pending".to_string())].into();
+        };
+        // #41 submitted 11 minutes ago, #42 4 minutes ago (7 minutes after #41 would have been 4 minutes before).
+        crate::delivery::update(&st, slug, 40, |d| {
+            waiting(d.ticket_mut(41).unwrap(), "fed4321abc", 11);
+            waiting(d.ticket_mut(42).unwrap(), "0123abcd", 4);
+        });
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41).0, "closed", "#41 closes on its own wait");
+        assert_eq!(standing(&st, slug, 42).0, "review", "#42 still waits for its own");
+
+        crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(42).unwrap().submitted_at = ago(11));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 42).0, "closed");
+    }
+
+    #[tokio::test]
     async fn a_red_ci_on_a_commit_with_two_open_tickets_goes_to_the_oldest() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/ci-two";

@@ -2440,8 +2440,9 @@ enum Ci {
     /// Some still run, or none showed up yet.
     Running,
     Green,
-    /// The repo has no CI, or none runs on the branch.
-    Absent,
+    /// The repo has no CI, or none runs on the branch. `graced`: it has active workflows, so each ticket
+    /// waits `CI_GRACE_MINUTES` from its own submit for their checks to show up.
+    Absent { graced: bool },
     /// The failed check runs and commit statuses.
     Red(Vec<Value>, Vec<Value>),
 }
@@ -2458,7 +2459,8 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     let err = |e: anyhow::Error| e.to_string();
     let head = branch_head(state, d).await?;
     // The CI first: which tickets the commit includes only matters once it's done.
-    let since = waiting.iter().map(|t| t.submitted_at.as_str()).max().unwrap_or_default();
+    // The oldest submit: the grace is per ticket, so a newer submit never delays one that waited longer.
+    let since = waiting.iter().map(|t| t.submitted_at.as_str()).min().unwrap_or_default();
     let ci = ci_of(state, &d.repo, &head, since).await.map_err(err)?;
     if matches!(ci, Ci::Running) {
         return Ok(String::new());
@@ -2484,13 +2486,14 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     }
     match ci {
         Ci::Running => Ok(String::new()),
-        ci @ (Ci::Green | Ci::Absent) => {
+        ci @ (Ci::Green | Ci::Absent { .. }) => {
             let why = match ci {
                 Ci::Green => format!("its CI is green on `{}`", short(&head)),
                 _ => "the repo runs no CI on its branch".to_string(),
             };
+            let graced = matches!(ci, Ci::Absent { graced: true });
             let mut out = String::new();
-            for n in ready.iter().map(|t| t.number).collect::<Vec<_>>() {
+            for n in ready.iter().filter(|t| !graced || past_grace(&t.submitted_at)).map(|t| t.number).collect::<Vec<_>>() {
                 out += &ci_passed(state, &d.repo, d.spec, n, &why).await?;
             }
             Ok(out)
@@ -2546,7 +2549,7 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str) -> anyhow::
             Err(e) => return Err(e),
         };
         let active = workflows["workflows"].as_array().is_some_and(|w| w.iter().any(|w| w["state"] == "active"));
-        return Ok(if active && !past_grace(since) { Ci::Running } else { Ci::Absent });
+        return Ok(if active && !past_grace(since) { Ci::Running } else { Ci::Absent { graced: active } });
     }
     if runs.iter().any(|c| Check::of_run(c) == Check::Pending) || statuses.iter().any(|s| Check::of_status(s) == Check::Pending) {
         return Ok(Ci::Running);
