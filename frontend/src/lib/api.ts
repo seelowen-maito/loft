@@ -158,6 +158,8 @@ export type IssueDelivery = {
   waiting_on_you?: number[];
   /** Its open PR's branch is behind its base by `count` commits; null when it isn't. An older server doesn't send it. */
   behind?: { count: number; base: string } | null;
+  /** A ticket started while the spec PR was ready for review: Loft put it back to draft (`ok`), or GitHub refused, and `text` says so; null otherwise. An older server doesn't send it. */
+  draft_again?: { ok: boolean; text: string } | null;
 };
 
 export type Task = {

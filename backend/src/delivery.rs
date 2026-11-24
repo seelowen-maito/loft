@@ -75,6 +75,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             final_ci_fix: String::new(),
             actions_runs: Default::default(),
             reviewed_to: String::new(),
+            draft_again: None,
             last_notes: String::new(),
             migrated: false,
             standalone: false,
@@ -1164,7 +1165,24 @@ async fn begin(state: &AppState, d: &Delivery, n: i64, agent: &crate::db::Agent)
             .await
             .map_err(|e| format!("Couldn't label #{n} `in-progress`: {e}"))?;
     }
+    let again = back_to_draft(state, d, n).await;
+    // Done before (its final review passed): like a reopen, the next final review covers only what comes after now.
+    let head = match &again {
+        Some(a) if a.ok && !d.done_at.is_empty() => branch_head(state, d).await.ok(),
+        _ => None,
+    };
     let d = update(state, &d.repo, d.spec, |d| {
+        if let Some(a) = again {
+            if a.ok {
+                // A draft again: Loft stops following the ready PR's CI and marks it ready the usual way.
+                (d.ready_retry, d.final_ci, d.final_ci_since, d.final_ci_fix) = (false, String::new(), String::new(), String::new());
+                if !d.done_at.is_empty() {
+                    (d.done_at, d.final_rounds) = (String::new(), 0);
+                    d.reviewed_to = head.unwrap_or_else(|| d.reviewed_to.clone());
+                }
+            }
+            d.draft_again = Some(a);
+        }
         d.state = "running".into();
         (d.current, d.dev) = (Some(n), agent.id.clone());
         if let Some(x) = d.ticket_mut(n) {
@@ -3369,6 +3387,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "checks_url": checks_url(d),
         "ci_since": delivery_ci_since(d),
         "actions_minutes": (!d.local && d.state != "planned").then(|| crate::actions::total(&d.actions_runs)),
+        "draft_again": d.draft_again,
         "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
     });
     if !d.standalone {
@@ -3625,19 +3644,14 @@ pub async fn reopen(state: &AppState, repo: &str, spec: i64) -> Result<String, S
     }
     let head = branch_head(state, &d).await.map_err(|e| format!("Nothing was reopened: {e}"))?;
     if p["draft"] != true {
-        let query = "mutation($id: ID!) { convertPullRequestToDraft(input: { pullRequestId: $id }) { pullRequest { isDraft } } }";
-        let v = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query, "variables": { "id": p["node_id"] } })))
-            .await
-            .map_err(|e| format!("Nothing was reopened: couldn't put spec PR #{pr} back to draft: {e}"))?;
-        if let Some(e) = v["errors"].as_array().and_then(|es| es.first()) {
-            return Err(format!("Nothing was reopened: couldn't put spec PR #{pr} back to draft: {}", e["message"].as_str().unwrap_or("GitHub refused")));
-        }
+        to_draft(state, &p).await.map_err(|e| format!("Nothing was reopened: couldn't put spec PR #{pr} back to draft: {e}"))?;
     }
     let d = update(state, repo, spec, |d| {
         d.state = "running".into();
         (d.done_at, d.ready_retry, d.final_rounds, d.current) = (String::new(), false, 0, None);
         (d.final_ci, d.final_ci_since, d.final_ci_fix) = (String::new(), String::new(), String::new());
         d.reviewed_to = head.clone();
+        d.draft_again = None;
     })
     .ok_or("The Delivery record couldn't be saved.")?;
     track_pr(state, &d).await;
@@ -3649,6 +3663,43 @@ pub async fn reopen(state: &AppState, repo: &str, spec: i64) -> Result<String, S
     let (n, agent) = (next.expect("checked"), agent.expect("checked"));
     begin(state, &d, n, &agent).await.map_err(|e| format!("Reopened, but {e}: the mirror's next poll starts it."))?;
     Ok(format!("Reopened: spec PR #{pr} is a draft again, and {} is building #{n}.", agent.name))
+}
+
+/// Puts the PR `p` (as GitHub's pulls API gives it) back to draft. What GitHub said when it refused.
+async fn to_draft(state: &AppState, p: &Value) -> Result<(), String> {
+    let query = "mutation($id: ID!) { convertPullRequestToDraft(input: { pullRequestId: $id }) { pullRequest { isDraft } } }";
+    let v = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query, "variables": { "id": p["node_id"] } }))).await.map_err(|e| e.to_string())?;
+    match v["errors"].as_array().and_then(|es| es.first()) {
+        Some(e) => Err(e["message"].as_str().unwrap_or("GitHub refused").to_string()),
+        None => Ok(()),
+    }
+}
+
+/// Ticket #n of a spec's Delivery on GitHub starts while its spec PR is open and ready for review (tickets
+/// published after the ready, started without Reopen delivery): the PR goes back to draft, as Reopen does, so
+/// the workflows that skip drafts save again, and it's marked ready the usual way once the tickets close. The
+/// card's line, or None when the PR is a draft already, isn't open, or Loft couldn't read it.
+async fn back_to_draft(state: &AppState, d: &Delivery, n: i64) -> Option<crate::db::DraftAgain> {
+    let pr = d.pr.filter(|_| !d.local && !d.standalone)?;
+    let p = match crate::github::get(state, &format!("/repos/{}/pulls/{pr}", d.repo)).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("delivery {}#{}: couldn't read spec PR #{pr} to keep it a draft: {e}", d.repo, d.spec);
+            return None;
+        }
+    };
+    if p["state"] != "open" || p["draft"] != false {
+        return None;
+    }
+    let again = match to_draft(state, &p).await {
+        Ok(()) => crate::db::DraftAgain { ok: true, text: format!("Spec PR #{pr} is a draft again: #{n} started while it was ready for review. Loft marks it ready again once the tickets close.") },
+        Err(e) => crate::db::DraftAgain {
+            ok: false,
+            text: format!("Spec PR #{pr} stayed ready for review when #{n} started: GitHub refused to put it back to draft ({e}). Every push runs its whole CI until you make it a draft on GitHub."),
+        },
+    };
+    tracing::info!("delivery {}#{}: {}", d.repo, d.spec, again.text);
+    Some(again)
 }
 
 /// `POST /api/issues/{id}/reopen-delivery`: Reopen delivery on a spec's Delivery card.

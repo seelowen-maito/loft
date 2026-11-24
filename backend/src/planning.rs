@@ -785,6 +785,7 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
         d.state = "ready".into();
         (d.final_ci, d.final_ci_since, d.final_rounds) = ("following".into(), crate::db::now(), 0);
         d.final_ci_fix.clear();
+        d.draft_again = None;
     }) else {
         return Ok(Some(pr));
     };
@@ -4790,8 +4791,8 @@ pub(crate) mod tests {
         let reopen = its[0]["actions"].as_array().unwrap().iter().find(|a| a["kind"] == "reopen").unwrap();
         assert_eq!((&reopen["path"], &reopen["body"]), (&json!("/api/deliveries/reopen"), &json!({ "repo": slug, "spec": 40 })));
 
-        // Reopen: the spec PR goes back to draft, and the team's Dev builds #43.
-        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, spec_pr(slug, false));
+        // Reopen: the spec PR goes back to draft, and the team's Dev builds #43 (GitHub says it's a draft from then on).
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls/500"), vec![(200, spec_pr(slug, false)), (200, spec_pr(slug, true))]);
         let before = woken(&st, &dev).len();
         let Json(r) = crate::delivery::reopen_route(State(st.clone()), Json(crate::delivery::Which { repo: slug.into(), spec: 40 })).await.unwrap();
         assert_eq!(r["message"], "Reopened: spec PR #500 is a draft again, and Builder is building #43.");
@@ -4842,6 +4843,83 @@ pub(crate) mod tests {
         // The Lead hands it out like any ticket.
         tool(&st, &lead, "assign_ticket", json!({ "ticket": 43, "dev": "Builder" })).await.unwrap();
         assert!(woken(&st, &dev).last().is_some_and(|p| p.contains("build ticket #43 \"Docs\"")));
+    }
+
+    /// The convertPullRequestToDraft calls the fake got.
+    fn draft_calls(fake: &Fake) -> Vec<crate::github::tests::Seen> {
+        fake.seen("/graphql").into_iter().filter(|c| c.body["query"].as_str().is_some_and(|q| q.contains("convertPullRequestToDraft"))).collect()
+    }
+
+    #[tokio::test]
+    async fn a_ticket_starting_while_the_spec_pr_is_ready_puts_it_back_to_draft() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/draft-again";
+        let (dev, team) = building_both(&st, &fake, "draft-again", &["code_reviewer"]).await;
+        let cr = &team[0];
+        let shown = |st: &AppState| crate::delivery::delivery_json(st, &delivery(st, slug));
+        // #41 started with the spec PR a draft: it stays as it is.
+        assert!(draft_calls(&fake).is_empty());
+        assert_eq!(shown(&st)["draft_again"], Value::Null);
+
+        // The spec PR is ready for review while #41 is built: #42 starting puts it back to draft, and the card says why.
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls/500"), vec![(200, spec_pr(slug, false)), (200, spec_pr(slug, true))]);
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("Next: #42 is with Builder."), "{out}");
+        let calls = draft_calls(&fake);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].body["variables"]["id"], "PR_500");
+        assert_eq!(shown(&st)["draft_again"], json!({ "ok": true, "text": "Spec PR #500 is a draft again: #42 started while it was ready for review. Loft marks it ready again once the tickets close." }));
+        assert!(woken(&st, &dev).last().is_some_and(|w| w.contains("build ticket #42 \"API\"")));
+
+        // Once the tickets close it's ready again the usual way: the Code reviewer's pass marks it, and the line goes.
+        let out = tool(&st, &dev, "submit_ticket", json!({ "number": 42, "commits": ["0123abcd"] })).await.unwrap();
+        assert!(out.contains("Code reviewer) is reviewing the whole spec PR #500 now."), "{out}");
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls/500"), vec![(200, spec_pr(slug, true)), (200, spec_pr(slug, false))]);
+        let out = tool(&st, cr, "review_ticket", json!({ "number": 500, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.ends_with("Spec PR #500 is ready for review now, and the user is told it can be merged once its CI is green."), "{out}");
+        assert_eq!(draft_calls(&fake).len(), 1, "a ready PR made by Loft isn't put back");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.draft_again.is_none()), ("ready", true));
+        assert_eq!(shown(&st)["draft_again"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_spec_pr_github_wont_put_back_to_draft_is_said_on_the_card_and_the_delivery_goes_on() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/draft-refused";
+        let (dev, _) = building_both(&st, &fake, "draft-refused", &[]).await;
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, spec_pr(slug, false));
+        fake.route("POST", "/graphql", 200, json!({ "errors": [{ "message": "Resource not accessible by integration" }] }));
+        let out = tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert!(out.contains("Next: #42 is with Builder."), "{out}");
+        assert_eq!(draft_calls(&fake).len(), 1);
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.current), ("running", Some(42)));
+        assert!(woken(&st, &dev).last().is_some_and(|w| w.contains("build ticket #42 \"API\"")));
+        let v = crate::delivery::delivery_json(&st, &d);
+        assert_eq!(v["draft_again"], json!({ "ok": false, "text": "Spec PR #500 stayed ready for review when #42 started: GitHub refused to put it back to draft (Resource not accessible by integration). Every push runs its whole CI until you make it a draft on GitHub." }));
+    }
+
+    #[tokio::test]
+    async fn a_new_ticket_started_on_a_done_delivery_without_reopen_puts_the_spec_pr_back_to_draft_like_reopen() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/draft-done";
+        let (dev, _) = done_delivery(&st, &fake, "draft-done").await;
+        crate::delivery::record_ticket(&st, slug, 40, 43, "Docs", vec![]);
+        fake.route("POST", &format!("/repos/{slug}/issues/43/labels"), 201, json!({}));
+        fake.in_turn("GET", &format!("/repos/{slug}/pulls/500"), vec![(200, spec_pr(slug, false)), (200, spec_pr(slug, true))]);
+        // Running again by some way other than Reopen delivery: the mirror's catch-up hands out #43.
+        crate::delivery::update(&st, slug, 40, |d| d.state = "running".into());
+        crate::delivery::retry(&st, slug).await;
+        assert_eq!(draft_calls(&fake).len(), 1);
+        assert!(woken(&st, &dev).last().is_some_and(|w| w.contains("build ticket #43 \"Docs\"")));
+        let d = delivery(&st, slug);
+        // Like a reopen: Loft stops following the ready PR's CI, and the next final review covers only what comes after.
+        assert_eq!((d.state.as_str(), d.done_at.as_str(), d.final_ci.as_str(), d.reviewed_to.as_str(), d.current), ("running", "", "", CI_HEAD, Some(43)));
+        assert!(d.draft_again.is_some_and(|a| a.ok));
     }
 
     #[tokio::test]
@@ -5042,7 +5120,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "draft_again": null, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);

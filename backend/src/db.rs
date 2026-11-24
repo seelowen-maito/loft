@@ -94,6 +94,10 @@ pub struct Delivery {
     /// review already, so the next one reviews only what came after. Empty before any reopen.
     #[serde(default)]
     pub reviewed_to: String,
+    /// A ticket started while its spec PR was ready for review: whether Loft put the PR back to draft, and the
+    /// card's line saying so (or why GitHub refused). Cleared when the PR is marked ready again or reopened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_again: Option<DraftAgain>,
     /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
     /// ticket or final review waiting for the user hands them to the Dev.
     #[serde(default)]
@@ -163,6 +167,14 @@ impl Delivery {
             }
         }
     }
+}
+
+/// See [`Delivery::draft_again`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DraftAgain {
+    /// The PR is a draft again; false when GitHub refused, so it stayed ready for review.
+    pub ok: bool,
+    pub text: String,
 }
 
 /// A project setting changed from Loft's default: its value, who changed it (an agent's id, empty for the user, and
@@ -1673,6 +1685,7 @@ impl Db {
                 final_ci_fix: String::new(),
                 actions_runs: Default::default(),
                 reviewed_to: String::new(),
+                draft_again: None,
                 last_notes: String::new(),
                 migrated: true,
                 standalone: false,
