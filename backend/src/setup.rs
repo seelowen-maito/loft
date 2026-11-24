@@ -983,7 +983,7 @@ mod tests {
         // A model that only narrates: it never posts a round.
         let bin = st.cfg.root.as_path().join("chatty-claude");
         std::fs::write(&bin, r#"#!/bin/sh
-prompt=$(cat)
+IFS= read -r prompt
 printf '%s\n---\n' "$prompt" >> prompts.log
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Hi, I am Dev!"}]}}'
