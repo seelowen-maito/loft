@@ -786,8 +786,8 @@ pub(crate) async fn after_tickets(state: &AppState, d: &crate::db::Delivery) -> 
     Ok(ready_if_done(state, d).await?.map(|pr| format!("\nIt was the spec's last open ticket: spec PR #{pr} is now ready for review: https://github.com/{slug}/pull/{pr}")))
 }
 
-/// [`mark_ready`], noting a call that failed for the mirror to retry on its next poll; a PR found ready,
-/// merged or closed is settled and never asked about again.
+/// [`mark_ready`], noting a call that failed for the mirror to retry on its next poll; a PR found merged or
+/// closed is settled and never asked about again.
 pub(crate) async fn ready_if_done(state: &AppState, d: &crate::db::Delivery) -> Result<Option<i64>, String> {
     let out = mark_ready(state, d).await;
     let failed = out.is_err();
@@ -795,7 +795,7 @@ pub(crate) async fn ready_if_done(state: &AppState, d: &crate::db::Delivery) -> 
     out
 }
 
-/// Marks the Delivery's spec PR ready for review when it's still an open draft, and has Loft watch it, so
+/// Marks the Delivery's spec PR ready for review when it's still an open draft (one already ready stays so), and has Loft watch it, so
 /// it reaches Needs you (with a push) once it can be merged. Loft then follows its CI: the Delivery is done
 /// once it's green. The caller knows every ticket is closed; a
 /// Delivery migrated from before Deliveries (or with no tickets listed) checks the spec's sub-issues on
@@ -808,7 +808,7 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
         crate::delivery::update(state, slug, spec, |d| d.state = to);
     };
     let p = crate::github::get(state, &format!("/repos/{slug}/pulls/{pr}")).await.map_err(|e| format!("couldn't read spec PR #{pr}: {e}"))?;
-    if p["state"] != "open" || p["draft"] != true {
+    if p["state"] != "open" {
         settle("settled");
         return Ok(None);
     }
@@ -819,12 +819,15 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
             return Ok(None);
         }
     }
-    let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }";
-    let v = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query, "variables": { "id": p["node_id"] } })))
-        .await
-        .map_err(|e| format!("couldn't mark spec PR #{pr} ready for review: {e}"))?;
-    if let Some(e) = v["errors"].as_array().and_then(|es| es.first()) {
-        return Err(format!("couldn't mark spec PR #{pr} ready for review: {}", e["message"].as_str().unwrap_or("GitHub refused")));
+    // Already ready (it couldn't go back to draft, or the user marked it ready): followed all the same.
+    if p["draft"] == true {
+        let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }";
+        let v = crate::github::request(state, reqwest::Method::POST, "/graphql", Some(json!({ "query": query, "variables": { "id": p["node_id"] } })))
+            .await
+            .map_err(|e| format!("couldn't mark spec PR #{pr} ready for review: {e}"))?;
+        if let Some(e) = v["errors"].as_array().and_then(|es| es.first()) {
+            return Err(format!("couldn't mark spec PR #{pr} ready for review: {}", e["message"].as_str().unwrap_or("GitHub refused")));
+        }
     }
     // Ready, but done only once its CI is green: Loft follows it from now on.
     let Some(d) = crate::delivery::update(state, slug, spec, |d| {
@@ -1735,19 +1738,38 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_spec_pr_already_ready_or_merged_is_left_alone() {
+    async fn a_spec_pr_already_ready_is_followed_and_a_merged_one_left_alone() {
+        // Already ready (it couldn't go back to draft, or the user marked it): no GraphQL call, but Loft follows its CI
+        // as if it had marked it ready.
         let st = state();
         let fake = own_fake(&st);
         let slug = "octo/ready-done";
         let a = planner_on(&st, "ready-done", Some("git@github.com:octo/ready-done.git"));
         spec_with_tickets(&st, &fake, slug);
         subs(&st, &fake, slug, &["closed", "closed"]);
-
-        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "body": "Closes #40" }));
-        assert!(!close(&st, &a, 41, &["abc1234"]).await.unwrap().contains("ready for review"));
-        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "closed", "merged": true, "draft": false, "body": "Closes #40" }));
-        assert!(!close(&st, &a, 42, &["def5678"]).await.unwrap().contains("ready for review"));
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": false, "body": "Closes #40", "head": { "sha": CI_HEAD } }));
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": [run("in_progress", None)] }));
+        assert!(close(&st, &a, 41, &["abc1234"]).await.unwrap().contains("spec PR #500 is now ready for review"));
         assert!(fake.seen("/graphql").is_empty());
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.done_at.as_str()), ("ready", "following", ""));
+        // Green: done, like one Loft marked ready.
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/status"), 200, json!({ "statuses": [] }));
+        crate::delivery::follow_all(&st).await;
+        assert!(!st.db.get_delivery(slug, 40).unwrap().unwrap().done_at.is_empty());
+
+        // Merged: settled, nothing to follow.
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/merged-done";
+        let a = planner_on(&st, "merged-done", Some("git@github.com:octo/merged-done.git"));
+        spec_with_tickets(&st, &fake, slug);
+        subs(&st, &fake, slug, &["closed", "closed"]);
+        fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "closed", "merged": true, "draft": false, "body": "Closes #40" }));
+        assert!(!close(&st, &a, 41, &["abc1234"]).await.unwrap().contains("ready for review"));
+        assert!(fake.seen("/graphql").is_empty());
+        assert_eq!(st.db.get_delivery(slug, 40).unwrap().unwrap().state, "settled");
     }
 
     #[tokio::test]
@@ -1857,8 +1879,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_catch_up_leaves_ready_merged_and_closed_spec_prs_alone() {
-        for (i, pr) in [json!({ "state": "open", "draft": false }), json!({ "state": "closed", "merged": true, "draft": false }), json!({ "state": "closed", "draft": true })].into_iter().enumerate() {
+    async fn the_catch_up_leaves_merged_and_closed_spec_prs_alone() {
+        for (i, pr) in [json!({ "state": "closed", "merged": true, "draft": false }), json!({ "state": "closed", "draft": true })].into_iter().enumerate() {
             let st = state();
             let fake = own_fake(&st);
             let (name, slug) = (format!("ready-settled-{i}"), format!("octo/ready-settled-{i}"));
