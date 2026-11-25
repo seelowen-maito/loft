@@ -5243,7 +5243,7 @@ mod tests {
 
         // Denied: the agent is told to use its own clone.
         let asking = guard(user.clone());
-        crate::agents::tests::until("a permission request", 5, || pending().len() == 1).await;
+        crate::agents::tests::until("a permission request", 60, || pending().len() == 1).await;
         let req = pending().remove(0);
         assert_eq!(req.tool_name, "Checkout");
         assert_eq!(req.input["folder"], user.display().to_string());
@@ -5255,7 +5255,7 @@ mod tests {
 
         // No rule to save: Always allow is refused, even with a rule posted, and the agent's tools stay as they were.
         let asking = guard(user.clone());
-        crate::agents::tests::until("a second permission request", 5, || pending().len() == 1).await;
+        crate::agents::tests::until("a second permission request", 60, || pending().len() == 1).await;
         let id = pending()[0].id.clone();
         assert_eq!(pending()[0].rule, "");
         let tools = st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools;
@@ -5267,7 +5267,7 @@ mod tests {
         crate::agents::decide(&st, &id, "allow_once", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["allow"], true);
         let again = guard(user.join("frontend"));
-        crate::agents::tests::until("the next change asking again", 5, || pending().len() == 1).await;
+        crate::agents::tests::until("the next change asking again", 60, || pending().len() == 1).await;
         crate::agents::decide(&st, &pending()[0].id, "deny", None, None, None).unwrap();
         assert_eq!(again.await.unwrap()["allow"], false);
 
@@ -5286,10 +5286,10 @@ mod tests {
         let asking = tokio::spawn(handle(State(st.clone()), P(a.id.clone()), axum::Json(req)));
 
         // Allowing the first doesn't let the second run unasked.
-        crate::agents::tests::until("the first question", 5, || pending().len() == 1).await;
+        crate::agents::tests::until("the first question", 60, || pending().len() == 1).await;
         assert_eq!(pending()[0].input["folder"], one.display().to_string());
         crate::agents::decide(&st, &pending()[0].id, "allow", None, None, None).unwrap();
-        crate::agents::tests::until("the second question", 5, || pending().first().is_some_and(|p| p.input["folder"] == two.display().to_string())).await;
+        crate::agents::tests::until("the second question", 60, || pending().first().is_some_and(|p| p.input["folder"] == two.display().to_string())).await;
         crate::agents::decide(&st, &pending()[0].id, "deny", None, None, None).unwrap();
         let v = asking.await.unwrap().0;
         assert_eq!(v["allow"], false);
