@@ -45,7 +45,8 @@ pub fn mcp_tools() -> Vec<Value> {
             "title": { "type": "string", "description": "The spec's title: what gets built, in a few words." },
             "project": { "type": "string", "description": "When you work in several projects: the one this is for (its repo gets it). Defaults to your starred main project." },
             "body": { "type": "string", "description": "The spec in Markdown, following the spec template." },
-            "docs_branch": { "type": "string", "description": "In a grill that committed glossary or ADR changes: the docs branch, pushed to GitHub first. The spec branch starts from it, or gets it merged in when it already exists, so the spec PR carries the docs and no Docs PR is opened. Leave it out when there are no docs commits." }
+            "docs_branch": { "type": "string", "description": "In a grill that committed glossary or ADR changes: the docs branch, pushed to GitHub first. The spec branch starts from it, or gets it merged in when it already exists, so the spec PR carries the docs and no Docs PR is opened. Leave it out when there are no docs commits." },
+            "ci_mode": { "type": "string", "enum": ["per_ticket", "at_the_end"], "description": "In a grill on a private repo: the CI mode the user answered. Once the spec is published, Loft saves it as the project's `ci_mode` Project setting with `set_project_setting`, as changed by you. Leave it out when it wasn't asked or was left unanswered." }
         }, "required": ["title", "body"] }
     }), json!({
         "name": "publish_tickets",
@@ -104,10 +105,25 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
         publish_tickets(state, all, me, args).await
     } else {
         let docs = args["docs_branch"].as_str().map(str::trim).filter(|d| !d.is_empty());
-        publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or(""), docs).await.map(|(msg, slug, spec)| {
-            crate::grill::record_published(state, &me.id, &slug, Some(spec), vec![]);
-            msg
-        })
+        let ci_mode = args["ci_mode"].as_str().map(str::trim).filter(|m| !m.is_empty());
+        match ci_mode.filter(|m| ![crate::project_settings::PER_TICKET, crate::project_settings::AT_THE_END].contains(m)) {
+            Some(m) => Err(format!("`{m}` isn't a CI mode: pass `per_ticket` or `at_the_end`, or leave `ci_mode` out. Nothing was published.")),
+            None => match publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or(""), docs).await {
+                Ok((msg, slug, spec)) => {
+                    crate::grill::record_published(state, &me.id, &slug, Some(spec), vec![]);
+                    // The grill's answer, saved as the Lead would with its tool.
+                    let saved = match ci_mode {
+                        None => String::new(),
+                        Some(m) => match crate::project_settings::lead_change(state, me, &json!({ "project": me.project.trim(), "key": crate::project_settings::CI_MODE, "value": m })).await {
+                            Ok(project) => format!("\nThe CI mode `{m}` is saved in {project}'s Project settings, as changed by you."),
+                            Err(e) => format!("\nThe CI mode wasn't saved: {e}"),
+                        },
+                    };
+                    Ok(format!("{msg}{saved}"))
+                }
+                Err(e) => Err(e),
+            },
+        }
     };
     // Even a failure can leave issues published, so clients hear about it either way, in every project
     // a ticket went to.
@@ -8718,5 +8734,107 @@ pub(crate) mod tests {
         merge(json!("merge")).await.unwrap();
         assert_eq!(merged_with(), "merge");
         assert_eq!(merge(json!("octopus")).await.unwrap_err().1, "method must be squash | merge | rebase");
+    }
+
+    // ---- CI mode in the grill (#470) ----
+
+    /// `name`'s Lead, busy so a wake waits in its queue, on `octo/<name>`, which the fake says is private or public.
+    fn lead_on(st: &AppState, fake: &Fake, name: &str, private: bool) -> Agent {
+        let mut a = planner_on(st, name, Some(&format!("git@github.com:octo/{name}.git")));
+        a.role = "lead".into();
+        st.db.save_agent(&a).unwrap();
+        st.rt.lock().unwrap().running.insert(a.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        fake.route("GET", &format!("/repos/octo/{name}"), 200, json!({ "default_branch": "main", "private": private }));
+        a
+    }
+
+    /// The user starts a grill with `a`: the wake it got.
+    async fn start_grill(st: &AppState, a: &Agent) -> String {
+        let body = json!({ "text": "grill me on rounds", "meta": { "grill": { "role": "start_request" } } });
+        let _ = crate::api::send_message(State(st.clone()), axum::extract::Path(a.id.clone()), Json(serde_json::from_value(body).unwrap())).await.map_err(|e| e.1).unwrap();
+        st.rt.lock().unwrap().grill_queued.get(&a.id).map(|q| q.join("\n---\n")).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_grill_on_a_private_repo_asks_its_ci_mode_right_after_test_seams() {
+        let st = state();
+        let fake = own_fake(&st);
+        let a = lead_on(&st, &fake, "grill-private", true);
+        let wake = start_grill(&st, &a).await;
+        assert!(wake.contains("Your project's repo is private: right after the Test seams question, ask its CI mode (see Planning: CI mode)."), "{wake}");
+        assert_eq!(crate::grill::active(&st, &a.id).unwrap().private_repos, ["grill-private"]);
+
+        // The instructions carry the question, right after Test seams, with a recommendation and the draft pattern.
+        let brief = crate::grill::with_brief(&st, &a.id, "round 1".into());
+        let at = |s: &str| brief.find(s).unwrap_or_else(|| panic!("missing {s:?}"));
+        assert!(at("- Test seams:") < at("# Planning: CI mode") && at("# Planning: CI mode") < at("# Planning: new project"));
+        for want in [
+            "Your project's repo is private, so GitHub bills every Actions minute",
+            "Right after the Test seams question, ask the project's CI mode as a round question with your recommendation: `per_ticket`",
+            "suggest the draft pattern for the workflows",
+            "`if: github.event.pull_request.draft == false`",
+            "Pass the answer as `ci_mode` to `mcp__loft__publish_spec`",
+        ] {
+            assert!(brief.contains(want), "missing {want:?}");
+        }
+        // Each round's wake reminds it where the answer goes.
+        crate::grill::tests::round(&st, &a, &["Spec?"]).unwrap();
+        let next = crate::grill::tests::send(&st, &a).unwrap();
+        assert!(next.contains("pass it as `docs_branch`, and the user's CI mode as `ci_mode` (see Planning: CI mode))"), "{next}");
+
+        // A public repo: no question anywhere.
+        let b = lead_on(&st, &fake, "grill-public", false);
+        let wake = start_grill(&st, &b).await;
+        assert!(wake.contains("[Grill mode:") && !wake.contains("CI mode"), "{wake}");
+        assert!(crate::grill::active(&st, &b.id).unwrap().private_repos.is_empty());
+        assert!(!crate::grill::with_brief(&st, &b.id, "round 1".into()).contains("CI mode"));
+        crate::grill::tests::round(&st, &b, &["Spec?"]).unwrap();
+        assert!(!crate::grill::tests::send(&st, &b).unwrap().contains("ci_mode"));
+
+        // Several projects: it names the private ones, and only a spec on one of them asks.
+        let mut c = lead_on(&st, &fake, "grill-many", true);
+        planner_on(&st, "grill-other", Some("git@github.com:octo/grill-other.git"));
+        fake.route("GET", "/repos/octo/grill-other", 200, json!({ "default_branch": "main", "private": false }));
+        c.projects = vec!["grill-many".into(), "grill-other".into()];
+        st.db.save_agent(&c).unwrap();
+        let wake = start_grill(&st, &c).await;
+        assert!(wake.contains("The repo of `grill-many` is private: a spec there asks its CI mode right after the Test seams question (see Planning: CI mode)."), "{wake}");
+        let brief = crate::grill::with_brief(&st, &c.id, "round 1".into());
+        assert!(brief.contains("The repo of `grill-many` is private, so GitHub bills") && brief.contains("- On a spec for another of your projects, skip this."));
+    }
+
+    #[tokio::test]
+    async fn publishing_the_spec_with_the_grills_answer_saves_the_ci_mode_as_the_lead() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-answer";
+        let mut a = planner_on(&st, "ci-answer", Some("git@github.com:octo/ci-answer.git"));
+        repo(&fake, slug, &["spec", "ready-for-agent"], 70);
+        let spec = |ci_mode: &str| json!({ "title": "Rounds", "body": "## Problem Statement\n\nIt hurts.", "ci_mode": ci_mode });
+        let ci = || crate::project_settings::get(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({ "project": "ci-answer" })).unwrap()));
+        let ci = || async { ci().await.unwrap().0["settings"].as_array().unwrap().iter().find(|s| s["key"] == "ci_mode").unwrap().clone() };
+
+        // Not a CI mode: refused before anything is published.
+        let err = mcp_call(&st, &a, "publish_spec", &spec("sometimes")).await.unwrap().unwrap_err();
+        assert_eq!(err, "`sometimes` isn't a CI mode: pass `per_ticket` or `at_the_end`, or leave `ci_mode` out. Nothing was published.");
+        assert!(posts(&fake, slug, "issues").is_empty());
+
+        // Not the Lead: the spec is published, and the CI mode isn't saved, as the Lead's tool says.
+        a.role = "dev".into();
+        st.db.save_agent(&a).unwrap();
+        let out = mcp_call(&st, &a, "publish_spec", &spec("at_the_end")).await.unwrap().unwrap();
+        assert!(out.starts_with("Published the spec as #70") && out.ends_with("\nThe CI mode wasn't saved: Only the project's Lead changes its Project settings, once the user said yes."), "{out}");
+        assert_eq!(ci().await["changed"], Value::Null);
+
+        // The Lead: saved, with the Lead as who changed it. A retry saves it again.
+        a.role = "lead".into();
+        st.db.save_agent(&a).unwrap();
+        let out = mcp_call(&st, &a, "publish_spec", &spec("at_the_end")).await.unwrap().unwrap();
+        assert!(out.starts_with("The spec \"Rounds\" is already published as #70") && out.ends_with("\nThe CI mode `at_the_end` is saved in ci-answer's Project settings, as changed by you."), "{out}");
+        let s = ci().await;
+        assert_eq!((&s["value"], &s["changed"]["agent"]), (&json!("at_the_end"), &json!({ "id": a.id, "name": a.name })));
+        assert!(crate::project_settings::ci_at_the_end(&st, "ci-answer"));
+
+        // Without `ci_mode`, nothing about it.
+        assert!(!publish(&st, &a, "Rounds").await.unwrap().contains("CI mode"));
     }
 }

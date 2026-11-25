@@ -548,7 +548,9 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
         meta["reply_to"] = r;
     }
     let grill = m.meta.as_ref().and_then(|v| v.get("grill")).filter(|g| g.is_object());
-    let meta = match crate::grill::on_user_message(&state, &agent, m.text.trim(), grill, meta)? {
+    // A grill on a private repo asks its CI mode: GitHub says which repos are, before the grill starts.
+    let private = if crate::grill::starts_grill(m.text.trim(), grill) { crate::grill::private_projects(&state, &agent).await } else { vec![] };
+    let meta = match crate::grill::on_user_message_with(&state, &agent, m.text.trim(), grill, meta, &private)? {
         crate::grill::Routed::Normal(meta) => meta,
         crate::grill::Routed::Handled { message, wake } => {
             if let Some(p) = wake {

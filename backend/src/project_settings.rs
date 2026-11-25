@@ -719,6 +719,13 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
 
 /// `set_project_setting`: the project's Lead changes one setting.
 async fn set_tool(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
+    let project = lead_change(state, me, args).await?;
+    Ok(format!("Saved, as changed by you now.\n{}", tool_text(state, &project)))
+}
+
+/// The project's Lead changes one setting, as `set_project_setting` asks (`project`, `key`, `value`): also how
+/// publishing a spec saves the CI mode the grill asked. The project changed.
+pub async fn lead_change(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
     if me.role != "lead" {
         return Err("Only the project's Lead changes its Project settings, once the user said yes.".into());
     }
@@ -736,5 +743,5 @@ async fn set_tool(state: &AppState, me: &Agent, args: &Value) -> Result<String, 
         }
     }
     save(state, &project, key, &args["value"], Some(me)).await?;
-    Ok(format!("Saved, as changed by you now.\n{}", tool_text(state, &project)))
+    Ok(project)
 }

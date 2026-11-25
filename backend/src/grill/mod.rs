@@ -76,6 +76,10 @@ pub struct Session {
     /// Older sessions stored a single one.
     #[serde(default, deserialize_with = "one_or_many")]
     pub published: Vec<Published>,
+    /// The agent's projects whose GitHub repo was private as the grill started: their grill asks the CI mode
+    /// (see Planning: CI mode).
+    #[serde(default)]
+    pub private_repos: Vec<String>,
 }
 
 fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Published>, D::Error> {
@@ -211,6 +215,45 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
 
 /// The end-of-planning card for a grill that published something: links to the spec and tickets, the
 /// spec's Delivery for Start delivery (or, for a plan without one, the suggested next message for the
+/// The agent's projects whose GitHub repo is private, read as a grill starts: GitHub bills every Actions minute
+/// there, so the grill asks the project's CI mode (see Planning: CI mode). A repo GitHub can't tell about counts as
+/// public.
+pub async fn private_projects(state: &AppState, a: &Agent) -> Vec<String> {
+    let mut out = vec![];
+    if crate::github::token(state).is_none() {
+        return out;
+    }
+    let projects = if a.projects.is_empty() { vec![a.project.trim().to_string()] } else { a.projects.clone() };
+    for p in projects.into_iter().filter(|p| !p.is_empty()) {
+        let Ok(slug) = crate::repos::github_repo(state, &p).await else { continue };
+        if crate::github::get(state, &format!("/repos/{slug}")).await.is_ok_and(|m| m["private"] == true) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// The private repos, as the subject of a sentence: "Your project's repo is", or for an agent with `several`
+/// projects, which ones. None when there's none.
+fn private_subject(private: &[String], several: bool) -> Option<String> {
+    let list = private.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+    match private {
+        [] => None,
+        [_] if !several => Some("Your project's repo is".into()),
+        [_] => Some(format!("The repo of {list} is")),
+        _ => Some(format!("The repos of {list} are")),
+    }
+}
+
+/// For the grill's start: the repos that are private, so the grill asks their CI mode.
+fn ci_mode_note(private: &[String], several: bool) -> String {
+    match private_subject(private, several) {
+        None => String::new(),
+        Some(which) if !several => format!(" {which} private: right after the Test seams question, ask its CI mode (see Planning: CI mode)."),
+        Some(which) => format!(" {which} private: a spec there asks its CI mode right after the Test seams question (see Planning: CI mode)."),
+    }
+}
+
 /// For an agent with several projects: the first round asks which one the grill is about (unless the user said),
 /// and the spec and tickets go there.
 fn which_project(a: &Agent) -> String {
@@ -497,6 +540,7 @@ fn new_session(agent_id: &str, topic: &str, status: &str) -> Session {
         summarized: false,
         seen_commands: vec![],
         published: vec![],
+        private_repos: vec![],
     }
 }
 
@@ -549,8 +593,9 @@ fn round_prompt(s: &Session, r: &Round, context: Option<u64>) -> String {
         ),
         _ => String::new(),
     };
+    let ci = if s.private_repos.is_empty() { "" } else { ", and the user's CI mode as `ci_mode` (see Planning: CI mode)" };
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`{ci}), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -569,20 +614,31 @@ pub enum Routed {
     Handled { message: Option<Message>, wake: Option<String> },
 }
 
-/// Routes a message the user sent to `agent`. Only the user's own messages reach this; messages from
-/// other agents, task briefs and wake-ups never count as answers.
+/// `on_user_message_with` for an agent with no private repo.
+#[cfg(test)]
 pub fn on_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, meta: Value) -> Result<Routed, ApiError> {
-    locked(state, &agent.id, || route_user_message(state, agent, text, grill, meta))
+    on_user_message_with(state, agent, text, grill, meta, &[])
 }
 
-fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, mut meta: Value) -> Result<Routed, ApiError> {
+/// Routes a message the user sent to `agent`. Only the user's own messages reach this; messages from
+/// other agents, task briefs and wake-ups never count as answers. `private`: the agent's projects whose repo is
+/// private (`private_projects`), which the caller reads from GitHub when the message starts a grill.
+pub fn on_user_message_with(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, meta: Value, private: &[String]) -> Result<Routed, ApiError> {
+    locked(state, &agent.id, || route_user_message(state, agent, text, grill, meta, private))
+}
+
+/// Whether a user message starts a grill: `/grill`, or "Grill me…" typed (the web composer, old app builds), which
+/// replaces an open one rather than being taken as an answer.
+pub fn starts_grill(text: &str, grill: Option<&Value>) -> bool {
+    let role = grill.and_then(|g| g["role"].as_str()).unwrap_or("");
+    role == "start_request" || (role.is_empty() && commands::is_start_request(text))
+}
+
+fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option<&Value>, mut meta: Value, private: &[String]) -> Result<Routed, ApiError> {
     let role = grill.and_then(|g| g["role"].as_str()).unwrap_or("");
     let conflict = |e: &str| ApiError(StatusCode::CONFLICT, e.into());
 
-    // "Grill me…" typed (the web composer, old app builds) starts a grill like /grill does, and replaces an
-    // open one rather than being taken as an answer.
-    let typed_start = role.is_empty() && commands::is_start_request(text);
-    if role == "start_request" || typed_start {
+    if starts_grill(text, grill) {
         let mut s = match active(state, &agent.id) {
             Some(s) if s.status == "preparing" => s,
             Some(mut old) => {
@@ -591,6 +647,7 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
             }
             None => new_session(&agent.id, text, "preparing"),
         };
+        s.private_repos = private.to_vec();
         save(state, &mut s).map_err(internal)?;
         meta["grill"] = json!({ "session_id": s.id, "role": "start_request" });
         let message = add_msg(state, &agent.id, None, "user", "text", text, meta);
@@ -600,8 +657,9 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
             ""
         };
         let which = which_project(agent);
+        let ci = ci_mode_note(private, agent.projects.len() > 1);
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}{ci}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -1196,7 +1254,7 @@ While you grill, build the project's language and record its hard decisions.
 - Without a spec, one Docs PR at the end: before `mcp__loft__grill_end` (also when the user stops the grill), push the branch and open one PR with `gh pr create` (title "Docs: <topic>", body listing the terms and ADRs it adds), and pass its URL as `docs_pr`. Loft shows it as a PR card. A grill that resolved no terms or decisions has no branch and opens no PR.
 
 {SPEC}
-
+{CI_MODE}
 # Planning: new project
 When your project folder has no git repo or no GitHub remote yet (Loft says so when the grill starts):
 - The first round also asks "Create the GitHub repo `<owner>/<project>` and publish this folder?". Call `mcp__loft__preview_new_repo` first: it gives the files and total size of the first commit, the owners the user can create it under (their account and the organizations their token can create repos in) and the question, with the owners as options and private as the recommendation. Ask it in the user's language, keeping the file list and the size.
@@ -1275,20 +1333,47 @@ Once the spec is published, split it into tickets the team can pick up.
 
 - Publish them with `mcp__loft__publish_tickets`: the spec's number as `spec` (or the Loft issue id `publish_spec` gave, for a plan kept in Loft), and every ticket with `blocked_by` naming the titles of the tickets that block it (or `owner/repo#n` for one outside this list, which Loft links and the Delivery waits for) and, when it isn't the spec's repo, its `project`. A ticket in another repo is created there, still a sub-issue of the spec and linked to its blockers across repos. Loft creates them blockers first as sub-issues of the spec, labelled `ready-for-agent` and assigned to the user, and links the blockers as GitHub dependencies. Under a spec with a spec PR it adds a `## Branch` section to each ticket naming the spec branch and PR, so don't write one yourself. Without a GitHub repo they become Loft issues under the spec, with the blockers as their dependencies. After a failure, tell the user what went wrong and call it again with the same tickets: what's published is skipped. Never create issues with `gh`."#;
 
-/// The grill instructions in full.
+/// The CI mode question, only in the instructions of a grill on a private repo, where GitHub bills every Actions
+/// minute: `{WHICH}` names the repo.
+const CI_MODE: &str = r#"
+# Planning: CI mode
+{WHICH} private, so GitHub bills every Actions minute its workflows spend, and each ticket's pushes run them on the draft spec PR.
+- Right after the Test seams question, ask the project's CI mode as a round question with your recommendation: `per_ticket` (each ticket closes only once its CI is green, Loft's default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once, when the spec PR is ready). First read the repo's `.github/workflows` and the project's `ci_mode` Project setting (`mcp__loft__project_settings`): recommend `at_the_end` when the workflows are heavy (jobs of several minutes, a matrix, mobile builds) and `per_ticket` when they're light, and when the setting was already changed, ask whether to keep it.
+- In the same question, suggest the draft pattern for the workflows: heavy jobs skip a draft PR (`if: github.event.pull_request.draft == false`, with `ready_for_review` among the `pull_request` types), so each ticket's pushes only run the light jobs (Loft counts a skipped job as green). Loft never changes the workflows: the user does, if they want to.
+- Pass the answer as `ci_mode` to `mcp__loft__publish_spec`: Loft saves it in the project's Project settings with `set_project_setting`, as changed by you. When the user left it unanswered, leave `ci_mode` out.
+"#;
+
+/// The grill instructions in full, for a grill on no private repo.
+#[cfg(test)]
 pub fn brief() -> String {
-    BRIEF.replace("{SPEC}", SPEC).replace("{TICKETS}", TICKETS)
+    brief_for(&[], false)
+}
+
+/// The grill instructions in full; with the CI mode question when `private` names the agent's projects whose repo
+/// is private, out of `several` or just one.
+pub fn brief_for(private: &[String], several: bool) -> String {
+    let ci = match private_subject(private, several) {
+        None => String::new(),
+        Some(which) if !several => CI_MODE.replace("{WHICH}", &which),
+        Some(which) => CI_MODE.replace("{WHICH}", &which) + "- On a spec for another of your projects, skip this.\n",
+    };
+    BRIEF.replace("{SPEC}", SPEC).replace("{CI_MODE}", &ci).replace("{TICKETS}", TICKETS)
 }
 
 /// `prompt` for a grill run, with the brief in front unless this context already has it. A new
 /// session, `/clear` and a compaction (`grill_briefed` cleared) each lose it.
 pub fn with_brief(state: &AppState, agent_id: &str, prompt: String) -> String {
-    let mut fresh = false;
+    let (mut fresh, mut several) = (false, false);
     let _ = state.db.update_agent(agent_id, |a| {
         fresh = !a.grill_briefed;
         a.grill_briefed = true;
+        several = a.projects.len() > 1;
     });
-    if fresh { format!("{}\n\n{prompt}", brief()) } else { prompt }
+    if !fresh {
+        return prompt;
+    }
+    let private = active(state, agent_id).map(|s| s.private_repos).unwrap_or_default();
+    format!("{}\n\n{prompt}", brief_for(&private, several))
 }
 
 #[cfg(test)]
