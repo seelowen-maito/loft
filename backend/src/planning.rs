@@ -4452,6 +4452,7 @@ pub(crate) mod tests {
             assert!(w.last().unwrap().contains(want), "missing {want:?} in {}", w.last().unwrap());
         }
         assert_eq!(posts(&fake, slug, "issues/500/comments").last().unwrap()["body"], "**CI** failed on `c1c1c1c`, which includes ticket #41: `test`.");
+        assert_eq!(fake.seen(&format!("/repos/{slug}/actions/jobs/77/logs")).len(), 1, "the failed job's log is downloaded once");
         assert_eq!(posts(&fake, slug, "issues/500/labels").last().unwrap(), &json!({ "labels": ["changes-requested"] }));
         assert_eq!(standing(&st, slug, 41).0, "started");
         assert!(tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.is_err());

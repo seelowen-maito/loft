@@ -2219,8 +2219,9 @@ enum Ci {
     /// The repo has active workflows, but no check showed up on the commit within the CI grace: a workflow's
     /// `paths` filter can skip a commit, so it passes, and Loft says so on the PR and the card.
     NoneRan,
-    /// The failed check runs and commit statuses.
-    Red(Vec<Value>, Vec<Value>),
+    /// The failed check runs and commit statuses, and the tails of the job logs already read, by check run id: the
+    /// changes round reuses them rather than downloading them again.
+    Red(Vec<Value>, Vec<Value>, std::collections::BTreeMap<i64, String>),
     /// A Billing block: GitHub refused to run the jobs (the owner's payments failed, or its spending limit was
     /// reached). The failed check runs.
     Billing(Vec<Value>),
@@ -2294,11 +2295,11 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
             }
             Ok(out)
         }
-        Ci::Red(runs, statuses) => {
+        Ci::Red(runs, statuses, logs) => {
             // A ticket whose CI already passed on an earlier commit isn't what broke it.
             match included.iter().find(|t| t.verdicts.get("ci").is_none_or(|v| v != "pass")) {
                 Some(t) if waits_for_ci(t) => {
-                    let (names, log) = failure_of(state, &d.repo, &runs, &statuses).await;
+                    let (names, log) = failure_of(state, &d.repo, &runs, &statuses, &logs).await;
                     ci_failed(state, d, t, &head, &names, &log).await
                 }
                 // Being fixed, waiting for its fix, or waiting for the user: its next commit runs the CI again.
@@ -2364,10 +2365,11 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str, grace: i64)
     if billing_blocked(state, repo, &failed_runs).await? {
         return Ok(Ci::Billing(failed_runs));
     }
-    if failed_statuses.is_empty() && all_infra(state, repo, &failed_runs).await? {
+    let mut logs = std::collections::BTreeMap::new();
+    if failed_statuses.is_empty() && all_infra(state, repo, &failed_runs, &mut logs).await? {
         return Ok(Ci::Infra(failed_runs));
     }
-    Ok(Ci::Red(failed_runs, failed_statuses))
+    Ok(Ci::Red(failed_runs, failed_statuses, logs))
 }
 
 /// What a commit's pending checks say: `Queued` when some check run is `queued` and nothing runs (no check run
@@ -2451,15 +2453,19 @@ async fn without_superseded(state: &AppState, repo: &str, sha: &str, runs: Vec<V
 const INFRA_CONCLUSIONS: [&str; 3] = ["cancelled", "startup_failure", "stale"];
 
 /// Whether every one of these failed check runs (`without_superseded`'s) failed for GitHub's infrastructure, not
-/// the code: an infrastructure conclusion, or an Actions job with no log. A failure with a log stops it at once.
-async fn all_infra(state: &AppState, repo: &str, failed_runs: &[Value]) -> anyhow::Result<bool> {
+/// the code: an infrastructure conclusion, or an Actions job with no log. A failure with a log stops it at once, and
+/// its log's tail goes in `logs` for [`failure_of`].
+async fn all_infra(state: &AppState, repo: &str, failed_runs: &[Value], logs: &mut std::collections::BTreeMap<i64, String>) -> anyhow::Result<bool> {
     for c in failed_runs {
         if c["conclusion"].as_str().is_some_and(|x| INFRA_CONCLUSIONS.contains(&x)) {
             continue;
         }
         let Some(id) = c["id"].as_i64().filter(|_| c["app"]["slug"] == "github-actions") else { return Ok(false) };
         match crate::github::get_text(state, &format!("/repos/{repo}/actions/jobs/{id}/logs")).await {
-            Ok(text) if !text.trim().is_empty() => return Ok(false),
+            Ok(text) if !text.trim().is_empty() => {
+                logs.insert(id, log_tail(&text));
+                return Ok(false);
+            }
             Ok(_) => {}
             Err(e) if crate::github::is_gone(&e) => {}
             Err(e) => return Err(e),
@@ -2593,8 +2599,8 @@ async fn infra_failed(state: &AppState, d: &Delivery, failed: &[Value], head: &s
 }
 
 /// The names of the failed check runs and commit statuses, and each one's failure with its log: read only when
-/// a ticket goes back for it.
-async fn failure_of(state: &AppState, repo: &str, failed_runs: &[Value], failed_statuses: &[Value]) -> (Vec<String>, String) {
+/// a ticket goes back for it, unless `logs` has it already (see [`all_infra`]).
+async fn failure_of(state: &AppState, repo: &str, failed_runs: &[Value], failed_statuses: &[Value], logs: &std::collections::BTreeMap<i64, String>) -> (Vec<String>, String) {
     let (mut names, mut log) = (vec![], String::new());
     for c in failed_runs {
         let name = c["name"].as_str().unwrap_or("a check");
@@ -2611,8 +2617,12 @@ async fn failure_of(state: &AppState, repo: &str, failed_runs: &[Value], failed_
         if c["app"]["slug"] == "github-actions"
             && let Some(id) = c["id"].as_i64()
         {
-            match crate::github::get_text(state, &format!("/repos/{repo}/actions/jobs/{id}/logs")).await {
-                Ok(text) => log += &format!("```\n{}\n```\n", log_tail(&text)),
+            let read = match logs.get(&id) {
+                Some(tail) => Ok(tail.clone()),
+                None => crate::github::get_text(state, &format!("/repos/{repo}/actions/jobs/{id}/logs")).await.map(|text| log_tail(&text)),
+            };
+            match read {
+                Ok(tail) => log += &format!("```\n{tail}\n```\n"),
                 Err(e) => log += &format!("(Loft couldn't read its log: {e})\n"),
             }
         }
@@ -2806,8 +2816,8 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
             done(state, repo, spec);
             Ok(format!("{said}\nThe ready {}: {why}, so the user is told it can be merged.", final_tag(d)))
         }
-        Ci::Red(runs, statuses) => {
-            let (names, log) = failure_of(state, repo, &runs, &statuses).await;
+        Ci::Red(runs, statuses, logs) => {
+            let (names, log) = failure_of(state, repo, &runs, &statuses, &logs).await;
             ready_ci_failed(state, d, &head, &names, &log).await
         }
     }
