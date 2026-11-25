@@ -112,10 +112,9 @@ pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>
     let mut s: crate::settings::Settings = serde_json::from_value(merged).map_err(|e| bad(e.to_string()))?;
     // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
     s.push.relay_url = state.settings.get().push.relay_url;
-    // Older clients don't know the global auto-publish switch: they keep it.
-    if s.auto_publish_all.is_none() {
-        s.auto_publish_all = state.settings.get().auto_publish_all;
-    }
+    // Older clients still send the GitHub publishing Settings had: it's each project's own now (#467), so it's dropped.
+    let now = state.settings.get();
+    (s.auto_publish_all, s.auto_publish, s.comment_approval, s.comment_approval_default) = (now.auto_publish_all, now.auto_publish, now.comment_approval, now.comment_approval_default);
     // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
     // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
     if s.backup_dir != state.settings.get().backup_dir

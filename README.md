@@ -83,6 +83,10 @@ Each project also has its own **Project settings**, opened with **Settings** in 
 - **CI grace**: how long a commit with no check at all waits for one when the repo has workflows (10 minutes by default, up to 120), before Loft takes it as no CI ran and carries on.
 - **Team model**: the model, effort and subagent model new agents of the project start on (by default each agent's own, from its template). **Apply to the team now** gives the ones that are set to the agents whose main project it is; each agent stays editable on its own.
 - **Rust build cache**: on (the default), the project's agents build Rust through the shared sccache once it's installed; off, they build without it, from each agent's next run.
+- **Publish new issues to GitHub**: off (the default), a new Loft issue stays in Loft until you press Publish to GitHub; on, each new Loft issue of the project becomes a GitHub issue right away (only a project with a GitHub repo can).
+- **Comments going to GitHub**: which comments on the project's GitHub issues wait for your approval in Needs you before Loft posts them: every one (`Ask for every comment`, the default), only agents' (`Auto-approve my own comments`) or none (`Auto-approve everything`). Progress notes and private notes always stay in Loft.
+
+The last two used to be in Settings, for every project: on the update, each project kept the values Settings had, and a project added later starts at Loft's default.
 
 ### Use it from other devices
 

@@ -267,8 +267,9 @@ async fn serve() -> anyhow::Result<()> {
     state.rt.lock().unwrap().workspaces_not_moved = not_moved;
     setup::ensure_loft(&state);
     {
-        let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();
-        if let Err(e) = state.settings.migrate_github_settings(&with_repo) {
+        // GitHub publishing moved from Settings to each project's Project settings: the projects there now inherit it.
+        let projects: Vec<String> = repos::list(&state, false).await.into_iter().map(|r| r.name).collect();
+        if let Err(e) = project_settings::migrate_github_settings(&state, &projects) {
             tracing::warn!("GitHub settings migration: {e}");
         }
     }

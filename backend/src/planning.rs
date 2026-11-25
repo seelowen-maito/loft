@@ -8385,4 +8385,77 @@ pub(crate) mod tests {
         assert!(!crate::project_settings::sccache_on(&st, "pteam-lead") && crate::project_settings::sccache_on(&st, "other") && crate::project_settings::sccache_on(&st, ""));
         assert_eq!(crate::project_settings::team_defaults(&st, "pteam-lead"), vec![("model", "fable".to_string())]);
     }
+
+    // ---- GitHub publishing per project (#467) ----
+
+    #[tokio::test]
+    async fn each_project_inherits_the_github_publishing_settings_had_and_a_new_one_starts_at_loft_s_default() {
+        use crate::project_settings::{get, migrate_github_settings, put};
+        let st = state();
+        for p in ["gp-a", "gp-b", "gp-own", "gp-new"] {
+            std::fs::create_dir_all(st.settings.boot().projects_dir.join(p)).unwrap();
+        }
+        let read = |p: &str| get(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({ "project": p })).unwrap()));
+        let change = |p: &str, key: &str, value: Value| put(State(st.clone()), Json(serde_json::from_value(json!({ "project": p, "key": key, "value": value })).unwrap()));
+        let one = |v: &Value, key: &str| v["settings"].as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().clone();
+        // A project's two GitHub settings: their values, and whether each is still Loft's default, never changed.
+        let github = async |p: &str| {
+            let Json(v) = read(p).await.unwrap();
+            let (publish, mode) = (one(&v, "auto_publish"), one(&v, "comment_approval"));
+            (publish["value"].as_str().unwrap().to_string(), mode["value"].as_str().unwrap().to_string(), publish["changed"].is_null(), mode["changed"].is_null())
+        };
+        let s = |v: &str| v.to_string();
+
+        // Loft's defaults, on the page: off and ask.
+        let Json(v) = read("gp-a").await.unwrap();
+        let (publish, mode) = (one(&v, "auto_publish"), one(&v, "comment_approval"));
+        assert_eq!((&publish["kind"], &publish["default"], &mode["default"]), (&json!("choice"), &json!("off"), &json!("ask")));
+        let choices: Vec<&str> = mode["choices"].as_array().unwrap().iter().map(|c| c["value"].as_str().unwrap()).collect();
+        assert_eq!(choices, ["ask", "own", "all"]);
+
+        // Settings had them for every project: auto-publish on, own comments straight. gp-own already has its own mode.
+        let mut old = st.settings.get();
+        (old.auto_publish_all, old.comment_approval_default) = (Some(true), "own".into());
+        st.settings.save(old).unwrap();
+        let _ = change("gp-own", "comment_approval", json!("all")).await.unwrap();
+        migrate_github_settings(&st, &[s("gp-a"), s("gp-b"), s("gp-own")]).unwrap();
+        assert_eq!(github("gp-a").await, (s("on"), s("own"), false, false), "the old values, recorded as the user's");
+        assert_eq!(github("gp-b").await, (s("on"), s("own"), false, false));
+        assert_eq!((github("gp-own").await.0, github("gp-own").await.1), (s("on"), s("all")), "its own mode is kept");
+        assert!(crate::project_settings::auto_publish(&st, "gp-a") && crate::project_settings::comment_approval(&st, "gp-b") == "own");
+
+        // Settings no longer has them, so they're gone from its page, and a project made later starts at Loft's default.
+        let Json(view) = crate::api::get_settings(State(st.clone())).await;
+        for key in ["auto_publish_all", "auto_publish", "comment_approval", "comment_approval_default"] {
+            assert!(view["settings"].get(key).is_none(), "{key} left Settings");
+        }
+        migrate_github_settings(&st, &[s("gp-a"), s("gp-new")]).unwrap();
+        assert_eq!(github("gp-new").await, (s("off"), s("ask"), true, true));
+        // An older client still sending them changes nothing.
+        let _ = crate::api::put_settings(State(st.clone()), Json(json!({ "auto_publish_all": false, "comment_approval_default": "ask" }))).await.unwrap();
+        migrate_github_settings(&st, &[s("gp-a"), s("gp-new")]).unwrap();
+        assert_eq!(github("gp-a").await, (s("on"), s("own"), false, false));
+        assert_eq!(github("gp-new").await, (s("off"), s("ask"), true, true));
+    }
+
+    #[tokio::test]
+    async fn settings_from_before_the_global_switch_hand_each_project_its_own_and_defaults_save_nothing() {
+        use crate::project_settings::{auto_publish, comment_approval, migrate_github_settings};
+        let st = state();
+        let mut old = st.settings.get();
+        old.auto_publish = vec!["gp-x".into()];
+        old.comment_approval = [("gp-x".to_string(), "all".to_string()), ("gp-z".to_string(), "sometimes".to_string())].into();
+        old.comment_approval_default = "ask".into();
+        st.settings.save(old).unwrap();
+        migrate_github_settings(&st, &["gp-x".into(), "gp-y".into(), "gp-z".into()]).unwrap();
+        assert!(auto_publish(&st, "gp-x") && !auto_publish(&st, "gp-y"));
+        assert_eq!((comment_approval(&st, "gp-x"), comment_approval(&st, "gp-y"), comment_approval(&st, "gp-z")), (s("all"), s("ask"), s("ask")), "an unknown mode asks");
+        assert!(st.db.project_settings("gp-y").unwrap().is_empty(), "Loft's default isn't saved as a change");
+        assert_eq!(st.db.project_settings("gp-x").unwrap().len(), 2);
+        assert!(!auto_publish(&st, "") && comment_approval(&st, "") == "ask", "no project: off and ask");
+
+        fn s(v: &str) -> String {
+            v.to_string()
+        }
+    }
 }

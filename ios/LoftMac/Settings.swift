@@ -58,15 +58,6 @@ struct SettingsSection: View {
                     Toggle("Messaging rules", isOn: bool("messaging_rules")).accessibilityIdentifier("messagingRulesToggle")
                     note("Tells every agent to message other agents only with a finding, report, verdict or request, never thanks or waiting notes.")
                 }
-                Section("GitHub issues") {
-                    Picker("Comments going to GitHub", selection: binding("comment_approval_default", "ask")) {
-                        Text("Ask for every comment").tag("ask")
-                        Text("Auto-approve my own comments").tag("own")
-                        Text("Auto-approve everything").tag("all")
-                    }
-                    Toggle("Publish new Loft issues to GitHub automatically", isOn: bool("auto_publish_all"))
-                    note("Each new Loft issue in a project with a GitHub repo becomes a GitHub issue right away. Off: it stays in Loft until you press Publish to GitHub.")
-                }
                 Section("Navigation") {
                     Toggle("Show Simulator", isOn: bool("show_simulator"))
                     note("Adds a tab to the web app to view and control a booted iOS Simulator on this Mac.")

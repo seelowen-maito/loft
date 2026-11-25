@@ -515,10 +515,6 @@ export type Settings = {
   auto_update: boolean;
   show_simulator: boolean;
   messaging_rules: boolean;
-  /** Publish new Loft issues to GitHub as they're made (projects with a GitHub repo). */
-  auto_publish_all: boolean;
-  /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
-  comment_approval_default: ApprovalMode;
   /** Where the daily backups go; "" is ~/Library/Application Support/Loft/backups. */
   backup_dir: string;
   /** Hours with no run before an agent counts as idle and Loft shuts its Simulator device down. At least 1. */
@@ -583,8 +579,6 @@ export type CleanLog = {
   removed: number;
   failed: number;
 };
-
-export type ApprovalMode = "ask" | "own" | "all";
 
 /** GitHub's rate limit as its last answers said (`reset` in Unix seconds), and Loft's requests this hour by source. */
 export type GithubBudget = {

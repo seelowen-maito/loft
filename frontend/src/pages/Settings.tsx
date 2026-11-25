@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { RotateCw, TriangleAlert } from "lucide-react";
-import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { api, type AgentDevice, type AgentsSummary, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
@@ -51,20 +51,6 @@ export function Toggle({ on, onChange, label, hint }: { on: boolean; onChange: (
         {hint && <span className="block text-[11.5px] text-fg-3">{hint}</span>}
       </span>
     </button>
-  );
-}
-
-const MODES: { value: ApprovalMode; label: string }[] = [
-  { value: "ask", label: "Ask for every comment" },
-  { value: "own", label: "Auto-approve my own comments" },
-  { value: "all", label: "Auto-approve everything" },
-];
-
-function ModeSelect({ value, onChange }: { value: ApprovalMode; onChange: (m: ApprovalMode) => void }) {
-  return (
-    <select value={value} onChange={(e) => onChange(e.target.value as ApprovalMode)} className="input">
-      {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-    </select>
   );
 }
 
@@ -596,18 +582,6 @@ export default function SettingsPage() {
             onChange={(v) => set("messaging_rules", v)}
             label="Messaging rules"
             hint="Tells every agent to message other agents only with a finding, report, verdict or request, never thanks or waiting notes."
-          />
-        </SettingsCard>
-
-        <SettingsCard title="GitHub issues">
-          <Field label="Comments going to GitHub" hint="Every comment on a GitHub issue waits for your approval unless this says otherwise.">
-            <ModeSelect value={draft.comment_approval_default} onChange={(m) => set("comment_approval_default", m)} />
-          </Field>
-          <Toggle
-            on={draft.auto_publish_all}
-            onChange={(v) => set("auto_publish_all", v)}
-            label="Publish new Loft issues to GitHub automatically"
-            hint="Each new Loft issue in a project with a GitHub repo becomes a GitHub issue right away. Off: it stays in Loft until you press Publish to GitHub."
           />
         </SettingsCard>
 

@@ -57,6 +57,10 @@ pub const TEAM_EFFORT: &str = "team_effort";
 pub const TEAM_SUBAGENT_MODEL: &str = "team_subagent_model";
 /// Whether the project's agents build Rust through the shared sccache.
 pub const SCCACHE: &str = "sccache";
+/// Whether new Loft issues of the project are published to GitHub as they're made.
+pub const AUTO_PUBLISH: &str = "auto_publish";
+/// When comments on the project's mirrored issues go to GitHub: `ask`, `own` or `all`.
+pub const COMMENT_APPROVAL: &str = "comment_approval";
 /// The team defaults, each with the agent field it sets.
 const TEAM: &[(&str, &str)] = &[(TEAM_MODEL, "model"), (TEAM_EFFORT, "effort"), (TEAM_SUBAGENT_MODEL, "subagent_model")];
 
@@ -169,6 +173,29 @@ const DEFS: &[Def] = &[
         default: "on",
         kind: Kind::Choice,
     },
+    Def {
+        key: AUTO_PUBLISH,
+        label: "Publish new issues to GitHub",
+        help: "Whether each new Loft issue of the project becomes a GitHub issue right away. Only a project with a GitHub repo can publish.",
+        choices: &[
+            ("off", "Off", "New Loft issues stay in Loft until you press Publish to GitHub."),
+            ("on", "On", "Each new Loft issue becomes a GitHub issue as it's made."),
+        ],
+        default: "off",
+        kind: Kind::Choice,
+    },
+    Def {
+        key: COMMENT_APPROVAL,
+        label: "Comments going to GitHub",
+        help: "Which comments on the project's GitHub issues wait for your approval before Loft posts them there. Progress notes and private notes always stay in Loft.",
+        choices: &[
+            ("ask", "Ask for every comment", "Every comment waits for your approval."),
+            ("own", "Auto-approve my own comments", "Yours go straight to GitHub; agents' wait for your approval."),
+            ("all", "Auto-approve everything", "Every comment goes straight to GitHub."),
+        ],
+        default: "ask",
+        kind: Kind::Choice,
+    },
 ];
 
 /// A choice as text: in backticks, or "empty" for the empty one.
@@ -264,6 +291,40 @@ pub fn ci_at_the_end(state: &AppState, project: &str) -> bool {
 /// Whether `project`'s agents build Rust through sccache (when it's installed): yes unless the project turned it off.
 pub fn sccache_on(state: &AppState, project: &str) -> bool {
     project.trim().is_empty() || value_of(state, project.trim(), SCCACHE) != "off"
+}
+
+/// Whether `project`'s new Loft issues are published to GitHub as they're made: no unless the project turned it on.
+pub fn auto_publish(state: &AppState, project: &str) -> bool {
+    !project.trim().is_empty() && value_of(state, project.trim(), AUTO_PUBLISH) == "on"
+}
+
+/// Which comments on `project`'s mirrored issues go straight to GitHub: `ask` (none, every one waits for approval,
+/// the default), `own` (the user's) or `all`.
+pub fn comment_approval(state: &AppState, project: &str) -> String {
+    if project.trim().is_empty() { "ask".into() } else { value_of(state, project.trim(), COMMENT_APPROVAL) }
+}
+
+/// Hands the GitHub publishing Settings kept for every project (or, before that, per project there) to each of
+/// `projects`, once (#467): a project gets the value it had, saved as the user's change when it isn't Loft's
+/// default, unless it has its own already. Settings then drops it, so a project made later starts at Loft's default.
+pub fn migrate_github_settings(state: &AppState, projects: &[String]) -> Result<(), String> {
+    let mut s = state.settings.get();
+    if s.auto_publish_all.is_none() && s.auto_publish.is_empty() && s.comment_approval.is_empty() && s.comment_approval_default.is_empty() {
+        return Ok(());
+    }
+    for p in projects.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        let publish = s.auto_publish_all.unwrap_or_else(|| s.auto_publish.iter().any(|a| a.trim() == p));
+        let mode = s.comment_approval.get(p).unwrap_or(&s.comment_approval_default);
+        let mode = if matches!(mode.as_str(), "own" | "all") { mode.as_str() } else { "ask" };
+        let saved = state.db.project_settings(p).map_err(|e| e.to_string())?;
+        for (key, value) in [(AUTO_PUBLISH, if publish { "on" } else { "off" }), (COMMENT_APPROVAL, mode)] {
+            if !saved.contains_key(key) && def(key).is_some_and(|d| d.default != value) {
+                set(state, p, key, &json!(value), None)?;
+            }
+        }
+    }
+    (s.auto_publish_all, s.auto_publish, s.comment_approval, s.comment_approval_default) = (None, vec![], Default::default(), String::new());
+    state.settings.save(s).map_err(|e| e.to_string())
 }
 
 /// `project`'s team defaults that are set, as the agent fields they set (`model`, `effort`, `subagent_model`) and
@@ -499,7 +560,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "set_project_setting",
-            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10). `team_model`, `team_effort` and `team_subagent_model` are what new agents of the project start on: a model (`sonnet`, `opus`, `fable`, `haiku`), an effort (`low`, `medium`, `high`, `xhigh`, `max`) and the model their subagents run on, or empty for each agent's own (the default); the agents the team has keep theirs until the user applies them to the team on the settings page. `sccache` is `on` (the default) or `off`: whether the project's agents build Rust through the shared sccache.",
+            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10). `team_model`, `team_effort` and `team_subagent_model` are what new agents of the project start on: a model (`sonnet`, `opus`, `fable`, `haiku`), an effort (`low`, `medium`, `high`, `xhigh`, `max`) and the model their subagents run on, or empty for each agent's own (the default); the agents the team has keep theirs until the user applies them to the team on the settings page. `sccache` is `on` (the default) or `off`: whether the project's agents build Rust through the shared sccache. `auto_publish` is `off` (the default) or `on`: whether each new Loft issue of the project becomes a GitHub issue as it's made. `comment_approval` is which comments on the project's GitHub issues go straight to GitHub: `ask` (every one waits for the user's approval, the default), `own` (the user's go straight, agents' wait) or `all`.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "The project; your main project when omitted." },
                 "key": { "type": "string", "description": "The setting, like `ci_mode`." },
