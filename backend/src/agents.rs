@@ -773,6 +773,7 @@ fn fresh_threshold(setting: &str) -> u64 {
 fn reset_session_fields(a: &mut Agent) {
     a.session_id = None;
     a.context_tokens = None;
+    a.goal = None;
     a.grill_briefed = false;
     a.memory_index = None;
 }
@@ -1000,6 +1001,12 @@ pub fn needs_action_from_loft(state: &AppState, to: &Agent, text: &str) {
 /// The most FYIs put in front of one prompt; older ones are only counted.
 const MAX_FYIS_PER_PROMPT: usize = 20;
 
+/// A prompt that is a slash command, like `/goal clear` or `/context`: claude may answer it itself, without a turn.
+/// It runs only as the whole prompt, so it runs alone: no FYIs in front, no other queued message joined to it.
+fn is_command(prompt: &str) -> bool {
+    prompt.starts_with('/')
+}
+
 /// Put the pending FYIs, oldest first, in front of the prompt: the newest MAX_FYIS_PER_PROMPT,
 /// after a line saying how many older ones were left out.
 fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
@@ -1099,14 +1106,14 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
-            // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
-            let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
+            // A slash command must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
+            let fyis = if !is_command(&prompt) && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
             let full = with_fyis(&fyis, &prompt);
             let mut delivered = false;
             let failed = match run_once(&state, &agent_id, &full, trigger, for_user, throwaway, kill.clone(), &mut delivered).await {
                 Ok(failed) => failed,
                 Err(e) => {
-                    state.rt.lock().unwrap().runs.remove(&agent_id);
+                    end_run_info(&state, &agent_id);
                     // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
                     if !delivered {
                         let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
@@ -1130,30 +1137,51 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             let (next, push) = {
                 let mut rt = state.rt.lock().unwrap();
                 let drew = rt.redrawing.remove(&agent_id);
-                // The run that takes the queue delivers its agent messages.
-                let delivered = rt.queued_messages.remove(&agent_id).is_some();
-                let next = match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
-                    (Some(q), g) if !q.is_empty() => {
-                        // User work first; grill follow-ups wait for the run after it.
-                        if let Some(g) = g {
-                            rt.grill_queued.insert(agent_id.clone(), g);
+                // A slash command in a longer queue runs on its own first (a sent-now `/goal clear` put back, say);
+                // the rest waits for the run after it.
+                let command = rt.queued.get(&agent_id).filter(|q| q.len() > 1).and_then(|q| q.iter().find(|p| is_command(p)).cloned());
+                let (delivered, next) = if let Some(cmd) = command {
+                    let id = rt.queued_messages.get(&agent_id).and_then(|q| q.iter().find(|(_, p)| *p == cmd)).map(|(i, _)| *i);
+                    let mine = id.is_some_and(|i| state.db.get_message(&agent_id, i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()));
+                    match id {
+                        Some(i) => {
+                            unqueue(&state, &mut rt, &agent_id, i);
                         }
-                        let u = rt.queued_for_user.remove(&agent_id);
-                        take_delivery_queue(&mut rt, &agent_id);
-                        Some((q.join("\n\n"), "user", u, false))
+                        None => {
+                            let q = rt.queued.get_mut(&agent_id).unwrap();
+                            if let Some(at) = q.iter().position(|p| *p == cmd) {
+                                q.remove(at);
+                            }
+                        }
                     }
-                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false, false)),
-                    // A Redraw waits for everything else.
-                    _ if rt.redraw_queued.remove(&agent_id) => {
-                        rt.redrawing.insert(agent_id.clone());
-                        Some((REDRAW_PROMPT.to_string(), "avatar", false, true))
-                    }
-                    _ => {
-                        // Saved before the run stops counting as running, so a restart keeps the idle time.
-                        let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
-                        rt.running.remove(&agent_id);
-                        None
-                    }
+                    (id.is_some(), Some((cmd, "user", mine, false)))
+                } else {
+                    // The run that takes the queue delivers its agent messages.
+                    let delivered = rt.queued_messages.remove(&agent_id).is_some();
+                    let next = match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
+                        (Some(q), g) if !q.is_empty() => {
+                            // User work first; grill follow-ups wait for the run after it.
+                            if let Some(g) = g {
+                                rt.grill_queued.insert(agent_id.clone(), g);
+                            }
+                            let u = rt.queued_for_user.remove(&agent_id);
+                            take_delivery_queue(&mut rt, &agent_id);
+                            Some((q.join("\n\n"), "user", u, false))
+                        }
+                        (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false, false)),
+                        // A Redraw waits for everything else.
+                        _ if rt.redraw_queued.remove(&agent_id) => {
+                            rt.redrawing.insert(agent_id.clone());
+                            Some((REDRAW_PROMPT.to_string(), "avatar", false, true))
+                        }
+                        _ => {
+                            // Saved before the run stops counting as running, so a restart keeps the idle time.
+                            let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
+                            rt.running.remove(&agent_id);
+                            None
+                        }
+                    };
+                    (delivered, next)
                 };
                 let push = delivered || (drew && next.is_some());
                 (next, push)
@@ -1228,32 +1256,159 @@ pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str
 pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
     {
         let mut rt = state.rt.lock().unwrap();
-        let Some(at) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().position(|(i, _)| *i == id)) else {
+        if unqueue(state, &mut rt, agent_id, id).is_none() {
             return Ok(false);
-        };
-        let (_, prompt) = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
-        if let Some(q) = rt.queued.get_mut(agent_id)
-            && let Some(p) = q.iter().position(|x| *x == prompt)
-        {
-            q.remove(p);
-        }
-        // Nothing queued is for the user any more (every waiting prompt is a tracked message, none the user's own):
-        // the next run isn't an answer to them.
-        let rest: Vec<i64> = rt.queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
-        if rt.queued.get(agent_id).map_or(0, |q| q.len()) == rest.len()
-            && !rest.iter().any(|i| state.db.get_message(agent_id, *i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()))
-        {
-            rt.queued_for_user.remove(agent_id);
         }
         // The ticket and context clear a hand-over set are left as they are: the worst case is one context clear
         // the agent didn't need on its next run.
     }
     state.db.mark_cancelled(agent_id, id)?;
+    emit_message(state, agent_id, id)?;
+    emit_run(state, agent_id);
+    Ok(true)
+}
+
+/// Takes queued message `id` out of `agent_id`'s queue, returning its prompt. None when it isn't queued.
+fn unqueue(state: &AppState, rt: &mut crate::state::Runtime, agent_id: &str, id: i64) -> Option<String> {
+    let at = rt.queued_messages.get(agent_id)?.iter().position(|(i, _)| *i == id)?;
+    let (_, prompt) = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
+    if let Some(q) = rt.queued.get_mut(agent_id)
+        && let Some(p) = q.iter().position(|x| *x == prompt)
+    {
+        q.remove(p);
+    }
+    // Nothing queued is for the user any more (every waiting prompt is a tracked message, none the user's own):
+    // the next run isn't an answer to them.
+    let rest: Vec<i64> = rt.queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+    if rt.queued.get(agent_id).map_or(0, |q| q.len()) == rest.len()
+        && !rest.iter().any(|i| state.db.get_message(agent_id, *i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()))
+    {
+        rt.queued_for_user.remove(agent_id);
+    }
+    Some(prompt)
+}
+
+fn emit_message(state: &AppState, agent_id: &str, id: i64) -> Result<()> {
     if let Some(m) = state.db.get_message(agent_id, id)? {
         state.emit(Event::Message { message: serde_json::to_value(&m).unwrap() });
     }
+    Ok(())
+}
+
+/// Send now: delivers the user's queued message `id` into `agent_id`'s run in progress, as Ctrl+Enter does in the
+/// terminal, instead of waiting for the run to end. It leaves the queue for good: it can't be cancelled and the next
+/// run doesn't get it again. False, leaving it queued, for an agent's message, or when the run takes no more input
+/// (it's ending, or it's a quiet one): it waits for the next run as before.
+pub fn send_now(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
+    if !state.db.get_message(agent_id, id)?.is_some_and(|m| m.meta["from_agent"].is_null()) {
+        return Ok(false);
+    }
+    {
+        // Under the lock the run closes its input under: a message is either written to it or stays queued.
+        let mut rt = state.rt.lock().unwrap();
+        let Some(tx) = rt.runs.get(agent_id).and_then(|i| i.send_now.clone()) else {
+            return Ok(false);
+        };
+        let Some(prompt) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().find(|(i, _)| *i == id)).map(|(_, p)| p.clone()) else {
+            return Ok(false);
+        };
+        if tx.send((id, prompt.clone())).is_err() {
+            return Ok(false);
+        }
+        unqueue(state, &mut rt, agent_id, id);
+        let info = rt.runs.get_mut(agent_id).unwrap();
+        info.sent.push((id, prompt));
+        // The run now answers the user: its reply is an Unread reply.
+        info.for_user = true;
+    }
+    state.db.mark_sent_now(agent_id, id, true)?;
+    emit_message(state, agent_id, id)?;
     emit_run(state, agent_id);
     Ok(true)
+}
+
+/// Send now for each of the user's messages in `agent_id`'s queue, in order, as when a goal or Stop hook blocks.
+/// A run that takes no input keeps them queued.
+fn send_queued_now(state: &AppState, agent_id: &str) {
+    let ids: Vec<i64> = state.rt.lock().unwrap().queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+    for id in ids {
+        if let Err(e) = send_now(state, agent_id, id) {
+            tracing::warn!("send now {id} for {agent_id}: {e:#}");
+        }
+    }
+}
+
+/// The Goal active button: sends `/goal clear` as the user's message, into the run in progress when there is one
+/// (Send now, so it clears even while the goal keeps the run going), or as the next run otherwise.
+pub fn clear_goal(state: &AppState, agent_id: &str) -> Option<Message> {
+    let msg = enqueue_chat(state, agent_id, "/goal clear".into(), json!({}))?;
+    // A run that takes no more input gets it next, from the queue.
+    let _ = send_now(state, agent_id, msg.id);
+    Some(msg)
+}
+
+/// Records the agent's `/goal` as a run showed it, and pushes it to the clients when it changed.
+fn set_goal(state: &AppState, agent_id: &str, goal: Option<String>) {
+    if state.db.get_agent(agent_id).ok().flatten().is_none_or(|a| a.goal == goal) {
+        return;
+    }
+    if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| a.goal = goal) {
+        emit_agent(state, &a);
+    }
+}
+
+/// What a claude-made reply line says about the goal: `Goal set: <condition>` (or `Goal active: …` on `/goal`
+/// after a resume) sets it, `Goal cleared: …` and `No goal set` drop it. None when it says nothing about it.
+fn goal_change(text: &str) -> Option<Option<String>> {
+    if let Some(g) = text.strip_prefix("Goal set:").or_else(|| text.strip_prefix("Goal active:")) {
+        return Some(Some(g.trim().trim_end_matches("(not yet evaluated)").trim().to_string()));
+    }
+    (text.starts_with("Goal cleared") || text.starts_with("No goal set")).then_some(None)
+}
+
+/// A Stop hook's block: the synthetic user line claude adds each time a Stop hook or a `/goal` sends it back to
+/// work, `Stop hook feedback:\n<reason>`, or `…\n[<condition>]: <reason>` for a goal. Returns the goal's
+/// condition, if a goal sent it (`goal` is the one Loft knows, to cut it off exactly), and the reason.
+fn hook_block(ev: &Value, goal: Option<&str>) -> Option<(Option<String>, String)> {
+    if ev["type"] != "user" || ev["isSynthetic"] != true {
+        return None;
+    }
+    let text = user_text(ev);
+    let rest = text.strip_prefix("Stop hook feedback:")?.trim();
+    let known = goal.and_then(|g| rest.strip_prefix(&format!("[{g}]:")).map(|r| (g.to_string(), r)));
+    let goal = known.or_else(|| rest.strip_prefix('[')?.split_once("]:").map(|(g, r)| (g.to_string(), r)));
+    Some(match goal {
+        Some((g, r)) => (Some(g), r.trim().to_string()),
+        None => (None, rest.to_string()),
+    })
+}
+
+/// The chat's line for a Stop hook's block: why the agent keeps going.
+fn hook_block_line(goal: bool, reason: &str) -> String {
+    let reason = if reason.is_empty() { "no reason given" } else { reason };
+    if goal { format!("Goal not met: {}", truncate(reason, 600)) } else { format!("Stop hook: {}", truncate(reason, 600)) }
+}
+
+/// The run is over in Loft's books: drops its info, and puts the user's messages sent now that claude never took
+/// back at the front of the queue, as they were, for the next run. Returns the info.
+fn end_run_info(state: &AppState, agent_id: &str) -> Option<crate::state::RunInfo> {
+    let info = {
+        let mut rt = state.rt.lock().unwrap();
+        rt.waiting.remove(agent_id);
+        let info = rt.runs.remove(agent_id)?;
+        for (id, prompt) in info.sent.iter().rev() {
+            rt.queued.entry(agent_id.to_string()).or_default().insert(0, prompt.clone());
+            rt.queued_messages.entry(agent_id.to_string()).or_default().insert(0, (*id, prompt.clone()));
+            rt.queued_for_user.insert(agent_id.to_string());
+        }
+        info
+    };
+    for (id, _) in &info.sent {
+        tracing::info!("agent {agent_id}: message {id} was sent now but the run ended before claude took it: queued again");
+        let _ = state.db.mark_sent_now(agent_id, *id, false);
+        let _ = emit_message(state, agent_id, *id);
+    }
+    Some(info)
 }
 
 pub fn stop(state: &AppState, agent_id: &str) -> bool {
@@ -1575,6 +1730,116 @@ enum RunOutcome {
     StaleSession,
 }
 
+/// Model turns in a row with no tool call after which Loft stops a run: a goal or Stop hook that never passes
+/// keeps claude answering the same text, each turn billed, until its own limit of 9.
+const BRAKE_TURNS: u32 = 5;
+
+/// Counts the agent's own model turns in a row that call no tool, within one claude turn (a `result` ends it).
+/// Claude only takes another turn without a tool call when something pushes it on, like a Stop hook's feedback.
+#[derive(Default)]
+struct Brake {
+    turns: u32,
+    /// The model turn being read (its message id; claude may split one turn over several lines) and whether it called a tool.
+    open: Option<(Option<String>, bool)>,
+    /// The last Stop hook feedback, which says why claude kept going (a goal's reason, without its condition).
+    reason: Option<String>,
+}
+
+impl Brake {
+    fn close(&mut self) {
+        if let Some((_, tools)) = self.open.take() {
+            self.turns = if tools { 0 } else { self.turns + 1 };
+        }
+    }
+
+    /// Reads one of claude's top-level lines; true when the run should stop before another turn.
+    fn see(&mut self, ev: &Value) -> bool {
+        let blocks = ev["message"]["content"].as_array().map(Vec::as_slice).unwrap_or_default();
+        match ev["type"].as_str() {
+            // Claude's own replies to commands like `/goal` aren't model turns.
+            Some("assistant") if ev["message"]["model"] == "<synthetic>" => {}
+            Some("assistant") => {
+                let id = ev["message"]["id"].as_str().map(String::from);
+                let tools = blocks.iter().any(|b| b["type"] == "tool_use");
+                match &mut self.open {
+                    Some((open, t)) if id.is_some() && *open == id => *t |= tools,
+                    _ => {
+                        self.close();
+                        if self.turns >= BRAKE_TURNS {
+                            return true;
+                        }
+                        self.open = Some((id, tools));
+                    }
+                }
+            }
+            Some("user") if !blocks.iter().any(|b| b["type"] == "tool_result") => {
+                self.close();
+                if ev["isSynthetic"] == true {
+                    if let Some((_, r)) = hook_block(ev, None) {
+                        self.reason = Some(r);
+                    }
+                } else {
+                    // A message from the user is new input, not a loop.
+                    self.turns = 0;
+                    self.reason = None;
+                }
+                return self.turns >= BRAKE_TURNS;
+            }
+            Some("result") => {
+                self.open = None;
+                self.turns = 0;
+                self.reason = None;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// What the chat says when the brake stops a run.
+    fn notice(&self) -> String {
+        let head = format!("Stopped the run: {BRAKE_TURNS} turns in a row without a tool call.");
+        match &self.reason {
+            Some(r) if !r.is_empty() => format!("{head} A goal or Stop hook kept it going: {}", truncate(r, 600)),
+            _ => format!("{head} It looked stuck in a loop."),
+        }
+    }
+}
+
+/// `prompt` as a line of claude's stream-json input, its images inline. `now`: for a run in progress, which claude
+/// otherwise takes only once its turn ends; during a Stop hook's or goal's block, that's never.
+async fn input_line(state: &AppState, agent_id: &str, prompt: &str, now: bool) -> String {
+    let line = crate::uploads::stdin_line(state, agent_id, prompt).await;
+    let mut v = line.and_then(|l| serde_json::from_str::<Value>(&l).ok()).unwrap_or_else(|| {
+        json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] } })
+    });
+    if now {
+        v["priority"] = json!("now");
+    }
+    v.to_string() + "\n"
+}
+
+/// The text of a user line, claude's or Loft's input: what tells a replay apart.
+fn user_text(ev: &Value) -> String {
+    let content = &ev["message"]["content"];
+    content.as_str().map(String::from).unwrap_or_else(|| content.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect())
+}
+
+/// Claude stays alive while its stdin is open: Loft closes it where the run would end. Not while a message sent
+/// now is still on its way in (claude takes it in a turn of its own); false then.
+fn close_input(state: &AppState, agent_id: &str, stdin: &mut Option<tokio::process::ChildStdin>) -> bool {
+    if stdin.is_none() {
+        return true;
+    }
+    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+        if !i.sent.is_empty() {
+            return false;
+        }
+        i.send_now = None;
+    }
+    *stdin = None;
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_process(
     state: &AppState,
@@ -1620,15 +1885,15 @@ async fn run_process(
     }
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
-    let image_line = crate::uploads::stdin_line(state, agent_id, prompt).await;
+    let first = input_line(state, agent_id, prompt, false).await;
+    let first_text = serde_json::from_str::<Value>(&first).map(|v| user_text(&v)).unwrap_or_default();
     let mut cmd = build_command(state, &agent, resume)?;
     if throwaway {
         // Not saved, so it isn't listed among the agent's past Sessions either.
         cmd.arg("--no-session-persistence");
     }
-    if image_line.is_some() {
-        cmd.args(["--input-format", "stream-json"]);
-    }
+    // Input as stream-json lines, each echoed back once claude takes it: a message sent now is delivered at its echo.
+    cmd.args(["--input-format", "stream-json", "--replay-user-messages"]);
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
@@ -1637,10 +1902,17 @@ async fn run_process(
         && let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
             tracing::warn!("agent {agent_id}: could not record its process session: {e}");
         }
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
+    let mut stdin = child.stdin.take();
+    stdin.as_mut().unwrap().write_all(first.as_bytes()).await?;
+    // A run the user reads takes their messages sent now (`send_now`) while it lasts; a quiet one only its prompt.
+    let takes_input = !quiet && !throwaway;
+    if !takes_input {
+        stdin = None;
     }
+    let (send_tx, mut send_rx) = tokio::sync::mpsc::unbounded_channel::<(i64, String)>();
+    // Messages sent now written to claude, by the text claude echoes back once it takes one.
+    let mut written: Vec<(i64, String)> = Vec::new();
+    let mut first_echoed = false;
     *delivered = true;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stderr = child.stderr.take().unwrap();
@@ -1673,11 +1945,28 @@ async fn run_process(
     let preempt = Arc::new(Notify::new());
     // Claude has exited, but a process it left behind can keep its pipes open: read what's buffered until then.
     let mut drain_until: Option<tokio::time::Instant> = None;
-    state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), for_user, ..Default::default() });
+    let mut brake = Brake::default();
+    // The brake stopped the run: it ends like a stop, with the reason in the chat, and the queue goes on.
+    let mut braked = false;
+    // Claude ended the turn over its own limit of Stop hook blocks in a row: the goal didn't pass, it stays.
+    let mut capped = false;
+    state.rt.lock().unwrap().runs.insert(
+        agent_id.to_string(),
+        crate::state::RunInfo { last_output_at: now(), for_user, send_now: takes_input.then_some(send_tx), ..Default::default() },
+    );
     loop {
         let waiting = replied && !bg.is_empty();
         let line = tokio::select! {
             l = lines.next_line() => l?,
+            Some((id, p)) = send_rx.recv(), if stdin.is_some() => {
+                let line = input_line(state, agent_id, &p, true).await;
+                match stdin.as_mut().unwrap().write_all(line.as_bytes()).await {
+                    Ok(()) => written.push((id, serde_json::from_str::<Value>(&line).map(|v| user_text(&v)).unwrap_or_default())),
+                    // It stays among the run's `sent`: back to the queue when the run ends.
+                    Err(e) => tracing::warn!("agent {agent_id}: run {run_id}: could not send message {id} now: {e}"),
+                }
+                continue;
+            }
             _ = kill.notified() => {
                 tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
                 terminate(&mut child).await;
@@ -1746,6 +2035,14 @@ async fn run_process(
             }
         }
         let sub = ev["parent_tool_use_id"].as_str().map(|s| s.to_string());
+        if sub.is_none() && brake.see(&ev) {
+            tracing::info!("agent {agent_id}: stopping run {run_id}: {BRAKE_TURNS} turns in a row without a tool call");
+            run_msg(quiet, state, agent_id, rid, "system", "notice", &brake.notice(), json!({ "brake": true }));
+            terminate(&mut child).await;
+            loft_stopped = true;
+            braked = true;
+            break;
+        }
         match ev["type"].as_str() {
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
@@ -1768,6 +2065,7 @@ async fn run_process(
                         a.memory_index = None;
                     })?;
                 }
+                Some("notification") if ev["key"] == "stop-hook-block-cap" => capped = true,
                 Some("permission_denied") => {
                     run_msg(quiet, state, agent_id, rid, "system", "notice", ev["message"].as_str().unwrap_or("Permission denied"), json!({ "tool": ev["tool_name"] }));
                 }
@@ -1810,6 +2108,7 @@ async fn run_process(
                     }
                     if replied && bg.is_empty() {
                         // The last one finished after the reply; claude starts a turn to report it, or exits.
+                        close_input(state, agent_id, &mut stdin);
                         exit_by = Some(tokio::time::Instant::now() + FOLLOW_UP_GRACE);
                     }
                 }
@@ -1828,12 +2127,18 @@ async fn run_process(
                     }
                 }
                 // Everything sent as input this turn is the context: fresh, cache-read and cache-written tokens.
+                // Not claude's own replies (`<synthetic>`, like "Goal cleared: …"): their usage is all zeros.
                 let u = &ev["message"]["usage"];
-                if sub.is_none() && u.is_object() && !throwaway {
+                if sub.is_none() && u.is_object() && !throwaway && ev["message"]["model"] != "<synthetic>" {
                     let n = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().filter_map(|k| u[*k].as_u64()).sum();
                     set_context_tokens(state, agent_id, Some(n));
                 }
                 let blocks = ev["message"]["content"].as_array().cloned().unwrap_or_default();
+                if ev["message"]["model"] == "<synthetic>" && sub.is_none() && !throwaway {
+                    if let Some(g) = blocks.iter().filter_map(|b| b["text"].as_str()).find_map(goal_change) {
+                        set_goal(state, agent_id, g);
+                    }
+                }
                 for b in blocks {
                     let meta_sub = json!({ "subagent": sub });
                     match b["type"].as_str() {
@@ -1889,6 +2194,40 @@ async fn run_process(
                     }
                 }
             }
+            // Claude took one of its input lines: the prompt, or a message sent now, now delivered. Not shown again.
+            Some("user") if ev["isReplay"] == true => {
+                let text = user_text(&ev);
+                let at = match written.iter().position(|(_, t)| *t == text) {
+                    Some(at) => Some(at),
+                    None if !first_echoed && text == first_text => None,
+                    // Claude reworded it somehow: echoes come in the order the lines went in.
+                    None => (!written.is_empty()).then_some(0),
+                };
+                if text == first_text {
+                    first_echoed = true;
+                }
+                if let Some(at) = at {
+                    let (id, _) = written.remove(at);
+                    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+                        i.sent.retain(|(s, _)| *s != id);
+                    }
+                }
+            }
+            Some("user") if sub.is_none() && ev["isSynthetic"] == true => {
+                let known = if throwaway { None } else { state.db.get_agent(agent_id).ok().flatten().and_then(|a| a.goal) };
+                if let Some((goal, reason)) = hook_block(&ev, known.as_deref()) {
+                    run_msg(quiet, state, agent_id, rid, "system", "notice", &hook_block_line(goal.is_some(), &reason), json!({
+                        "hook_block": true, "goal": goal,
+                    }));
+                    // A goal's block says it's active, even one set before Loft knew (a resumed Session's).
+                    if goal.is_some() && !throwaway {
+                        set_goal(state, agent_id, goal);
+                    }
+                    // The run waits on an answer the queue would only give it once it ends: the user's queued
+                    // messages are what it waits for, so they go in now (agents' messages keep waiting).
+                    send_queued_now(state, agent_id);
+                }
+            }
             Some("user") => {
                 let blocks = ev["message"]["content"].as_array().cloned().unwrap_or_default();
                 for b in blocks {
@@ -1928,12 +2267,36 @@ async fn run_process(
                 }
             }
             Some("result") => {
-                got_result = true;
+                // A message sent now cut the turn short: claude goes on with it in a new turn of the same run.
+                let aborted = ev["terminal_reason"].as_str().is_some_and(|r| r.starts_with("aborted"));
+                got_result |= !aborted;
                 // Resuming a session whose background task was stopped first replays an empty result
-                // (no turns); the real turn follows, however long the model thinks first.
-                replied = ev["num_turns"].as_u64() != Some(0);
-                if replied && bg.is_empty() {
-                    exit_by = Some(tokio::time::Instant::now() + EXIT_GRACE);
+                // (no turns); the real turn follows, however long the model thinks first. A command claude
+                // answers itself, like `/goal clear`, takes no turns either, but says something: that's the reply.
+                let said = ev["result"].as_str().is_some_and(|r| !r.trim().is_empty());
+                replied = !aborted && (ev["num_turns"].as_u64() != Some(0) || said);
+                if !throwaway {
+                    if ev["num_turns"].as_u64() == Some(0) {
+                        if let Some(g) = ev["result"].as_str().and_then(goal_change) {
+                            set_goal(state, agent_id, g);
+                        }
+                    } else if ev["terminal_reason"] == "completed" && !capped {
+                        // A turn ends while a goal is active only once it passed, and claude says nothing then.
+                        set_goal(state, agent_id, None);
+                    }
+                }
+                capped = false;
+                // An error ends the run too, though it may come with no turns and nothing said (the first API call failed).
+                if (replied || ev["is_error"] == true) && bg.is_empty() {
+                    // The run ends here, unless a message sent now is still on its way in: claude answers it first.
+                    let grace = if close_input(state, agent_id, &mut stdin) { EXIT_GRACE } else { FOLLOW_UP_GRACE };
+                    exit_by = Some(tokio::time::Instant::now() + grace);
+                } else if !aborted && bg.is_empty() && is_command(&first_text) {
+                    // No turns and nothing said to a command claude answers itself, like `/context`: claude exits
+                    // once its input closes, no deadline. Any other prompt got the empty replay of a resume: the
+                    // real turn follows, however long the model thinks first, and takes messages sent now until
+                    // its own result closes the input.
+                    close_input(state, agent_id, &mut stdin);
                 } else if replied {
                     if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
                         i.waiting_since = Some(now());
@@ -1975,7 +2338,9 @@ async fn run_process(
                     "is_error": ev["is_error"],
                     "usage": ev["usage"],
                 });
-                if replied || run_error.is_some() {
+                if aborted {
+                    // Neither a reply nor the run's end: its cost counts, in the next run end's running total.
+                } else if replied || run_error.is_some() {
                     run_msg(quiet, state, agent_id, rid, "system", "run_end", "", end);
                     held_end = None;
                 } else {
@@ -1987,12 +2352,12 @@ async fn run_process(
         }
     }
 
-    let had_subagents = {
-        let mut rt = state.rt.lock().unwrap();
-        rt.waiting.remove(agent_id);
-        rt.runs.remove(agent_id).is_some_and(|i| !i.subagents.is_empty())
-    };
-    if had_subagents {
+    drop(stdin);
+    // Messages sent now that claude never took go back to the queue, ahead of the rest.
+    let info = end_run_info(state, agent_id);
+    // A message the user sent now made this run an answer to them.
+    let for_user = for_user || info.as_ref().is_some_and(|i| i.for_user);
+    if info.is_some_and(|i| !i.subagents.is_empty()) {
         emit_run(state, agent_id);
     }
     if let Some(end) = held_end {
@@ -2009,7 +2374,10 @@ async fn run_process(
         }
     };
     let err = tokio::time::timeout(EXIT_GRACE, stderr_task).await.ok().and_then(|r| r.ok()).unwrap_or_default();
-    if !got_result {
+    if braked && !got_result {
+        run_msg(quiet, state, agent_id, rid, "system", "run_end", "", json!({ "stopped": true }));
+    }
+    if !got_result && !braked {
         if !killed && resume && agent.session_id.is_some() && !got_any && err.to_lowercase().contains("no conversation found") {
             return Ok(RunOutcome::StaleSession);
         }
@@ -2051,7 +2419,7 @@ async fn run_process(
             run_msg(quiet, state, agent_id, rid, "system", "run_end", "", json!({ "stopped": true }));
         }
     }
-    let (st, text) = if !killed && !got_result { ("error", "Last run failed") } else { ("idle", "") };
+    let (st, text) = if !killed && !braked && !got_result { ("error", "Last run failed") } else { ("idle", "") };
     set_status(state, agent_id, st, text);
     if for_user && !quiet && (!last_text.is_empty() || run_error.is_some()) {
         mark_replied(state, agent_id);
@@ -2396,9 +2764,24 @@ pub(crate) mod tests {
     /// A Redraw costs 0.25 on session "s-redraw" and waits for a `go` file before it replies.
     /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command, in a process session of
     /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
+    /// "goal-loop" asks for a password over and over, each text-only turn sent back by a Stop hook, and never ends
+    /// on its own; "goal-tools" does the same with a tool call after four turns and three more after it, then replies.
+    /// The goal scenarios send the lines the probe for #476 recorded from the real claude: "goal-pass" sets a goal,
+    /// is blocked once and waits for a `go` file before the goal passes (a completed turn, nothing said);
+    /// "goal-cap" is blocked by the goal and by a command Stop hook until claude's own limit ends the turn;
+    /// "goal-hold" is blocked and waits for a message sent now: `/goal clear` clears it in a turn of its own;
+    /// "goal-hold-resumed" does the same after the empty result (no turns, nothing said) a resume replays first.
+    /// "hold-block" asks for a password, waits for a `go` file, is blocked by a Stop hook and then takes two lines
+    /// from its stdin; "hold-plain" asks the same and replies at `go`, with no block.
+    /// "/goal clear" as the prompt clears it, without a model turn; both then wait for their stdin to close.
+    /// "/context" answers with no turns and nothing in its result, then waits for its stdin to close too.
+    /// "api-down" ends in an error with no turns and no `result`, as when the first API call fails, then waits the same way.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
-prompt=$(cat)
+text() { perl -CO -MJSON::PP -ne 'my $c = JSON::PP->new->utf8->decode($_)->{message}{content}; print ref $c ? join("", map { $_->{text} // "" } @$c) : $c'; }
+IFS= read -r line
+prompt=$(printf '%s\n' "$line" | text)
+printf '%s\n' "$line" > input.json
 printf '%s\n---\n' "$prompt" >> prompts.log
 case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
   chmod -x "$0"
@@ -2426,6 +2809,95 @@ case "$prompt" in *"redraw your sticker"*) while [ ! -f go ]; do sleep 0.05; don
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
+case "$prompt" in *send-now*|*send-lost*)
+  replay() { sed 's/}$/,"isReplay":true}/'; }
+  printf '%s\n' "$line" | replay
+  for i in 1 2; do
+    echo '{"type":"assistant","message":{"id":"g'$i'","content":[{"type":"text","text":"What is the password?"}]}}'
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met."}]},"isSynthetic":true}'
+  done
+  IFS= read -r next
+  printf '%s\n' "$next" >> sent.log
+  case "$prompt" in *send-lost*) exit 1;; esac
+  printf '%s\n' "$next" | replay
+  echo '{"type":"result","subtype":"success","result":"","num_turns":2,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  said=$(printf '%s\n' "$next" | text)
+  echo '{"type":"assistant","message":{"id":"g3","content":[{"type":"text","text":"Got it: '"$said"'"}]}}'
+  echo '{"type":"result","subtype":"success","result":"Got it","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.02}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
+esac
+case "$prompt" in *hold-block*|*hold-plain*)
+  echo '{"type":"assistant","message":{"id":"h1","content":[{"type":"text","text":"What is the password?"}]}}'
+  while [ ! -f go ]; do sleep 0.05; done
+  case "$prompt" in *hold-plain*)
+    echo '{"type":"result","subtype":"success","result":"What is the password?","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+    cat > /dev/null
+    exit 0;;
+  esac
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: no password yet."}]},"isSynthetic":true}'
+  IFS= read -r one
+  IFS= read -r two
+  printf '%s\n%s\n' "$one" "$two" >> sent.log
+  printf '%s\n%s\n' "$one" "$two" | sed 's/}$/,"isReplay":true}/'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":1,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  echo '{"type":"assistant","message":{"id":"h2","content":[{"type":"text","text":"Got it: '"$(printf '%s\n' "$one" | text) $(printf '%s\n' "$two" | text)"'"}]}}'
+  echo '{"type":"result","subtype":"success","result":"Got it","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.02}'
+  cat > /dev/null
+  exit 0;;
+esac
+goal='the user said the password'
+synthetic() { echo '{"type":"assistant","message":{"id":"syn-'$2'","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"'"$1"'"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'; }
+goal_block() { printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\n['"$goal"']: insufficient evidence: no password yet."}]},"isSynthetic":true}'; }
+cleared() {
+  synthetic "Goal cleared: $goal" c
+  echo '{"type":"result","subtype":"success","result":"Goal cleared: '"$goal"'","num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0
+}
+case "$prompt" in *goal-hold-resumed*)
+  echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}';;
+esac
+case "$prompt" in *goal-pass*|*goal-cap*|*goal-hold*)
+  synthetic "Goal set: $goal" s
+  echo '{"type":"assistant","message":{"id":"p1","model":"claude-haiku-5-5","content":[{"type":"text","text":"What is the password?"}]}}'
+  goal_block;;
+esac
+case "$prompt" in *goal-pass*)
+  while [ ! -f go ]; do sleep 0.05; done
+  echo '{"type":"assistant","message":{"id":"p2","content":[{"type":"text","text":"Thanks, that is it."}]}}'
+  echo '{"type":"result","subtype":"success","result":"Thanks, that is it.","num_turns":2,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+  exit 0;;
+esac
+case "$prompt" in *goal-cap*)
+  echo '{"type":"assistant","message":{"id":"p2","content":[{"type":"text","text":"What is the password?"}]}}'
+  echo '{"type":"system","subtype":"hook_response","hook_name":"Stop","hook_event":"Stop","output":"{}","exit_code":0,"outcome":"success"}'
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: the tests are still red."}]},"isSynthetic":true}'
+  echo '{"type":"system","subtype":"informational","content":"A hook blocked the turn from ending 9 consecutive times—overriding and ending turn."}'
+  echo '{"type":"system","subtype":"notification","key":"stop-hook-block-cap","text":"A hook blocked the turn from ending 9 consecutive times—overriding and ending turn."}'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":3,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+  exit 0;;
+esac
+case "$prompt" in *goal-hold*)
+  IFS= read -r next
+  printf '%s\n' "$next" >> sent.log
+  printf '%s\n' "$next" | sed 's/}$/,"isReplay":true}/'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":1,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  case "$(printf '%s\n' "$next" | text)" in "/goal clear") cleared;; esac
+  exit 1;;
+esac
+case "$prompt" in "/goal clear") cleared;; esac
+case "$prompt" in /context)
+  echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
+esac
 case "$prompt" in *crash*) exit 1;; esac
 case "$prompt" in *leftover*) sleep 20 & exit 1;; esac
 case "$prompt" in *sigterm*) kill -TERM $$;; esac
@@ -2445,6 +2917,12 @@ esac
 case "$prompt" in *slow*)
   echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}'
   sleep 1;;
+esac
+case "$prompt" in *api-down*)
+  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
 esac
 case "$prompt" in *fail*)
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"session_id":"s1","total_cost_usd":0}'
@@ -2497,6 +2975,25 @@ case "$prompt" in *tool-status*)
 esac
 case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
+esac
+case "$prompt" in *goal-loop*|*goal-tools*)
+  feedback='{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: the user has not said the password yet."}]},"isSynthetic":true}'
+  turn() {
+    echo '{"type":"assistant","message":{"id":"m'$1'","content":[{"type":"thinking","thinking":"again"}]}}'
+    echo '{"type":"assistant","message":{"id":"m'$1'","content":[{"type":"text","text":"What is the password?"}]}}'
+    printf '%s\n' "$feedback"
+  }
+  case "$prompt" in *goal-loop*)
+    trap 'echo yes > terminated; exit 143' TERM
+    for i in 1 2 3 4 5 6 7 8 9; do turn $i; sleep 0.1; done
+    sleep 600 &
+    wait;;
+  esac
+  for i in 1 2 3 4; do turn $i; done
+  echo '{"type":"assistant","message":{"id":"t1","content":[{"type":"text","text":"Let me check."}]}}'
+  echo '{"type":"assistant","message":{"id":"t1","content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/x/notes.md"}}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"r1","content":"no password here"}]}}'
+  for i in 5 6 7; do turn $i; done;;
 esac
 case "$prompt" in *bash-cmd*)
   perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/zsh -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
@@ -3162,6 +3659,330 @@ esac
         assert!(std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("sent while it looked stuck"));
         let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
         assert!(msgs.iter().any(|m| m.kind == "notice" && m.content == "Stopped by user. The queued message runs next."));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn five_turns_in_a_row_without_a_tool_stop_the_run_and_the_queue_goes_on() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-loop".into()), "user");
+        until("the run to start", 10, || ws.join("prompts.log").exists()).await;
+        enqueue(&st, &a.id, Some("BANANA-42".into()), "user");
+        until("the queue to drain", 20, || !is_running(&st, &a.id) && std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("BANANA-42")).await;
+        assert!(ws.join("terminated").exists(), "claude was stopped");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        let asks = msgs.iter().filter(|m| m.kind == "text" && m.content == "What is the password?").count();
+        assert_eq!(asks, BRAKE_TURNS as usize, "stopped at the 5th turn's feedback, before a 6th");
+        let notice = msgs.iter().find(|m| m.kind == "notice" && m.meta["brake"] == true).expect("the chat says why it stopped");
+        assert_eq!(
+            notice.content,
+            "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: Objective not met: the user has not said the password yet."
+        );
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.kind == "text" && m.content == "started"), "the queued message got its run");
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().status, "idle");
+    }
+
+    fn asked(st: &AppState, id: &str, n: usize) -> bool {
+        st.db.list_messages(id, 100, None).unwrap().iter().filter(|m| m.content == "What is the password?").count() >= n
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_now_delivers_the_users_queued_message_into_the_run_in_progress() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        // Not a run the user started: Send now makes its reply an answer to them.
+        wake(&st, &a.id, "send-now".into(), "agent");
+        until("the goal to block", 10, || asked(&st, &a.id, 2)).await;
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "Status?");
+        let from_agent = st.db.list_messages(&a.id, 100, None).unwrap().into_iter().find(|m| m.content == "Status?").unwrap().id;
+        let mine = enqueue_chat(&st, &a.id, "The password is BANANA-42.".into(), json!({})).unwrap().id;
+        assert!(!send_now(&st, &a.id, from_agent).unwrap(), "an agent's message only waits in the queue");
+        assert!(send_now(&st, &a.id, mine).unwrap());
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&a.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [from_agent], "it left the queue");
+        }
+        assert_eq!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta["sent_now"], true);
+        assert!(!cancel_queued(&st, &a.id, mine).unwrap(), "sent now: no cancelling it");
+        assert!(!send_now(&st, &a.id, mine).unwrap(), "once is enough");
+        until("the agent to answer it in the run", 10, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "Got it: The password is BANANA-42.")).await;
+        idle(&st, &a.id).await;
+        let sent = std::fs::read_to_string(ws.join("sent.log")).unwrap();
+        let line: Value = serde_json::from_str(sent.trim()).unwrap();
+        assert_eq!(line["priority"], "now", "it gets in during the hook's block");
+        assert_eq!(user_text(&line), "The password is BANANA-42.");
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input at the end of the run");
+        assert!(std::fs::read_to_string(ws.join("argv.log")).unwrap().lines().any(|l| l == "--replay-user-messages"));
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert_eq!(msgs.iter().filter(|m| m.content == "The password is BANANA-42.").count(), 1, "its replay isn't shown again");
+        assert!(msgs.iter().all(|m| !(m.role == "assistant" && m.content.trim().is_empty())), "no empty bubble for the cut-short turn");
+        // The cut-short turn isn't the run's end; the agent's message got the next run, and the user's didn't.
+        assert_eq!(msgs.iter().filter(|m| m.kind == "run_end").count(), 2, "one per run: {msgs:?}");
+        let p = prompts(&st, &a.id);
+        assert!(p.contains("Status?") && !p.contains("BANANA-42"), "{p}");
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_sent_now_that_claude_never_took_goes_back_to_the_queue() {
+        let (st, a) = fake_claude_state();
+        wake(&st, &a.id, "send-lost".into(), "agent");
+        until("the goal to block", 10, || asked(&st, &a.id, 2)).await;
+        let mine = enqueue_chat(&st, &a.id, "remember BANANA".into(), json!({})).unwrap().id;
+        assert!(send_now(&st, &a.id, mine).unwrap());
+        until("the next run to take it", 20, || prompts(&st, &a.id).contains("remember BANANA")).await;
+        idle(&st, &a.id).await;
+        assert!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta.get("sent_now").is_none());
+        // After the run, there's nothing to send it into: it waits for a run like any message.
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let later = enqueue_chat(&st, &a.id, "later".into(), json!({})).unwrap().id;
+        assert!(!send_now(&st, &a.id, later).unwrap());
+        assert!(st.rt.lock().unwrap().queued_messages[&a.id].iter().any(|(i, _)| *i == later));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hook_block_sends_the_users_queued_messages_now_and_not_the_agents() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        wake(&st, &a.id, "hold-block".into(), "agent");
+        until("the question", 10, || asked(&st, &a.id, 1)).await;
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        let one = enqueue_chat(&st, &a.id, "The password".into(), json!({})).unwrap().id;
+        message_from_agent(&st, &lead, &a, "Status?");
+        let two = enqueue_chat(&st, &a.id, "is BANANA-42.".into(), json!({})).unwrap().id;
+        assert!(sent_log(&ws).is_empty(), "no block yet: they wait in the queue");
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the agent to answer them in the run", 10, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "Got it: The password is BANANA-42.")).await;
+        idle(&st, &a.id).await;
+        let sent: Vec<String> = sent_log(&ws).lines().map(|l| user_text(&serde_json::from_str(l).unwrap())).collect();
+        assert_eq!(sent, ["The password", "is BANANA-42."], "in the order they were queued, with no click");
+        for id in [one, two] {
+            assert_eq!(st.db.get_message(&a.id, id).unwrap().unwrap().meta["sent_now"], true);
+        }
+        let p = prompts(&st, &a.id);
+        assert!(p.contains("Status?") && !p.contains("BANANA-42"), "the agent's message got the next run: {p}");
+        assert_eq!(notices(&st, &a.id), ["Stop hook: Objective not met: no password yet."]);
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_a_hook_block_the_users_queued_message_waits_for_the_next_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("hold-plain".into()), "user");
+        until("the question", 10, || asked(&st, &a.id, 1)).await;
+        let mine = enqueue_chat(&st, &a.id, "BANANA-42".into(), json!({})).unwrap().id;
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the next run to take it", 20, || prompts(&st, &a.id).contains("BANANA-42")).await;
+        idle(&st, &a.id).await;
+        assert!(sent_log(&ws).is_empty());
+        assert!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta.get("sent_now").is_none());
+    }
+
+    fn sent_log(ws: &std::path::Path) -> String {
+        std::fs::read_to_string(ws.join("sent.log")).unwrap_or_default()
+    }
+
+    fn goal_of(st: &AppState, id: &str) -> Option<String> {
+        st.db.get_agent(id).unwrap().unwrap().goal
+    }
+
+    fn notices(st: &AppState, id: &str) -> Vec<String> {
+        st.db.list_messages(id, 100, None).unwrap().into_iter().filter(|m| m.meta["hook_block"] == true).map(|m| m.content).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_block_says_why_in_the_chat_and_goal_active_lasts_until_the_goal_passes() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-pass".into()), "user");
+        until("the goal's block", 10, || !notices(&st, &a.id).is_empty()).await;
+        assert_eq!(goal_of(&st, &a.id).as_deref(), Some("the user said the password"), "Goal active while the run goes on");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        let line = msgs.iter().find(|m| m.meta["hook_block"] == true).unwrap();
+        assert_eq!((line.role.as_str(), line.kind.as_str()), ("system", "notice"));
+        assert_eq!(line.content, "Goal not met: insufficient evidence: no password yet.", "the reason, without the goal's condition");
+        assert_eq!(line.meta["goal"], "the user said the password");
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        assert_eq!(goal_of(&st, &a.id), None, "the turn ended: the goal passed, though claude said nothing");
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_goal_over_claudes_limit_stays_active_until_the_button_clears_it() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        run(&st, &a.id, "goal-cap", 1).await;
+        assert_eq!(notices(&st, &a.id), ["Goal not met: insufficient evidence: no password yet.", "Stop hook: Objective not met: the tests are still red."]);
+        assert_eq!(goal_of(&st, &a.id).as_deref(), Some("the user said the password"), "claude's limit ended the turn, not the goal");
+        // No run in progress: the button's /goal clear is the next run, which claude answers without a model turn.
+        set(&st, &a.id, |a| a.context_tokens = Some(5000));
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!((m.role.as_str(), m.content.as_str()), ("user", "/goal clear"));
+        until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "the run ended on claude's answer, not hung on its open input");
+        assert!(prompts(&st, &a.id).contains("/goal clear"));
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.content == "Goal cleared: the user said the password"));
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().context_tokens, Some(5000), "the synthetic reply's zero usage isn't the context size");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_button_clears_a_goal_blocking_the_run_in_progress() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-hold".into()), "user");
+        until("the goal's block", 10, || goal_of(&st, &a.id).is_some() && !notices(&st, &a.id).is_empty()).await;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true, "sent into the run, not queued behind it");
+        until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        let line: Value = serde_json::from_str(std::fs::read_to_string(ws.join("sent.log")).unwrap().trim()).unwrap();
+        assert_eq!((user_text(&line).as_str(), line["priority"].as_str()), ("/goal clear", Some("now")));
+        assert!(ws.join("stdin-closed").exists());
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resumed_run_takes_messages_sent_now_after_its_empty_replay() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-hold-resumed".into()), "user");
+        until("the goal's block", 10, || goal_of(&st, &a.id).is_some() && !notices(&st, &a.id).is_empty()).await;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true, "the replay's empty result didn't close the run's input");
+        until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        let line: Value = serde_json::from_str(sent_log(&ws).trim()).unwrap();
+        assert_eq!(user_text(&line), "/goal clear");
+        assert!(ws.join("stdin-closed").exists());
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
+    }
+
+    fn prompt_list(st: &AppState, id: &str) -> Vec<String> {
+        prompts(st, id).split("\n---\n").filter(|p| !p.is_empty()).map(String::from).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_buttons_goal_clear_runs_alone_and_pending_fyis_wait_for_the_next_run() {
+        let (st, a) = fake_claude_state();
+        set(&st, &a.id, |a| a.goal = Some("the user said the password".into()));
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        fyi_from_agent(&st, &lead, &a, "The build is green.");
+        clear_goal(&st, &a.id).unwrap();
+        until("the goal to clear", 10, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        assert_eq!(prompt_list(&st, &a.id), ["/goal clear"], "no FYI in front of the command");
+        let fyis = st.db.take_pending_fyis(&a.id).unwrap();
+        assert!(fyis.len() == 1 && fyis[0].1.ends_with("The build is green."), "the FYI waits for a real run: {fyis:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_goal_clear_runs_on_its_own_before_the_rest_of_the_queue() {
+        let (st, a) = fake_claude_state();
+        set(&st, &a.id, |a| a.goal = Some("the user said the password".into()));
+        // "slow" takes input but never reads it: what's sent now into it goes back to the queue when it ends.
+        enqueue(&st, &a.id, Some("slow".into()), "user");
+        until("the run to take input", 10, || st.rt.lock().unwrap().runs.get(&a.id).is_some_and(|i| i.send_now.is_some())).await;
+        let chatty = enqueue_chat(&st, &a.id, "chatty".into(), json!({})).unwrap().id;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true);
+        until("the queue to run", 20, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "On it.")).await;
+        idle(&st, &a.id).await;
+        assert_eq!(prompt_list(&st, &a.id), ["slow", "/goal clear", "chatty"], "the command alone, then the rest");
+        assert_eq!(goal_of(&st, &a.id), None);
+        assert!(st.rt.lock().unwrap().queued_messages.get(&a.id).is_none_or(|q| q.iter().all(|(i, _)| *i != chatty)));
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_error_with_no_turns_and_nothing_said_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("api-down".into()), "user");
+        until("the run to start", 10, || prompts(&st, &a.id).contains("api-down")).await;
+        enqueue(&st, &a.id, Some("chatty".into()), "user");
+        until("the queued message to run next", 10, || prompts(&st, &a.id).contains("chatty")).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input on the error");
+        assert_eq!(error_text(&st, &a.id).as_deref(), Some("error_during_execution"));
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "On it."), "the queued run replied");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_claude_answers_itself_with_nothing_said_still_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("/context".into()), "user");
+        until("the run to start", 10, || prompts(&st, &a.id).contains("/context")).await;
+        enqueue(&st, &a.id, Some("chatty".into()), "user");
+        until("the queued message to run next", 10, || prompts(&st, &a.id).contains("chatty")).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input after its answer");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error" && m.content != "Stopped"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.content == "On it."), "the queued run replied");
+    }
+
+    #[test]
+    fn hook_feedback_and_goal_replies_are_read_from_claudes_lines() {
+        let fb = |t: &str| json!({ "type": "user", "isSynthetic": true, "message": { "role": "user", "content": [{ "type": "text", "text": t }] } });
+        assert_eq!(hook_block(&fb("Stop hook feedback:\nObjective not met: no tests."), None), Some((None, "Objective not met: no tests.".into())));
+        assert_eq!(hook_block(&fb("Stop hook feedback:\n[Tests pass]: still red"), None), Some((Some("Tests pass".into()), "still red".into())));
+        // A condition with brackets of its own is cut off whole when Loft knows it.
+        let g = "Fix [the] bug";
+        assert_eq!(hook_block(&fb("Stop hook feedback:\n[Fix [the] bug]: not yet"), Some(g)), Some((Some(g.into()), "not yet".into())));
+        assert_eq!(hook_block(&json!({ "type": "user", "message": { "content": "Stop hook feedback:\nx" } }), None), None, "only claude's own line");
+        assert_eq!(hook_block(&fb("Hello"), None), None);
+        assert_eq!(goal_change("Goal set: Tests pass"), Some(Some("Tests pass".into())));
+        assert_eq!(goal_change("Goal active: Tests pass (not yet evaluated)"), Some(Some("Tests pass".into())));
+        assert_eq!(goal_change("Goal cleared: Tests pass"), Some(None));
+        assert_eq!(goal_change("No goal set. Usage: /goal <condition>"), Some(None));
+        assert_eq!(goal_change("Done."), None);
+        assert_eq!(hook_block_line(true, ""), "Goal not met: no reason given");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_call_starts_the_count_over() {
+        let (st, a) = fake_claude_state();
+        run(&st, &a.id, "goal-tools", 1).await;
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.meta["brake"] != true), "{msgs:?}");
+        assert_eq!(msgs.iter().filter(|m| m.kind == "text" && m.content == "What is the password?").count(), 7);
+        assert!(msgs.iter().any(|m| m.kind == "text" && m.content == "started"), "the run ended with its reply");
+    }
+
+    #[test]
+    fn the_brake_counts_model_turns_not_lines_and_a_user_message_or_result_starts_over() {
+        let text = |id: &str| json!({ "type": "assistant", "message": { "id": id, "content": [{ "type": "text", "text": "hi" }] } });
+        let feedback = json!({ "type": "user", "isSynthetic": true, "message": { "content": [{ "type": "text", "text": "Stop hook feedback:\n[goal]: not yet" }] } });
+        let mut b = Brake::default();
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("m{i}"))) && !b.see(&text(&format!("m{i}"))) && !b.see(&feedback));
+        }
+        assert_eq!(b.turns, 4, "two lines of one turn count once");
+        assert!(!b.see(&json!({ "type": "user", "message": { "content": "the password" } })));
+        assert_eq!(b.turns, 0, "the user's message is new input");
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("n{i}"))) && !b.see(&feedback));
+        }
+        assert!(!b.see(&json!({ "type": "result", "num_turns": 4 })));
+        assert_eq!(b.turns, 0, "a finished turn starts over");
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("k{i}"))) && !b.see(&feedback));
+        }
+        assert!(!b.see(&text("k4")));
+        assert!(b.see(&feedback), "the 5th turn's feedback stops it");
+        assert_eq!(b.notice(), "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: not yet");
     }
 
     fn fields(st: &AppState, id: &str) -> Value {

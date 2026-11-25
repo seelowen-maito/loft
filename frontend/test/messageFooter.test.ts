@@ -64,11 +64,11 @@ test("a cancelled message offers Copy to box and no Reply or Save", () => {
   assert.match(r.footer.textContent!, /^Cancelled, not sent to the agent/);
 });
 
-test("your own queued message shows the mark and Cancel in its footer", () => {
+test("your own queued message shows the mark, Cancel and Send now in its footer", () => {
   const r = row(msg(6, "user"));
-  assert.deepEqual(r.labels, ["Cancel this queued message", "Save this message", "Reply to your message"]);
+  assert.deepEqual(r.labels, ["Cancel this queued message", "Send now", "Save this message", "Reply to your message"]);
   assert.equal(r.inFooter, true);
-  assert.match(r.footer.textContent!, /^\s*Queued until this run ends Cancel.*Reply$/);
+  assert.match(r.footer.textContent!, /^\s*Queued until this run ends Cancel Send now.*Reply$/);
 });
 
 test("your own cancelled message is struck through, offers Copy to box and no Reply", () => {
