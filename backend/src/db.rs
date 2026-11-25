@@ -496,6 +496,24 @@ pub struct TaskComment {
     pub created_at: String,
 }
 
+/// A chat message kept in Saved: a copy of its text with where it came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedItem {
+    pub id: i64,
+    pub title: String,
+    pub tag: String,
+    /// The message as Markdown.
+    pub content: String,
+    /// The agent whose chat it was saved from, and its name then: it may be deleted since.
+    pub agent_id: String,
+    pub agent_name: String,
+    pub message_id: i64,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    /// The pull request of its last export to a project's docs (`pull_requests.id`), if any.
+    pub export_pr: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
     pub id: i64,
@@ -871,6 +889,19 @@ CREATE TABLE IF NOT EXISTS actions_owners (
     owner TEXT PRIMARY KEY,
     data TEXT NOT NULL
 );
+-- Saved: chat messages kept for good (saved.rs). Independent of messages and agents: deleting either keeps them.
+CREATE TABLE IF NOT EXISTS saved_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    content TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    export_pr TEXT
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -980,6 +1011,23 @@ fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
     })
 }
 
+const SAVED_COLS: &str = "id, title, tag, content, agent_id, agent_name, message_id, created_at, updated_at, export_pr";
+
+fn saved_from_row(r: &Row) -> rusqlite::Result<SavedItem> {
+    Ok(SavedItem {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        tag: r.get(2)?,
+        content: r.get(3)?,
+        agent_id: r.get(4)?,
+        agent_name: r.get(5)?,
+        message_id: r.get(6)?,
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
+        export_pr: r.get(9)?,
+    })
+}
+
 fn memory_from_row(r: &Row) -> rusqlite::Result<Memory> {
     Ok(Memory {
         id: r.get(0)?,
@@ -1025,6 +1073,11 @@ impl Db {
         let has_updated: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'updated_at'", [], |r| r.get(0))?;
         if !has_updated {
             conn.execute("ALTER TABLE memories ADD COLUMN updated_at TEXT", [])?;
+        }
+        // Saved items made before export had no PR of their own.
+        let has_export: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('saved_items') WHERE name = 'export_pr'", [], |r| r.get(0))?;
+        if !has_export {
+            conn.execute("ALTER TABLE saved_items ADD COLUMN export_pr TEXT", [])?;
         }
         // FYIs used to wait in the agent's `data`; move any still there to their table, once.
         conn.execute_batch(
@@ -2024,6 +2077,66 @@ impl Db {
     pub fn delete_memory(&self, agent_id: &str, id: i64) -> Result<bool> {
         let c = self.0.lock().unwrap();
         Ok(c.execute("DELETE FROM memories WHERE agent_id = ?1 AND id = ?2", params![agent_id, id])? > 0)
+    }
+
+    // ---- saved --------------------------------------------------------
+
+    pub fn add_saved(&self, title: &str, tag: &str, content: &str, agent_id: &str, agent_name: &str, message_id: i64) -> Result<SavedItem> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO saved_items (title, tag, content, agent_id, agent_name, message_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![title, tag, content, agent_id, agent_name, message_id, now()],
+        )?;
+        let id = c.last_insert_rowid();
+        Ok(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row)?)
+    }
+
+    /// Newest first. `query` matches the title or content, ignoring case; `tag` matches exactly, ignoring case.
+    pub fn list_saved(&self, query: &str, tag: &str) -> Result<Vec<SavedItem>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(&format!(
+            "SELECT {SAVED_COLS} FROM saved_items
+             WHERE (?1 = '' OR instr(lower(title), lower(?1)) > 0 OR instr(lower(content), lower(?1)) > 0)
+               AND (?2 = '' OR lower(tag) = lower(?2))
+             ORDER BY created_at DESC, id DESC"
+        ))?;
+        let rows = st.query_map(params![query, tag], saved_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every tag in use, sorted.
+    pub fn saved_tags(&self) -> Result<Vec<String>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT DISTINCT tag FROM saved_items WHERE tag != '' ORDER BY lower(tag)")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn get_saved(&self, id: i64) -> Result<Option<SavedItem>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row).optional()?)
+    }
+
+    /// Sets the title, tag and content and stamps `updated_at`; None when there's no such item.
+    pub fn update_saved(&self, id: i64, title: &str, tag: &str, content: &str) -> Result<Option<SavedItem>> {
+        let c = self.0.lock().unwrap();
+        if c.execute("UPDATE saved_items SET title = ?2, tag = ?3, content = ?4, updated_at = ?5 WHERE id = ?1", params![id, title, tag, content, now()])? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row)?))
+    }
+
+    /// Records the pull request of the item's latest export.
+    pub fn set_saved_export(&self, id: i64, pr_id: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("UPDATE saved_items SET export_pr = ?2 WHERE id = ?1", params![id, pr_id])?;
+        Ok(())
+    }
+
+    /// False when there was no such item.
+    pub fn delete_saved(&self, id: i64) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.execute("DELETE FROM saved_items WHERE id = ?1", [id])? > 0)
     }
 
     // ---- permissions --------------------------------------------------

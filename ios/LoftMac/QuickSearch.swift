@@ -250,7 +250,7 @@ final class QuickSearchController {
     }
 
     private static let sections: [String: MacSection] = [
-        "/repos": .overview, "/agents": .agents, "/issues": .issues, "/needs-you": .needsYou, "/settings": .settings,
+        "/repos": .overview, "/agents": .agents, "/issues": .issues, "/needs-you": .needsYou, "/saved": .saved, "/settings": .settings,
     ]
 }
 

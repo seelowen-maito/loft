@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router";
-import { Bot, GitBranch, Inbox, ListTodo, Mic, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
+import { Bookmark, Bot, GitBranch, Inbox, ListTodo, Mic, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
@@ -16,6 +16,7 @@ import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
 import CleanPage from "./pages/Clean";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
+import SavedPage from "./pages/Saved";
 import NeedsYouPage, { useCloseNeedsYou } from "./pages/NeedsYou";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { UpdateStatus } from "./components/UpdateStatus";
@@ -220,6 +221,9 @@ export default function App() {
             <NavLink to={issuesLink(location.pathname)} className={tab} aria-label="Issues">
               <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>
             </NavLink>
+            <NavLink to="/saved" className={tab} aria-label="Saved">
+              <Bookmark className="size-3.5" /> <span className="max-md:hidden">Saved</span>
+            </NavLink>
             {showSimulator && (
               <NavLink to="/simulator" className={tab} aria-label="Simulator">
                 <Smartphone className="size-3.5" /> <span className="max-md:hidden">Simulator</span>
@@ -271,6 +275,8 @@ export default function App() {
           <Route path="/tasks" element={<OldTask />} />
           <Route path="/tasks/:id" element={<OldTask />} />
           <Route path="/needs-you" element={<NeedsYouPage />} />
+          <Route path="/saved" element={<SavedPage />} />
+          <Route path="/saved/:id" element={<SavedPage />} />
           <Route path="/simulator" element={<SimulatorPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/clean" element={<CleanPage />} />

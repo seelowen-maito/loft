@@ -615,6 +615,18 @@ public final class LoftStore {
         historyHasMore[agentId] = page.count >= 100
     }
 
+    /// Loads earlier pages until message `id` is in the chat, for a saved item's Open in chat (at most `pages` pages).
+    /// True when it's there.
+    public func loadMessage(_ id: Int64, in agentId: String, pages: Int = 10) async -> Bool {
+        // A chat restored from the disk cache doesn't know yet whether it has earlier pages: load its latest page first.
+        if historyHasMore[agentId] == nil { try? await loadConversation(agentId) }
+        for _ in 0..<pages {
+            guard let first = messages[agentId]?.first, first.id > id else { break }
+            guard historyHasMore[agentId] == true, (try? await loadOlder(agentId)) != nil else { break }
+        }
+        return messages[agentId]?.contains { $0.id == id } == true
+    }
+
     /// A dictation going out after a short Undo from a chat ("Sending to …"). It lives here rather than in the
     /// composer, so it still goes when you leave the chat during the window.
     public struct VoiceAutoSend: Identifiable {
@@ -968,6 +980,21 @@ public final class LoftStore {
     }
 
     public func stopRun(_ agentId: String) async throws { try await requireWrite().stopRun(agentId: agentId) }
+
+    /// Cancels a queued message before the agent's run takes it (#668). False when the run already took it.
+    /// Either way it leaves the queue at once, and a cancelled one shows cancelled; the server's events say the same.
+    public func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool {
+        let ok = try await requireWrite().cancelQueued(agentId: agentId, messageId: messageId)
+        if let i = agents.firstIndex(where: { $0.id == agentId }) { agents[i].queuedMessages?.removeAll { $0 == messageId } }
+        guard ok else { return false }
+        if var m = messages[agentId]?.first(where: { $0.id == messageId }) {
+            var o: [String: JSONValue] = if case .object(let o)? = m.meta { o } else { [:] }
+            o["cancelled"] = true
+            m.meta = .object(o)
+            insert(m)
+        }
+        return true
+    }
     public func workspaceSize(_ agentId: String) async throws -> Int64 { try await requireWrite().workspaceSize(agentId: agentId) }
     /// Deletes the agent and, with `purgeFiles`, its workspace; it leaves the list without waiting for the event.
     public func deleteAgent(_ agentId: String, purgeFiles: Bool) async throws {
@@ -1147,6 +1174,15 @@ public final class LoftStore {
     public func herdrStatus() async throws -> JSONValue { try await requireWrite().herdrStatus() }
     public func herdrSetup() async throws -> JSONValue { try await requireWrite().herdrSetup() }
     public func herdrFocus(agentId: String) async throws { try await requireWrite().herdrFocus(agentId: agentId) }
+    public func savedList(query: String = "", tag: String = "") async throws -> SavedList { try await requireWrite().savedList(query: query, tag: tag) }
+    public func savedItem(id: Int64) async throws -> SavedItem { try await requireWrite().savedItem(id: id) }
+    public func saveMessage(_ m: ChatMessage, title: String, tag: String) async throws -> SavedItem {
+        try await requireWrite().saveMessage(agentId: m.agentId, messageId: m.id, title: title, tag: tag)
+    }
+    public func updateSaved(id: Int64, title: String, tag: String, content: String) async throws -> SavedItem {
+        try await requireWrite().updateSaved(id: id, title: title, tag: tag, content: content)
+    }
+    public func deleteSaved(id: Int64) async throws { try await requireWrite().deleteSaved(id: id) }
 
     /// Saves the two GitHub issues settings, leaving the server's other settings as they are.
     public func saveIssueSettings(_ s: IssueSettings) async throws {

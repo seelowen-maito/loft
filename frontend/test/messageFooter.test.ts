@@ -1,4 +1,4 @@
-// A chat message's footer in jsdom (#666): Reply, the time and the queued state in one row, the last thing in the message.
+// A chat message's footer in jsdom (#666): Reply, Save (#677), the time and the queued state in one row, the last thing in the message.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
@@ -36,28 +36,28 @@ function row(m: object) {
   return { div, footer, labels: buttons.map((b) => b.getAttribute("aria-label") ?? b.textContent!.trim()), inFooter: buttons.every((b) => footer.contains(b)) };
 }
 
-test("your message ends with the time, then Reply naming you", () => {
+test("your message ends with the time, then Save and Reply naming you", () => {
   const r = row(msg(1, "user"));
-  assert.deepEqual(r.labels, ["Reply to your message"]);
+  assert.deepEqual(r.labels, ["Save this message", "Reply to your message"]);
   assert.equal(r.footer.textContent!.endsWith("Reply"), true);
   assert.equal(r.footer.querySelector("time")!.getAttribute("title")!.length > 0, true);
 });
 
-test("the agent's message starts its footer with Reply, and nothing floats outside it", () => {
+test("the agent's message starts its footer with Reply, then Save, and nothing floats outside it", () => {
   const r = row(msg(2, "assistant"));
-  assert.deepEqual(r.labels, ["Reply to Loft Dev"]);
+  assert.deepEqual(r.labels, ["Reply to Loft Dev", "Save this message"]);
   assert.equal(r.inFooter, true);
   assert.equal(r.footer.firstElementChild!.tagName, "BUTTON");
 });
 
 test("a queued message from an agent shows the mark and Cancel before the time and Reply", () => {
   const r = row(msg(5, "user", { from_agent: lead }));
-  assert.deepEqual(r.labels, ["Cancel this queued message from Loft Lead", "Reply to Loft Lead"]);
+  assert.deepEqual(r.labels, ["Cancel this queued message from Loft Lead", "Save this message", "Reply to Loft Lead"]);
   assert.equal(r.inFooter, true);
   assert.match(r.footer.textContent!, /^\s*Queued until this run ends Cancel.*Reply$/);
 });
 
-test("a cancelled message offers Copy to box and no Reply", () => {
+test("a cancelled message offers Copy to box and no Reply or Save", () => {
   const r = row(msg(4, "user", { from_agent: lead, cancelled: true }));
   assert.deepEqual(r.labels, ["Copy to box"]);
   assert.equal(r.inFooter, true);
@@ -66,7 +66,7 @@ test("a cancelled message offers Copy to box and no Reply", () => {
 
 test("your own queued message shows the mark, Cancel and Send now in its footer", () => {
   const r = row(msg(6, "user"));
-  assert.deepEqual(r.labels, ["Cancel this queued message", "Send now", "Reply to your message"]);
+  assert.deepEqual(r.labels, ["Cancel this queued message", "Send now", "Save this message", "Reply to your message"]);
   assert.equal(r.inFooter, true);
   assert.match(r.footer.textContent!, /^\s*Queued until this run ends Cancel Send now.*Reply$/);
 });
@@ -76,4 +76,9 @@ test("your own cancelled message is struck through, offers Copy to box and no Re
   assert.deepEqual(r.labels, ["Copy to box"]);
   assert.match(r.footer.textContent!, /^Cancelled, not sent to the agent/);
   assert.ok(r.div.querySelector(".line-through"));
+});
+
+test("a message with only images has Reply but nothing to save", () => {
+  const r = row({ ...msg(8, "user", { images: ["a.png"] }), content: "" });
+  assert.deepEqual(r.labels, ["Reply to your message"]);
 });

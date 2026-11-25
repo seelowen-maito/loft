@@ -44,6 +44,9 @@ public protocol LoftAPI: Sendable {
     /// `PATCH /api/agents/{id}` with some of its editable fields (today `fresh_context`).
     func updateAgent(id: String, _ fields: [String: JSONValue]) async throws -> Agent
     func stopRun(agentId: String) async throws
+    /// `POST /api/agents/{id}/messages/{mid}/cancel`: takes a message back out of the queue; false when the run
+    /// already took it.
+    func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool
     /// Bytes in the agent's workspace: what deleting it with the agent frees.
     func workspaceSize(agentId: String) async throws -> Int64
     /// Deletes the agent; with `purgeFiles` its workspace folder too.
@@ -144,6 +147,13 @@ public protocol LoftAPI: Sendable {
     func herdrFocus(agentId: String) async throws
     /// The agent's "/" menu: `GET /api/agents/{id}/commands`.
     func commands(agentId: String) async throws -> [AgentCommand]
+    /// Saved (spec #675): `GET /api/saved?q=&tag=`, `GET /api/saved/{id}`, `POST /api/saved` from a chat message,
+    /// `PUT` and `DELETE /api/saved/{id}`.
+    func savedList(query: String, tag: String) async throws -> SavedList
+    func savedItem(id: Int64) async throws -> SavedItem
+    func saveMessage(agentId: String, messageId: Int64, title: String, tag: String) async throws -> SavedItem
+    func updateSaved(id: Int64, title: String, tag: String, content: String) async throws -> SavedItem
+    func deleteSaved(id: Int64) async throws
 }
 
 public struct LiveLoftAPI: LoftAPI {
@@ -341,6 +351,10 @@ public struct LiveLoftAPI: LoftAPI {
         try decode(Agent.self, try await send("PATCH", "/agents/\(id)", body: .object(fields)))
     }
     public func stopRun(agentId: String) async throws { _ = try await send("POST", "/agents/\(agentId)/stop") }
+    public func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool {
+        struct Ok: Decodable { let ok: Bool }
+        return try decode(Ok.self, try await send("POST", "/agents/\(agentId)/messages/\(messageId)/cancel")).ok
+    }
     public func workspaceSize(agentId: String) async throws -> Int64 {
         struct Size: Decodable { let bytes: Int64 }
         return try await (get("/agents/\(agentId)/workspace-size") as Size).bytes
@@ -498,6 +512,18 @@ public struct LiveLoftAPI: LoftAPI {
     public func herdrSetup() async throws -> JSONValue { try decode(JSONValue.self, try await send("POST", "/herdr/setup", body: [:], timeout: 300)) }
     public func herdrFocus(agentId: String) async throws { _ = try await send("POST", "/herdr/focus/\(agentId)", body: [:], timeout: 30) }
     public func commands(agentId: String) async throws -> [AgentCommand] { try await get("/agents/\(agentId)/commands") }
+    public func savedList(query: String, tag: String) async throws -> SavedList {
+        try await get("/saved", query: [URLQueryItem(name: "q", value: query), URLQueryItem(name: "tag", value: tag)])
+    }
+    public func savedItem(id: Int64) async throws -> SavedItem { try await get("/saved/\(id)") }
+    public func saveMessage(agentId: String, messageId: Int64, title: String, tag: String) async throws -> SavedItem {
+        let body: JSONValue = ["agent_id": .string(agentId), "message_id": .number(Double(messageId)), "title": .string(title), "tag": .string(tag)]
+        return try decode(SavedItem.self, try await send("POST", "/saved", body: body))
+    }
+    public func updateSaved(id: Int64, title: String, tag: String, content: String) async throws -> SavedItem {
+        try decode(SavedItem.self, try await send("PUT", "/saved/\(id)", body: ["title": .string(title), "tag": .string(tag), "content": .string(content)]))
+    }
+    public func deleteSaved(id: Int64) async throws { _ = try await send("DELETE", "/saved/\(id)") }
 
     public func eventLines() async throws -> AsyncThrowingStream<String, Error> {
         var req = URLRequest(url: url("/events"))
@@ -617,4 +643,9 @@ extension LoftAPI {
     public func herdrSetup() async throws -> JSONValue { throw APIError.unsupported("Herdr UI") }
     public func herdrFocus(agentId: String) async throws { throw APIError.unsupported("Herdr UI") }
     public func commands(agentId: String) async throws -> [AgentCommand] { [] }
+    public func savedList(query: String, tag: String) async throws -> SavedList { throw APIError.unsupported("Saved") }
+    public func savedItem(id: Int64) async throws -> SavedItem { throw APIError.unsupported("Saved") }
+    public func saveMessage(agentId: String, messageId: Int64, title: String, tag: String) async throws -> SavedItem { throw APIError.unsupported("Saved") }
+    public func updateSaved(id: Int64, title: String, tag: String, content: String) async throws -> SavedItem { throw APIError.unsupported("Saved") }
+    public func deleteSaved(id: Int64) async throws { throw APIError.unsupported("Saved") }
 }
