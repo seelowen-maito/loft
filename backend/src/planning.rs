@@ -4494,6 +4494,10 @@ pub(crate) mod tests {
         let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
         assert!(out.contains("#41: the repo runs no CI on its branch.\nClosed #41"), "{out}");
         assert_eq!(standing(&st, "octo/ci-none", 41), ("closed".into(), Some(42), None));
+        // No workflow, so nothing to say: no comment on the PR, no line on the card.
+        let said = |fake: &Fake, slug: &str| posts(fake, slug, "issues/500/comments").into_iter().filter(|c| c["body"].as_str().unwrap_or_default().starts_with("**CI**: no CI ran")).count();
+        assert_eq!(said(&fake, "octo/ci-none"), 0);
+        assert_eq!(crate::delivery::delivery_json(&st, &delivery(&st, "octo/ci-none"))["no_ci"], json!([]));
 
         // An active workflow with no check on the commit yet: it waits, until the grace after the submit.
         let (fake, st) = (fake_github(), state());
@@ -4505,9 +4509,20 @@ pub(crate) mod tests {
         assert!(out.ends_with("#41 waits for its CI: Loft closes it when the CI is green."), "{out}");
         crate::delivery::follow_all(&st).await;
         assert_eq!(standing(&st, slug, 41).0, "review");
+        assert_eq!(said(&fake, slug), 0, "within the grace: nothing said yet");
         crate::delivery::update(&st, slug, 40, |d| d.ticket_mut(41).unwrap().submitted_at = (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339());
         crate::delivery::follow_all(&st).await;
+        // Past the grace with none: it passes as before (a `paths` filter can skip a commit), and Loft says so.
         assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert_eq!(said(&fake, slug), 1);
+        let body = posts(&fake, slug, "issues/500/comments").into_iter().rev().find(|c| c["body"].as_str().unwrap_or_default().starts_with("**CI**: no CI ran")).unwrap();
+        assert_eq!(body["body"], "**CI**: no CI ran on `c1c1c1c`, which includes ticket #41. The repo has active workflows, but no check showed up within 10 minutes of the submit (a workflow's `paths` filter can skip a commit), so it passes without one.");
+        let d = delivery(&st, slug);
+        assert_eq!(d.ticket(41).unwrap().no_ci, "c1c1c1c");
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["no_ci"], json!(["No CI ran on c1c1c1c for #41: it passed without one."]));
+        // Polled again, nothing more is posted.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(said(&fake, slug), 1);
     }
 
     #[tokio::test]
@@ -5278,7 +5293,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "billing_url": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "draft_again": null, "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "billing_url": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "draft_again": null, "no_ci": [], "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);

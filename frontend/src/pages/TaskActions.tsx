@@ -168,7 +168,8 @@ function useIssueDelivery(t: Task) {
 }
 
 /** Where a started Delivery stands: running, waiting for CI (how long, linked to its checks), stalled (and why), paused, needs you, final review or done,
- *  the GitHub Actions minutes its branch spent so far, and a spec PR Loft put back to draft (or couldn't) when a ticket started. */
+ *  the GitHub Actions minutes its branch spent so far, a spec PR Loft put back to draft (or couldn't) when a ticket started, and the tickets
+ *  that passed with no CI run on their commit although the repo has workflows. */
 function DeliveryState({ d }: { d: IssueDelivery | null }) {
   const minutes = actionsMinutesLine(d);
   return (
@@ -177,6 +178,7 @@ function DeliveryState({ d }: { d: IssueDelivery | null }) {
       {minutes && <div className="mt-1 text-[12.5px] text-fg-3" data-delivery-minutes>{minutes}</div>}
       {d?.behind && <div className="mt-1 text-[12.5px] text-warn" data-delivery-behind>{d.behind.count} behind {d.behind.base}: the Dev merges it in before submitting.</div>}
       {d?.draft_again && <div className={`mt-1 text-[12.5px] ${d.draft_again.ok ? "text-fg-3" : "text-warn"}`} data-delivery-draft-again>{d.draft_again.text}</div>}
+      {d?.no_ci?.map((line) => <div key={line} className="mt-1 text-[12.5px] text-warn" data-delivery-no-ci>{line}</div>)}
     </>
   );
 }

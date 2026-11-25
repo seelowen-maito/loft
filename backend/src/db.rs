@@ -286,6 +286,10 @@ pub struct DeliveryTicket {
     /// submitted to a team with no reviewers. Empty otherwise: cleared when the CI passes or a changes round starts.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ci_since: String,
+    /// The commit its CI passed on with no CI at all although the repo has active workflows: no check showed up
+    /// within the CI grace (a workflow's `paths` filter can skip a commit). Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub no_ci: String,
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,

@@ -162,6 +162,8 @@ export type IssueDelivery = {
   behind?: { count: number; base: string } | null;
   /** A ticket started while the spec PR was ready for review: Loft put it back to draft (`ok`), or GitHub refused, and `text` says so; null otherwise. An older server doesn't send it. */
   draft_again?: { ok: boolean; text: string } | null;
+  /** A line per ticket whose CI passed with none run on its commit although the repo has active workflows. An older server doesn't send it. */
+  no_ci?: string[];
   /** On a private repo: what the workflow check found, until the Delivery is done; null when there's nothing to warn about. An older server doesn't send it. */
   workflows?: WorkflowCheck | null;
 };

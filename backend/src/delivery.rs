@@ -1600,6 +1600,8 @@ async fn submit(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
                 t.verdicts.insert("ci".into(), "pending".into());
             }
             t.submitted_at = crate::db::now();
+            // New commits: whether a CI runs on them is for their own CI to say.
+            t.no_ci.clear();
             // With no reviewer to wait for, only its CI is left from the submit on.
             t.ci_since = if ci && reviewers.is_empty() { t.submitted_at.clone() } else { String::new() };
         }
@@ -2212,6 +2214,9 @@ enum Ci {
     Green,
     /// The repo has no CI, or none runs on the branch.
     Absent,
+    /// The repo has active workflows, but no check showed up on the commit within the CI grace: a workflow's
+    /// `paths` filter can skip a commit, so it passes, and Loft says so on the PR and the card.
+    NoneRan,
     /// The failed check runs and commit statuses.
     Red(Vec<Value>, Vec<Value>),
     /// A Billing block: GitHub refused to run the jobs (the owner's payments failed, or its spending limit was
@@ -2273,13 +2278,16 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     }
     match ci {
         Ci::Running | Ci::Queued(_) | Ci::Billing(_) | Ci::Infra(_) => Ok(String::new()),
-        ci @ (Ci::Green | Ci::Absent) => {
+        ci @ (Ci::Green | Ci::Absent | Ci::NoneRan) => {
             let why = match ci {
                 Ci::Green => format!("its CI is green on `{}`", short(&head)),
+                Ci::NoneRan => format!("no CI ran on `{}`, though the repo has workflows", short(&head)),
                 _ => "the repo runs no CI on its branch".to_string(),
             };
-            let mut out = String::new();
-            for n in ready.iter().map(|t| t.number).collect::<Vec<_>>() {
+            let numbers: Vec<i64> = ready.iter().map(|t| t.number).collect();
+            // Said before they pass: passing can close them and end the Delivery.
+            let mut out = if matches!(ci, Ci::NoneRan) { no_ci_ran(state, d, &numbers, &head, grace).await? } else { String::new() };
+            for n in numbers {
                 out += &ci_passed(state, &d.repo, d.spec, n, &why).await?;
             }
             Ok(out)
@@ -2337,7 +2345,11 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str, grace: i64)
             Err(e) => return Err(e),
         };
         let active = workflows["workflows"].as_array().is_some_and(|w| w.iter().any(|w| w["state"] == "active"));
-        return Ok(if active && !past_grace(since, grace) { Ci::Running } else { Ci::Absent });
+        return Ok(match (active, past_grace(since, grace)) {
+            (true, false) => Ci::Running,
+            (true, true) => Ci::NoneRan,
+            (false, _) => Ci::Absent,
+        });
     }
     if runs.iter().any(|c| Check::of_run(c) == Check::Pending) || statuses.iter().any(|s| Check::of_status(s) == Check::Pending) {
         return Ok(queued(&runs, &statuses));
@@ -2632,6 +2644,36 @@ fn log_tail(text: &str) -> String {
     if cut > 0 { format!("… ({cut} earlier lines cut)\n{tail}") } else { tail }
 }
 
+/// No CI ran on commit `head`, which includes `tickets`, although the repo has active workflows: none showed up within
+/// `grace` minutes of their submit. They still pass (a workflow's `paths` filter can skip a commit), but each keeps
+/// that commit for the card, and the PR gets a comment saying so. The lines for the reply.
+async fn no_ci_ran(state: &AppState, d: &Delivery, tickets: &[i64], head: &str, grace: i64) -> Result<String, String> {
+    let d = update(state, &d.repo, d.spec, |d| {
+        for n in tickets {
+            if let Some(t) = d.ticket_mut(*n) {
+                t.no_ci = short(head).to_string();
+            }
+        }
+    })
+    .ok_or("The Delivery record couldn't be saved.")?;
+    let names = list_of(&d.tickets.iter().filter(|t| tickets.contains(&t.number)).map(|t| tag(&d, t)).collect::<Vec<_>>());
+    let Some(pr) = d.pr else { return Ok(String::new()) };
+    let ticket = if tickets.len() == 1 { "ticket" } else { "tickets" };
+    let body = format!(
+        "**CI**: no CI ran on `{}`, which includes {ticket} {names}. The repo has active workflows, but no check showed up within {grace} minutes of the submit (a workflow's `paths` filter can skip a commit), so it passes without one.",
+        short(head)
+    );
+    Ok(match crate::github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{pr}/comments", d.repo), Some(json!({ "body": body }))).await {
+        Ok(_) => format!("\nNo CI ran on `{}`, which includes {names}: posted on #{pr}.", short(head)),
+        Err(e) => format!("\nNo CI ran on `{}`, which includes {names}. Couldn't post it on #{pr}: {e}.", short(head)),
+    })
+}
+
+/// What a Delivery card says of its tickets whose CI passed with none run although the repo has workflows, one line each.
+fn no_ci_lines(d: &Delivery) -> Vec<String> {
+    d.tickets.iter().filter(|t| !t.no_ci.is_empty()).map(|t| format!("No CI ran on {} for {}: it passed without one.", t.no_ci, tag(d, t))).collect()
+}
+
 /// The CI of ticket #n passed (`why`): it closes when its reviewers passed too. The lines for the reply.
 async fn ci_passed(state: &AppState, repo: &str, spec: i64, n: i64, why: &str) -> Result<String, String> {
     let d = update(state, repo, spec, |d| {
@@ -2725,9 +2767,10 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
         Ci::Running | Ci::Queued(_) => Ok(String::new()),
         Ci::Billing(runs) => billing_block(state, d, &runs, vec![]).await,
         Ci::Infra(runs) => infra_failed(state, d, &runs, &head, vec![]).await,
-        ci @ (Ci::Green | Ci::Absent) => {
+        ci @ (Ci::Green | Ci::Absent | Ci::NoneRan) => {
             let why = match ci {
                 Ci::Green => format!("its CI is green on `{}`", short(&head)),
+                Ci::NoneRan => format!("no CI ran on `{}`, though the repo has workflows", short(&head)),
                 _ => "the repo runs no CI on its branch".to_string(),
             };
             if d.final_rounds > 0 {
@@ -3757,7 +3800,8 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
 /// What an issue page shows of its Delivery: its state (with why it stalled, its state line, whether Pause and Resume apply, and
 /// whether a ticket or its final review waits for the user), whether it started, who has it, its PR (and its checks page),
 /// since when it waits for CI, the Actions minutes its branch spent so far (null for a plan kept in Loft), the workflow check's
-/// warnings while it has some and isn't done, and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
+/// warnings while it has some and isn't done, a line per ticket whose CI passed with none run although the repo has workflows,
+/// and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
 pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let on_ci = d.current.and_then(|n| d.ticket(n)).is_some_and(waiting_for_ci);
     let dev = state.db.get_agent(&d.dev).ok().flatten().filter(|_| !on_ci);
@@ -3779,6 +3823,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "ci_since": delivery_ci_since(d),
         "actions_minutes": (!d.local && d.state != "planned").then(|| crate::actions::total(&d.actions_runs)),
         "draft_again": d.draft_again,
+        "no_ci": no_ci_lines(d),
         "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
     });
     // The workflow check warns until the Delivery is done.
