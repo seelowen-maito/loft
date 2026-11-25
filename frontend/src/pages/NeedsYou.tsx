@@ -8,8 +8,9 @@ import { relTime } from "../lib/time";
 import { isTyping } from "../lib/shortcuts";
 import { ActionButton } from "../components/ActionButton";
 import { ErrorLine } from "../components/Callout";
+import { ConfirmDialog } from "../components/Dialog";
 import { errorText, useAction } from "../lib/useAction";
-import { answerBody, beingLookedAt, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
+import { answerBody, beingLookedAt, clearAll, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
 
 const TONE = { bad: "bg-bad", warn: "bg-warn", accent: "bg-accent", muted: "bg-fg-3/40" } as const;
 
@@ -163,6 +164,8 @@ export default function NeedsYouPage() {
   }, []);
   const [list, setList] = useState<NeedsYouList | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const clearing = useAction();
   // Unseen when they appeared during this visit: shown as new until the page closes, though marked seen at once.
   const [fresh, setFresh] = useState<Set<string>>(new Set());
   const shown = useRef<string[]>([]);
@@ -219,10 +222,35 @@ export default function NeedsYouPage() {
               {headline(list.count, list.items.filter((i) => fresh.has(i.id)).length)}
             </span>
           )}
-          <button type="button" onClick={close} title="Close (Esc)" aria-label="Close Needs you" className="ml-auto self-center rounded-full p-1.5 text-fg-3 transition-colors hover:bg-white/[0.06] hover:text-fg">
-            <X className="size-4" />
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            {list && clearAll(list.items).clear > 0 && (
+              <button type="button" className="btn-ghost self-center text-[12.5px]" data-needs-you-clear-all onClick={() => setConfirming(true)}>
+                {clearAll(list.items).label}
+              </button>
+            )}
+            <button type="button" onClick={close} title="Close (Esc)" aria-label="Close Needs you" className="self-center rounded-full p-1.5 text-fg-3 transition-colors hover:bg-white/[0.06] hover:text-fg">
+              <X className="size-4" />
+            </button>
+          </div>
         </div>
+        {confirming && list && (
+          <ConfirmDialog
+            title={`Clear ${clearAll(list.items).clear} ${clearAll(list.items).clear === 1 ? "item" : "items"}?`}
+            body="Each one is marked Done and leaves the list, on every device."
+            confirmLabel="Clear all"
+            pendingLabel="Clearing…"
+            pending={clearing.busy}
+            error={clearing.error}
+            onConfirm={() =>
+              clearing.run(async () => {
+                await api.needsYouClearAll();
+                setConfirming(false);
+                load();
+              })
+            }
+            onClose={() => setConfirming(false)}
+          />
+        )}
         {err && <p className="text-[12.5px] text-bad">Couldn't load Needs you: {err}</p>}
         {list && list.items.length === 0 && (
           <div className="panel flex flex-col items-center gap-2 px-5 py-12 text-center">

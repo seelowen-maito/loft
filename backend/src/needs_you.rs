@@ -1086,6 +1086,22 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/needs-you/dismiss-all`: Done on every item that offers it, in one call; asks without Done stay.
+/// Returns how many it cleared.
+pub async fn dismiss_all(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let clearable = |i: &Item| i.actions.iter().any(|a| a["kind"] == "dismiss");
+    let cleared = items.iter().filter(|i| clearable(i)).count();
+    for i in items.iter().filter(|i| clearable(i)) {
+        state.db.dismiss_needs_you(&i.id)?;
+    }
+    items.retain(|i| !clearable(i));
+    if let Ok(v) = look(&state, &items) {
+        emit_if_changed(&state, &v);
+    }
+    Ok(Json(json!({ "ok": true, "cleared": cleared })))
+}
+
 /// The `task_done` item of `t`, its id and when it finished: an issue the user created that finished in the last
 /// `REVIEW_HOURS`.
 fn done_item(t: &Task) -> Option<(String, String)> {
@@ -1443,6 +1459,21 @@ mod tests {
         assert!(dismiss_item(State(st.clone()), Path("permission:p1".into())).await.is_err());
         assert!(dismiss_item(State(st.clone()), Path(item(&v, "grill_round")["id"].as_str().unwrap().into())).await.is_err(), "an open round can't be dismissed");
         assert!(dismiss_item(State(st.clone()), Path("question:999999".into())).await.is_err(), "unknown ids are refused");
+
+        // Clear all: every item with Done goes, in one call; the asks without it stay, and it stays cleared.
+        let before = ids(&snapshot(&st).unwrap());
+        let asks: Vec<String> = collect(&st).unwrap().iter().filter(|i| !i.actions.iter().any(|a| a["kind"] == "dismiss")).map(|i| i.id.clone()).collect();
+        assert!(asks.iter().any(|i| i.starts_with("permission:")) && asks.iter().any(|i| i.starts_with("grill:")), "{asks:?}");
+        let Json(r) = dismiss_all(State(st.clone())).await.unwrap();
+        let after = ids(&snapshot(&st).unwrap());
+        assert_eq!(r["cleared"], json!(before.len() - after.len()));
+        assert!(r["cleared"].as_u64().unwrap() > 0);
+        let mut left = after.clone();
+        left.sort();
+        let mut want = asks.clone();
+        want.sort();
+        assert_eq!(left, want, "only the asks without Done stay");
+        assert_eq!(dismiss_all(State(st.clone())).await.unwrap().0["cleared"], json!(0), "nothing left to clear");
     }
 
     #[test]
