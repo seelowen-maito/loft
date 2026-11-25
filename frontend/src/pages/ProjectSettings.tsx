@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ArrowLeft, Plus } from "lucide-react";
-import { api, TEAM_SETTINGS, type ProjectBranches, type ProjectMergeMethods, type ProjectSetting, type ProjectSettingsView, type ReviewerRow } from "../lib/api";
+import { api, TEAM_SETTINGS, type ProjectActions, type ProjectBranches, type ProjectMergeMethods, type ProjectSetting, type ProjectSettingsView, type ReviewerRow } from "../lib/api";
 import { SettingsCard } from "../components/SettingsCard";
 import { Sticker } from "../components/Sticker";
 import { ErrorLine } from "../components/Callout";
 import { errorText, useAction } from "../lib/useAction";
 import { cx } from "../lib/format";
 import { fmtDateTime, relTime } from "../lib/time";
+import { monthName, quotaPercent, quotaTone } from "../lib/actionsQuota";
 
 /** A project's own settings, opened from its repo panel: each starts at Loft's default, and shows who changed it and when. */
 export default function ProjectSettingsPage() {
@@ -40,8 +41,68 @@ export default function ProjectSettingsPage() {
             <TeamCard key="team" project={project} settings={view.settings.filter((t) => TEAM_SETTINGS.includes(t.key))} onSaved={setView} />
           ) : null,
         )}
+        {view && <ActionsMinutes project={project} />}
       </div>
     </div>
+  );
+}
+
+/** Read only: the repo's GitHub Actions minutes this month, and how far its owner is into the quota set in Settings. */
+function ActionsMinutes({ project }: { project: string }) {
+  const [a, setA] = useState<ProjectActions | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    setA(null);
+    setErr(null);
+    api.projectActions(project).then(setA).catch((e) => setErr(errorText(e)));
+  }, [project]);
+  const quotaLink = (
+    <Link to="/settings#github" className="text-accent hover:underline">
+      Settings → GitHub API
+    </Link>
+  );
+  let body: React.ReactNode = null;
+  if (a && a.repo === null) body = <p className="text-[12.5px] text-fg-3">{a.why}</p>;
+  else if (a && a.repo !== null) {
+    const o = a.owner;
+    const pct = quotaPercent(o.minutes, o.quota);
+    const share = quotaPercent(a.minutes, o.quota);
+    body = (
+      <div className="space-y-2.5">
+        {!a.read ? (
+          <p className="text-[12.5px] text-fg-3">Not read yet: Loft reads {a.repo} every 15 minutes.</p>
+        ) : a.private === false ? (
+          <p className="text-[12.5px] text-fg-3">{a.repo} is public: GitHub doesn't bill its Actions minutes.</p>
+        ) : (
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 text-[13px]">
+            <span className="text-fg [overflow-wrap:anywhere]">{a.repo}</span>
+            <span className="font-mono text-[12.5px] tabular-nums">
+              {a.minutes.toLocaleString()} min{share !== null && <span className="text-fg-3"> · {share < 1 && share > 0 ? "<1" : Math.round(share)}% of the quota</span>}
+            </span>
+          </div>
+        )}
+        {o.quota === null ? (
+          <p className="text-[11.5px] text-fg-3">
+            {o.owner} has used {o.minutes.toLocaleString()} min this month, with no quota set. Set one in {quotaLink}.
+          </p>
+        ) : (
+          <div className="space-y-1">
+            <div className="h-1.5 overflow-hidden rounded-full bg-ink-700">
+              <div className={cx("h-full rounded-full", quotaTone(pct ?? 0))} style={{ width: `${Math.min(100, pct ?? 0)}%` }} />
+            </div>
+            <p className="text-[11.5px] text-fg-3">
+              {o.owner}: {o.minutes.toLocaleString()} of {o.quota.toLocaleString()} min ({Math.round(pct ?? 0)}%){o.source === "billing" ? ", as GitHub bills the org" : ""}. The quota is set in {quotaLink}.
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
+  return (
+    <SettingsCard title={`GitHub Actions${a && a.repo !== null ? ` · ${monthName(a.month)}` : ""}`} description="Minutes this month, each job rounded up as GitHub bills it. Read only." error={err}>
+      {!a && !err && <div className="skeleton h-10 rounded-xl" />}
+      {body}
+    </SettingsCard>
   );
 }
 

@@ -536,7 +536,7 @@ async fn branches_of(state: &AppState, project: &str) -> Result<Value, String> {
 }
 
 /// `project` as the page and the API name it, once it's a folder in the projects folder.
-fn known_project(state: &AppState, project: &str) -> Result<String, ApiError> {
+pub(crate) fn known_project(state: &AppState, project: &str) -> Result<String, ApiError> {
     let name = crate::repos::project_name(project).map_err(bad)?;
     if name.is_empty() {
         return Err(bad("project is required"));

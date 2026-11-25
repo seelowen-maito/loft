@@ -850,6 +850,35 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         });
     }
 
+    // An owner's GitHub Actions minutes reached 70% or 90% of the quota the user set: one item a line, a month. A
+    // higher line takes the lower one's place, and the item goes if the minutes fall under it (a higher quota).
+    for w in crate::actions::warnings(state, Utc::now()) {
+        let id = format!("actions_quota:{}:{}:{}", w.owner, w.month, w.line);
+        let pct = u64::from(w.minutes) * 100 / u64::from(w.quota.max(1));
+        let mut actions = vec![];
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#github") } }));
+        }
+        actions.push(dismiss(&id));
+        let source = if w.billed { "as GitHub bills the org" } else { "summed over its private repos Loft knows" };
+        items.push(Item {
+            kind: "actions_quota",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text(&format!("{} used {pct}% of its GitHub Actions minutes", w.owner), MAX_TITLE),
+            reason: text(&format!("{} of {} minutes this month, past {}% of the quota.", w.minutes, w.quota, w.line), MAX_REASON),
+            text: text(&format!("{} of {} minutes this month ({source}). When the quota runs out GitHub stops running its jobs. Settings → GitHub API shows each repo's minutes and changes the quota; a project's CI mode `at the end` (Project settings) runs the CI only when the spec PR is ready.", w.minutes, w.quota), MAX_TEXT),
+            created_at: w.at.clone(),
+            links: vec![json!({ "label": "Settings → GitHub API", "path": "/settings#github" })],
+            actions,
+            push: (format!("GitHub Actions: {} at {}% of its quota", w.owner, w.line), format!("{} of {} minutes this month", w.minutes, w.quota)),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
     // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low, and until 2 GB more are
     // free: near the line it would come and go, new each time.
     let free = crate::sweep::free_bytes(&state.cfg.storage_dir);
@@ -985,8 +1014,13 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     let target = i.actions.iter().find(|a| a["kind"] == "open").map(|a| a["target"].clone()).unwrap_or(Value::Null);
     PushItem {
         id: i.id.clone(),
-        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck".
-        kind: if i.kind == "mac_access" { "stuck" } else { i.kind },
+        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck", and an owner's
+        // Actions quota running out stops its Deliveries' CI, so it goes with "delivery_stalled".
+        kind: match i.kind {
+            "mac_access" => "stuck",
+            "actions_quota" => "delivery_stalled",
+            k => k,
+        },
         urgency: i.urgency,
         agent_id: i.agent.as_ref().map(|a| a.0.clone()),
         task_id: i.task_id.clone(),

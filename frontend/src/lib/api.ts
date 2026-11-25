@@ -589,6 +589,25 @@ export type GithubBudget = {
   window_reset: number | null;
 };
 
+/** An owner's (org or account) GitHub Actions minutes this month, in UTC: the org's billed minutes (`billing`, when the
+ *  token has `admin:org`) or the sum of its private repos Loft knows (`repos`), and the monthly quota the user set. */
+export type ActionsOwner = {
+  owner: string;
+  /** `Organization` or `User`; empty before any repo of it was read. */
+  kind: string;
+  minutes: number;
+  source: "billing" | "repos";
+  quota: number | null;
+  repos: { repo: string; minutes: number; private: boolean }[];
+};
+
+export type ActionsOwners = { month: string; owners: ActionsOwner[] };
+
+/** A project's repo minutes this month and its owner's month; `repo` is null when the project isn't on GitHub. */
+export type ProjectActions =
+  | { project: string; repo: null; why: string }
+  | { project: string; repo: string; month: string; read: boolean; private: boolean | null; minutes: number; owner: ActionsOwner };
+
 /** What reading GitHub just did: per mirrored project, and why the others aren't mirrored. */
 export type MirrorSync = {
   connected: boolean;
@@ -761,6 +780,10 @@ export const api = {
   stopLeftRunning: (agent: string) => req<{ stopped: number }>("POST", `/workspaces/${agent}/stop-processes`),
   backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
+  actionsOwners: () => req<ActionsOwners>("GET", "/actions/owners"),
+  /** Sets an owner's monthly Actions quota in minutes, or none with null. */
+  setActionsQuota: (owner: string, quota: number | null) => req<ActionsOwners>("PUT", `/actions/owners/${encodeURIComponent(owner)}`, { quota }),
+  projectActions: (project: string) => req<ProjectActions>("GET", `/actions/project?project=${encodeURIComponent(project)}`),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),

@@ -179,6 +179,9 @@ fn api_routes() -> Router<AppState> {
         .route("/pull-requests/{id}/refresh", post(api::refresh_pull_request))
         .route("/pull-requests/{id}/merge", post(api::merge_pull_request))
         .route("/github/budget", get(github::budget))
+        .route("/actions/owners", get(actions::owners_get))
+        .route("/actions/owners/{owner}", put(actions::set_quota))
+        .route("/actions/project", get(actions::project))
         // Herdr UI: Loft's agents in the Herdr terminal multiplexer (herdr.rs, herdr/ at the root).
         .route("/herdr", get(herdr::status))
         .route("/herdr/setup", post(herdr::setup_local))
@@ -294,6 +297,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || tailnet::check_https(port));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(delivery::ci_poller(state.clone()));
+    tokio::spawn(actions::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
     tokio::spawn(simulator::tidier(state.clone()));

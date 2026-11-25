@@ -796,6 +796,19 @@ CREATE TABLE IF NOT EXISTS project_settings (
     changed_at TEXT NOT NULL,
     PRIMARY KEY(project, key)
 );
+-- Each GitHub repo's Actions minutes in a month (actions.rs): `data` is its runs read so far and its own facts, as JSON.
+-- `month` is `YYYY-MM`, in UTC.
+CREATE TABLE IF NOT EXISTS actions_months (
+    repo TEXT NOT NULL,
+    month TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY(repo, month)
+);
+-- Each GitHub owner's Actions quota and warnings (actions.rs), as JSON.
+CREATE TABLE IF NOT EXISTS actions_owners (
+    owner TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -1739,6 +1752,44 @@ impl Db {
             "INSERT OR REPLACE INTO project_settings (project, key, value, changed_by, changed_by_name, changed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![project.trim(), key, serde_json::to_string(&s.value)?, s.changed_by, s.changed_by_name, s.changed_at],
         )?;
+        Ok(())
+    }
+
+    // ---- Actions minutes per owner ----------------------------------
+
+    /// What was read of `repo`'s Actions minutes in `month`, as JSON.
+    pub fn actions_month(&self, repo: &str, month: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT data FROM actions_months WHERE repo = ?1 AND month = ?2", params![repo, month], |r| r.get(0)).optional()?)
+    }
+
+    /// Every repo read in `month`: (repo, data as JSON), by repo.
+    pub fn actions_months(&self, month: &str) -> Result<Vec<(String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT repo, data FROM actions_months WHERE month = ?1 ORDER BY repo")?;
+        let rows = st.query_map([month], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Saves `repo`'s month, and forgets its months before it.
+    pub fn save_actions_month(&self, repo: &str, month: &str, data: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO actions_months (repo, month, data) VALUES (?1, ?2, ?3)", params![repo, month, data])?;
+        c.execute("DELETE FROM actions_months WHERE repo = ?1 AND month < ?2", params![repo, month])?;
+        Ok(())
+    }
+
+    /// Every owner's quota and warnings: (owner, data as JSON), by owner.
+    pub fn actions_owners(&self) -> Result<Vec<(String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT owner, data FROM actions_owners ORDER BY owner")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn save_actions_owner(&self, owner: &str, data: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO actions_owners (owner, data) VALUES (?1, ?2)", params![owner, data])?;
         Ok(())
     }
 
