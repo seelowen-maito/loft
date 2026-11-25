@@ -72,6 +72,9 @@ struct NeedsYouListView: View {
         .environment(\.needsYouFresh, fresh)
         .navigationTitle("Needs you")
         .toolbar { clearAllButton }
+        // The button went (nothing left to clear) while its confirm was up: drop the confirm, or it would open again with
+        // the button.
+        .onChange(of: NeedsYouClearAll(store.needsYou?.items ?? []).clear) { _, n in if n == 0 { clearing = nil } }
         .refreshable { await store.refreshNeedsYou() }
         .task {
             await store.refreshNeedsYou()

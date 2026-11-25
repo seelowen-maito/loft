@@ -58,6 +58,8 @@ struct NeedsYouScreen: View {
             Button { Task { await store.refreshNeedsYou() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                 .keyboardShortcut("r")
         }
+        // Nothing left to clear (the button went) while the confirm was up: drop it.
+        .onChange(of: clearAll.clear) { _, n in if n == 0 { clearing = nil } }
         .confirmationDialog(clearing?.question ?? "", isPresented: Binding(get: { clearing != nil }, set: { if !$0 { clearing = nil } }),
                             presenting: clearing) { taken in
             Button("Clear all", role: .destructive) {
