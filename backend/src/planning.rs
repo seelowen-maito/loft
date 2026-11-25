@@ -8043,6 +8043,13 @@ pub(crate) mod tests {
         assert!(wakes.len() == 1 && wakes[0].contains(&format!("\n- {line}\n")), "{wakes:?}");
         let items = done_items(&st);
         assert!(items[0]["reason"].as_str().unwrap().ends_with(&line), "{items:?}");
+
+        // Done, it stays ready, even after its PR merges on GitHub: the poller doesn't read its minutes again.
+        assert_eq!((d.state.as_str(), d.final_ci.as_str()), ("ready", ""));
+        st.rt.lock().unwrap().actions_read.clear();
+        let reads = fake.seen(&format!("{runs}?")).len();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(fake.seen(&format!("{runs}?")).len(), reads);
     }
 
     #[tokio::test]

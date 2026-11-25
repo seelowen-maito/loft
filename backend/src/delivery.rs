@@ -2887,10 +2887,13 @@ pub(crate) async fn follow_all(state: &AppState) {
     follow_minutes(state).await;
 }
 
-/// Whether Loft counts the Actions minutes of `d`'s branch: a Delivery on GitHub that started, until its PR
-/// merges or closes.
+/// The states of a Delivery in work, besides a ready one that follows its PR's CI (see [`counts_minutes`]).
+const IN_WORK: [&str; 6] = ["running", "stalled", "paused", "final_review", "final_fixes", "needs_human"];
+
+/// Whether the poller reads the Actions minutes of `d`'s branch: a Delivery on GitHub in work. A done one stays
+/// `ready` after its PR merges, so it's left out: `follow_ready_ci` made its last read when it was done.
 fn counts_minutes(d: &Delivery) -> bool {
-    !d.local && !d.branch.is_empty() && !matches!(d.state.as_str(), "planned" | "settled" | "merged")
+    !d.local && !d.branch.is_empty() && (IN_WORK.contains(&d.state.as_str()) || follows_ready_ci(d))
 }
 
 /// The Actions minutes of `d`'s branch now (see [`crate::actions::of_branch`]), or None when they didn't change
@@ -2909,7 +2912,8 @@ async fn read_minutes(state: &AppState, d: &Delivery) -> Option<std::collections
 /// Reads the Actions minutes of each Delivery that counts them and wasn't read in the last `ACTIONS_EVERY`, and
 /// saves the ones that changed.
 async fn follow_minutes(state: &AppState) {
-    for d in state.db.all_deliveries().unwrap_or_default().into_iter().filter(counts_minutes) {
+    let in_work = IN_WORK.iter().chain(&["ready"]).flat_map(|s| state.db.deliveries_in_state(s).unwrap_or_default());
+    for d in in_work.filter(counts_minutes) {
         let due = state.rt.lock().unwrap().actions_read.get(&format!("{}#{}", d.repo, d.spec)).is_none_or(|at| at.elapsed() >= ACTIONS_EVERY);
         if !due {
             continue;
