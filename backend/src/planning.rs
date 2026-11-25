@@ -424,6 +424,7 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str, doc
     let k = key(&title);
     let (msg, n) = spec_issue(state, me, &slug, &title, &k, body).await?;
     crate::delivery::record_spec(state, &slug, n, me.project.trim(), &me.id, &spec_branch(n, title.as_str()));
+    let made = state.db.get_delivery(&slug, n).ok().flatten().filter(|d| d.pr.is_some());
     let pr = match spec_pr(state, &slug, n, &title, docs).await {
         Ok(line) => line,
         Err(e) => {
@@ -431,7 +432,13 @@ async fn publish_spec(state: &AppState, me: &Agent, title: &str, body: &str, doc
             format!("The spec is published, but {e}. Call publish_spec again with the same title{same} to retry only the spec branch and PR.")
         }
     };
-    Ok((format!("{msg}\n{pr}"), slug, IssueLink { number: n, title, id: String::new(), repo: String::new() }))
+    // The workflow check runs once, as the spec PR is made: a retry asks GitHub nothing more and says what it found.
+    let check = match made {
+        Some(d) => d.workflows,
+        None => crate::workflows::record(state, &slug, n).await,
+    };
+    let warn = check.map(|c| crate::workflows::reply_lines(&c)).unwrap_or_default();
+    Ok((format!("{msg}\n{pr}{warn}"), slug, IssueLink { number: n, title, id: String::new(), repo: String::new() }))
 }
 
 /// The spec's issue on `slug`: the reply and its number, published now or found already there.
@@ -2692,10 +2699,18 @@ pub(crate) mod tests {
     /// A grill on `name` that published spec #40 (PR #500 on `spec/40-rounds`) and these tickets as #41,
     /// #42… in publishing order, ended with its card. The planner and the card's message.
     async fn planned(st: &AppState, fake: &Fake, name: &str, tickets: Vec<Value>) -> (Agent, crate::db::Message) {
+        let (a, m, _) = planned_with(st, fake, name, tickets, |_, _| {}).await;
+        (a, m)
+    }
+
+    /// [`planned`], with `setup` routing more of the repo on the fake before the spec is published. The
+    /// publish_spec reply too.
+    async fn planned_with(st: &AppState, fake: &Fake, name: &str, tickets: Vec<Value>, setup: impl Fn(&Fake, &str)) -> (Agent, crate::db::Message, String) {
         let slug = format!("octo/{name}");
         let a = planner_on(st, name, Some(&format!("git@github.com:{slug}.git")));
         let numbers: Vec<i64> = (0..tickets.len() as i64).map(|i| 41 + i).collect();
         tickets_repo(fake, &slug, 40, &[&[40][..], &numbers].concat());
+        setup(fake, &slug);
         // The mirror's catch-up after publishing finds the spec PR still a draft.
         fake.route("GET", &format!("/repos/{slug}/pulls/500"), 200, json!({ "number": 500, "node_id": "PR_500", "state": "open", "draft": true }));
         for n in &numbers {
@@ -2703,11 +2718,112 @@ pub(crate) mod tests {
         }
         crate::grill::tests::round(st, &a, &["Spec?"]).unwrap();
         crate::grill::tests::send(st, &a).unwrap();
-        publish(st, &a, "Rounds").await.unwrap();
+        let reply = publish(st, &a, "Rounds").await.unwrap();
         publish_tickets(st, &a, Some(40), tickets).await.unwrap();
         crate::grill::mcp_call(st, &a, "grill_end", &json!({ "summary": "Done." })).unwrap().unwrap();
         let m = summary(st, &a);
-        (a, m)
+        (a, m, reply)
+    }
+
+    /// The repo on the fake, private or public, with this `ci.yml` on its spec branch (and a README beside it,
+    /// which isn't a workflow) and one recent run of it, whose job `ios` took 7.5 minutes.
+    fn workflow_on(fake: &Fake, slug: &str, private: bool, ci: &str) {
+        use base64::Engine;
+        fake.route("GET", &format!("/repos/{slug}"), 200, json!({ "default_branch": "main", "private": private }));
+        let files = json!([{ "type": "file", "name": "ci.yml", "path": ".github/workflows/ci.yml" }, { "type": "file", "name": "README.md", "path": ".github/workflows/README.md" }]);
+        fake.route("GET", &format!("/repos/{slug}/contents/.github/workflows"), 200, files);
+        fake.route("GET", &format!("/repos/{slug}/contents/.github/workflows/ci.yml"), 200, json!({ "encoding": "base64", "content": base64::engine::general_purpose::STANDARD.encode(ci) }));
+        fake.route("GET", &format!("/repos/{slug}/actions/runs"), 200, json!({ "total_count": 1, "workflow_runs": [{ "id": 9, "path": ".github/workflows/ci.yml", "status": "completed" }] }));
+        let job = json!({ "name": "ios", "conclusion": "success", "started_at": "2026-11-01T10:00:00Z", "completed_at": "2026-11-01T10:07:30Z" });
+        fake.route("GET", &format!("/repos/{slug}/actions/runs/9/jobs"), 200, json!({ "total_count": 1, "jobs": [job] }));
+    }
+
+    /// Both triggers, no concurrency and a macOS job on the draft: each of the three warnings.
+    const COSTLY_CI: &str = "name: CI\non: [push, pull_request]\njobs:\n  ios:\n    runs-on: macos-latest\n    steps:\n      - run: xcodebuild test\n";
+
+    /// The same job, run once a push, cancelling, and skipped on drafts: nothing to warn about.
+    const LEAN_CI: &str = "name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\nconcurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true\njobs:\n  ios:\n    runs-on: macos-latest\n    if: github.event.pull_request.draft == false\n";
+
+    fn warning_kinds(v: &Value) -> Vec<&str> {
+        v["warnings"].as_array().into_iter().flatten().map(|w| w["kind"].as_str().unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_private_repos_costly_workflows_warn_on_the_end_card_and_as_the_delivery_starts_with_minutes_per_ticket() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/wf-costly";
+        let (a, m, reply) = planned_with(&st, &fake, "wf-costly", vec![ticket("Store", &[])], |f, s| workflow_on(f, s, true, COSTLY_CI)).await;
+        // Read on the spec branch.
+        let read: Vec<String> = fake.seen(&format!("/repos/{slug}/contents/")).into_iter().map(|s| s.path).collect();
+        assert_eq!(read, [format!("/repos/{slug}/contents/.github/workflows?ref=spec/40-rounds"), format!("/repos/{slug}/contents/.github/workflows/ci.yml?ref=spec/40-rounds")]);
+
+        // The planner hears it, to tell the user.
+        for want in [
+            "The repo is private and its workflows spend more Actions minutes than they need to on the draft spec PR.",
+            "- `ci.yml` runs twice on every push to the spec branch, once for `push` and once for `pull_request`.",
+            "- `ci.yml` has no `concurrency` with `cancel-in-progress`",
+            "- `ci.yml` runs heavy jobs on the draft spec PR, where every ticket pushes: `ios` (macOS).",
+            // 8 minutes (7.5 rounded up) a run, run twice a push, 1.8 pushes a ticket.
+            "Estimate: about 29 min of GitHub Actions per ticket (1.8 pushes to the spec branch per ticket, measured on the repo's recent runs).",
+        ] {
+            assert!(reply.contains(want), "missing {want:?} in {reply}");
+        }
+
+        // The end-of-planning card warns, without blocking Start delivery.
+        let card = &m.meta["grill"]["end_card"];
+        assert_eq!(warning_kinds(&card["workflows"]), ["push_and_pull_request", "no_cancel_in_progress", "heavy_in_draft"]);
+        assert_eq!((&card["workflows"]["minutes_per_ticket"], &card["workflows"]["measured"]), (&json!(29), &json!(true)));
+        assert!(card["workflows"]["warnings"][1]["text"].as_str().unwrap().contains("cancel-in-progress: true"));
+        assert_eq!(card["delivery"], json!({ "repo": slug, "spec": 40 }));
+        // A retry of publish_spec says it again without reading the workflows again.
+        assert!(publish(&st, &a, "Rounds").await.unwrap().contains("- `ci.yml` runs twice on every push"));
+        assert_eq!(fake.seen(&format!("/repos/{slug}/contents/.github/workflows?")).len(), 1);
+
+        // Started: read again, and the Delivery card warns too.
+        busy(&st, "Builder", "wf-costly", "dev");
+        press(&st, &a, &m).await.unwrap();
+        assert_eq!(fake.seen(&format!("/repos/{slug}/contents/.github/workflows?")).len(), 2, "read again as it starts");
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!(d.state, "running");
+        let shown = crate::delivery::delivery_json(&st, &d);
+        assert_eq!(warning_kinds(&shown["workflows"]), ["push_and_pull_request", "no_cancel_in_progress", "heavy_in_draft"]);
+        assert_eq!(shown["workflows"]["text"], card["workflows"]["text"]);
+        // Done: no more warning.
+        crate::delivery::update(&st, slug, 40, |d| d.state = "ready".into());
+        assert_eq!(crate::delivery::delivery_json(&st, &st.db.get_delivery(slug, 40).unwrap().unwrap()).get("workflows"), None);
+    }
+
+    #[tokio::test]
+    async fn a_public_repo_and_lean_workflows_get_no_warning() {
+        let (fake, st) = (fake_github(), state());
+        // Public: its minutes aren't billed, so its workflows aren't even read.
+        let (_, m, reply) = planned_with(&st, &fake, "wf-public", vec![ticket("Store", &[])], |f, s| workflow_on(f, s, false, COSTLY_CI)).await;
+        assert!(fake.seen("/repos/octo/wf-public/contents").is_empty());
+        assert!(!reply.contains("private"), "{reply}");
+        assert_eq!(m.meta["grill"]["end_card"].get("workflows"), None);
+        assert_eq!(st.db.get_delivery("octo/wf-public", 40).unwrap().unwrap().workflows, None);
+
+        // Private, with workflows that already run lean.
+        let (_, m, reply) = planned_with(&st, &fake, "wf-lean", vec![ticket("Store", &[])], |f, s| workflow_on(f, s, true, LEAN_CI)).await;
+        assert_eq!(fake.seen("/repos/octo/wf-lean/contents/.github/workflows/ci.yml").len(), 1, "read");
+        assert!(!reply.contains("private"), "{reply}");
+        assert_eq!(m.meta["grill"]["end_card"].get("workflows"), None);
+        assert_eq!(st.db.get_delivery("octo/wf-lean", 40).unwrap().unwrap().workflows, None);
+    }
+
+    #[tokio::test]
+    async fn workflows_fixed_after_the_spec_was_published_stop_warning_when_the_delivery_starts() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/wf-fixed";
+        let (a, m, _) = planned_with(&st, &fake, "wf-fixed", vec![ticket("Store", &[])], |f, s| workflow_on(f, s, true, COSTLY_CI)).await;
+        assert!(st.db.get_delivery(slug, 40).unwrap().unwrap().workflows.is_some());
+        // The user took the card's advice before starting.
+        workflow_on(&fake, slug, true, LEAN_CI);
+        busy(&st, "Builder", "wf-fixed", "dev");
+        press(&st, &a, &m).await.unwrap();
+        let d = st.db.get_delivery(slug, 40).unwrap().unwrap();
+        assert_eq!((d.state.as_str(), &d.workflows), ("running", &None));
+        assert_eq!(crate::delivery::delivery_json(&st, &d).get("workflows"), None);
     }
 
     /// An agent in `project` with `role`, busy, so a wake waits in its queue instead of starting claude.

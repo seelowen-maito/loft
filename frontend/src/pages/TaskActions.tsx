@@ -13,6 +13,7 @@ import { issuePickerOrder, outsideWarning, projectChoices, projectsOf } from "..
 import { MentionMenu } from "../components/MentionMenu";
 import { ActionButton } from "../components/ActionButton";
 import { StartWarning } from "../components/StartWarning";
+import { WorkflowWarnings } from "../components/WorkflowWarnings";
 import { Callout, ErrorLine, ResultLine } from "../components/Callout";
 import { actionsMinutesLine, deliveryButtons } from "../lib/deliveryState";
 import { DeliveryLine } from "../components/DeliveryLine";
@@ -329,6 +330,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
         <DeliveryButtons d={started} a={r} />
       </div>
       {warn && !started && !!d?.waits_on?.length && <StartWarning waits={d.waits_on} onStart={start} startPending={starting.busy} onCancel={() => setWarn(false)} onStarted={reload} />}
+      {d?.workflows && <WorkflowWarnings check={d.workflows} className="mt-3" />}
       <ResultLine said={r.said} className="mt-2" />
       <ErrorLine error={r.error} className="mt-2" />
       {running.length > 0 && (

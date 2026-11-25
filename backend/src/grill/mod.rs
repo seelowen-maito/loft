@@ -254,12 +254,17 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
         .iter()
         .map(|p| {
             let delivery = delivery_of(p);
-            let entry = json!({
+            // What the workflow check of a private repo found when the spec was published, when it warns.
+            let workflows = p.spec.as_ref().filter(|_| !p.repo.is_empty()).and_then(|sp| state.db.get_delivery(&p.repo, sp.number).ok().flatten()).and_then(|d| d.workflows);
+            let mut entry = json!({
                 "repo": p.repo,
                 "spec": p.spec.as_ref().map(|i| link(p, i)),
                 "tickets": p.tickets.iter().map(|t| link(p, t)).collect::<Vec<_>>(),
                 "delivery": delivery,
             });
+            if let Some(w) = workflows {
+                entry["workflows"] = json!(w);
+            }
             (entry, delivery)
         })
         .collect();

@@ -160,6 +160,19 @@ export type IssueDelivery = {
   behind?: { count: number; base: string } | null;
   /** A ticket started while the spec PR was ready for review: Loft put it back to draft (`ok`), or GitHub refused, and `text` says so; null otherwise. An older server doesn't send it. */
   draft_again?: { ok: boolean; text: string } | null;
+  /** On a private repo: what the workflow check found, until the Delivery is done; null when there's nothing to warn about. An older server doesn't send it. */
+  workflows?: WorkflowCheck | null;
+};
+
+/** The workflow check of a private repo: each workflow's way of spending more Actions minutes than it needs to on the
+ *  draft spec PR ("push_and_pull_request", "no_cancel_in_progress", "heavy_in_draft"), with the minutes each ticket will
+ *  spend (`measured` on recent runs, else a guess) and `text`, the line saying so. */
+export type WorkflowCheck = {
+  warnings: { kind: string; workflow: string; text: string }[];
+  minutes_per_ticket: number;
+  measured: boolean;
+  text: string;
+  checked_at: string;
 };
 
 export type Task = {
@@ -276,6 +289,8 @@ export type CardSpec = {
   tickets: PlannedIssue[];
   /** The spec's Delivery, for Start delivery; `started` once it started: who got which ticket. */
   delivery?: { repo: string; spec: number; standalone?: boolean; local?: boolean; started?: DeliveryStarted } | null;
+  /** On a private repo whose workflows spend more than they need to: the workflow check, when the spec was published. */
+  workflows?: WorkflowCheck;
 };
 
 /** The first spec sits at the top (older cards have only that one); further specs of the grill are in `more`. */

@@ -76,6 +76,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             actions_runs: Default::default(),
             reviewed_to: String::new(),
             draft_again: None,
+            workflows: None,
             last_notes: String::new(),
             migrated: false,
             standalone: false,
@@ -940,6 +941,10 @@ pub async fn start(state: &AppState, repo: &str, spec: i64, fallback: &str) -> R
     };
     if d.branch.is_empty() {
         return Err(format!("Spec #{spec} has no spec branch yet: call publish_spec again with the same title to make it."));
+    }
+    // Read again as it starts: the workflows may have changed since the spec was published, or it wasn't published by Loft.
+    if !d.local {
+        crate::workflows::record(state, repo, spec).await;
     }
     let n = next_ticket(&d).map(|t| t.number).ok_or_else(|| {
         let waits: Vec<String> = d.tickets.iter().filter(|t| t.state == "open").flat_map(|t| t.waiting_on.clone()).collect();
@@ -3397,7 +3402,8 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
 
 /// What an issue page shows of its Delivery: its state (with why it stalled, its state line, whether Pause and Resume apply, and
 /// whether a ticket or its final review waits for the user), whether it started, who has it, its PR (and its checks page),
-/// since when it waits for CI, the Actions minutes its branch spent so far (null for a plan kept in Loft) and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
+/// since when it waits for CI, the Actions minutes its branch spent so far (null for a plan kept in Loft), the workflow check's
+/// warnings while it has some and isn't done, and, for a spec, its tickets. A ticket waiting for CI has no agent on it: no Dev is shown as on it.
 pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let on_ci = d.current.and_then(|n| d.ticket(n)).is_some_and(waiting_for_ci);
     let dev = state.db.get_agent(&d.dev).ok().flatten().filter(|_| !on_ci);
@@ -3420,6 +3426,10 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "draft_again": d.draft_again,
         "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
     });
+    // The workflow check warns until the Delivery is done.
+    if let Some(w) = d.workflows.as_ref().filter(|_| !matches!(d.state.as_str(), "ready" | "settled" | "merged")) {
+        v["workflows"] = json!(w);
+    }
     if !d.standalone {
         v["spec"] = json!(true);
         v["current"] = json!(current.map(|t| json!({ "number": t.number, "title": t.title })));

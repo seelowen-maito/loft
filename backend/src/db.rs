@@ -98,6 +98,10 @@ pub struct Delivery {
     /// card's line saying so (or why GitHub refused). Cleared when the PR is marked ready again or reopened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_again: Option<DraftAgain>,
+    /// On a private repo: what the workflow check found when the spec was published or the Delivery started,
+    /// while there's something to warn about. See `crate::workflows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<crate::workflows::Check>,
     /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
     /// ticket or final review waiting for the user hands them to the Dev.
     #[serde(default)]
@@ -1701,6 +1705,7 @@ impl Db {
                 actions_runs: Default::default(),
                 reviewed_to: String::new(),
                 draft_again: None,
+                workflows: None,
                 last_notes: String::new(),
                 migrated: true,
                 standalone: false,

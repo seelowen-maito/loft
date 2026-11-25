@@ -54,6 +54,7 @@ mod testdir;
 mod updater;
 mod uploads;
 mod voice;
+mod workflows;
 mod usage;
 
 use std::path::PathBuf;
