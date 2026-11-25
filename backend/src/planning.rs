@@ -8925,7 +8925,8 @@ pub(crate) mod tests {
         let items = stalled_items(&st);
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0]["title"], "GitHub Actions blocked by billing: Rounds");
-        assert!(items[0]["text"].as_str().unwrap().contains("Stopped at: the CI of #41."), "{}", items[0]["text"]);
+        assert_eq!(items[0]["reason"], "GitHub Actions is blocked by billing (a failed payment or the spending limit): fix it on GitHub, then Resume, and Loft re-runs the failed jobs.");
+        assert!(items[0]["text"].as_str().unwrap().ends_with("Stopped at: the CI of #41."), "{}", items[0]["text"]);
         assert!(items[0]["links"].as_array().unwrap().contains(&json!({ "label": "Billing on GitHub", "url": "https://github.com/organizations/octo/settings/billing" })));
         let kinds: Vec<&str> = items[0]["actions"].as_array().unwrap().iter().map(|a| a["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["resume", "open", "open", "dismiss"]);

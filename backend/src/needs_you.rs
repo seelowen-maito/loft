@@ -550,8 +550,11 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 format!("{}\n\n{}", crate::delivery::stalled_reason(state, &d), a.text),
                 format!("{who} asks you something"),
             ),
-            // A Billing block's reason is long: the item's text has all of it.
-            None if d.stall_reason == "billing" => (crate::delivery::stalled_reason(state, &d), crate::delivery::stalled_reason(state, &d), title.clone()),
+            // A Billing block's reason is long: the item says what to do, and its text has where it stopped too.
+            None if d.stall_reason == "billing" => {
+                let all = crate::delivery::stalled_reason(state, &d);
+                (all.split(" Stopped at:").next().unwrap_or_default().to_string(), all, title.clone())
+            }
             None => (crate::delivery::stalled_reason(state, &d), String::new(), title.clone()),
         };
         let mut actions = vec![action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec }))];
