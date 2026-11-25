@@ -73,6 +73,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             final_ci: String::new(),
             final_ci_since: String::new(),
             final_ci_fix: String::new(),
+            final_no_ci: String::new(),
             actions_runs: Default::default(),
             reviewed_to: String::new(),
             draft_again: None,
@@ -1205,6 +1206,7 @@ async fn begin(state: &AppState, d: &Delivery, n: i64, agent: &crate::db::Agent)
             if a.ok {
                 // A draft again: Loft stops following the ready PR's CI and marks it ready the usual way.
                 (d.ready_retry, d.final_ci, d.final_ci_since, d.final_ci_fix) = (false, String::new(), String::new(), String::new());
+                d.final_no_ci.clear();
                 if !d.done_at.is_empty() {
                     (d.done_at, d.final_rounds) = (String::new(), 0);
                     d.reviewed_to = head.unwrap_or_else(|| d.reviewed_to.clone());
@@ -2647,6 +2649,7 @@ fn log_tail(text: &str) -> String {
 /// No CI ran on commit `head`, which includes `tickets`, although the repo has active workflows: none showed up within
 /// `grace` minutes of their submit. They still pass (a workflow's `paths` filter can skip a commit), but each keeps
 /// that commit for the card, and the PR gets a comment saying so. The lines for the reply.
+/// With no `tickets`, it's the ready PR's newest commit (see [`follow_ready_ci`]).
 async fn no_ci_ran(state: &AppState, d: &Delivery, tickets: &[i64], head: &str, grace: i64) -> Result<String, String> {
     let d = update(state, &d.repo, d.spec, |d| {
         for n in tickets {
@@ -2654,24 +2657,36 @@ async fn no_ci_ran(state: &AppState, d: &Delivery, tickets: &[i64], head: &str, 
                 t.no_ci = short(head).to_string();
             }
         }
+        if tickets.is_empty() {
+            d.final_no_ci = short(head).to_string();
+        }
     })
     .ok_or("The Delivery record couldn't be saved.")?;
     let names = list_of(&d.tickets.iter().filter(|t| tickets.contains(&t.number)).map(|t| tag(&d, t)).collect::<Vec<_>>());
     let Some(pr) = d.pr else { return Ok(String::new()) };
-    let ticket = if tickets.len() == 1 { "ticket" } else { "tickets" };
+    let (what, since) = if tickets.is_empty() {
+        (format!("the newest commit of the ready {}", pr_name(&d)), "after Loft began following its CI")
+    } else {
+        (format!("which includes {} {names}", if tickets.len() == 1 { "ticket" } else { "tickets" }), "of the submit")
+    };
     let body = format!(
-        "**CI**: no CI ran on `{}`, which includes {ticket} {names}. The repo has active workflows, but no check showed up within {grace} minutes of the submit (a workflow's `paths` filter can skip a commit), so it passes without one.",
+        "**CI**: no CI ran on `{}`, {what}. The repo has active workflows, but no check showed up within {grace} minutes {since} (a workflow's `paths` filter can skip a commit), so it passes without one.",
         short(head)
     );
+    let what = if tickets.is_empty() { format!("the ready {}", final_tag(&d)) } else { format!("which includes {names}") };
     Ok(match crate::github::request(state, reqwest::Method::POST, &format!("/repos/{}/issues/{pr}/comments", d.repo), Some(json!({ "body": body }))).await {
-        Ok(_) => format!("\nNo CI ran on `{}`, which includes {names}: posted on #{pr}.", short(head)),
-        Err(e) => format!("\nNo CI ran on `{}`, which includes {names}. Couldn't post it on #{pr}: {e}.", short(head)),
+        Ok(_) => format!("\nNo CI ran on `{}`, {what}: posted on #{pr}.", short(head)),
+        Err(e) => format!("\nNo CI ran on `{}`, {what}. Couldn't post it on #{pr}: {e}.", short(head)),
     })
 }
 
 /// What a Delivery card says of its tickets whose CI passed with none run although the repo has workflows, one line each.
 fn no_ci_lines(d: &Delivery) -> Vec<String> {
-    d.tickets.iter().filter(|t| !t.no_ci.is_empty()).map(|t| format!("No CI ran on {} for {}: it passed without one.", t.no_ci, tag(d, t))).collect()
+    let mut lines: Vec<String> = d.tickets.iter().filter(|t| !t.no_ci.is_empty()).map(|t| format!("No CI ran on {} for {}: it passed without one.", t.no_ci, tag(d, t))).collect();
+    if !d.final_no_ci.is_empty() {
+        lines.push(format!("No CI ran on {} of the ready {}: it passed without one.", d.final_no_ci, final_tag(d)));
+    }
+    lines
 }
 
 /// The CI of ticket #n passed (`why`): it closes when its reviewers passed too. The lines for the reply.
@@ -2776,6 +2791,8 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
             if d.final_rounds > 0 {
                 let _ = crate::github::request(state, reqwest::Method::DELETE, &format!("/repos/{repo}/issues/{}/labels/changes-requested", d.pr.unwrap_or_default()), None).await;
             }
+            // Said on the PR and the card, like a ticket's: with CI mode `at the end` it's the only CI check.
+            let said = if matches!(ci, Ci::NoneRan) { no_ci_ran(state, d, &[], &head, grace).await? } else { String::new() };
             // The done summary says what it spent, all of it.
             let runs = read_minutes(state, d).await;
             update(state, repo, spec, |d| {
@@ -2787,7 +2804,7 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
             })
             .ok_or("The Delivery record couldn't be saved.")?;
             done(state, repo, spec);
-            Ok(format!("\nThe ready {}: {why}, so the user is told it can be merged.", final_tag(d)))
+            Ok(format!("{said}\nThe ready {}: {why}, so the user is told it can be merged.", final_tag(d)))
         }
         Ci::Red(runs, statuses) => {
             let (names, log) = failure_of(state, repo, &runs, &statuses).await;
@@ -4095,6 +4112,7 @@ pub async fn reopen(state: &AppState, repo: &str, spec: i64) -> Result<String, S
         d.state = "running".into();
         (d.done_at, d.ready_retry, d.final_rounds, d.current) = (String::new(), false, 0, None);
         (d.final_ci, d.final_ci_since, d.final_ci_fix) = (String::new(), String::new(), String::new());
+        d.final_no_ci.clear();
         d.reviewed_to = head.clone();
         d.draft_again = None;
     })
@@ -4204,6 +4222,7 @@ async fn final_submit(state: &AppState, me: &crate::db::Agent, args: &Value, com
             d.state = "ready".into();
             (d.final_ci, d.final_ci_since) = ("following".into(), crate::db::now());
             d.final_ci_fix = commits.last().cloned().unwrap_or_default();
+            d.final_no_ci.clear();
         }) else {
             return Some(Err("The Delivery record couldn't be saved.".into()));
         };

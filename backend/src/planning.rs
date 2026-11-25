@@ -831,6 +831,7 @@ async fn mark_ready(state: &AppState, d: &crate::db::Delivery) -> Result<Option<
         d.state = "ready".into();
         (d.final_ci, d.final_ci_since, d.final_rounds) = ("following".into(), crate::db::now(), 0);
         d.final_ci_fix.clear();
+        d.final_no_ci.clear();
         d.draft_again = None;
     }) else {
         return Ok(Some(pr));
@@ -8407,6 +8408,29 @@ pub(crate) mod tests {
         assert!(out.contains("That's round 2 of changes on it, so it waits for the user now"), "{out}");
         let d = delivery(&st, slug);
         assert_eq!((d.state.as_str(), d.final_rounds, woken(&st, &dev).len()), ("needs_human", 2, before));
+    }
+
+    #[tokio::test]
+    async fn no_ci_on_the_ready_pr_is_said_on_the_pr_and_the_card() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-no-ci";
+        ready_with_ci(&st, &fake, "ready-no-ci", json!([run("in_progress", None)])).await;
+        fake.route("GET", &format!("/repos/{slug}/actions/workflows"), 200, json!({ "total_count": 1, "workflows": [{ "name": "CI", "state": "active" }] }));
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": [] }));
+        let said = |fake: &Fake| posts(fake, slug, "issues/500/comments").into_iter().filter(|c| c["body"].as_str().unwrap_or_default().starts_with("**CI**: no CI ran")).map(|c| c["body"].clone()).collect::<Vec<_>>();
+        crate::delivery::follow_all(&st).await;
+        assert!(said(&fake).is_empty(), "within the grace: nothing said yet");
+
+        // Past the grace with no check: done, as before, and Loft says so on the PR and the card.
+        crate::delivery::update(&st, slug, 40, |d| d.final_ci_since = (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339());
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert!(d.final_ci.is_empty() && !d.done_at.is_empty(), "{d:?}");
+        assert_eq!(said(&fake), vec![json!("**CI**: no CI ran on `c1c1c1c`, the newest commit of the ready spec PR. The repo has active workflows, but no check showed up within 10 minutes after Loft began following its CI (a workflow's `paths` filter can skip a commit), so it passes without one.")]);
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["no_ci"], json!(["No CI ran on c1c1c1c of the ready spec PR #500: it passed without one."]));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(said(&fake).len(), 1, "said once");
     }
 
     #[tokio::test]

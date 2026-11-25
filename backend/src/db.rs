@@ -88,6 +88,10 @@ pub struct Delivery {
     /// PR's head includes it. Empty before any fix.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub final_ci_fix: String,
+    /// The short SHA of the ready PR's commit that passed with no CI run although the repo has workflows: a line on
+    /// the card. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_no_ci: String,
     /// The GitHub Actions workflow runs of its branch (the spec branch, or a standalone ticket's), by run id, with
     /// the minutes each took: what the Delivery spent on Actions so far. See `crate::actions`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -1756,6 +1760,7 @@ impl Db {
                 final_ci: String::new(),
                 final_ci_since: String::new(),
                 final_ci_fix: String::new(),
+                final_no_ci: String::new(),
                 actions_runs: Default::default(),
                 reviewed_to: String::new(),
                 draft_again: None,
