@@ -4507,10 +4507,12 @@ esac
         // Queued behind a busy run: the agent JSON and an event say so straight away.
         let _ = send(&st, &a.id, "busy").await.ok().unwrap();
         until("the busy run", 60, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("busy")).await;
-        let mut events = st.events.subscribe();
+        let events = std::sync::Mutex::new(st.events.subscribe());
+        // The run's last event follows its end: wait for it.
+        let hears_done = || heard_redrawing(&mut events.lock().unwrap(), &a.id) == Some(false);
         let _ = redraw(&st, &a.id).await.ok().unwrap();
         assert!(redrawing(&st, &a.id).await, "a queued Redraw counts");
-        assert_eq!(heard_redrawing(&mut events, &a.id), Some(true), "other tabs hear it's queued");
+        assert_eq!(heard_redrawing(&mut events.lock().unwrap(), &a.id), Some(true), "other tabs hear it's queued");
 
         // Drawing: still true.
         stop(&st, &a.id);
@@ -4519,7 +4521,7 @@ esac
         std::fs::write(ws.join("go"), "").unwrap();
         idle(&st, &a.id).await;
         assert!(!redrawing(&st, &a.id).await, "false once it has drawn");
-        assert_eq!(heard_redrawing(&mut events, &a.id), Some(false), "the last event says it's done");
+        until("the last event to say it's done", 60, hears_done).await;
 
         // A Redraw that ends without a sticker (stopped) clears it too.
         std::fs::remove_file(ws.join("go")).unwrap();
@@ -4529,7 +4531,7 @@ esac
         stop(&st, &a.id);
         idle(&st, &a.id).await;
         assert!(!redrawing(&st, &a.id).await, "false once a stopped Redraw ends");
-        assert_eq!(heard_redrawing(&mut events, &a.id), Some(false));
+        until("the last event to say it's done", 60, hears_done).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
