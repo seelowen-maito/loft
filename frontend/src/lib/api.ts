@@ -148,6 +148,8 @@ export type IssueDelivery = {
   ci_since?: string | null;
   /** The GitHub Actions minutes its branch spent so far, each job rounded up as GitHub bills it; null before it started or in a plan kept in Loft. An older server doesn't send it. */
   actions_minutes?: number | null;
+  /** `actions_minutes` as they use up the owner's included minutes (macOS jobs count 10×, Windows 2×); null when `actions_minutes` is. An older server doesn't send it. */
+  actions_weighted?: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
   /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */

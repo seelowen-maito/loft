@@ -3843,6 +3843,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
         "checks_url": checks_url(d),
         "ci_since": delivery_ci_since(d),
         "actions_minutes": (!d.local && d.state != "planned").then(|| crate::actions::total(&d.actions_runs)),
+        "actions_weighted": (!d.local && d.state != "planned").then(|| crate::actions::weighted_total(&d.actions_runs)),
         "draft_again": d.draft_again,
         "no_ci": no_ci_lines(d),
         "behind": tracked_pr(state, d).filter(|p| p.behind_by > 0 && p.state == "open").map(|p| json!({ "count": p.behind_by, "base": p.base_ref })),
@@ -4364,10 +4365,12 @@ pub(crate) fn done(state: &AppState, repo: &str, spec: i64) {
     }
 }
 
-/// What a Delivery on GitHub spent on Actions, for its done summary; None for a plan kept in Loft.
+/// What a Delivery on GitHub spent on Actions, for its done summary: its jobs' time, and what that used up of the
+/// owner's included minutes when macOS or Windows jobs weigh more. None for a plan kept in Loft.
 pub(crate) fn minutes_line(d: &Delivery) -> Option<String> {
-    let n = crate::actions::total(&d.actions_runs);
-    (!d.local).then(|| format!("GitHub Actions: {n} min on its {} `{}`.", branch_name(d), d.branch))
+    let (n, w) = (crate::actions::total(&d.actions_runs), crate::actions::weighted_total(&d.actions_runs));
+    let weighted = if w > n { format!(" ({w} of the owner's included minutes: macOS jobs count 10×, Windows 2×)") } else { String::new() };
+    (!d.local).then(|| format!("GitHub Actions: {n} min of jobs on its {} `{}`{weighted}.", branch_name(d), d.branch))
 }
 
 /// The summary the done wake carries: the spec, its PR (or branch), and the tickets closed.

@@ -5285,7 +5285,7 @@ pub(crate) mod tests {
         assert_eq!(fake.seen("/graphql").len(), 1);
         assert_eq!(st.db.get_delivery(slug, 41).unwrap().unwrap().state, "ready");
         let done = done_items(&st);
-        assert!(done.len() == 1 && done[0]["title"] == "Delivery done: Store" && done[0]["reason"] == "Every ticket is closed and its reviews passed: PR #500 is ready for review. GitHub Actions: 0 min on its ticket branch `ticket/41-store`.", "{done:#?}");
+        assert!(done.len() == 1 && done[0]["title"] == "Delivery done: Store" && done[0]["reason"] == "Every ticket is closed and its reviews passed: PR #500 is ready for review. GitHub Actions: 0 min of jobs on its ticket branch `ticket/41-store`.", "{done:#?}");
         assert!(fake.seen(&format!("/repos/{slug}/issues/41")).iter().all(|s| s.method != "PATCH"), "still open until the merge");
     }
 
@@ -5316,7 +5316,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "billing_url": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "draft_again": null, "no_ci": [], "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "billing_url": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "actions_weighted": 0, "draft_again": null, "no_ci": [], "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -7367,7 +7367,7 @@ pub(crate) mod tests {
         let items = done_items(&st);
         assert_eq!(items.len(), 1, "{items:#?}");
         let item = &items[0];
-        assert_eq!((&item["title"], &item["reason"], &item["urgency"]), (&json!("Delivery done: Rounds"), &json!(format!("Every ticket is closed and its reviews passed: spec PR #500 is ready for review. GitHub Actions: 0 min on its spec branch `{}`.", d.branch)), &json!(1)));
+        assert_eq!((&item["title"], &item["reason"], &item["urgency"]), (&json!("Delivery done: Rounds"), &json!(format!("Every ticket is closed and its reviews passed: spec PR #500 is ready for review. GitHub Actions: 0 min of jobs on its spec branch `{}`.", d.branch)), &json!(1)));
         let acts = item["actions"].as_array().unwrap();
         assert_eq!(acts.iter().map(|a| a["label"].clone()).collect::<Vec<_>>(), [json!("Open issue"), json!("Open PR"), json!("Done")]);
         assert_eq!(acts[1]["target"], json!({ "url": format!("https://github.com/{slug}/pull/500") }));
@@ -8061,7 +8061,7 @@ pub(crate) mod tests {
         assert!(!d.done_at.is_empty(), "{d:?}");
         assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], json!(10));
         assert_eq!(fake.seen(&jobs(1)).len(), 1);
-        let line = format!("GitHub Actions: 10 min on its spec branch `{}`.", d.branch);
+        let line = format!("GitHub Actions: 10 min of jobs on its spec branch `{}`.", d.branch);
         let wakes = done_wakes(&st);
         assert!(wakes.len() == 1 && wakes[0].contains(&format!("\n- {line}\n")), "{wakes:?}");
         let items = done_items(&st);
@@ -8136,6 +8136,13 @@ pub(crate) mod tests {
         assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], json!(0));
         d.state = "planned".into();
         assert_eq!(crate::delivery::delivery_json(&st, &d)["actions_minutes"], Value::Null, "not before it starts");
+
+        // macOS or Windows jobs: the card and the done summary say what they used up of the owner's included minutes too.
+        d.state = "running".into();
+        d.actions_runs.insert("1".into(), crate::actions::RunMinutes { attempt: 1, minutes: 7, done: true, weighted: 28 });
+        let shown = crate::delivery::delivery_json(&st, &d);
+        assert_eq!((&shown["actions_minutes"], &shown["actions_weighted"]), (&json!(7), &json!(28)));
+        assert_eq!(crate::delivery::minutes_line(&d).unwrap(), "GitHub Actions: 7 min of jobs on its spec branch `spec/1-x` (28 of the owner's included minutes: macOS jobs count 10×, Windows 2×).");
     }
 
     // ---- Ticket reviewers (#463) ----

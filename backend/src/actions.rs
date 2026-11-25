@@ -1,8 +1,8 @@
 //! GitHub Actions minutes: how long the workflow runs of a branch took, each job rounded up to the minute as
 //! GitHub bills it. A Delivery keeps its branch's runs, so its card and its done summary say what it spent.
 //!
-//! Each owner (an org or an account) has its month too: the sum of its private repos Loft knows, or the org's own
-//! billed minutes when the token may read them (`admin:org`), against a quota the user sets in Settings. Reaching 70%
+//! Each owner (an org or an account) has its month too: the sum of its private repos Loft knows, weighted as GitHub
+//! uses up included minutes (macOS jobs 10×, Windows 2×), or the org's own billed minutes when the token may read them (`admin:org`), against a quota the user sets in Settings. Reaching 70%
 //! and 90% of it is a Needs you item each, once a month.
 
 use crate::api::{ApiResult, bad};
@@ -29,11 +29,32 @@ pub struct RunMinutes {
     pub minutes: u32,
     /// The run had completed: it isn't read again until a rerun.
     pub done: bool,
+    /// `minutes` as they use up an owner's included minutes: each job's times its runner's [`job_weight`].
+    #[serde(default)]
+    pub weighted: u32,
 }
 
-/// The total of `runs`.
+/// The total of `runs`: the time their jobs took.
 pub fn total(runs: &BTreeMap<String, RunMinutes>) -> u32 {
     runs.values().map(|r| r.minutes).sum()
+}
+
+/// The weighted total of `runs`: what they used up of their owner's included minutes.
+pub fn weighted_total(runs: &BTreeMap<String, RunMinutes>) -> u32 {
+    runs.values().map(|r| r.weighted).sum()
+}
+
+/// How many of an owner's included minutes one minute of `job` uses up: 10 on a macOS runner, 2 on Windows, 1 on
+/// Linux, by the runner's labels.
+pub fn job_weight(job: &Value) -> u32 {
+    let labels = job["labels"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_ascii_lowercase).collect::<Vec<_>>();
+    if labels.iter().any(|l| l.starts_with("macos")) {
+        10
+    } else if labels.iter().any(|l| l.starts_with("windows")) {
+        2
+    } else {
+        1
+    }
 }
 
 /// The minutes GitHub bills for `job`: its time rounded up to the minute. A skipped job, one still running and one
@@ -68,8 +89,8 @@ async fn of_runs(state: &AppState, repo: &str, filter: &str, since: &str, known:
             if known.get(&id.to_string()).is_some_and(|k| k.done && k.attempt == attempt) {
                 continue;
             }
-            let minutes = run_minutes(state, repo, id).await?;
-            out.insert(id.to_string(), RunMinutes { attempt, minutes, done: r["status"] == "completed" });
+            let (minutes, weighted) = run_minutes(state, repo, id).await?;
+            out.insert(id.to_string(), RunMinutes { attempt, minutes, done: r["status"] == "completed", weighted });
         }
         let listed = v["total_count"].as_u64().map_or(usize::MAX, |n| n as usize);
         if runs.len() < PER_PAGE || page * PER_PAGE >= listed {
@@ -79,19 +100,20 @@ async fn of_runs(state: &AppState, repo: &str, filter: &str, since: &str, known:
     Ok(out)
 }
 
-/// The minutes of run `id`'s jobs, every attempt's.
-async fn run_minutes(state: &AppState, repo: &str, id: i64) -> anyhow::Result<u32> {
-    let mut minutes = 0;
+/// The minutes of run `id`'s jobs, every attempt's, and weighted (see [`job_weight`]).
+async fn run_minutes(state: &AppState, repo: &str, id: i64) -> anyhow::Result<(u32, u32)> {
+    let (mut minutes, mut weighted) = (0, 0);
     for page in 1..=MAX_PAGES {
         let v = crate::github::get(state, &format!("/repos/{repo}/actions/runs/{id}/jobs?filter=all&per_page={PER_PAGE}&page={page}")).await?;
         let jobs = v["jobs"].as_array().cloned().unwrap_or_default();
         minutes += jobs.iter().map(job_minutes).sum::<u32>();
+        weighted += jobs.iter().map(|j| job_minutes(j).saturating_mul(job_weight(j))).sum::<u32>();
         let listed = v["total_count"].as_u64().map_or(usize::MAX, |n| n as usize);
         if jobs.len() < PER_PAGE || page * PER_PAGE >= listed {
             break;
         }
     }
-    Ok(minutes)
+    Ok((minutes, weighted))
 }
 
 // ---- Each owner's month, against its quota ----
@@ -212,7 +234,7 @@ pub fn months(state: &AppState, now: DateTime<Utc>) -> Vec<OwnerMonth> {
     for (repo, data) in state.db.actions_months(&month).unwrap_or_default() {
         let Ok(m) = serde_json::from_str::<RepoMonth>(&data) else { continue };
         let o = by.entry(owner_of(&repo).to_string()).or_default();
-        let minutes = if m.private { total(&m.runs) } else { 0 };
+        let minutes = if m.private { weighted_total(&m.runs) } else { 0 };
         if m.private {
             o.minutes += minutes;
         }
@@ -454,7 +476,7 @@ pub async fn project(State(state): State<AppState>, Query(q): Query<ProjectQuery
     let owner = months(&state, now).into_iter().find(|u| u.owner == owner_of(&repo)).unwrap_or_else(|| OwnerMonth { owner: owner_of(&repo).to_string(), ..Default::default() });
     Ok(Json(json!({
         "project": project, "repo": repo, "month": month_of(now), "read": m.is_some(),
-        "private": m.as_ref().map(|m| m.private), "minutes": m.as_ref().filter(|m| m.private).map_or(0, |m| total(&m.runs)),
+        "private": m.as_ref().map(|m| m.private), "minutes": m.as_ref().filter(|m| m.private).map_or(0, |m| weighted_total(&m.runs)),
         "owner": month_json(&owner),
     })))
 }
@@ -483,6 +505,25 @@ mod tests {
         let mut own = job("2026-11-24T10:00:00Z", json!("2026-11-24T10:05:00Z"));
         own["labels"] = json!(["self-hosted", "macOS"]);
         assert_eq!(job_minutes(&own), 0, "GitHub doesn't bill a self-hosted runner");
+    }
+
+    #[tokio::test]
+    async fn an_owners_month_weights_macos_and_windows_jobs_as_github_uses_up_included_minutes() {
+        assert_eq!([json!(["ubuntu-latest"]), json!(["macos-14"]), json!(["macOS-latest-xlarge"]), json!(["windows-2022"]), json!(null)].iter().map(|l| job_weight(&json!({ "labels": l }))).collect::<Vec<_>>(), vec![1, 10, 10, 2, 1]);
+        let st = crate::tasks::tests::state();
+        let fake = crate::github::tests::own_fake(&st);
+        project(&st, "app", Some("https://github.com/mobile/app.git"));
+        let repo = "mobile/app";
+        fake.route("GET", &format!("/repos/{repo}"), 200, json!({ "private": true, "owner": { "type": "User" } }));
+        fake.route("GET", &format!("/repos/{repo}/actions/runs"), 200, json!({ "total_count": 1, "workflow_runs": [run(1)] }));
+        let job = |secs: i64, label: &str| json!({ "conclusion": "success", "started_at": "2026-11-24T10:00:00Z", "completed_at": (chrono::DateTime::parse_from_rfc3339("2026-11-24T10:00:00Z").unwrap() + chrono::Duration::seconds(secs)).to_rfc3339(), "labels": [label] });
+        // 2 min on Linux, 2 on macOS, 3 on Windows: 7 minutes of jobs, 2 + 20 + 6 of the included ones.
+        fake.route("GET", &format!("/repos/{repo}/actions/runs/1/jobs"), 200, json!({ "total_count": 3, "jobs": [job(120, "ubuntu-latest"), job(120, "macos-14"), job(180, "windows-latest")] }));
+        let out = of_branch(&st, repo, "spec/1-x", "2026-11-24T09:00:00Z", &BTreeMap::new()).await.unwrap();
+        assert_eq!((total(&out), weighted_total(&out)), (7, 28));
+        follow(&st, Utc::now()).await;
+        let v = owners_now(&st).await;
+        assert_eq!((&owner(&v, "mobile")["minutes"], &owner(&v, "mobile")["repos"][0]["minutes"]), (&json!(28), &json!(28)));
     }
 
     /// A finished job of a minute.
@@ -514,7 +555,7 @@ mod tests {
 
         let out = of_branch(&st, repo, "spec/1-x", "2026-11-24T09:00:00Z", &BTreeMap::new()).await.unwrap();
         assert_eq!(out.len(), 130);
-        assert_eq!(out["1"], RunMinutes { attempt: 1, minutes: 105, done: true });
+        assert_eq!(out["1"], RunMinutes { attempt: 1, minutes: 105, done: true, weighted: 105 });
         assert_eq!(total(&out), 105 + 129);
         let listed: Vec<_> = fake.seen(&format!("{runs}?")).into_iter().map(|s| s.path).collect();
         assert!(listed.len() == 2 && listed[0].ends_with("&page=1") && listed[1].ends_with("&page=2"), "{listed:?}");

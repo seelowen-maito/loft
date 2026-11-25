@@ -97,9 +97,11 @@ test("waiting for CI counts from the Delivery's ci_since and links to the checks
 });
 
 test("the Actions minutes its branch spent, once started and only when the server sends them", () => {
-  assert.equal(actionsMinutesLine({ state: "running", started: true, actions_minutes: 12 }), "GitHub Actions: 12 min so far");
-  assert.equal(actionsMinutesLine({ state: "stalled", started: true, actions_minutes: 0 }), "GitHub Actions: 0 min so far");
-  for (const state of ["ready", "settled", "merged"]) assert.equal(actionsMinutesLine({ state, started: true, actions_minutes: 112 }), "GitHub Actions: 112 min", state);
+  assert.equal(actionsMinutesLine({ state: "running", started: true, actions_minutes: 12 }), "GitHub Actions: 12 min of jobs so far");
+  assert.equal(actionsMinutesLine({ state: "running", started: true, actions_minutes: 7, actions_weighted: 28 }), "GitHub Actions: 7 min of jobs so far · 28 of the quota (macOS 10×, Windows 2×)");
+  assert.equal(actionsMinutesLine({ state: "ready", started: true, actions_minutes: 7, actions_weighted: 7 }), "GitHub Actions: 7 min of jobs");
+  assert.equal(actionsMinutesLine({ state: "stalled", started: true, actions_minutes: 0 }), "GitHub Actions: 0 min of jobs so far");
+  for (const state of ["ready", "settled", "merged"]) assert.equal(actionsMinutesLine({ state, started: true, actions_minutes: 112 }), "GitHub Actions: 112 min of jobs", state);
   assert.equal(actionsMinutesLine({ state: "running", started: true, actions_minutes: null }), null);
   assert.equal(actionsMinutesLine({ state: "running", started: true }), null);
   assert.equal(actionsMinutesLine({ state: "planned", started: false, actions_minutes: 3 }), null);

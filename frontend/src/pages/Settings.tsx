@@ -138,7 +138,7 @@ function ActionsQuotas() {
       {v && v.owners.length === 0 && <p className="text-[12.5px] text-fg-3">No repo on GitHub read yet: Loft reads each project's repo every 15 minutes.</p>}
       {v?.owners.map((o) => <OwnerQuota key={o.owner} o={o} onSaved={setV} />)}
       <p className="text-[11.5px] text-fg-3">
-        Per org or account: the sum of its private repos Loft knows, each job rounded up to the minute (public repos are free), or the org's own billed minutes when the token has <code className="font-mono">admin:org</code>. At 70% and 90% of a quota,
+        Per org or account: the sum of its private repos Loft knows, each job rounded up to the minute (public repos are free) and weighted as GitHub uses up included minutes (macOS jobs 10×, Windows 2×), or the org's own billed minutes when the token has <code className="font-mono">admin:org</code>. At 70% and 90% of a quota,
         Needs you tells you, once a month.
       </p>
     </div>
