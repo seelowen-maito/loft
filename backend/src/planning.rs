@@ -9346,4 +9346,162 @@ pub(crate) mod tests {
         crate::delivery::follow_all(&st).await;
         assert_eq!(done_items(&st).len(), 1, "done once the re-run is green");
     }
+
+    // ---- CI queued (#458) ----
+
+    /// RFC 3339 time `minutes` ago.
+    fn ago(minutes: i64) -> String {
+        (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339()
+    }
+
+    /// Check run `id`, job `name` of workflow run 1, `status` (not completed) since `minutes` ago: GitHub sets a job's
+    /// `started_at` as it queues.
+    fn job_since(id: i64, name: &str, status: &str, minutes: i64) -> Value {
+        json!({ "id": id, "name": name, "status": status, "conclusion": null, "started_at": ago(minutes), "app": { "slug": "github-actions" }, "details_url": format!("https://github.com/octo/ci/actions/runs/1/job/{id}"), "output": { "title": "" } })
+    }
+
+    /// Time passes with job `job` still queued: GitHub lists it with its (earlier) `started_at`, and the queue clock
+    /// Loft kept goes back as far.
+    fn later(st: &AppState, fake: &Fake, slug: &str, runs: &str, job: Value) {
+        let at = job["started_at"].as_str().unwrap().to_string();
+        fake.route("GET", runs, 200, json!({ "check_runs": [job] }));
+        crate::delivery::update(st, slug, 40, |d| d.ci_queued_since = at.clone());
+    }
+
+    #[tokio::test]
+    async fn a_ci_queued_shows_on_the_card_and_stalls_the_delivery_after_30_minutes() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-queued";
+        let (dev, team) = building(&st, &fake, "ci-queued", &["qa"]).await;
+        spec_issue(&st, &fake, "ci-queued", slug);
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        let queued = job_since(77, "test", "queued", 10);
+        fake.route("GET", &runs, 200, json!({ "check_runs": [queued.clone()] }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let wakes = woken(&st, &dev).len();
+
+        // Queued 10 minutes with no job running: the card says so, with how long, and nothing stalls yet.
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!(d.state, "running");
+        let since = chrono::DateTime::parse_from_rfc3339(&d.ci_queued_since).unwrap();
+        assert_eq!(since, chrono::DateTime::parse_from_rfc3339(queued["started_at"].as_str().unwrap()).unwrap(), "since the job queued");
+        let v = crate::delivery::delivery_json(&st, &d);
+        assert_eq!(v["state_line"], json!({ "tone": "ci", "text": "CI queued, not started on #41" }));
+        assert_eq!(v["ci_since"], json!(d.ci_queued_since), "the card's time is the queue's");
+        assert!(stalled_items(&st).is_empty());
+
+        // 21 minutes later, 31 queued: the Delivery stalls on the CI's tickets, with no round and no wake for the Dev.
+        later(&st, &fake, slug, &runs, job_since(77, "test", "queued", 31));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.stalled_on.clone()), ("stalled", "running", "ci_queued", vec![41]));
+        assert_eq!((d.ticket(41).unwrap().rounds, d.ticket(41).unwrap().state.as_str()), (0, "review"));
+        assert_eq!(woken(&st, &dev).len(), wakes);
+        assert!(fake.seen(&format!("/repos/{slug}/actions/runs/")).iter().all(|s| s.method != "POST"), "nothing to re-run");
+
+        // Needs you: its own title and reason, the checks on GitHub, pushed; the card says why it stalled.
+        let items = stalled_items(&st);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["title"], "CI queued, not started: Rounds");
+        assert_eq!(items[0]["reason"], "Its CI sat queued for 30 minutes without starting, with no job running: check GitHub Actions (minutes left, runners), then Resume for 30 more minutes.");
+        assert!(items[0]["text"].as_str().unwrap().ends_with("Stopped at: the CI of #41."), "{}", items[0]["text"]);
+        assert!(items[0]["links"].as_array().unwrap().contains(&json!({ "label": "Checks on GitHub", "url": format!("https://github.com/{slug}/pull/500/checks") })));
+        let all = crate::needs_you::collect(&st).unwrap();
+        let p = crate::needs_you::to_push(all.iter().find(|i| i.kind == "delivery_stalled").unwrap());
+        assert_eq!((p.title.as_str(), p.body.as_str()), ("CI queued, not started", "Rounds"));
+        let v = crate::delivery::delivery_json(&st, &d);
+        assert_eq!((&v["stall_reason"], &v["can_resume"]), (&json!("ci_queued"), &json!(true)));
+        assert!(v["state_line"]["text"].as_str().unwrap().starts_with("Stalled: its CI sat queued for 30 minutes"), "{}", v["state_line"]);
+
+        // A ticket's step going ahead meanwhile doesn't end it: only Resume does.
+        crate::delivery::update(&st, slug, 40, |d| d.clear_stall(41));
+        assert_eq!(delivery(&st, slug).stall_reason, "ci_queued");
+
+        // Resume follows the CI again with 30 more minutes: still queued, it doesn't stall again at once.
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(out, "Resumed spec #40. Loft follows the CI again and gives its queued jobs another 30 minutes to start; still queued then, it stalls again.");
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), woken(&st, &dev).len()), ("running", wakes));
+        assert!(chrono::DateTime::parse_from_rfc3339(&d.ci_queued_since).unwrap() > chrono::DateTime::parse_from_rfc3339(&ago(1)).unwrap(), "the clock restarted: {}", d.ci_queued_since);
+        assert!(stalled_items(&st).is_empty());
+
+        // A runner takes it: the queue clock goes, and the card waits for CI again.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [job_since(77, "test", "in_progress", 31)] }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ci_queued_since.as_str()), ("running", ""));
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["state_line"], json!({ "tone": "ci", "text": "Waiting for CI on #41" }));
+
+        // Green: #41 closes.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [ci_job(77, "test", 1, "success")] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).ticket(41).unwrap().state, "closed");
+    }
+
+    #[tokio::test]
+    async fn jobs_running_dont_count_toward_the_queues_30_minutes() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-queue-running";
+        let (dev, _) = building(&st, &fake, "ci-queue-running", &[]).await;
+        spec_issue(&st, &fake, "ci-queue-running", slug);
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+
+        // One job runs for an hour while another sits queued behind it: the CI is moving, nothing is queued.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [job_since(76, "build", "in_progress", 60), job_since(77, "test", "queued", 60)] }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ci_queued_since.as_str()), ("running", ""));
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["state_line"], json!({ "tone": "ci", "text": "Waiting for CI on #41" }));
+
+        // That job finished 5 minutes ago and the other one is still queued: queued since then, not since it queued.
+        let mut built = ci_job(76, "build", 1, "success");
+        built["completed_at"] = json!(ago(5));
+        fake.route("GET", &runs, 200, json!({ "check_runs": [built, job_since(77, "test", "queued", 60)] }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!(d.state, "running", "only 5 minutes queued with nothing running");
+        let since = chrono::DateTime::parse_from_rfc3339(&d.ci_queued_since).unwrap();
+        assert!(since > chrono::DateTime::parse_from_rfc3339(&ago(6)).unwrap() && since < chrono::DateTime::parse_from_rfc3339(&ago(4)).unwrap(), "{since}");
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["state_line"], json!({ "tone": "ci", "text": "CI queued, not started on #41" }));
+
+        // A job waiting on something else (an environment's approval, a concurrency group) isn't queued either.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [job_since(77, "test", "queued", 60), job_since(78, "deploy", "waiting", 60)] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).ci_queued_since.as_str()), ("running", ""));
+    }
+
+    #[tokio::test]
+    async fn a_ci_queued_on_the_ready_pr_stalls_it_and_resume_follows_that_ci_again() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-queued";
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        let (dev, _) = ready_with_ci(&st, &fake, "ready-queued", json!([job_since(77, "test", "queued", 5)])).await;
+        let wakes = woken(&st, &dev).len();
+
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str()), ("ready", "following"));
+        assert_eq!(crate::delivery::delivery_json(&st, &d)["state_line"], json!({ "tone": "ci", "text": "CI queued, not started on the ready spec PR #500" }));
+
+        later(&st, &fake, slug, &runs, job_since(77, "test", "queued", 45));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.final_rounds), ("stalled", "ready", "ci_queued", 0));
+        assert!(crate::delivery::stalled_reason(&st, &d).ends_with("Stopped at: the CI of the ready spec PR #500."));
+        assert_eq!(woken(&st, &dev).len(), wakes, "no final round");
+        assert!(done_items(&st).is_empty());
+
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).final_ci.as_str()), ("ready", "following"));
+        fake.route("GET", &runs, 200, json!({ "check_runs": [ci_job(77, "test", 1, "success")] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(done_items(&st).len(), 1, "done once it ran green");
+        assert_eq!(delivery(&st, slug).ci_queued_since, "");
+    }
 }

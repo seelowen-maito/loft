@@ -570,15 +570,18 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             actions.push(json!({ "kind": "open", "label": "Open billing", "target": { "url": b.url } }));
             links.push(json!({ "label": "Billing on GitHub", "url": b.url }));
         }
-        // An infrastructure failure: the CI checks on GitHub, where the user sees what failed and can re-run it too.
+        // An infrastructure failure, or a CI queued too long: the CI checks on GitHub, where the user sees what failed or
+        // waits, and can re-run it too.
         let infra = d.stall_reason == "infra";
-        if let Some(url) = crate::delivery::checks_url(&d).filter(|_| infra) {
+        let queued = d.stall_reason == "ci_queued";
+        if let Some(url) = crate::delivery::checks_url(&d).filter(|_| infra || queued) {
             links.push(json!({ "label": "Checks on GitHub", "url": url }));
         }
         actions.extend([open, dismiss(&id)]);
         let (title, push) = match billing {
             Some(_) => (format!("GitHub Actions blocked by billing: {title}"), ("GitHub Actions blocked by billing".to_string(), title)),
             None if infra => (format!("CI failed for GitHub's infrastructure: {title}"), ("CI failed for GitHub's infrastructure".to_string(), title)),
+            None if queued => (format!("CI queued, not started: {title}"), ("CI queued, not started".to_string(), title)),
             None => (format!("Delivery stalled: {title}"), ("Delivery stalled".to_string(), push)),
         };
         items.push(Item {

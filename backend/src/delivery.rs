@@ -78,6 +78,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             draft_again: None,
             billing: None,
             infra: None,
+            ci_queued_since: String::new(),
             workflows: None,
             last_notes: String::new(),
             migrated: false,
@@ -755,6 +756,7 @@ fn stall_why(reason: &str) -> &'static str {
         "ci_missing" => "its submitted commits aren't on its branch on GitHub, so Loft can't follow its CI: push them, then Resume",
         "billing" => "GitHub Actions is blocked by billing (a failed payment or the spending limit): fix it on GitHub, then Resume, and Loft re-runs the failed jobs",
         "infra" => "its CI failed twice for GitHub's infrastructure, not the code: check GitHub Actions, then Resume, and Loft re-runs the failed jobs",
+        "ci_queued" => "its CI sat queued for 30 minutes without starting, with no job running: check GitHub Actions (minutes left, runners), then Resume for 30 more minutes",
         _ => "the run Loft woke for its step ended without its call",
     }
 }
@@ -2143,6 +2145,10 @@ fn ci_grace(state: &AppState, d: &Delivery) -> i64 {
     crate::project_settings::ci_grace_minutes(state, &d.project)
 }
 
+/// How long, in minutes, a CI job may sit queued with none running before the Delivery stalls: GitHub starts a job
+/// within seconds when a runner is free, so this long means none will (no minutes left, no runner with its labels).
+const CI_QUEUE_MINUTES: i64 = 30;
+
 /// The last lines of a failed job's log a changes round carries; the whole log is at the check's link.
 const LOG_LINES: usize = 300;
 
@@ -2172,12 +2178,22 @@ fn ci_since(t: &DeliveryTicket) -> Option<&str> {
 }
 
 /// When the Delivery's earliest ticket waiting for CI started waiting, or None when none is: the elapsed time on
-/// its card, for a spec and a standalone ticket alike.
+/// its card, for a spec and a standalone ticket alike. While that CI sits queued, since when it does.
 fn delivery_ci_since(d: &Delivery) -> Option<&str> {
+    if let Some(since) = ci_queued(d) {
+        return Some(since);
+    }
     if follows_ready_ci(d) {
         return Some(d.final_ci_since.as_str()).filter(|s| !s.is_empty());
     }
     d.tickets.iter().filter_map(ci_since).filter_map(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|at| (at, s))).min().map(|(_, s)| s)
+}
+
+/// Since when the CI Loft follows for `d` (its tickets', or its ready PR's) has sat queued with no job running, or
+/// None when it doesn't, or Loft follows none.
+fn ci_queued(d: &Delivery) -> Option<&str> {
+    let follows = follows_ready_ci(d) || d.state == "running" && d.tickets.iter().any(waits_for_ci);
+    Some(d.ci_queued_since.as_str()).filter(|s| follows && !s.is_empty())
 }
 
 /// The page of the Delivery's CI checks on GitHub: its PR's Checks tab (the spec PR, or a standalone
@@ -2190,6 +2206,9 @@ pub(crate) fn checks_url(d: &Delivery) -> Option<String> {
 enum Ci {
     /// Some still run, or none showed up yet.
     Running,
+    /// Some jobs are queued and none runs: since when (RFC 3339) as GitHub tells it, the later of when they queued and
+    /// when the last check finished. None when GitHub gave no time.
+    Queued(Option<String>),
     Green,
     /// The repo has no CI, or none runs on the branch.
     Absent,
@@ -2218,7 +2237,11 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     let since = waiting.iter().map(|t| t.submitted_at.as_str()).max().unwrap_or_default();
     let grace = ci_grace(state, d);
     let ci = rerun_pending(d, ci_of(state, &d.repo, &head, since, grace).await.map_err(err)?, grace);
-    if matches!(ci, Ci::Running) {
+    // Queued with no runner taking it: the card says so, and past `CI_QUEUE_MINUTES` the Delivery stalls for the user.
+    if let Some(stuck) = queue_clock(state, d, &ci)? {
+        return Ok(ci_queued_stall(state, d, &stuck, waiting.iter().map(|t| t.number).collect()));
+    }
+    if matches!(ci, Ci::Running | Ci::Queued(_)) {
         return Ok(String::new());
     }
     // A Billing block isn't the code's fault: the whole Delivery stalls for the user, with no round for the Dev.
@@ -2249,7 +2272,7 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
         return Ok(String::new());
     }
     match ci {
-        Ci::Running | Ci::Billing(_) | Ci::Infra(_) => Ok(String::new()),
+        Ci::Running | Ci::Queued(_) | Ci::Billing(_) | Ci::Infra(_) => Ok(String::new()),
         ci @ (Ci::Green | Ci::Absent) => {
             let why = match ci {
                 Ci::Green => format!("its CI is green on `{}`", short(&head)),
@@ -2317,7 +2340,7 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str, grace: i64)
         return Ok(if active && !past_grace(since, grace) { Ci::Running } else { Ci::Absent });
     }
     if runs.iter().any(|c| Check::of_run(c) == Check::Pending) || statuses.iter().any(|s| Check::of_status(s) == Check::Pending) {
-        return Ok(Ci::Running);
+        return Ok(queued(&runs, &statuses));
     }
     let failed_runs: Vec<Value> = runs.into_iter().filter(|c| Check::of_run(c) == Check::Failed).collect();
     let failed_statuses: Vec<Value> = statuses.into_iter().filter(|s| Check::of_status(s) == Check::Failed).collect();
@@ -2331,6 +2354,53 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str, grace: i64)
         return Ok(Ci::Infra(failed_runs));
     }
     Ok(Ci::Red(failed_runs, failed_statuses))
+}
+
+/// What a commit's pending checks say: `Queued` when some check run is `queued` and nothing runs (no check run
+/// `in_progress`, nor another not done, nor a pending commit status), since the later of when those queued (their
+/// `started_at`, which GitHub sets as a job queues) and when the last finished check did; `Running` otherwise.
+fn queued(runs: &[Value], statuses: &[Value]) -> Ci {
+    let waiting: Vec<&Value> = runs.iter().filter(|c| c["status"] != "completed").collect();
+    if waiting.is_empty() || waiting.iter().any(|c| c["status"] != "queued") || statuses.iter().any(|s| crate::prs::Check::of_status(s) == crate::prs::Check::Pending) {
+        return Ci::Running;
+    }
+    let at = |c: &Value, key: &str| c[key].as_str().and_then(|x| chrono::DateTime::parse_from_rfc3339(x).ok());
+    let queued = waiting.iter().filter_map(|c| at(c, "started_at"));
+    let finished = runs.iter().filter(|c| c["status"] == "completed").filter_map(|c| at(c, "completed_at"));
+    Ci::Queued(queued.chain(finished).max().map(|t| t.to_rfc3339()))
+}
+
+/// Keeps `d`'s queue clock (`Delivery::ci_queued_since`) by its CI `ci`: set while it's queued, to the later of when
+/// GitHub says it queued and when it last had one (Resume restarts it), and cleared once it isn't. The time it sits
+/// queued since, once that's past `CI_QUEUE_MINUTES`; None before, or when it isn't queued.
+fn queue_clock(state: &AppState, d: &Delivery, ci: &Ci) -> Result<Option<String>, String> {
+    let Ci::Queued(github) = ci else {
+        if !d.ci_queued_since.is_empty() {
+            update(state, &d.repo, d.spec, |d| d.ci_queued_since.clear()).ok_or("The Delivery record couldn't be saved.")?;
+        }
+        return Ok(None);
+    };
+    let parse = |x: &str| chrono::DateTime::parse_from_rfc3339(x).ok();
+    let since = match (parse(&d.ci_queued_since), github.as_deref().and_then(parse)) {
+        (Some(kept), Some(github)) => kept.max(github).to_rfc3339(),
+        (Some(kept), None) => kept.to_rfc3339(),
+        (None, Some(github)) => github.to_rfc3339(),
+        (None, None) => crate::db::now(),
+    };
+    if parse(&since) != parse(&d.ci_queued_since) {
+        update(state, &d.repo, d.spec, |d| d.ci_queued_since = since.clone()).ok_or("The Delivery record couldn't be saved.")?;
+    }
+    Ok(past_grace(&since, CI_QUEUE_MINUTES).then_some(since))
+}
+
+/// `d`'s CI has sat queued since `since`, past `CI_QUEUE_MINUTES`, with no job running: no runner will take it (the
+/// owner's minutes ran out, say, or no runner has its labels). The whole Delivery stalls for the user, with no round
+/// for the Dev. `tickets` are those waiting for that CI. The lines for the reply.
+fn ci_queued_stall(state: &AppState, d: &Delivery, since: &str, tickets: Vec<i64>) -> String {
+    stall(state, d, "ci_queued", tickets, None, None);
+    let what = if follows_ready_ci(d) { format!("the ready {}", final_tag(d)) } else { format!("the {} `{}`", branch_name(d), d.branch) };
+    let minutes = chrono::DateTime::parse_from_rfc3339(since).map_or(CI_QUEUE_MINUTES, |t| chrono::Utc::now().signed_duration_since(t).num_minutes());
+    format!("\nThe CI of {what} is queued and hasn't started: a job has sat queued for {minutes} minutes with none running, so the Delivery stalled until the user checks GitHub Actions and resumes it.")
 }
 
 /// `runs`, the check runs of commit `sha`, without the jobs cancelled because a newer run took their place: a newer
@@ -2647,8 +2717,12 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
     }
     // Exhaustive like `follow_ci`'s: what stalls a ticket's CI stalls the ready PR's too.
     let grace = ci_grace(state, d);
-    match rerun_pending(d, ci_of(state, repo, &head, &d.final_ci_since, grace).await.map_err(|e| e.to_string())?, grace) {
-        Ci::Running => Ok(String::new()),
+    let ci = rerun_pending(d, ci_of(state, repo, &head, &d.final_ci_since, grace).await.map_err(|e| e.to_string())?, grace);
+    if let Some(stuck) = queue_clock(state, d, &ci)? {
+        return Ok(ci_queued_stall(state, d, &stuck, vec![]));
+    }
+    match ci {
+        Ci::Running | Ci::Queued(_) => Ok(String::new()),
         Ci::Billing(runs) => billing_block(state, d, &runs, vec![]).await,
         Ci::Infra(runs) => infra_failed(state, d, &runs, &head, vec![]).await,
         ci @ (Ci::Green | Ci::Absent) => {
@@ -3199,20 +3273,24 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
 
 /// Resume on a Delivery stalled on its CI for something only the user can fix (a Billing block, or GitHub's
 /// infrastructure failing twice), once they fixed it: Loft asks GitHub to re-run the failed jobs of those workflow
-/// runs (no new push) and follows that CI again; failed so again, it stalls again. No agent is woken for the CI,
+/// runs (no new push) and follows that CI again; failed so again, it stalls again. A CI queued too long has nothing
+/// to re-run: Loft follows it again, and it stalls again if it's still queued `CI_QUEUE_MINUTES` later. No agent is woken for the CI,
 /// since the stall stopped none: only a ticket whose step stalled meanwhile is resumed as usual. A re-run GitHub
 /// refuses (one already re-run on GitHub, or a run too old to re-run) resumes it all the same, saying so: the CI is
 /// followed again, and its old failed checks staying past the grace stall it again. The caller holds the repo's
 /// publish lock. The line saying what it did.
 async fn resume_ci(state: &AppState, d: Delivery) -> Result<String, String> {
     let (repo, spec) = (d.repo.clone(), d.spec);
-    let billing = d.stall_reason == "billing";
-    let runs = if billing { d.billing.as_ref().map(|b| b.runs.clone()) } else { d.infra.as_ref().map(|f| f.runs.clone()) }.unwrap_or_default();
-    let refused = rerun_failed(state, &repo, &runs).await.err();
+    let (billing, queued) = (d.stall_reason == "billing", d.stall_reason == "ci_queued");
+    let runs = if billing { d.billing.as_ref().map(|b| b.runs.clone()) } else if queued { None } else { d.infra.as_ref().map(|f| f.runs.clone()) }.unwrap_or_default();
+    let refused = if queued { None } else { rerun_failed(state, &repo, &runs).await.err() };
     let stuck: Vec<DeliveryTicket> = d.tickets.iter().filter(|t| d.stalled_on.contains(&t.number) && matches!(t.state.as_str(), "started" | "review" | "closing") && !waits_for_ci(t)).cloned().collect();
     let saved = update(state, &repo, spec, |d| {
         d.unstall();
-        let rerun_at = if billing { d.billing.as_mut().map(|b| &mut b.rerun_at) } else { d.infra.as_mut().map(|f| &mut f.rerun_at) };
+        if queued {
+            d.ci_queued_since = crate::db::now();
+        }
+        let rerun_at = if billing { d.billing.as_mut().map(|b| &mut b.rerun_at) } else if queued { None } else { d.infra.as_mut().map(|f| &mut f.rerun_at) };
         if let Some(at) = rerun_at {
             *at = crate::db::now();
         }
@@ -3220,6 +3298,7 @@ async fn resume_ci(state: &AppState, d: Delivery) -> Result<String, String> {
     .ok_or("Nothing was resumed: the Delivery record couldn't be saved.")?;
     let again = if billing { "if GitHub still refuses them for billing" } else { "if they fail for GitHub's infrastructure again" };
     let rerun = match (runs.as_slice(), &refused) {
+        _ if queued => format!(" Loft follows the CI again and gives its queued jobs another {CI_QUEUE_MINUTES} minutes to start; still queued then, it stalls again."),
         (_, Some(e)) => format!(" {e}. Loft follows the CI again all the same, in case the jobs were re-run on GitHub; {again} or nothing re-runs them, it stalls again."),
         ([], None) => " Loft found no workflow run to re-run: re-run the failed jobs on GitHub, and Loft follows the CI again.".to_string(),
         ([r], None) => format!(" Loft asked GitHub to re-run the failed jobs of workflow run {r} and follows the CI again; {again}, it stalls again."),
@@ -3228,6 +3307,8 @@ async fn resume_ci(state: &AppState, d: Delivery) -> Result<String, String> {
     let mut lines = String::new();
     let stalled = if billing {
         "the Delivery stalled while GitHub Actions was blocked by billing, and this ticket's step stopped meanwhile"
+    } else if queued {
+        "the Delivery stalled while its CI sat queued without starting, and this ticket's step stopped meanwhile"
     } else {
         "the Delivery stalled while GitHub's infrastructure failed its CI, and this ticket's step stopped meanwhile"
     };
@@ -3645,7 +3726,8 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
         "final_fixes" if d.final_ci == "fixing" => ("final", "Final round: the Dev is fixing the CI that failed on the ready PR."),
         "final_fixes" => ("final", "Final review: the Dev is fixing what the Code reviewer found."),
         _ if follows_ready_ci(d) => {
-            stalled = format!("Waiting for CI on the ready {}", final_tag(d));
+            let waiting = if ci_queued(d).is_some() { "CI queued, not started" } else { "Waiting for CI" };
+            stalled = format!("{waiting} on the ready {}", final_tag(d));
             ("ci", stalled.as_str())
         }
         "ready" | "settled" if reopenable(d) => ("done", "Done, but tickets published since are open: Reopen delivery builds them."),
@@ -3658,7 +3740,8 @@ fn state_line(state: &AppState, d: &Delivery) -> Value {
             let on_ci: Vec<String> = d.tickets.iter().filter(|t| waiting_for_ci(t)).map(|t| tag(d, t)).collect();
             let at_work = d.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review" | "changes" | "closing") && !waiting_for_ci(t));
             if !on_ci.is_empty() && !at_work {
-                stalled = format!("Waiting for CI on {}", on_ci.join(", "));
+                let waiting = if ci_queued(d).is_some() { "CI queued, not started" } else { "Waiting for CI" };
+                stalled = format!("{waiting} on {}", on_ci.join(", "));
                 ("ci", stalled.as_str())
             } else if waits.is_empty() {
                 ("running", "Running.")

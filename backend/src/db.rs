@@ -43,8 +43,8 @@ pub struct Delivery {
     #[serde(default)]
     pub resume_to: String,
     /// Why it stalled: "run_failed", "no_call" (the run ended without its call), "restart" (the run was
-    /// lost when Loft restarted), "billing" (a Billing block: see `billing`) or "infra" (its CI failed twice for
-    /// GitHub's infrastructure: see `infra`), among others.
+    /// lost when Loft restarted), "billing" (a Billing block: see `billing`), "infra" (its CI failed twice for
+    /// GitHub's infrastructure: see `infra`) or "ci_queued" (a CI job sat queued too long: see `ci_queued_since`), among others.
     #[serde(default)]
     pub stall_reason: String,
     /// When it stalled (RFC 3339): a new stall is a new Needs you item.
@@ -112,6 +112,10 @@ pub struct Delivery {
     /// failed to start, stale, or failed with no log), and Loft's re-run of it. A second one on the same commit stalls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infra: Option<InfraFailure>,
+    /// While a job of the CI Loft follows sits queued with none running: since when (RFC 3339), the later of when it
+    /// queued and when the CI last moved, or when Resume gave it another `CI_QUEUE_MINUTES`. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ci_queued_since: String,
     /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
     /// ticket or final review waiting for the user hands them to the Dev.
     #[serde(default)]
@@ -192,10 +196,11 @@ pub struct DraftAgain {
     pub text: String,
 }
 
-/// Whether a Delivery stalled for `reason` stalled on its CI for something only the user can fix (a Billing block, or
-/// an infrastructure failure twice): Resume re-runs the failed jobs.
+/// Whether a Delivery stalled for `reason` stalled on its CI for something only the user can fix (a Billing block, an
+/// infrastructure failure twice, or a job queued too long without starting): Resume re-runs the failed jobs, or gives
+/// the queued ones more time.
 pub fn ci_stall(reason: &str) -> bool {
-    matches!(reason, "billing" | "infra")
+    matches!(reason, "billing" | "infra" | "ci_queued")
 }
 
 /// See [`Delivery::infra`].
@@ -1752,6 +1757,7 @@ impl Db {
                 draft_again: None,
                 billing: None,
                 infra: None,
+                ci_queued_since: String::new(),
                 workflows: None,
                 last_notes: String::new(),
                 migrated: true,

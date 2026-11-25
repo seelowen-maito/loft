@@ -122,7 +122,7 @@ export type WaitsOn = { blocker: string; delivery: { repo: string; spec: number;
 export type IssueDelivery = {
   /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
-  /** Why it stalled: "run_failed", "no_call", "restart", "ci_missing", "billing" (a Billing block) or "infra" (its CI failed twice for GitHub's infrastructure), among others; null unless stalled. */
+  /** Why it stalled: "run_failed", "no_call", "restart", "ci_missing", "billing" (a Billing block), "infra" (its CI failed twice for GitHub's infrastructure) or "ci_queued" (a CI job sat queued 30 minutes without starting), among others; null unless stalled. */
   stall_reason?: string | null;
   /** Stalled by a Billing block: the repo owner's billing page on GitHub; null otherwise. An older server doesn't send it. */
   billing_url?: string | null;
@@ -144,7 +144,7 @@ export type IssueDelivery = {
   pr: number | null;
   /** Its PR's Checks tab on GitHub (the spec PR, or a standalone ticket's PR); null in a plan kept in Loft or before the PR opens. An older server doesn't send it. */
   checks_url?: string | null;
-  /** When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included; null when none is. An older server doesn't send it. */
+  /** When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included, or, while that CI sits queued with no job running ("CI queued, not started"), since when it does; null when none is. An older server doesn't send it. */
   ci_since?: string | null;
   /** The GitHub Actions minutes its branch spent so far, each job rounded up as GitHub bills it; null before it started or in a plan kept in Loft. An older server doesn't send it. */
   actions_minutes?: number | null;
