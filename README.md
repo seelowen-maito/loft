@@ -74,21 +74,6 @@ Then open http://localhost:7420 and check **Settings** (gear icon, top right). S
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
 - **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (and `npm` when pnpm and corepack are missing) on `PATH`.
 
-Each project also has its own **Project settings**, opened with **Settings** in its repo panel (Repos, then click the repo). Each one starts at Loft's default and shows who changed it last and when: you, or the project's Lead, which can change one with its `set_project_setting` tool once you said yes. They're kept in loft's database:
-
-- **CI mode**: `Per ticket` (the default) closes each Delivery ticket only once its CI is green; `At the end` closes tickets on their reviewers and checks the CI once the spec PR is ready, where a red CI is a final round for the Dev. It only changes what Loft waits for, never which workflows GitHub runs. On a private repo, a grill asks it right after how the work will be tested, with a recommendation and the suggestion to skip heavy jobs on draft PRs in the workflows, and publishing the spec saves your answer here, as changed by the agent that grilled you.
-- **Base branch**: a picker with the repo's branches on GitHub. The next spec PRs and standalone tickets start from it and merge into it; it starts at the repo's default branch, and Deliveries already under way keep the base they have.
-- **Ticket reviewers**: one row per reviewer role (QA, Security, Code reviewer) with the team's agent in it, its sticker and a switch for "reviews each ticket". QA and Security are on by default. The Code reviewer always does the final review of the whole spec PR; switched on, it also reviews each ticket. A Delivery waits only for the reviewers switched on. A role with no agent shows dimmed with **Create**, which asks Loft's own agent to set one up.
-- **Rounds of changes**: 1 to 5 (3 by default), the rounds of changes a Delivery ticket, or the final review, gets before it waits for you. A change counts from the next round on.
-- **CI grace**: how long a commit with no check at all waits for one when the repo has workflows (10 minutes by default, up to 120), before Loft takes it as no CI ran, says so on the PR and the Delivery card, and carries on.
-- **Team model**: the model, effort and subagent model new agents of the project start on (by default each agent's own, from its template). **Apply to the team now** gives the ones that are set to the agents whose main project it is; each agent stays editable on its own.
-- **Rust build cache**: on (the default), the project's agents build Rust through the shared sccache once it's installed; off, they build without it, from each agent's next run.
-- **Publish new issues to GitHub**: off (the default), a new Loft issue stays in Loft until you press Publish to GitHub; on, each new Loft issue of the project becomes a GitHub issue right away (only a project with a GitHub repo can).
-- **Comments going to GitHub**: which comments on the project's GitHub issues wait for your approval in Needs you before Loft posts them: every one (`Ask for every comment`, the default), only agents' (`Auto-approve my own comments`) or none (`Auto-approve everything`). Progress notes and private notes always stay in Loft. The Lead can only narrow this one and **Publish new issues to GitHub** (toward asking, and off): only you widen them, on this page.
-- **Merge method**: how **Merge** on the project's pull request cards (and in Needs you) merges: `Squash and merge` (the default), `Create a merge commit` or `Rebase and merge`. The page offers only the methods the repo allows on GitHub; if the repo later stops allowing the one picked, Merge uses squash, or else a method it allows.
-
-The two GitHub publishing settings used to be in Settings, for every project: on the update, each project kept the values Settings had, and a project added later starts at Loft's default.
-
 ### Use it from other devices
 
 loft is a web app on port `7420`, so it works with whatever network setup you already have: a reverse proxy, a VPN, or your local network. Set **SSH host** to this machine's name so `/code` opens VS Code over Remote-SSH.
