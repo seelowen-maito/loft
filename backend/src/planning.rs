@@ -8807,6 +8807,31 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_repo_github_cant_tell_about_in_time_counts_as_public() {
+        use std::time::{Duration, Instant};
+        let st = state();
+        let fake = own_fake(&st);
+        // GitHub errors: public, so the grill doesn't ask.
+        let a = lead_on(&st, &fake, "grill-error", true);
+        fake.route("GET", "/repos/octo/grill-error", 500, json!({ "message": "Server Error" }));
+        assert!(crate::grill::private_projects(&st, &a).await.is_empty());
+
+        // Slow repos are read at once, and one GitHub doesn't answer in time for counts as public.
+        let mut b = lead_on(&st, &fake, "grill-slow-a", true);
+        lead_on(&st, &fake, "grill-slow-b", true);
+        lead_on(&st, &fake, "grill-stalled", true);
+        fake.slow("GET", "/repos/octo/grill-slow-a", Duration::from_millis(800));
+        fake.slow("GET", "/repos/octo/grill-slow-b", Duration::from_millis(800));
+        fake.slow("GET", "/repos/octo/grill-stalled", Duration::from_secs(30));
+        b.projects = vec!["grill-slow-a".into(), "grill-stalled".into(), "grill-slow-b".into()];
+        let started = Instant::now();
+        let private = crate::grill::private_projects_within(&st, &b, Duration::from_secs(2)).await;
+        assert_eq!(private, ["grill-slow-a", "grill-slow-b"]);
+        // One after another it would take 0.8 + 2 + 0.8 seconds.
+        assert!(started.elapsed() < Duration::from_millis(3000), "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
     async fn publishing_the_spec_with_the_grills_answer_saves_the_ci_mode_as_the_lead() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/ci-answer";
@@ -8839,5 +8864,20 @@ pub(crate) mod tests {
 
         // Without `ci_mode`, nothing about it.
         assert!(!publish(&st, &a, "Rounds").await.unwrap().contains("CI mode"));
+
+        // A Lead with several projects: a spec for its other project saves the CI mode there.
+        planner_on(&st, "ci-second", Some("git@github.com:octo/ci-second.git"));
+        repo(&fake, "octo/ci-second", &["spec", "ready-for-agent"], 71);
+        a.projects = vec!["ci-answer".into(), "ci-second".into()];
+        st.db.save_agent(&a).unwrap();
+        let mut second = spec("per_ticket");
+        second["project"] = json!("ci-second");
+        let out = mcp_call(&st, &a, "publish_spec", &second).await.unwrap().unwrap();
+        assert!(out.starts_with("Published the spec as #71") && out.ends_with("\nThe CI mode `per_ticket` is saved in ci-second's Project settings, as changed by you."), "{out}");
+        assert!(!crate::project_settings::ci_at_the_end(&st, "ci-second"));
+        assert!(crate::project_settings::ci_at_the_end(&st, "ci-answer"), "the main project keeps its own");
+        let saved = crate::project_settings::get(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({ "project": "ci-second" })).unwrap())).await.unwrap();
+        let s = saved.0["settings"].as_array().unwrap().iter().find(|s| s["key"] == "ci_mode").unwrap().clone();
+        assert_eq!((&s["value"], &s["changed"]["agent"]["id"]), (&json!("per_ticket"), &json!(a.id)));
     }
 }
