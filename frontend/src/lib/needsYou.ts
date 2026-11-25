@@ -158,6 +158,13 @@ export function headline(total: number, fresh: number): string {
   return fresh > 0 ? `${fresh} new · ${total} in all` : `${total} waiting, none new`;
 }
 
+/** What Clear all does: the items that offer Done go, the asks without it stay. */
+export function clearAll(items: NeedsYouItem[]): { clear: number; stay: number; label: string } {
+  const clear = items.filter((i) => i.actions.some((a) => a.kind === "dismiss")).length;
+  const stay = items.length - clear;
+  return { clear, stay, label: stay > 0 ? `Clear ${clear} · ${stay} ${stay === 1 ? "ask stays" : "asks stay"}` : `Clear ${clear}` };
+}
+
 /** Whether a `needs_you` event's ids differ from the items shown, so the page reloads. */
 export function idsChanged(shown: string[], ids: string[]): boolean {
   return shown.length !== ids.length || shown.some((id, n) => id !== ids[n]);
