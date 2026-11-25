@@ -723,6 +723,14 @@ async fn set_tool(state: &AppState, me: &Agent, args: &Value) -> Result<String, 
     Ok(format!("Saved, as changed by you now.\n{}", tool_text(state, &project)))
 }
 
+/// The CI mode the user answered in `me`'s grill, saved when its spec is published: the user gave it, so any
+/// grilling agent saves it, not only the Lead, with `me` as who changed it.
+pub async fn grill_ci_mode(state: &AppState, me: &Agent, mode: &str) -> Result<String, String> {
+    let project = me.project.trim().to_string();
+    save(state, &project, CI_MODE, &json!(mode), Some(me)).await?;
+    Ok(project)
+}
+
 /// The project's Lead changes one setting, as `set_project_setting` asks (`project`, `key`, `value`): also how
 /// publishing a spec saves the CI mode the grill asked. The project changed.
 pub async fn lead_change(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {

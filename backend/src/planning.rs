@@ -111,10 +111,10 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
             None => match publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or(""), docs).await {
                 Ok((msg, slug, spec)) => {
                     crate::grill::record_published(state, &me.id, &slug, Some(spec), vec![]);
-                    // The grill's answer, saved as the Lead would with its tool.
+                    // The user's answer in the grill, saved whatever the grilling agent's role.
                     let saved = match ci_mode {
                         None => String::new(),
-                        Some(m) => match crate::project_settings::lead_change(state, me, &json!({ "project": me.project.trim(), "key": crate::project_settings::CI_MODE, "value": m })).await {
+                        Some(m) => match crate::project_settings::grill_ci_mode(state, me, m).await {
                             Ok(project) => format!("\nThe CI mode `{m}` is saved in {project}'s Project settings, as changed by you."),
                             Err(e) => format!("\nThe CI mode wasn't saved: {e}"),
                         },
@@ -8878,7 +8878,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn publishing_the_spec_with_the_grills_answer_saves_the_ci_mode_as_the_lead() {
+    async fn publishing_the_spec_with_the_grills_answer_saves_the_ci_mode_whoever_grilled() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/ci-answer";
         let mut a = planner_on(&st, "ci-answer", Some("git@github.com:octo/ci-answer.git"));
@@ -8892,20 +8892,22 @@ pub(crate) mod tests {
         assert_eq!(err, "`sometimes` isn't a CI mode: pass `per_ticket` or `at_the_end`, or leave `ci_mode` out. Nothing was published.");
         assert!(posts(&fake, slug, "issues").is_empty());
 
-        // Not the Lead: the spec is published, and the CI mode isn't saved, as the Lead's tool says.
+        // Not the Lead: the user answered in its grill, so it's saved all the same, with the agent as who changed it.
         a.role = "dev".into();
         st.db.save_agent(&a).unwrap();
         let out = mcp_call(&st, &a, "publish_spec", &spec("at_the_end")).await.unwrap().unwrap();
-        assert!(out.starts_with("Published the spec as #70") && out.ends_with("\nThe CI mode wasn't saved: Only the project's Lead changes its Project settings, once the user said yes."), "{out}");
-        assert_eq!(ci().await["changed"], Value::Null);
-
-        // The Lead: saved, with the Lead as who changed it. A retry saves it again.
-        a.role = "lead".into();
-        st.db.save_agent(&a).unwrap();
-        let out = mcp_call(&st, &a, "publish_spec", &spec("at_the_end")).await.unwrap().unwrap();
-        assert!(out.starts_with("The spec \"Rounds\" is already published as #70") && out.ends_with("\nThe CI mode `at_the_end` is saved in ci-answer's Project settings, as changed by you."), "{out}");
+        assert!(out.starts_with("Published the spec as #70") && out.ends_with("\nThe CI mode `at_the_end` is saved in ci-answer's Project settings, as changed by you."), "{out}");
         let s = ci().await;
         assert_eq!((&s["value"], &s["changed"]["agent"]), (&json!("at_the_end"), &json!({ "id": a.id, "name": a.name })));
+        assert!(crate::project_settings::ci_at_the_end(&st, "ci-answer"));
+
+        // The Lead: saved too. A retry saves it again.
+        a.role = "lead".into();
+        st.db.save_agent(&a).unwrap();
+        let out = mcp_call(&st, &a, "publish_spec", &spec("per_ticket")).await.unwrap().unwrap();
+        assert!(out.starts_with("The spec \"Rounds\" is already published as #70") && out.ends_with("\nThe CI mode `per_ticket` is saved in ci-answer's Project settings, as changed by you."), "{out}");
+        let out = mcp_call(&st, &a, "publish_spec", &spec("at_the_end")).await.unwrap().unwrap();
+        assert!(out.ends_with("\nThe CI mode `at_the_end` is saved in ci-answer's Project settings, as changed by you."), "{out}");
         assert!(crate::project_settings::ci_at_the_end(&st, "ci-answer"));
 
         // Without `ci_mode`, nothing about it.
