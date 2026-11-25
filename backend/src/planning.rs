@@ -8945,18 +8945,12 @@ pub(crate) mod tests {
         crate::delivery::follow_all(&st).await;
         assert_eq!(fake.seen(&runs).len(), reads);
 
-        // GitHub refuses the re-run: nothing is resumed.
-        let rerun = format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs");
-        fake.route("POST", &rerun, 403, json!({ "message": "Forbidden" }));
-        let err = crate::delivery::resume(&st, slug, 40).await.unwrap_err();
-        assert!(err.starts_with("Nothing was resumed: GitHub refused to re-run the failed jobs of workflow run 1"), "{err}");
-        assert_eq!(delivery(&st, slug).state, "stalled");
-
         // The billing is fixed: Resume re-runs the failed jobs, with no push and no wake.
+        let rerun = format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs");
         fake.route("POST", &rerun, 201, json!({}));
         let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
         assert_eq!(out, "Resumed spec #40. Loft asked GitHub to re-run the failed jobs of workflow run 1 and follows the CI again; if GitHub still refuses them for billing, it stalls again.");
-        assert_eq!(fake.seen(&rerun).iter().filter(|s| s.method == "POST").count(), 2);
+        assert_eq!(fake.seen(&rerun).iter().filter(|s| s.method == "POST").count(), 1);
         let d = delivery(&st, slug);
         assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("running", ""));
         assert!(!d.billing.as_ref().unwrap().rerun_at.is_empty());
@@ -8982,6 +8976,69 @@ pub(crate) mod tests {
         crate::delivery::follow_all(&st).await;
         assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
         assert!(woken(&st, &dev)[wakes..].iter().any(|w| w.contains("build ticket #42")));
+    }
+
+    #[tokio::test]
+    async fn a_rerun_github_refuses_still_resumes_and_the_delivery_moves_on() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-billing-rerun-refused";
+        let (dev, team) = building(&st, &fake, "ci-billing-rerun-refused", &["qa"]).await;
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.route("GET", &runs, 200, json!({ "check_runs": [refused(77)] }));
+        billing_note(&fake, slug, 77);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert_eq!(delivery(&st, slug).stall_reason, "billing");
+        let wakes = woken(&st, &dev).len();
+
+        // The user fixed the billing and re-ran the jobs on GitHub, so GitHub refuses Loft's re-run: resumed anyway,
+        // saying so.
+        let rerun = format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs");
+        fake.route("POST", &rerun, 403, json!({ "message": "This workflow run cannot be retried" }));
+        fake.route("POST", &format!("/repos/{slug}/actions/runs/1/rerun"), 403, json!({ "message": "This workflow is already running" }));
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert!(out.starts_with("Resumed spec #40. GitHub refused to re-run the failed jobs of workflow run 1: "), "{out}");
+        assert!(out.ends_with("Loft follows the CI again all the same, in case the jobs were re-run on GitHub; if GitHub still refuses them for billing or nothing re-runs them, it stalls again."), "{out}");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("running", ""));
+        assert!(!d.billing.as_ref().unwrap().rerun_at.is_empty());
+        assert!(stalled_items(&st).is_empty());
+        assert_eq!(woken(&st, &dev).len(), wakes, "no new push asked for");
+
+        // The old refused check, within the grace: the CI still runs.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).state, "running");
+
+        // The user's re-run passes: #41 closes and the next ticket starts.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert!(woken(&st, &dev)[wakes..].iter().any(|w| w.contains("build ticket #42")));
+    }
+
+    #[tokio::test]
+    async fn a_refused_rerun_whose_old_check_stays_stalls_again_past_the_grace() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-billing-rerun-old";
+        let (dev, team) = building(&st, &fake, "ci-billing-rerun-old", &["qa"]).await;
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.route("GET", &runs, 200, json!({ "check_runs": [refused(77)] }));
+        billing_note(&fake, slug, 77);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+
+        // The run is too old for GitHub to re-run: resumed, then stalled again once the grace is past.
+        fake.route("POST", &format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs"), 403, json!({ "message": "Unable to re-run this workflow run because it was created over a month ago" }));
+        fake.route("POST", &format!("/repos/{slug}/actions/runs/1/rerun"), 403, json!({ "message": "Unable to re-run this workflow run because it was created over a month ago" }));
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert!(out.contains("created over a month ago"), "{out}");
+        assert_eq!(delivery(&st, slug).state, "running");
+        crate::delivery::update(&st, slug, 40, |d| d.billing.as_mut().unwrap().rerun_at = (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339());
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str(), d.ticket(41).unwrap().rounds), ("stalled", "billing", 0));
     }
 
     #[tokio::test]

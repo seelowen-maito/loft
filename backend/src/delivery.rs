@@ -2455,17 +2455,18 @@ async fn billing_block(state: &AppState, d: &Delivery, failed: &[Value], tickets
 }
 
 /// Asks GitHub to re-run the failed jobs of workflow runs `runs`, or the whole run when it has none to re-run (one
-/// that never started). The first refusal, as GitHub worded it.
+/// that never started). Each run is asked, even after a refusal; the refusals, as GitHub worded them.
 async fn rerun_failed(state: &AppState, repo: &str, runs: &[i64]) -> Result<(), String> {
+    let mut refused = vec![];
     for r in runs {
         let failed = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{repo}/actions/runs/{r}/rerun-failed-jobs"), None).await;
         if let Err(e) = failed
             && crate::github::request(state, reqwest::Method::POST, &format!("/repos/{repo}/actions/runs/{r}/rerun"), None).await.is_err()
         {
-            return Err(format!("GitHub refused to re-run the failed jobs of workflow run {r}: {e}"));
+            refused.push(format!("GitHub refused to re-run the failed jobs of workflow run {r}: {e}"));
         }
     }
-    Ok(())
+    if refused.is_empty() { Ok(()) } else { Err(refused.join("; ")) }
 }
 
 /// GitHub's infrastructure failed `d`'s CI jobs (`failed`) on commit `head`, not the code: no round for the Dev. The
@@ -3193,12 +3194,14 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
 /// infrastructure failing twice), once they fixed it: Loft asks GitHub to re-run the failed jobs of those workflow
 /// runs (no new push) and follows that CI again; failed so again, it stalls again. No agent is woken for the CI,
 /// since the stall stopped none: only a ticket whose step stalled meanwhile is resumed as usual. A re-run GitHub
-/// refuses leaves it stalled. The caller holds the repo's publish lock. The line saying what it did.
+/// refuses (one already re-run on GitHub, or a run too old to re-run) resumes it all the same, saying so: the CI is
+/// followed again, and its old failed checks staying past the grace stall it again. The caller holds the repo's
+/// publish lock. The line saying what it did.
 async fn resume_ci(state: &AppState, d: Delivery) -> Result<String, String> {
     let (repo, spec) = (d.repo.clone(), d.spec);
     let billing = d.stall_reason == "billing";
     let runs = if billing { d.billing.as_ref().map(|b| b.runs.clone()) } else { d.infra.as_ref().map(|f| f.runs.clone()) }.unwrap_or_default();
-    rerun_failed(state, &repo, &runs).await.map_err(|e| format!("Nothing was resumed: {e}."))?;
+    let refused = rerun_failed(state, &repo, &runs).await.err();
     let stuck: Vec<DeliveryTicket> = d.tickets.iter().filter(|t| d.stalled_on.contains(&t.number) && matches!(t.state.as_str(), "started" | "review" | "closing") && !waits_for_ci(t)).cloned().collect();
     let saved = update(state, &repo, spec, |d| {
         d.unstall();
@@ -3209,10 +3212,11 @@ async fn resume_ci(state: &AppState, d: Delivery) -> Result<String, String> {
     })
     .ok_or("Nothing was resumed: the Delivery record couldn't be saved.")?;
     let again = if billing { "if GitHub still refuses them for billing" } else { "if they fail for GitHub's infrastructure again" };
-    let rerun = match runs.as_slice() {
-        [] => " Loft found no workflow run to re-run: re-run the failed jobs on GitHub, and Loft follows the CI again.".to_string(),
-        [r] => format!(" Loft asked GitHub to re-run the failed jobs of workflow run {r} and follows the CI again; {again}, it stalls again."),
-        rs => format!(" Loft asked GitHub to re-run the failed jobs of workflow runs {} and follows the CI again; {again}, it stalls again.", list_of(&rs.iter().map(i64::to_string).collect::<Vec<_>>())),
+    let rerun = match (runs.as_slice(), &refused) {
+        (_, Some(e)) => format!(" {e}. Loft follows the CI again all the same, in case the jobs were re-run on GitHub; {again} or nothing re-runs them, it stalls again."),
+        ([], None) => " Loft found no workflow run to re-run: re-run the failed jobs on GitHub, and Loft follows the CI again.".to_string(),
+        ([r], None) => format!(" Loft asked GitHub to re-run the failed jobs of workflow run {r} and follows the CI again; {again}, it stalls again."),
+        (rs, None) => format!(" Loft asked GitHub to re-run the failed jobs of workflow runs {} and follows the CI again; {again}, it stalls again.", list_of(&rs.iter().map(i64::to_string).collect::<Vec<_>>())),
     };
     let mut lines = String::new();
     let stalled = if billing {
