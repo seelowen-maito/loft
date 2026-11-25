@@ -550,8 +550,9 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 format!("{}\n\n{}", crate::delivery::stalled_reason(state, &d), a.text),
                 format!("{who} asks you something"),
             ),
-            // A Billing block's reason is long: the item says what to do, and its text has where it stopped too.
-            None if d.stall_reason == "billing" => {
+            // A Billing block's (or an infrastructure failure's) reason is long: the item says what to do, and its text
+            // has where it stopped too.
+            None if crate::db::ci_stall(&d.stall_reason) => {
                 let all = crate::delivery::stalled_reason(state, &d);
                 (all.split(" Stopped at:").next().unwrap_or_default().to_string(), all, title.clone())
             }
@@ -569,9 +570,15 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             actions.push(json!({ "kind": "open", "label": "Open billing", "target": { "url": b.url } }));
             links.push(json!({ "label": "Billing on GitHub", "url": b.url }));
         }
+        // An infrastructure failure: the CI checks on GitHub, where the user sees what failed and can re-run it too.
+        let infra = d.stall_reason == "infra";
+        if let Some(url) = crate::delivery::checks_url(&d).filter(|_| infra) {
+            links.push(json!({ "label": "Checks on GitHub", "url": url }));
+        }
         actions.extend([open, dismiss(&id)]);
         let (title, push) = match billing {
             Some(_) => (format!("GitHub Actions blocked by billing: {title}"), ("GitHub Actions blocked by billing".to_string(), title)),
+            None if infra => (format!("CI failed for GitHub's infrastructure: {title}"), ("CI failed for GitHub's infrastructure".to_string(), title)),
             None => (format!("Delivery stalled: {title}"), ("Delivery stalled".to_string(), push)),
         };
         items.push(Item {

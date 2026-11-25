@@ -9080,4 +9080,196 @@ pub(crate) mod tests {
         let d = delivery(&st, slug);
         assert_eq!((d.state.as_str(), d.ticket(41).unwrap().state.as_str()), ("running", "review"));
     }
+
+
+    // ---- Infrastructure failures (#457) ----
+
+    /// Check run `id`, job `name` of workflow run `run`, completed with `conclusion`.
+    fn ci_job(id: i64, name: &str, run: i64, conclusion: &str) -> Value {
+        json!({ "id": id, "name": name, "status": "completed", "conclusion": conclusion, "app": { "slug": "github-actions" }, "details_url": format!("https://github.com/octo/ci/actions/runs/{run}/job/{id}"), "output": { "title": "" } })
+    }
+
+    #[tokio::test]
+    async fn an_infrastructure_failure_is_re_run_once_with_no_round_and_stalls_the_second_time() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-infra";
+        let (dev, team) = building(&st, &fake, "ci-infra", &["qa"]).await;
+        spec_issue(&st, &fake, "ci-infra", slug);
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.route("GET", &runs, 200, json!({ "check_runs": [ci_job(77, "test", 1, "cancelled")] }));
+        fake.route("GET", &format!("/repos/{slug}/actions/runs"), 200, json!({ "workflow_runs": [{ "id": 1, "workflow_id": 9, "status": "completed" }] }));
+        let rerun = format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs");
+        fake.route("POST", &rerun, 201, json!({}));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let wakes = woken(&st, &dev).len();
+
+        // Cancelled with no newer run on the commit: Loft asks GitHub to re-run it, with no round, no log read, no
+        // wake for the Dev and no stall.
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("The CI of the spec branch `spec/40-rounds` failed for GitHub's infrastructure, not the code (`test` (cancelled)) on `c1c1c1c`: Loft asked GitHub to re-run it once."), "{out}");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ticket(41).unwrap().state.as_str(), d.ticket(41).unwrap().rounds), ("running", "review", 0));
+        let f = d.infra.clone().unwrap();
+        assert_eq!((f.head.as_str(), f.runs.clone(), f.checks.clone(), f.rerun_at.is_empty()), (CI_HEAD, vec![1], vec![77], false));
+        assert_eq!(fake.seen(&rerun).iter().filter(|s| s.method == "POST").count(), 1);
+        assert_eq!(woken(&st, &dev).len(), wakes);
+        assert!(fake.seen(&format!("/repos/{slug}/actions/jobs/")).is_empty(), "no log read");
+        assert!(stalled_items(&st).is_empty());
+
+        // GitHub hasn't replaced the cancelled check yet: the CI still runs, and nothing is re-run again.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).state, "running");
+        assert_eq!(fake.seen(&rerun).iter().filter(|s| s.method == "POST").count(), 1);
+
+        // The re-run fails to start: the Delivery stalls for the user, still with no round.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [ci_job(78, "test", 1, "startup_failure")] }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.stalled_on.clone()), ("stalled", "running", "infra", vec![41]));
+        assert_eq!((d.ticket(41).unwrap().rounds, d.infra.as_ref().unwrap().checks.clone(), d.infra.as_ref().unwrap().rerun_at.as_str()), (0, vec![78], ""));
+        assert_eq!(fake.seen(&rerun).iter().filter(|s| s.method == "POST").count(), 1, "re-run once only");
+        assert_eq!(woken(&st, &dev).len(), wakes);
+
+        // Needs you: its own title and reason, the checks on GitHub, pushed.
+        let items = stalled_items(&st);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["title"], "CI failed for GitHub's infrastructure: Rounds");
+        assert_eq!(items[0]["reason"], "Its CI failed twice for GitHub's infrastructure, not the code: check GitHub Actions, then Resume, and Loft re-runs the failed jobs.");
+        assert!(items[0]["text"].as_str().unwrap().ends_with("Stopped at: the CI of #41."), "{}", items[0]["text"]);
+        assert!(items[0]["links"].as_array().unwrap().contains(&json!({ "label": "Checks on GitHub", "url": format!("https://github.com/{slug}/pull/500/checks") })));
+        let all = crate::needs_you::collect(&st).unwrap();
+        let p = crate::needs_you::to_push(all.iter().find(|i| i.kind == "delivery_stalled").unwrap());
+        assert_eq!((p.title.as_str(), p.body.as_str()), ("CI failed for GitHub's infrastructure", "Rounds"));
+        let v = crate::delivery::delivery_json(&st, &d);
+        assert_eq!((&v["stall_reason"], &v["billing_url"], &v["can_resume"]), (&json!("infra"), &Value::Null, &json!(true)));
+
+        // A ticket's step going ahead meanwhile doesn't end it: only Resume does.
+        crate::delivery::update(&st, slug, 40, |d| d.clear_stall(41));
+        assert_eq!(delivery(&st, slug).stall_reason, "infra");
+
+        // Resume re-runs the failed jobs again, with no push and no wake.
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(out, "Resumed spec #40. Loft asked GitHub to re-run the failed jobs of workflow run 1 and follows the CI again; if they fail for GitHub's infrastructure again, it stalls again.");
+        assert_eq!(fake.seen(&rerun).iter().filter(|s| s.method == "POST").count(), 2);
+        assert_eq!((delivery(&st, slug).state.as_str(), woken(&st, &dev).len()), ("running", wakes));
+
+        // This time it runs and passes: #41 closes and the next ticket starts.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [ci_job(79, "test", 1, "success")] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert!(delivery(&st, slug).infra.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_job_with_no_log_is_infrastructure_and_a_run_that_never_started_is_re_run_whole() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-infra-nolog";
+        let (dev, _) = building(&st, &fake, "ci-infra-nolog", &[]).await;
+        ci_on(&fake, slug, "spec/40-rounds", json!([ci_job(77, "test", 3, "failure"), ci_job(78, "lint", 3, "stale")]));
+        // No log for the failed job (GitHub answers 404), and GitHub has no failed job to re-run: Loft re-runs it all.
+        fake.route("POST", &format!("/repos/{slug}/actions/runs/3/rerun-failed-jobs"), 403, json!({ "message": "This workflow run cannot be retried" }));
+        fake.route("POST", &format!("/repos/{slug}/actions/runs/3/rerun"), 201, json!({}));
+        let wakes = woken(&st, &dev).len();
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ticket(41).unwrap().state.as_str(), d.ticket(41).unwrap().rounds), ("running", "review", 0));
+        assert_eq!(d.infra.as_ref().map(|f| (f.runs.clone(), f.checks.clone())), Some((vec![3], vec![77, 78])));
+        assert_eq!(fake.seen(&format!("/repos/{slug}/actions/runs/3/rerun")).iter().filter(|s| s.method == "POST").count(), 2);
+        assert_eq!(woken(&st, &dev).len(), wakes);
+    }
+
+    #[tokio::test]
+    async fn an_infrastructure_failure_loft_cant_re_run_stalls_at_once() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-infra-refused";
+        let (dev, _) = building(&st, &fake, "ci-infra-refused", &[]).await;
+        ci_on(&fake, slug, "spec/40-rounds", json!([ci_job(77, "test", 4, "startup_failure")]));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str(), d.ticket(41).unwrap().rounds), ("stalled", "infra", 0));
+        let reply = woken(&st, &dev);
+        assert!(reply.iter().all(|w| !w.contains("CI failed")), "no round for the Dev");
+    }
+
+    #[tokio::test]
+    async fn a_job_cancelled_for_a_newer_run_on_the_same_commit_is_ignored() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-superseded";
+        let (dev, _) = building(&st, &fake, "ci-superseded", &[]).await;
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        // A newer run of the same workflow on the commit is still going: the CI still runs, nothing is re-run.
+        ci_on(&fake, slug, "spec/40-rounds", json!([ci_job(77, "test", 1, "cancelled")]));
+        let workflow_runs = format!("/repos/{slug}/actions/runs");
+        fake.route("GET", &workflow_runs, 200, json!({ "workflow_runs": [{ "id": 2, "workflow_id": 9, "status": "queued" }, { "id": 1, "workflow_id": 9, "status": "completed" }] }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ticket(41).unwrap().state.as_str(), d.infra.is_none()), ("running", "review", true));
+        assert!(fake.seen(&format!("{workflow_runs}?head_sha={CI_HEAD}")).len() == 1, "asked for the commit's workflow runs");
+        assert!(fake.seen(&format!("{workflow_runs}/")).iter().all(|s| s.method != "POST"), "nothing re-run");
+
+        // The newer run passed: the cancelled job is no result, so the CI is green.
+        fake.route("GET", &workflow_runs, 200, json!({ "workflow_runs": [{ "id": 2, "workflow_id": 9, "status": "completed" }, { "id": 1, "workflow_id": 9, "status": "completed" }] }));
+        fake.route("GET", &runs, 200, json!({ "check_runs": [ci_job(77, "test", 1, "cancelled"), ci_job(80, "build", 2, "success")] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert!(fake.seen(&format!("{workflow_runs}/")).iter().all(|s| s.method != "POST"), "nothing re-run");
+    }
+
+    #[tokio::test]
+    async fn a_job_cancelled_for_a_newer_check_of_its_name_is_ignored_without_asking_github() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-superseded-name";
+        let (dev, _) = building(&st, &fake, "ci-superseded-name", &[]).await;
+        ci_on(&fake, slug, "spec/40-rounds", json!([ci_job(77, "test", 1, "cancelled"), ci_job(78, "test", 1, "success")]));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert!(fake.seen(&format!("/repos/{slug}/actions/runs")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_code_failure_beside_an_infrastructure_one_is_still_the_codes_round() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-infra-mixed";
+        let (dev, _) = building(&st, &fake, "ci-infra-mixed", &[]).await;
+        ci_on(&fake, slug, "spec/40-rounds", json!([ci_job(76, "lint", 1, "cancelled"), ci_job(77, "test", 1, "failure")]));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("thread 'store::total' panicked"));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ticket(41).unwrap().state.as_str(), d.ticket(41).unwrap().rounds, d.infra.is_none()), ("running", "started", 1, true));
+        assert!(woken(&st, &dev).last().unwrap().contains("thread 'store::total' panicked"));
+        assert!(fake.seen(&format!("/repos/{slug}/actions/runs/1/")).iter().all(|s| s.method != "POST"), "nothing re-run");
+    }
+
+    #[tokio::test]
+    async fn an_infrastructure_failure_on_the_ready_prs_ci_is_re_run_then_stalls_it_and_resume_follows_it_again() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-infra";
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        let rerun = format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs");
+        fake.route("POST", &rerun, 201, json!({}));
+        let (dev, _) = ready_with_ci(&st, &fake, "ready-infra", json!([ci_job(77, "test", 1, "startup_failure")])).await;
+        let wakes = woken(&st, &dev).len();
+
+        // Re-run once, still following.
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str(), d.final_rounds), ("ready", "following", 0));
+        assert_eq!(fake.seen(&rerun).iter().filter(|s| s.method == "POST").count(), 1);
+
+        // Failed so again: stalled, back to following that CI on Resume.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [ci_job(78, "test", 1, "startup_failure")] }));
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.final_rounds), ("stalled", "ready", "infra", 0));
+        assert!(crate::delivery::stalled_reason(&st, &d).ends_with("Stopped at: the CI of the ready spec PR #500."));
+        assert_eq!(woken(&st, &dev).len(), wakes, "no final round");
+
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).final_ci.as_str()), ("ready", "following"));
+        fake.route("GET", &runs, 200, json!({ "check_runs": [ci_job(79, "test", 1, "success")] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(done_items(&st).len(), 1, "done once the re-run is green");
+    }
 }

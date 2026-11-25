@@ -39,11 +39,12 @@ pub struct Delivery {
     /// Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready, merged or closed).
     pub state: String,
     /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes", or "ready"
-    /// for a Billing block on the ready PR's CI).
+    /// for a Billing block or an infrastructure failure on the ready PR's CI).
     #[serde(default)]
     pub resume_to: String,
     /// Why it stalled: "run_failed", "no_call" (the run ended without its call), "restart" (the run was
-    /// lost when Loft restarted), or "billing" (a Billing block: see `billing`), among others.
+    /// lost when Loft restarted), "billing" (a Billing block: see `billing`) or "infra" (its CI failed twice for
+    /// GitHub's infrastructure: see `infra`), among others.
     #[serde(default)]
     pub stall_reason: String,
     /// When it stalled (RFC 3339): a new stall is a new Needs you item.
@@ -107,6 +108,10 @@ pub struct Delivery {
     /// spending limit was reached. Kept after Resume re-runs the jobs, so their old checks aren't taken for a new block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing: Option<BillingBlock>,
+    /// The last CI failure that wasn't the code's but GitHub's infrastructure (a job cancelled with no newer run,
+    /// failed to start, stale, or failed with no log), and Loft's re-run of it. A second one on the same commit stalls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infra: Option<InfraFailure>,
     /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
     /// ticket or final review waiting for the user hands them to the Dev.
     #[serde(default)]
@@ -171,8 +176,8 @@ impl Delivery {
             if self.stall_ask.as_ref().is_some_and(|a| a.ticket == Some(n)) {
                 self.stall_ask = None;
             }
-            // A Billing block waits for the user's Resume, whatever its tickets do meanwhile.
-            if self.stalled_on.is_empty() && self.stall_reason != "billing" {
+            // A Billing block or an infrastructure failure waits for the user's Resume, whatever its tickets do meanwhile.
+            if self.stalled_on.is_empty() && !ci_stall(&self.stall_reason) {
                 self.unstall();
             }
         }
@@ -185,6 +190,26 @@ pub struct DraftAgain {
     /// The PR is a draft again; false when GitHub refused, so it stayed ready for review.
     pub ok: bool,
     pub text: String,
+}
+
+/// Whether a Delivery stalled for `reason` stalled on its CI for something only the user can fix (a Billing block, or
+/// an infrastructure failure twice): Resume re-runs the failed jobs.
+pub fn ci_stall(reason: &str) -> bool {
+    matches!(reason, "billing" | "infra")
+}
+
+/// See [`Delivery::infra`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfraFailure {
+    /// The commit whose CI failed.
+    pub head: String,
+    /// The workflow runs of the failed jobs: a re-run re-runs their failed jobs.
+    pub runs: Vec<i64>,
+    /// The failed check runs: a re-run gives its jobs new ones.
+    pub checks: Vec<i64>,
+    /// When Loft (or Resume) asked GitHub to re-run them (RFC 3339); empty while the Delivery is stalled for it.
+    #[serde(default)]
+    pub rerun_at: String,
 }
 
 /// See [`Delivery::billing`].
@@ -1726,6 +1751,7 @@ impl Db {
                 reviewed_to: String::new(),
                 draft_again: None,
                 billing: None,
+                infra: None,
                 workflows: None,
                 last_notes: String::new(),
                 migrated: true,
