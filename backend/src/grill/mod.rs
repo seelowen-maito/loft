@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -213,24 +214,31 @@ fn record_published_locked(state: &AppState, agent_id: &str, repo: &str, spec: O
     let _ = save(state, &mut s);
 }
 
-/// The end-of-planning card for a grill that published something: links to the spec and tickets, the
-/// spec's Delivery for Start delivery (or, for a plan without one, the suggested next message for the
+/// How long a grill's start waits on GitHub for its repos' visibility: the user's message isn't saved until then.
+const PRIVATE_WAIT: Duration = Duration::from_secs(3);
+
 /// The agent's projects whose GitHub repo is private, read as a grill starts: GitHub bills every Actions minute
-/// there, so the grill asks the project's CI mode (see Planning: CI mode). A repo GitHub can't tell about counts as
-/// public.
+/// there, so the grill asks the project's CI mode (see Planning: CI mode). A repo GitHub can't tell about, or not
+/// within PRIVATE_WAIT, counts as public.
 pub async fn private_projects(state: &AppState, a: &Agent) -> Vec<String> {
-    let mut out = vec![];
+    private_projects_within(state, a, PRIVATE_WAIT).await
+}
+
+pub(crate) async fn private_projects_within(state: &AppState, a: &Agent, wait: Duration) -> Vec<String> {
     if crate::github::token(state).is_none() {
-        return out;
+        return vec![];
     }
     let projects = if a.projects.is_empty() { vec![a.project.trim().to_string()] } else { a.projects.clone() };
-    for p in projects.into_iter().filter(|p| !p.is_empty()) {
-        let Ok(slug) = crate::repos::github_repo(state, &p).await else { continue };
-        if crate::github::get(state, &format!("/repos/{slug}")).await.is_ok_and(|m| m["private"] == true) {
-            out.push(p);
-        }
-    }
-    out
+    // One lookup per project, all at once, each bounded on its own so a slow one doesn't hide the others.
+    let checks = projects.into_iter().filter(|p| !p.is_empty()).map(|p| async move {
+        let lookup = async {
+            let slug = crate::repos::github_repo(state, &p).await.ok()?;
+            crate::github::get(state, &format!("/repos/{slug}")).await.ok()
+        };
+        let private = tokio::time::timeout(wait, lookup).await.ok().flatten().is_some_and(|m| m["private"] == true);
+        private.then_some(p)
+    });
+    futures::future::join_all(checks).await.into_iter().flatten().collect()
 }
 
 /// The private repos, as the subject of a sentence: "Your project's repo is", or for an agent with `several`
@@ -264,6 +272,8 @@ fn which_project(a: &Agent) -> String {
     format!(" You work in several projects ({list}): unless the user already said which one this is about, the first round asks it, with the most likely one as the recommendation. Read that project's documents, and pass it as `project` to publish_spec and publish_tickets; a ticket for another of your projects names it as its own `project`.")
 }
 
+/// The end-of-planning card for a grill that published something: links to the spec and tickets, the
+/// spec's Delivery for Start delivery (or, for a plan without one, the suggested next message for the
 /// composer after clearing context), and the roles the team lacks.
 fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
     let groups: Vec<&Published> = s.published.iter().filter(|p| p.spec.is_some() || !p.tickets.is_empty()).collect();
