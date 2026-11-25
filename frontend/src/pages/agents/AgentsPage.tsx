@@ -261,6 +261,11 @@ export default function AgentsPage() {
                               {a.queued_messages.length} queued
                             </span>
                           )}
+                          {a.goal && (
+                            <span className="shrink-0 rounded-full border border-accent/40 px-1.5 font-mono text-[10px] text-accent" title={`Goal active: ${a.goal}`}>
+                              goal
+                            </span>
+                          )}
                           {(a.running || listedContext(a) != null) && (
                             <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10.5px] tabular-nums text-fg-3">
                               {listedContext(a) != null && (

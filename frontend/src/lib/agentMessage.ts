@@ -26,6 +26,8 @@ export function sendState(result: string | undefined, agents: { queued_messages?
 export const QUEUED_MARK = "Queued until this run ends";
 /** The mark on an agent message the user cancelled while it waited: the agent never read it. */
 export const CANCELLED_MARK = "Cancelled, not sent to the agent";
+/** The mark on the user's message sent into the run in progress (Send now) instead of waiting for it to end. */
+export const SENT_NOW_MARK = "Sent now, into the run in progress";
 
 /** A task message's text without the `[Task <id>]` tag and the bracketed instructions Loft adds for the agent. */
 export function taskText(m: { content: string; meta: Record<string, any> | null }) {

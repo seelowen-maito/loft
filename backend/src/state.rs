@@ -86,6 +86,12 @@ pub struct RunInfo {
     pub for_user: bool,
     /// Tool calls (ids) whose result hasn't come back yet.
     pub tools_open: Vec<String>,
+    /// Send now: the way into the run's claude (message id, prompt) while its stdin is open and takes the user's
+    /// queued messages. None once Loft closed it, and in runs that take no input (quiet or throwaway ones).
+    pub send_now: Option<tokio::sync::mpsc::UnboundedSender<(i64, String)>>,
+    /// The user's messages sent now that claude hasn't taken yet (no replay of them): if the run ends first,
+    /// they go back to the queue.
+    pub sent: Vec<(i64, String)>,
 }
 
 /// A running subagent, as clients show it above the composer.
