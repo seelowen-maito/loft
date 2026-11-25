@@ -166,6 +166,9 @@ export function clearAll(items: NeedsYouItem[]): { ids: string[]; clear: number;
   return { ids, clear, stay, label: stay > 0 ? `Clear ${clear} · ${stay} ${stay === 1 ? "needs" : "need"} an answer` : `Clear ${clear}` };
 }
 
+/** The confirm's title for the items Clear all was opened with. */
+export const clearTitle = (n: number) => `Clear ${n} ${n === 1 ? "item" : "items"}?`;
+
 /** Whether a `needs_you` event's ids differ from the items shown, so the page reloads. */
 export function idsChanged(shown: string[], ids: string[]): boolean {
   return shown.length !== ids.length || shown.some((id, n) => id !== ids[n]);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerBody, badgeText, beingLookedAt, badgeTitle, badgeTone, clearAll, closeTarget, countAfter, countsOf, escCloses, freshAfter, headline, iconAction, idsChanged, itemView, placeOf, unseenIds, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
+import { answerBody, badgeText, beingLookedAt, badgeTitle, badgeTone, clearAll, clearTitle, closeTarget, countAfter, countsOf, escCloses, freshAfter, headline, iconAction, idsChanged, itemView, placeOf, unseenIds, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
 
 const HOST = "mac.tail1234.ts.net";
 
@@ -176,4 +176,15 @@ test("Clear all counts the items with Done, and says how many asks stay", () => 
   assert.equal(clearAll([withDone, item({})]).label, "Clear 1 · 1 needs an answer");
   assert.equal(clearAll([item({})]).clear, 0, "hidden: nothing to clear");
   assert.equal(clearAll([]).clear, 0);
+});
+
+test("Clear all's confirm keeps the ids it opened with, whatever arrives after", () => {
+  const withDone = (id: string) => item({ id, actions: [{ kind: "dismiss", label: "Done", method: "POST", path: "/x" } as NeedsYouItem["actions"][number]] });
+  const list = [withDone("a"), withDone("b")];
+  const opened = clearAll(list).ids; // what the page keeps while the dialog is open
+  list.push(withDone("late"));
+  assert.deepEqual(opened, ["a", "b"], "the late item isn't in the snapshot");
+  assert.deepEqual(clearAll(list).ids, ["a", "b", "late"]);
+  assert.equal(clearTitle(opened.length), "Clear 2 items?");
+  assert.equal(clearTitle(1), "Clear 1 item?");
 });

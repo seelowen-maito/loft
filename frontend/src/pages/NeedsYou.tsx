@@ -10,7 +10,7 @@ import { ActionButton } from "../components/ActionButton";
 import { ErrorLine } from "../components/Callout";
 import { ConfirmDialog } from "../components/Dialog";
 import { errorText, useAction } from "../lib/useAction";
-import { answerBody, beingLookedAt, clearAll, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
+import { answerBody, beingLookedAt, clearAll, clearTitle, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
 
 const TONE = { bad: "bg-bad", warn: "bg-warn", accent: "bg-accent", muted: "bg-fg-3/40" } as const;
 
@@ -164,7 +164,8 @@ export default function NeedsYouPage() {
   }, []);
   const [list, setList] = useState<NeedsYouList | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState(false);
+  // The ids Clear all was opened with: what the confirm names and sends, whatever arrives while it is open.
+  const [confirming, setConfirming] = useState<string[] | null>(null);
   const clearing = useAction();
   // Unseen when they appeared during this visit: shown as new until the page closes, though marked seen at once.
   const [fresh, setFresh] = useState<Set<string>>(new Set());
@@ -224,7 +225,7 @@ export default function NeedsYouPage() {
           )}
           <div className="ml-auto flex items-center gap-2">
             {list && clearAll(list.items).clear > 0 && (
-              <button type="button" className="btn-ghost self-center text-[12.5px]" data-needs-you-clear-all onClick={() => setConfirming(true)}>
+              <button type="button" className="btn-ghost self-center text-[12.5px]" data-needs-you-clear-all onClick={() => setConfirming(clearAll(list.items).ids)}>
                 {clearAll(list.items).label}
               </button>
             )}
@@ -233,9 +234,9 @@ export default function NeedsYouPage() {
             </button>
           </div>
         </div>
-        {confirming && list && (
+        {confirming && (
           <ConfirmDialog
-            title={`Clear ${clearAll(list.items).clear} ${clearAll(list.items).clear === 1 ? "item" : "items"}?`}
+            title={clearTitle(confirming.length)}
             body="Each one is marked Done and leaves the list, on every device."
             confirmLabel="Clear all"
             pendingLabel="Clearing…"
@@ -243,12 +244,12 @@ export default function NeedsYouPage() {
             error={clearing.error}
             onConfirm={() =>
               clearing.run(async () => {
-                await api.needsYouClearAll(clearAll(list.items).ids);
-                setConfirming(false);
+                await api.needsYouClearAll(confirming);
+                setConfirming(null);
                 load();
               })
             }
-            onClose={() => setConfirming(false)}
+            onClose={() => setConfirming(null)}
           />
         )}
         {err && <p className="text-[12.5px] text-bad">Couldn't load Needs you: {err}</p>}
