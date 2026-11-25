@@ -2334,11 +2334,13 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str, grace: i64)
 }
 
 /// `runs`, the check runs of commit `sha`, without the jobs cancelled because a newer run took their place: a newer
-/// check run of the same name, or a newer workflow run of the same workflow on that commit. None while such a newer
-/// workflow run hasn't finished: its jobs may not have check runs yet.
+/// check run of the same name in the same workflow run (another workflow's job of that name is no stand-in), or a
+/// newer workflow run of the same workflow on that commit. None while such a newer workflow run hasn't finished: its
+/// jobs may not have check runs yet.
 async fn without_superseded(state: &AppState, repo: &str, sha: &str, runs: Vec<Value>) -> anyhow::Result<Option<Vec<Value>>> {
     let id = |c: &Value| c["id"].as_i64().unwrap_or_default();
-    let newer_named = |c: &Value| runs.iter().any(|o| o["name"] == c["name"] && id(o) > id(c));
+    let same_check = |o: &Value, c: &Value| o["name"] == c["name"] && o["app"]["slug"] == c["app"]["slug"] && linked_run(o) == linked_run(c);
+    let newer_named = |c: &Value| runs.iter().any(|o| same_check(o, c) && id(o) > id(c));
     let (newer, cancelled): (Vec<&Value>, Vec<&Value>) = runs.iter().filter(|c| c["conclusion"] == "cancelled").partition(|c| newer_named(c));
     let mut gone: Vec<i64> = newer.iter().map(|c| id(c)).collect();
     if !cancelled.is_empty() {
@@ -2419,12 +2421,17 @@ fn rerun_pending(d: &Delivery, ci: Ci, grace: i64) -> Ci {
 
 /// The workflow run of check run `c`, an Actions job: from its link, else from GitHub. None for a check that isn't one.
 async fn workflow_run_of(state: &AppState, repo: &str, c: &Value) -> Option<i64> {
-    let linked = c["details_url"].as_str().and_then(|u| u.split("/actions/runs/").nth(1)).and_then(|r| r.split(['/', '?']).next()).and_then(|r| r.parse().ok());
+    let linked = linked_run(c);
     if linked.is_some() {
         return linked;
     }
     let id = c["id"].as_i64()?;
     crate::github::get(state, &format!("/repos/{repo}/actions/jobs/{id}")).await.ok()?["run_id"].as_i64()
+}
+
+/// The workflow run in check run `c`'s link, an Actions job's. None for any other check.
+fn linked_run(c: &Value) -> Option<i64> {
+    c["details_url"].as_str().and_then(|u| u.split("/actions/runs/").nth(1)).and_then(|r| r.split(['/', '?']).next()).and_then(|r| r.parse().ok())
 }
 
 /// The billing page on GitHub of `repo`'s owner: an org's own, or the signed-in account's.
@@ -2461,9 +2468,9 @@ async fn rerun_failed(state: &AppState, repo: &str, runs: &[i64]) -> Result<(), 
     for r in runs {
         let failed = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{repo}/actions/runs/{r}/rerun-failed-jobs"), None).await;
         if let Err(e) = failed
-            && crate::github::request(state, reqwest::Method::POST, &format!("/repos/{repo}/actions/runs/{r}/rerun"), None).await.is_err()
+            && let Err(whole) = crate::github::request(state, reqwest::Method::POST, &format!("/repos/{repo}/actions/runs/{r}/rerun"), None).await
         {
-            refused.push(format!("GitHub refused to re-run the failed jobs of workflow run {r}: {e}"));
+            refused.push(format!("GitHub refused to re-run the failed jobs of workflow run {r}: {e}; and the whole run: {whole}"));
         }
     }
     if refused.is_empty() { Ok(()) } else { Err(refused.join("; ")) }

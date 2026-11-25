@@ -9285,6 +9285,23 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_job_cancelled_beside_a_newer_job_of_its_name_in_another_workflow_is_still_an_infrastructure_failure() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-same-name";
+        let (dev, _) = building(&st, &fake, "ci-same-name", &[]).await;
+        let rerun = format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs");
+        fake.route("POST", &rerun, 201, json!({}));
+        // Workflow 9's `test` (run 1) was cancelled; workflow 8 has a `test` job of its own (run 2) that passed.
+        ci_on(&fake, slug, "spec/40-rounds", json!([ci_job(77, "test", 1, "cancelled"), ci_job(80, "test", 2, "success")]));
+        fake.route("GET", &format!("/repos/{slug}/actions/runs"), 200, json!({ "workflow_runs": [{ "id": 2, "workflow_id": 8, "status": "completed" }, { "id": 1, "workflow_id": 9, "status": "completed" }] }));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ticket(41).unwrap().state.as_str(), d.ticket(41).unwrap().rounds), ("running", "review", 0));
+        assert_eq!(d.infra.as_ref().map(|f| f.checks.clone()), Some(vec![77]));
+        assert_eq!(fake.seen(&rerun).len(), 1, "re-ran workflow run 1");
+    }
+
+    #[tokio::test]
     async fn a_code_failure_beside_an_infrastructure_one_is_still_the_codes_round() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/ci-infra-mixed";
