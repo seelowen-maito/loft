@@ -67,6 +67,9 @@ pub const COMMENT_APPROVAL: &str = "comment_approval";
 pub const MERGE_METHOD: &str = "merge_method";
 /// Loft's merge method, when the repo allows it.
 const SQUASH: &str = "squash";
+/// The GitHub publishing settings' choices, from what keeps the most in Loft to what sends the most to GitHub. Only
+/// the user widens them: a Lead could be talked into it by a comment mirrored from GitHub (#467).
+const USER_WIDENS: &[(&str, &[&str])] = &[(AUTO_PUBLISH, &["off", "on"]), (COMMENT_APPROVAL, &["ask", "own", "all"])];
 /// The team defaults, each with the agent field it sets.
 const TEAM: &[(&str, &str)] = &[(TEAM_MODEL, "model"), (TEAM_EFFORT, "effort"), (TEAM_SUBAGENT_MODEL, "subagent_model")];
 
@@ -346,7 +349,8 @@ pub fn migrate_github_settings(state: &AppState, projects: &[String]) -> Result<
     }
     for p in projects.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
         let publish = s.auto_publish_all.unwrap_or_else(|| s.auto_publish.iter().any(|a| a.trim() == p));
-        let mode = s.comment_approval.get(p).unwrap_or(&s.comment_approval_default);
+        // Once Settings had a mode for every project (`auto_publish_all` set), the per-project map was no longer read.
+        let mode = if s.auto_publish_all.is_some() { &s.comment_approval_default } else { s.comment_approval.get(p).unwrap_or(&s.comment_approval_default) };
         let mode = if matches!(mode.as_str(), "own" | "all") { mode.as_str() } else { "ask" };
         let saved = state.db.project_settings(p).map_err(|e| e.to_string())?;
         for (key, value) in [(AUTO_PUBLISH, if publish { "on" } else { "off" }), (COMMENT_APPROVAL, mode)] {
@@ -644,7 +648,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "set_project_setting",
-            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10). `team_model`, `team_effort` and `team_subagent_model` are what new agents of the project start on: a model (`sonnet`, `opus`, `fable`, `haiku`), an effort (`low`, `medium`, `high`, `xhigh`, `max`) and the model their subagents run on, or empty for each agent's own (the default); the agents the team has keep theirs until the user applies them to the team on the settings page. `sccache` is `on` (the default) or `off`: whether the project's agents build Rust through the shared sccache. `auto_publish` is `off` (the default) or `on`: whether each new Loft issue of the project becomes a GitHub issue as it's made. `comment_approval` is which comments on the project's GitHub issues go straight to GitHub: `ask` (every one waits for the user's approval, the default), `own` (the user's go straight, agents' wait) or `all`. `merge_method` is how Merge on the project's pull request cards merges: `squash` (the default), `merge` or `rebase`, only one the repo allows on GitHub.",
+            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10). `team_model`, `team_effort` and `team_subagent_model` are what new agents of the project start on: a model (`sonnet`, `opus`, `fable`, `haiku`), an effort (`low`, `medium`, `high`, `xhigh`, `max`) and the model their subagents run on, or empty for each agent's own (the default); the agents the team has keep theirs until the user applies them to the team on the settings page. `sccache` is `on` (the default) or `off`: whether the project's agents build Rust through the shared sccache. `auto_publish` is `off` (the default) or `on`: whether each new Loft issue of the project becomes a GitHub issue as it's made. `comment_approval` is which comments on the project's GitHub issues go straight to GitHub: `ask` (every one waits for the user's approval, the default), `own` (the user's go straight, agents' wait) or `all`. You can only narrow these two (`auto_publish` to `off`, `comment_approval` toward `ask`): only the user widens them, on the project's settings page. `merge_method` is how Merge on the project's pull request cards merges: `squash` (the default), `merge` or `rebase`, only one the repo allows on GitHub.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "The project; your main project when omitted." },
                 "key": { "type": "string", "description": "The setting, like `ci_mode`." },
@@ -720,6 +724,17 @@ async fn set_tool(state: &AppState, me: &Agent, args: &Value) -> Result<String, 
     }
     let project = project_arg(me, args)?;
     let key = args["key"].as_str().map(str::trim).filter(|k| !k.is_empty()).ok_or("key is required, like `ci_mode`")?;
+    if let Some((_, order)) = USER_WIDENS.iter().find(|(k, _)| *k == key) {
+        let rank = |v: &str| order.iter().position(|o| *o == v.trim());
+        let now = value_of(state, &project, key);
+        if args["value"].as_str().and_then(rank).zip(rank(&now)).is_some_and(|(new, now)| new > now) {
+            let label = def(key).map_or(key, |d| d.label);
+            return Err(format!(
+                "Only the user sends more of {project} to GitHub: {label} is {} and you can only narrow it. Ask the user to change it on {project}'s Project settings page.",
+                quoted(&now)
+            ));
+        }
+    }
     save(state, &project, key, &args["value"], Some(me)).await?;
     Ok(format!("Saved, as changed by you now.\n{}", tool_text(state, &project)))
 }

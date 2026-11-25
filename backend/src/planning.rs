@@ -8459,6 +8459,51 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn once_settings_had_one_mode_for_every_project_a_stale_per_project_one_is_ignored() {
+        use crate::project_settings::{auto_publish, comment_approval, migrate_github_settings};
+        let st = state();
+        // An older client wrote the per-project map back, wider, after Settings moved to one mode for every project.
+        let mut old = st.settings.get();
+        (old.auto_publish_all, old.comment_approval_default) = (Some(false), "ask".into());
+        old.comment_approval = [("gp-stale".to_string(), "all".to_string())].into();
+        st.settings.save(old).unwrap();
+        migrate_github_settings(&st, &["gp-stale".into()]).unwrap();
+        assert_eq!(comment_approval(&st, "gp-stale"), "ask", "the mode that applied, not the stale one");
+        assert!(!auto_publish(&st, "gp-stale"));
+        assert!(st.db.project_settings("gp-stale").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_lead_only_narrows_github_publishing_and_only_the_user_widens_it() {
+        use crate::project_settings::{auto_publish, comment_approval, put};
+        let st = state();
+        planner_on(&st, "gp-lead", None);
+        let lead = busy(&st, "Lead", "gp-lead", "lead");
+        let tool = |key: &str, value: &str| settings_tool(&st, &lead, "set_project_setting", json!({ "key": key, "value": value }));
+        let user = |key: &str, value: &str| put(State(st.clone()), Json(serde_json::from_value(json!({ "project": "gp-lead", "key": key, "value": value })).unwrap()));
+
+        // Widening is refused and changes nothing: no comment goes straight to GitHub, no new issue is published.
+        for (key, value) in [("comment_approval", "own"), ("comment_approval", "all"), ("auto_publish", "on")] {
+            let err = tool(key, value).await.unwrap_err();
+            assert!(err.starts_with("Only the user sends more of gp-lead to GitHub:") && err.contains("Project settings page"), "{err}");
+        }
+        assert_eq!((auto_publish(&st, "gp-lead"), comment_approval(&st, "gp-lead")), (false, "ask".to_string()));
+        assert!(st.db.project_settings("gp-lead").unwrap().is_empty(), "nothing recorded as changed");
+        assert_eq!(tool("comment_approval", "sometimes").await.unwrap_err(), "Comments going to GitHub takes `ask` or `own` or `all`.");
+
+        // The user widens them on the page; the Lead can then narrow them, but not widen them back.
+        let _ = user("comment_approval", "all").await.unwrap();
+        let _ = user("auto_publish", "on").await.unwrap();
+        assert!(tool("comment_approval", " own ").await.unwrap().contains("(`comment_approval`): `own`."));
+        assert_eq!(tool("comment_approval", "all").await.unwrap_err(), "Only the user sends more of gp-lead to GitHub: Comments going to GitHub is `own` and you can only narrow it. Ask the user to change it on gp-lead's Project settings page.");
+        tool("comment_approval", "own").await.unwrap();
+        tool("auto_publish", "off").await.unwrap();
+        tool("comment_approval", "ask").await.unwrap();
+        assert_eq!((auto_publish(&st, "gp-lead"), comment_approval(&st, "gp-lead")), (false, "ask".to_string()));
+        assert!(tool("auto_publish", "on").await.is_err());
+    }
+
     // ---- Merge method per project (#468) ----
 
     /// A repo on the fake allowing these merge methods.
