@@ -36,6 +36,8 @@ struct NeedsYouListView: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @State private var fresh: Set<String> = []
+    @State private var confirmingClear = false
+    @State private var clearError: String?
     var focus: String?
 
     var body: some View {
@@ -68,6 +70,7 @@ struct NeedsYouListView: View {
         .overlay(alignment: .top) { NeedsYouNotice() }
         .environment(\.needsYouFresh, fresh)
         .navigationTitle("Needs you")
+        .toolbar { clearAllButton }
         .refreshable { await store.refreshNeedsYou() }
         .task {
             await store.refreshNeedsYou()
@@ -75,6 +78,29 @@ struct NeedsYouListView: View {
         }
         .onChange(of: store.needsYou?.items.map(\.id)) { Task { await markSeen() } }
         .onChange(of: scenePhase) { Task { await markSeen() } }
+    }
+
+    /// Clear all: every item with Done, after a confirm; hidden when there's nothing to clear.
+    @ToolbarContentBuilder private var clearAllButton: some ToolbarContent {
+        let c = NeedsYouClearAll(store.needsYou?.items ?? [])
+        if c.clear > 0 {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(c.label) { confirmingClear = true }
+                    .accessibilityIdentifier("needsYouClearAll")
+                    .confirmationDialog(c.question, isPresented: $confirmingClear, titleVisibility: .visible) {
+                        Button("Clear all", role: .destructive) {
+                            Task {
+                                do { try await store.clearAllNeedsYou() } catch { clearError = error.localizedDescription }
+                            }
+                        }
+                    } message: {
+                        Text("Each one is marked Done and leaves the list, on every device.")
+                    }
+                    .alert("Couldn't clear", isPresented: Binding(get: { clearError != nil }, set: { if !$0 { clearError = nil } })) {
+                        Button("OK", role: .cancel) {}
+                    } message: { Text(clearError ?? "") }
+            }
+        }
     }
 
     /// What's on screen counts as seen everywhere, but not while the app is in the background.

@@ -102,6 +102,33 @@ final class NeedsYouTests: XCTestCase {
         XCTAssertNil(store.needsYou?.items.first { $0.type == "stuck" })
     }
 
+    /// Clear all (#687): the web's label rule, and the asks stay.
+    func testClearAllCountsWhatHasDoneAndTheAsksThatStay() throws {
+        let l = try fixture()
+        let c = NeedsYouClearAll(l.items)
+        XCTAssertEqual(c.clear, l.items.filter { $0.actions.contains { $0.kind == "dismiss" } }.count)
+        XCTAssertGreaterThan(c.clear, 0)
+        XCTAssertEqual(c.clear + c.stay, l.items.count)
+        XCTAssertEqual(c.label, "Clear \(c.clear) · \(c.stay) asks stay")
+        let one = NeedsYouClearAll([l.items.first { $0.canDismiss }!, l.items.first { !$0.canDismiss }!])
+        XCTAssertEqual([one.label, one.question], ["Clear 1 · 1 ask stays", "Clear 1 item?"])
+        let none = NeedsYouClearAll(l.items.filter { $0.canDismiss })
+        XCTAssertEqual([none.label, none.question], ["Clear \(c.clear)", "Clear \(c.clear) items?"])
+        XCTAssertEqual(NeedsYouClearAll(l.items.filter { !$0.canDismiss }).clear, 0, "nothing to clear: the button is hidden")
+    }
+
+    @MainActor
+    func testClearAllLeavesOnlyTheAsks() async throws {
+        let store = LoftStore(api: FixtureAPI(), cache: SnapshotStore(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)))
+        store.activate()
+        for _ in 0..<100 where store.connection != .connected || store.needsYou == nil { try await Task.sleep(for: .milliseconds(50)) }
+        defer { store.deactivate() }
+        let asks = try XCTUnwrap(store.needsYou?.items.filter { !$0.canDismiss }.map(\.id))
+        try await store.clearAllNeedsYou()
+        XCTAssertEqual(store.needsYou?.items.map(\.id), asks)
+        XCTAssertEqual(NeedsYouClearAll(store.needsYou?.items ?? []).clear, 0)
+    }
+
     func testRepliesOnlyOfferWhatTheAgentSaid() throws {
         guard #available(iOS 26.0, *) else { throw XCTSkip("iOS 26") }
         let text = "Backblaze B2 costs about $1 a month; S3 is about $3. Should I use B2 or S3?"

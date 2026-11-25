@@ -6,8 +6,11 @@ import SwiftUI
 struct NeedsYouScreen: View {
     @Environment(LoftStore.self) private var store
     @Environment(MacNav.self) private var nav
+    @State private var confirmingClear = false
+    @State private var clearError: String?
 
     var body: some View {
+        let clearAll = NeedsYouClearAll(store.needsYou?.items ?? [])
         ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
@@ -46,9 +49,26 @@ struct NeedsYouScreen: View {
         .overlay(alignment: .top) { NeedsYouNotice().padding(.top, 8) }
         .navigationTitle("Needs you")
         .toolbar {
+            // Clear all: every item with Done, after a confirm; hidden when there's nothing to clear.
+            if clearAll.clear > 0 {
+                Button(clearAll.label) { confirmingClear = true }
+                    .accessibilityIdentifier("needsYouClearAll")
+            }
             Button { Task { await store.refreshNeedsYou() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                 .keyboardShortcut("r")
         }
+        .confirmationDialog(clearAll.question, isPresented: $confirmingClear) {
+            Button("Clear all", role: .destructive) {
+                Task {
+                    do { try await store.clearAllNeedsYou() } catch { clearError = error.localizedDescription }
+                }
+            }
+        } message: {
+            Text("Each one is marked Done and leaves the list, on every device.")
+        }
+        .alert("Couldn't clear", isPresented: Binding(get: { clearError != nil }, set: { if !$0 { clearError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(clearError ?? "") }
         .task { await store.refreshNeedsYou() }
     }
 }
