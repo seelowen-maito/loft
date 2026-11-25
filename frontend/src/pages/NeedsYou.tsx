@@ -243,7 +243,7 @@ export default function NeedsYouPage() {
             error={clearing.error}
             onConfirm={() =>
               clearing.run(async () => {
-                await api.needsYouClearAll();
+                await api.needsYouClearAll(clearAll(list.items).ids);
                 setConfirming(false);
                 load();
               })

@@ -169,9 +169,11 @@ test("Esc closes Needs you, but not while typing an answer, composing, or with a
 test("Clear all counts the items with Done, and says how many asks stay", () => {
   const done = { kind: "dismiss", label: "Done", method: "POST", path: "/api/needs-you/x/dismiss" } as NeedsYouItem["actions"][number];
   const withDone = item({ actions: [done] });
-  assert.deepEqual(clearAll([withDone, withDone]), { clear: 2, stay: 0, label: "Clear 2" });
-  assert.equal(clearAll([withDone, item({}), item({})]).label, "Clear 1 · 2 asks stay");
-  assert.equal(clearAll([withDone, item({})]).label, "Clear 1 · 1 ask stays");
+  const a = { ...withDone, id: "a" }, b = { ...withDone, id: "b" };
+  assert.deepEqual(clearAll([a, b]), { ids: ["a", "b"], clear: 2, stay: 0, label: "Clear 2" });
+  assert.deepEqual(clearAll([a, item({ id: "ask" })]).ids, ["a"], "the call names only what has Done");
+  assert.equal(clearAll([withDone, item({}), item({})]).label, "Clear 1 · 2 need an answer");
+  assert.equal(clearAll([withDone, item({})]).label, "Clear 1 · 1 needs an answer");
   assert.equal(clearAll([item({})]).clear, 0, "hidden: nothing to clear");
   assert.equal(clearAll([]).clear, 0);
 });
