@@ -8458,4 +8458,104 @@ pub(crate) mod tests {
             v.to_string()
         }
     }
+
+    // ---- Merge method per project (#468) ----
+
+    /// A repo on the fake allowing these merge methods.
+    fn allowing(fake: &Fake, slug: &str, methods: &[&str]) -> Value {
+        let repo = json!({
+            "allow_squash_merge": methods.contains(&"squash"),
+            "allow_merge_commit": methods.contains(&"merge"),
+            "allow_rebase_merge": methods.contains(&"rebase"),
+        });
+        fake.route("GET", &format!("/repos/{slug}"), 200, repo.clone());
+        repo
+    }
+
+    #[tokio::test]
+    async fn the_merge_method_offers_only_what_the_repo_allows_and_starts_at_squash_when_allowed() {
+        use crate::project_settings::{get, merge_methods, put};
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("merge-pick", "octo/merge-pick");
+        planner_on(&st, name, Some("git@github.com:octo/merge-pick.git"));
+        let q = |project: &str| axum::extract::Query(serde_json::from_value(json!({ "project": project })).unwrap());
+        let change = |value: Value| put(State(st.clone()), Json(serde_json::from_value(json!({ "project": name, "key": "merge_method", "value": value })).unwrap()));
+        let method = |v: &Value| v["settings"].as_array().unwrap().iter().find(|s| s["key"] == "merge_method").unwrap().clone();
+
+        // Loft's default: squash, never changed; the page offers the methods the repo allows.
+        let Json(v) = get(State(st.clone()), q(name)).await.unwrap();
+        let s = method(&v);
+        assert_eq!((&s["kind"], &s["value"], &s["default"], &s["changed"]), (&json!("merge_method"), &json!("squash"), &json!("squash"), &Value::Null));
+        assert_eq!(s["choices"].as_array().unwrap().iter().map(|c| c["value"].clone()).collect::<Vec<_>>(), vec![json!("squash"), json!("merge"), json!("rebase")]);
+        allowing(&fake, slug, &["squash", "rebase"]);
+        let Json(m) = merge_methods(State(st.clone()), q(name)).await.unwrap();
+        assert_eq!(m, json!({ "repo": slug, "allowed": ["squash", "rebase"], "method": "squash" }));
+        assert_eq!(merge_methods(State(st.clone()), q("nowhere")).await.unwrap_err().0, axum::http::StatusCode::NOT_FOUND);
+
+        // A method the repo doesn't allow, or there isn't, is refused; one it allows is saved as the user's.
+        let err = change(json!("merge")).await.unwrap_err();
+        assert_eq!((err.0, err.1.as_str()), (axum::http::StatusCode::BAD_REQUEST, "octo/merge-pick doesn't allow `merge` on GitHub: it allows `squash` and `rebase`."));
+        let err = change(json!("fast-forward")).await.unwrap_err();
+        assert_eq!(err.1, "Merge method takes `squash` or `merge` or `rebase`.");
+        assert_eq!(method(&get(State(st.clone()), q(name)).await.unwrap().0)["value"], "squash", "nothing refused was saved");
+        let Json(v) = change(json!("rebase")).await.unwrap();
+        assert_eq!((&method(&v)["value"], &method(&v)["changed"]["agent"]), (&json!("rebase"), &Value::Null));
+        assert_eq!(merge_methods(State(st.clone()), q(name)).await.unwrap().0["method"], "rebase");
+
+        // The repo stops allowing it: its PRs merge with squash, or else the first method it allows.
+        allowing(&fake, slug, &["squash", "merge"]);
+        assert_eq!(merge_methods(State(st.clone()), q(name)).await.unwrap().0["method"], "squash");
+        allowing(&fake, slug, &["merge"]);
+        assert_eq!(merge_methods(State(st.clone()), q(name)).await.unwrap().0, json!({ "repo": slug, "allowed": ["merge"], "method": "merge" }));
+
+        // The Lead's tool checks the same.
+        let lead = busy(&st, "Lead", name, "lead");
+        let err = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "merge_method", "value": "squash" })).await.unwrap_err();
+        assert_eq!(err, "octo/merge-pick doesn't allow `squash` on GitHub: it allows `merge`.");
+        let out = settings_tool(&st, &lead, "set_project_setting", json!({ "key": "merge_method", "value": "merge" })).await.unwrap();
+        assert!(out.contains("- Merge method (`merge_method`): `merge`. Loft's default: `squash`. Choices: `squash` (") && out.contains(", one the repo allows on GitHub. Changed by Lead at "), "{out}");
+    }
+
+    #[tokio::test]
+    async fn merge_on_a_pr_card_uses_the_projects_merge_method() {
+        use crate::project_settings::put;
+        let st = state();
+        let fake = own_fake(&st);
+        let (name, slug) = ("merge-card", "octo/merge-card");
+        planner_on(&st, name, Some("https://github.com/octo/merge-card.git"));
+        let dev = busy(&st, "Builder", name, "dev");
+        let pull = |repo: Value| {
+            json!({ "number": 5, "title": "Retry cap", "state": "open", "draft": false, "mergeable": true, "mergeable_state": "clean",
+                    "head": { "ref": "cap", "sha": "abc" }, "base": { "ref": "main", "repo": repo }, "user": { "login": "octo" } })
+        };
+        let all = allowing(&fake, slug, &["squash", "merge", "rebase"]);
+        fake.route("GET", &format!("/repos/{slug}/pulls/5"), 200, pull(all.clone()));
+        fake.route("GET", &format!("/repos/{slug}/commits/abc/check-runs"), 200, json!({ "check_runs": [{ "status": "completed", "conclusion": "success" }] }));
+        fake.route("PUT", &format!("/repos/{slug}/pulls/5/merge"), 200, json!({ "merged": true }));
+        let pr = crate::prs::register(&st, &dev.id, slug, 5, None).await.unwrap();
+        assert_eq!(pr.merge_method, "squash", "Loft's default");
+        let merge = |method: Value| crate::api::merge_pull_request(State(st.clone()), axum::extract::Path(pr.id.clone()), Json(serde_json::from_value(json!({ "method": method })).unwrap()));
+        let merged_with = || fake.seen(&format!("/repos/{slug}/pulls/5/merge")).last().map(|s| s.body["merge_method"].clone()).unwrap();
+
+        // The user picks rebase: the open PR's card shows it at once, and Merge merges with it.
+        put(State(st.clone()), Json(serde_json::from_value(json!({ "project": name, "key": "merge_method", "value": "rebase" })).unwrap())).await.unwrap();
+        let card = |st: &AppState| st.db.get_pull_request(&pr.id).unwrap().unwrap();
+        assert_eq!(card(&st).merge_method, "rebase");
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let ready = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "pr_ready").unwrap_or_else(|| panic!("{v:#}"));
+        assert_eq!(ready["actions"][0]["body"], json!({ "method": "rebase" }), "Needs you's Merge too");
+        merge(Value::Null).await.unwrap();
+        assert_eq!(merged_with(), "rebase");
+
+        // The repo stops allowing rebase: Merge falls back to squash, from the PR's own read of the repo.
+        fake.route("GET", &format!("/repos/{slug}/pulls/5"), 200, pull(json!({ "allow_squash_merge": true, "allow_merge_commit": true, "allow_rebase_merge": false })));
+        merge(Value::Null).await.unwrap();
+        assert_eq!((merged_with(), card(&st).merge_method.as_str()), (json!("squash"), "squash"));
+
+        // A method the request names still wins, and one there isn't is refused.
+        merge(json!("merge")).await.unwrap();
+        assert_eq!(merged_with(), "merge");
+        assert_eq!(merge(json!("octopus")).await.unwrap_err().1, "method must be squash | merge | rebase");
+    }
 }

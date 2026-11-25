@@ -426,6 +426,8 @@ export type PullRequest = {
   mergeable: boolean | null;
   mergeable_state: string;
   merge_methods: string[];
+  /** The method Merge uses: the project's merge method, when the repo allows it. */
+  merge_method?: string;
   head_ref: string;
   base_ref: string;
   author: string;
@@ -644,7 +646,8 @@ export type Info = { projects_dir: string; storage_dir: string; github_token: bo
 
 /** One of a project's settings: its choices, Loft's default, its value and, once changed, when and by which agent (none: the user).
  *  A `branch` setting takes one of the repo's branches (`projectBranches`) instead of `choices`; empty is the repo's default branch.
- *  A `number` setting takes a whole number from `min` to `max`, in `unit`. */
+ *  A `number` setting takes a whole number from `min` to `max`, in `unit`.
+ *  A `merge_method` setting takes one of its `choices` that the repo allows (`projectMergeMethods`). */
 type ProjectSettingBase = {
   key: string;
   label: string;
@@ -655,13 +658,15 @@ type ProjectSettingBase = {
 /** One role that can review each ticket: the project's agent in it (none when the team has none) and whether it does. */
 export type ReviewerRow = { role: string; label: string; note: string; agent: { id: string; name: string; avatar: Avatar } | null; on: boolean };
 export type ProjectSetting =
-  | (ProjectSettingBase & { kind: "choice" | "branch"; default: string; value: string })
+  | (ProjectSettingBase & { kind: "choice" | "branch" | "merge_method"; default: string; value: string })
   | (ProjectSettingBase & { kind: "reviewers"; default: string[]; value: string[]; reviewers: ReviewerRow[] })
   | (ProjectSettingBase & { kind: "number"; default: number; value: number; min: number; max: number; unit: string });
 export type ProjectSettingsView = { project: string; settings: ProjectSetting[] };
 /** The team defaults new agents of a project start on, shown together with "Apply to the team now". */
 export const TEAM_SETTINGS = ["team_model", "team_effort", "team_subagent_model"];
 export type ProjectBranches = { repo: string; default_branch: string; branches: string[] };
+/** The merge methods a project's repo allows on GitHub, and the one its PRs' Merge uses. */
+export type ProjectMergeMethods = { repo: string; allowed: string[]; method: string };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -766,6 +771,7 @@ export const api = {
   applyTeamDefaults: (project: string) => req<ProjectSettingsView & { applied: { id: string; name: string }[] }>("POST", "/project-settings/apply-team", { project }),
   createReviewer: (project: string, role: string) => req<{ agent: { id: string; name: string }; message: string }>("POST", "/project-settings/reviewer", { project, role }),
   projectBranches: (project: string) => req<ProjectBranches>("GET", `/project-settings/branches?project=${encodeURIComponent(project)}`),
+  projectMergeMethods: (project: string) => req<ProjectMergeMethods>("GET", `/project-settings/merge-methods?project=${encodeURIComponent(project)}`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
   /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
@@ -916,7 +922,8 @@ export const api = {
   permissions: (agentId?: string) => req<PermissionRequest[]>("GET", `/permissions${agentId ? `?agent_id=${agentId}` : ""}`),
   pullRequests: (agentId?: string) => req<PullRequest[]>("GET", `/pull-requests${agentId ? `?agent_id=${agentId}` : ""}`),
   refreshPullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/refresh`),
-  mergePullRequest: (id: string, method: string) => req<PullRequest>("POST", `/pull-requests/${id}/merge`, { method }),
+  /** Merges with the project's merge method. */
+  mergePullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/merge`, {}),
   /** `answers` answers an `AskUserQuestion` prompt: the pick per question text. */
   decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string, answers?: Record<string, string>) =>
     req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule, answers }),

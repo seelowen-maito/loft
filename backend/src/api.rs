@@ -968,15 +968,16 @@ pub async fn refresh_pull_request(State(state): State<AppState>, Path(id): Path<
 
 #[derive(Deserialize)]
 pub struct MergeBody {
+    /// None: the project's merge method (#468).
     method: Option<String>,
 }
 
 pub async fn merge_pull_request(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<MergeBody>) -> ApiResult<Value> {
-    let method = b.method.unwrap_or_else(|| "squash".into());
-    if !["squash", "merge", "rebase"].contains(&method.as_str()) {
+    let method = b.method.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    if method.as_deref().is_some_and(|m| !["squash", "merge", "rebase"].contains(&m)) {
         return Err(bad("method must be squash | merge | rebase"));
     }
-    let pr = crate::prs::merge(&state, &id, &method).await.map_err(|e| bad(e.to_string()))?;
+    let pr = crate::prs::merge(&state, &id, method.as_deref()).await.map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!(pr)))
 }
 

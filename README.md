@@ -85,8 +85,9 @@ Each project also has its own **Project settings**, opened with **Settings** in 
 - **Rust build cache**: on (the default), the project's agents build Rust through the shared sccache once it's installed; off, they build without it, from each agent's next run.
 - **Publish new issues to GitHub**: off (the default), a new Loft issue stays in Loft until you press Publish to GitHub; on, each new Loft issue of the project becomes a GitHub issue right away (only a project with a GitHub repo can).
 - **Comments going to GitHub**: which comments on the project's GitHub issues wait for your approval in Needs you before Loft posts them: every one (`Ask for every comment`, the default), only agents' (`Auto-approve my own comments`) or none (`Auto-approve everything`). Progress notes and private notes always stay in Loft.
+- **Merge method**: how **Merge** on the project's pull request cards (and in Needs you) merges: `Squash and merge` (the default), `Create a merge commit` or `Rebase and merge`. The page offers only the methods the repo allows on GitHub; if the repo later stops allowing the one picked, Merge uses squash, or else a method it allows.
 
-The last two used to be in Settings, for every project: on the update, each project kept the values Settings had, and a project added later starts at Loft's default.
+The two GitHub publishing settings used to be in Settings, for every project: on the update, each project kept the values Settings had, and a project added later starts at Loft's default.
 
 ### Use it from other devices
 

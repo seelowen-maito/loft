@@ -698,7 +698,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         seen_prs.insert((p.slug.to_lowercase(), p.number));
         let id = format!("pr:{}:{}", p.id, p.head_sha);
         let who = name(&p.agent_id);
-        let method = p.merge_methods.first().cloned().unwrap_or_else(|| "squash".into());
+        // The project's merge method (#468), as the PR's last read set it.
+        let method = Some(p.merge_method.clone()).filter(|m| !m.is_empty()).or_else(|| p.merge_methods.first().cloned()).unwrap_or_else(|| "squash".into());
         let repo_name = p.slug.rsplit('/').next().unwrap_or(&p.slug).to_string();
         items.push(Item {
             kind: "pr_ready",

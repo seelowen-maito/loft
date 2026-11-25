@@ -495,6 +495,8 @@ pub struct PullRequest {
     /// clean | dirty | blocked | behind | unstable | has_hooks | draft | unknown
     pub mergeable_state: String,
     pub merge_methods: Vec<String>,
+    /// The method the card's Merge uses: the project's merge method, when the repo allows it (#468).
+    pub merge_method: String,
     pub head_ref: String,
     pub head_sha: String,
     pub base_ref: String,

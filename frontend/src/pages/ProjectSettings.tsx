@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ArrowLeft, Plus } from "lucide-react";
-import { api, TEAM_SETTINGS, type ProjectBranches, type ProjectSetting, type ProjectSettingsView, type ReviewerRow } from "../lib/api";
+import { api, TEAM_SETTINGS, type ProjectBranches, type ProjectMergeMethods, type ProjectSetting, type ProjectSettingsView, type ReviewerRow } from "../lib/api";
 import { SettingsCard } from "../components/SettingsCard";
 import { Sticker } from "../components/Sticker";
 import { ErrorLine } from "../components/Callout";
@@ -68,40 +68,73 @@ function SettingCard({ project, setting: s, onSaved }: { project: string; settin
         <BranchPicker project={project} setting={s} busy={save.busy} onChoose={choose} />
       ) : s.kind === "number" ? (
         <NumberPicker setting={s} busy={save.busy} onChoose={choose} />
+      ) : s.kind === "merge_method" ? (
+        <MergeMethodPicker project={project} setting={s} busy={save.busy} onChoose={choose} />
       ) : (
-        <div role="radiogroup" aria-label={s.label} className="grid gap-2 sm:grid-cols-2">
-          {s.choices.map((c) => {
-            const on = c.value === s.value;
-            return (
-              <button
-                key={c.value}
-                type="button"
-                role="radio"
-                aria-checked={on}
-                disabled={save.busy}
-                onClick={() => choose(c.value)}
-                className={cx(
-                  "flex items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors disabled:opacity-60",
-                  on ? "border-accent/50 bg-accent/[0.07]" : "border-line bg-ink-900 hover:border-white/15",
-                )}
-              >
-                <span className={cx("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border", on ? "border-accent" : "border-fg-3")}>
-                  {on && <span className="size-2 rounded-full bg-accent" />}
-                </span>
-                <span className="min-w-0">
-                  <span className="flex flex-wrap items-center gap-2 text-[13.5px] text-fg">
-                    {c.label}
-                    {c.value === s.default && <span className="chip py-0 text-[10px]">Loft's default</span>}
-                  </span>
-                  <span className="mt-0.5 block text-[11.5px] text-fg-3">{c.help}</span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
+        <ChoiceGrid label={s.label} choices={s.choices} value={s.value} loftDefault={s.default} busy={save.busy} onChoose={choose} />
       )}
       <Changed setting={s} label={label()} />
     </SettingsCard>
+  );
+}
+
+/** A setting's fixed choices as radio cards, the chosen one marked, Loft's default tagged. */
+function ChoiceGrid({ label, choices, value, loftDefault, busy, onChoose }: { label: string; choices: ProjectSetting["choices"]; value: string; loftDefault: string; busy: boolean; onChoose: (v: string) => void }) {
+  return (
+    <div role="radiogroup" aria-label={label} className="grid gap-2 sm:grid-cols-2">
+      {choices.map((c) => {
+        const on = c.value === value;
+        return (
+          <button
+            key={c.value}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            disabled={busy}
+            onClick={() => onChoose(c.value)}
+            className={cx(
+              "flex items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors disabled:opacity-60",
+              on ? "border-accent/50 bg-accent/[0.07]" : "border-line bg-ink-900 hover:border-white/15",
+            )}
+          >
+            <span className={cx("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border", on ? "border-accent" : "border-fg-3")}>
+              {on && <span className="size-2 rounded-full bg-accent" />}
+            </span>
+            <span className="min-w-0">
+              <span className="flex flex-wrap items-center gap-2 text-[13.5px] text-fg">
+                {c.label}
+                {c.value === loftDefault && <span className="chip py-0 text-[10px]">Loft's default</span>}
+              </span>
+              <span className="mt-0.5 block text-[11.5px] text-fg-3">{c.help}</span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The merge method: only the methods the repo allows on GitHub, the one Merge uses marked (squash, or else one it
+ *  allows, when the repo stopped allowing the saved one). When GitHub can't be read, every method, with why. */
+function MergeMethodPicker({ project, setting: s, busy, onChoose }: { project: string; setting: ProjectSetting & { kind: "choice" | "branch" | "merge_method" }; busy: boolean; onChoose: (v: string) => void }) {
+  const [repo, setRepo] = useState<ProjectMergeMethods | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    setErr(null);
+    api.projectMergeMethods(project).then(setRepo).catch((e) => setErr(errorText(e)));
+  }, [project, s.value]);
+  const allowed = repo?.allowed ?? [];
+  const choices = err ? s.choices : s.choices.filter((c) => allowed.includes(c.value));
+  const value = err || !repo ? s.value : repo.method;
+  return (
+    <div className="space-y-2">
+      {!repo && !err && <p className="text-[11.5px] text-fg-3">Reading the merge methods the repo allows on GitHub…</p>}
+      {(repo || err) && <ChoiceGrid label={s.label} choices={choices} value={value} loftDefault={s.default} busy={busy} onChoose={onChoose} />}
+      {repo && value !== s.value && (
+        <p className="text-[11.5px] text-warn">{repo.repo} doesn't allow {s.choices.find((c) => c.value === s.value)?.label ?? s.value} now, so Merge uses {s.choices.find((c) => c.value === value)?.label ?? value}.</p>
+      )}
+      {err && <p role="alert" className="text-[12.5px] text-bad [overflow-wrap:anywhere]">Couldn't read which merge methods the repo allows: {err}</p>}
+    </div>
   );
 }
 
@@ -245,7 +278,7 @@ function NumberPicker({ setting: s, busy, onChoose }: { setting: ProjectSetting 
 
 /** A branch setting: the repo's branches on GitHub, the empty choice standing for its default branch. A saved branch
  *  GitHub no longer lists stays in the list, so the picker never shows a value it doesn't have. */
-function BranchPicker({ project, setting: s, busy, onChoose }: { project: string; setting: ProjectSetting & { kind: "branch" | "choice" }; busy: boolean; onChoose: (v: string) => void }) {
+function BranchPicker({ project, setting: s, busy, onChoose }: { project: string; setting: ProjectSetting & { kind: "choice" | "branch" | "merge_method" }; busy: boolean; onChoose: (v: string) => void }) {
   const [list, setList] = useState<ProjectBranches | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {

@@ -22,6 +22,8 @@ enum Kind {
     Reviewers,
     /// A whole number from `min` to `max`, in `unit`.
     Number { min: i64, max: i64, unit: &'static str },
+    /// One of its fixed choices that the repo allows on GitHub: a merge method.
+    MergeMethod,
 }
 
 /// One setting: what it's called, what it does, the values it takes (each with its label and what it does) and
@@ -61,6 +63,10 @@ pub const SCCACHE: &str = "sccache";
 pub const AUTO_PUBLISH: &str = "auto_publish";
 /// When comments on the project's mirrored issues go to GitHub: `ask`, `own` or `all`.
 pub const COMMENT_APPROVAL: &str = "comment_approval";
+/// How the Merge on the project's PR cards merges: `squash`, `merge` or `rebase`, one the repo allows.
+pub const MERGE_METHOD: &str = "merge_method";
+/// Loft's merge method, when the repo allows it.
+const SQUASH: &str = "squash";
 /// The team defaults, each with the agent field it sets.
 const TEAM: &[(&str, &str)] = &[(TEAM_MODEL, "model"), (TEAM_EFFORT, "effort"), (TEAM_SUBAGENT_MODEL, "subagent_model")];
 
@@ -196,6 +202,18 @@ const DEFS: &[Def] = &[
         default: "ask",
         kind: Kind::Choice,
     },
+    Def {
+        key: MERGE_METHOD,
+        label: "Merge method",
+        help: "How Merge on the project's pull request cards merges. Only the methods the repo allows on GitHub are offered; when the repo stops allowing this one, Merge uses squash, or else one it allows.",
+        choices: &[
+            (SQUASH, "Squash and merge", "The PR's commits become one commit on the base branch."),
+            ("merge", "Create a merge commit", "The PR's commits join the base branch through a merge commit."),
+            ("rebase", "Rebase and merge", "The PR's commits are replayed one by one onto the base branch."),
+        ],
+        default: SQUASH,
+        kind: Kind::MergeMethod,
+    },
 ];
 
 /// A choice as text: in backticks, or "empty" for the empty one.
@@ -298,6 +316,20 @@ pub fn auto_publish(state: &AppState, project: &str) -> bool {
     !project.trim().is_empty() && value_of(state, project.trim(), AUTO_PUBLISH) == "on"
 }
 
+/// How `project`'s PRs merge, from the methods their repo allows (`allowed`; none known: any): the project's merge
+/// method when it's one of them, else squash when it is, else the first one allowed.
+pub fn merge_method(state: &AppState, project: &str, allowed: &[String]) -> String {
+    let want = if project.trim().is_empty() { SQUASH.to_string() } else { value_of(state, project.trim(), MERGE_METHOD) };
+    let ok = |m: &str| allowed.is_empty() || allowed.iter().any(|a| a == m);
+    if ok(&want) {
+        want
+    } else if ok(SQUASH) {
+        SQUASH.into()
+    } else {
+        allowed[0].clone()
+    }
+}
+
 /// Which comments on `project`'s mirrored issues go straight to GitHub: `ask` (none, every one waits for approval,
 /// the default), `own` (the user's) or `all`.
 pub fn comment_approval(state: &AppState, project: &str) -> String {
@@ -381,7 +413,7 @@ pub fn view(state: &AppState, project: &str) -> Value {
             let choices: Vec<Value> = d.choices.iter().map(|(v, l, h)| json!({ "value": v, "label": l, "help": h })).collect();
             let mut s = json!({
                 "key": d.key,
-                "kind": match d.kind { Kind::Choice => "choice", Kind::Branch => "branch", Kind::Reviewers => "reviewers", Kind::Number { .. } => "number" },
+                "kind": match d.kind { Kind::Choice => "choice", Kind::Branch => "branch", Kind::Reviewers => "reviewers", Kind::Number { .. } => "number", Kind::MergeMethod => "merge_method" },
                 "label": d.label,
                 "help": d.help,
                 "choices": choices,
@@ -411,7 +443,7 @@ pub fn set(state: &AppState, project: &str, key: &str, value: &Value, by: Option
             let v = value.as_str().map(str::trim).filter(|v| v.is_empty() || crate::planning::is_branch_name(v));
             json!(v.ok_or_else(|| format!("{} takes the name of one of the repo's branches, or an empty one for its default branch on GitHub.", d.label))?)
         }
-        Kind::Choice => {
+        Kind::Choice | Kind::MergeMethod => {
             let v = value.as_str().map(str::trim).filter(|v| d.choices.iter().any(|c| c.0 == *v));
             json!(v.ok_or_else(|| format!("{} takes {}.", d.label, d.choices.iter().map(|c| quoted(c.0)).collect::<Vec<_>>().join(" or ")))?)
         }
@@ -431,9 +463,13 @@ pub fn set(state: &AppState, project: &str, key: &str, value: &Value, by: Option
     state.db.set_project_setting(project, key, &s).map_err(|e| e.to_string())
 }
 
-/// Refuses a branch setting's value that isn't one of the project's branches on GitHub. Anything else, an empty
-/// value (the default branch) and a project with no GitHub repo pass: those are checked when saved, or never used.
+/// Refuses a branch setting's value that isn't one of the project's branches on GitHub, and a merge method the repo
+/// doesn't allow. Anything else, an empty value (the default branch) and a project with no GitHub repo pass: those
+/// are checked when saved, or never used.
 async fn on_github(state: &AppState, project: &str, key: &str, value: &Value) -> Result<(), String> {
+    if def(key).is_some_and(|d| d.kind == Kind::MergeMethod) {
+        return allowed_on_github(state, project, value).await;
+    }
     let branch = value.as_str().map(str::trim).unwrap_or_default();
     if !def(key).is_some_and(|d| d.kind == Kind::Branch) || branch.is_empty() || !crate::planning::is_branch_name(branch) {
         return Ok(());
@@ -444,6 +480,37 @@ async fn on_github(state: &AppState, project: &str, key: &str, value: &Value) ->
         Err(e) if crate::github::is_gone(&e) => Err(format!("`{branch}` isn't a branch of {slug} on GitHub.")),
         Err(e) => Err(format!("Couldn't check that `{branch}` is a branch of {slug}: {e}")),
     }
+}
+
+/// Refuses a merge method the project's repo doesn't allow on GitHub.
+async fn allowed_on_github(state: &AppState, project: &str, value: &Value) -> Result<(), String> {
+    let method = value.as_str().map(str::trim).unwrap_or_default();
+    // Not a merge method at all: saving it says so.
+    if !def(MERGE_METHOD).is_some_and(|d| d.choices.iter().any(|c| c.0 == method)) {
+        return Ok(());
+    }
+    let Ok(slug) = crate::repos::github_repo(state, project).await else { return Ok(()) };
+    let repo = crate::github::get(state, &format!("/repos/{slug}")).await.map_err(|e| format!("Couldn't check that {slug} allows `{method}`: {e}"))?;
+    let allowed = crate::prs::merge_methods_of(&repo);
+    if allowed.iter().any(|m| m == method) {
+        return Ok(());
+    }
+    let list = allowed.iter().map(|m| quoted(m)).collect::<Vec<_>>();
+    let list = match list.split_last() {
+        None => "none".to_string(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    };
+    Err(format!("{slug} doesn't allow `{method}` on GitHub: it allows {list}."))
+}
+
+/// The merge methods `project`'s repo allows on GitHub, and the one its PRs merge with: what the merge method
+/// setting can take.
+async fn merge_methods_in(state: &AppState, project: &str) -> Result<Value, String> {
+    let slug = crate::repos::github_repo(state, project).await?;
+    let repo = crate::github::get(state, &format!("/repos/{slug}")).await.map_err(|e| format!("Couldn't read {slug} on GitHub: {e}"))?;
+    let allowed = crate::prs::merge_methods_of(&repo);
+    Ok(json!({ "repo": slug, "allowed": allowed, "method": merge_method(state, project, &allowed) }))
 }
 
 /// `project`'s branches on GitHub, by name, and its default branch: what a branch setting can take.
@@ -500,12 +567,29 @@ pub async fn branches(State(state): State<AppState>, Query(q): Query<ProjectQuer
     Ok(Json(branches_of(&state, &project).await.map_err(bad)?))
 }
 
+/// `GET /api/project-settings/merge-methods?project=<name>`: the merge methods the project's repo allows on GitHub,
+/// for its merge method, and the one its PRs merge with.
+pub async fn merge_methods(State(state): State<AppState>, Query(q): Query<ProjectQuery>) -> ApiResult<Value> {
+    let project = known_project(&state, &q.project)?;
+    Ok(Json(merge_methods_in(&state, &project).await.map_err(bad)?))
+}
+
 /// `PUT /api/project-settings`: the user changes one setting of a project. Its settings after the change.
 pub async fn put(State(state): State<AppState>, Json(c): Json<Change>) -> ApiResult<Value> {
     let project = known_project(&state, &c.project)?;
-    on_github(&state, &project, &c.key, &c.value).await.map_err(bad)?;
-    set(&state, &project, &c.key, &c.value, None).map_err(bad)?;
+    save(&state, &project, &c.key, &c.value, None).await.map_err(bad)?;
     Ok(Json(view(&state, &project)))
+}
+
+/// Checks a change against GitHub, saves it, and carries it to what already depends on it: the open PRs' Merge
+/// for the merge method.
+async fn save(state: &AppState, project: &str, key: &str, value: &Value, by: Option<&Agent>) -> Result<(), String> {
+    on_github(state, project, key, value).await?;
+    set(state, project, key, value, by)?;
+    if key.trim() == MERGE_METHOD {
+        crate::prs::merge_method_changed(state, project).await;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -560,7 +644,7 @@ pub fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "set_project_setting",
-            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10). `team_model`, `team_effort` and `team_subagent_model` are what new agents of the project start on: a model (`sonnet`, `opus`, `fable`, `haiku`), an effort (`low`, `medium`, `high`, `xhigh`, `max`) and the model their subagents run on, or empty for each agent's own (the default); the agents the team has keep theirs until the user applies them to the team on the settings page. `sccache` is `on` (the default) or `off`: whether the project's agents build Rust through the shared sccache. `auto_publish` is `off` (the default) or `on`: whether each new Loft issue of the project becomes a GitHub issue as it's made. `comment_approval` is which comments on the project's GitHub issues go straight to GitHub: `ask` (every one waits for the user's approval, the default), `own` (the user's go straight, agents' wait) or `all`.",
+            "description": "As a project's Lead: change one of its Project settings, only once the user said yes to that change. Loft records you as who changed it, and when, on the project's settings page. Settings: `ci_mode` is `per_ticket` (each ticket closes only once its CI is green, the default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready); it never changes which workflows GitHub runs. `base_branch` is one of the repo's branches, the one the next spec PRs and standalone tickets start from and merge into, or empty for the repo's default branch on GitHub (the default); Deliveries already under way keep theirs. `ticket_reviewers` lists the roles that review each ticket of a Delivery, from `qa`, `security` and `code_reviewer` (default `qa` and `security`; the Code reviewer always does the final review of the spec PR, and on, it also reviews each ticket); a role with no agent on the team is skipped. `max_rounds` is how many rounds of changes a ticket, or the final review, gets before the Delivery waits for the user, from 1 to 5 (default 3), counted from the next round on. `ci_grace_minutes` is how many minutes a commit with no check at all waits for one when the repo has workflows before Loft takes it as \"no CI ran\", from 1 to 120 (default 10). `team_model`, `team_effort` and `team_subagent_model` are what new agents of the project start on: a model (`sonnet`, `opus`, `fable`, `haiku`), an effort (`low`, `medium`, `high`, `xhigh`, `max`) and the model their subagents run on, or empty for each agent's own (the default); the agents the team has keep theirs until the user applies them to the team on the settings page. `sccache` is `on` (the default) or `off`: whether the project's agents build Rust through the shared sccache. `auto_publish` is `off` (the default) or `on`: whether each new Loft issue of the project becomes a GitHub issue as it's made. `comment_approval` is which comments on the project's GitHub issues go straight to GitHub: `ask` (every one waits for the user's approval, the default), `own` (the user's go straight, agents' wait) or `all`. `merge_method` is how Merge on the project's pull request cards merges: `squash` (the default), `merge` or `rebase`, only one the repo allows on GitHub.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "The project; your main project when omitted." },
                 "key": { "type": "string", "description": "The setting, like `ci_mode`." },
@@ -591,6 +675,10 @@ fn tool_text(state: &AppState, project: &str) -> String {
             let choices = match d.kind {
                 Kind::Branch => "one of the repo's branches, or empty for its default branch on GitHub".to_string(),
                 Kind::Choice => d.choices.iter().map(|(v, _, h)| format!("{} ({})", quoted(v), h.trim_end_matches('.'))).collect::<Vec<_>>().join(", "),
+                Kind::MergeMethod => format!(
+                    "{}, one the repo allows on GitHub",
+                    d.choices.iter().map(|(v, _, h)| format!("{} ({})", quoted(v), h.trim_end_matches('.'))).collect::<Vec<_>>().join(", ")
+                ),
                 Kind::Reviewers => format!(
                     "a list of {}, or an empty one for none; a role with no agent on the team is skipped",
                     REVIEWER_ROLES.iter().map(|(k, h)| format!("`{k}` ({})", h.trim_end_matches('.'))).collect::<Vec<_>>().join(", ")
@@ -632,7 +720,6 @@ async fn set_tool(state: &AppState, me: &Agent, args: &Value) -> Result<String, 
     }
     let project = project_arg(me, args)?;
     let key = args["key"].as_str().map(str::trim).filter(|k| !k.is_empty()).ok_or("key is required, like `ci_mode`")?;
-    on_github(state, &project, key, &args["value"]).await?;
-    set(state, &project, key, &args["value"], Some(me))?;
+    save(state, &project, key, &args["value"], Some(me)).await?;
     Ok(format!("Saved, as changed by you now.\n{}", tool_text(state, &project)))
 }
