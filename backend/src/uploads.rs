@@ -356,11 +356,12 @@ mod tests {
     }
 
     /// What the agent was sent: the fake claude logs its stdin.
+    /// The message the run got on its stdin, as the fake claude keeps it in `input.json`.
     async fn sent(st: &AppState, id: &str) -> String {
-        let log = crate::agents::workspace(st, id).join("prompts.log");
-        crate::agents::tests::until("the run", 20, || log.exists()).await;
+        let input = crate::agents::workspace(st, id).join("input.json");
+        crate::agents::tests::until("the run", 20, || input.exists()).await;
         crate::agents::tests::until("the run to end", 20, || !crate::agents::is_running(st, id)).await;
-        std::fs::read_to_string(log).unwrap()
+        std::fs::read_to_string(input).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -378,7 +379,7 @@ mod tests {
         assert!(file.ends_with(".mp4"), "{file}");
         send(&st, &a.id, std::slice::from_ref(&file)).await.unwrap();
         let line = sent(&st, &a.id).await;
-        let msg: Value = serde_json::from_str(line.split("\n---\n").next().unwrap()).unwrap();
+        let msg: Value = serde_json::from_str(&line).unwrap();
         let content = msg["message"]["content"].as_array().unwrap();
         let texts: Vec<&str> = content.iter().filter_map(|c| c["text"].as_str()).collect();
         let images: Vec<&Value> = content.iter().filter(|c| c["type"] == "image").collect();

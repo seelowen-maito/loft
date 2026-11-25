@@ -300,6 +300,10 @@ pub struct Agent {
     /// Tokens in the Claude session's context as of its last reply. None until a run reports one.
     #[serde(default)]
     pub context_tokens: Option<u64>,
+    /// The `/goal` condition active in its Claude session, as its runs last showed it: set by `/goal`, gone when
+    /// the goal passes or is cleared. None when there's none.
+    #[serde(default)]
+    pub goal: Option<String>,
     pub last_run_at: Option<String>,
     /// When its last run ended, so the idle time survives a restart. None until a run ends.
     #[serde(default)]
@@ -1755,6 +1759,18 @@ impl Db {
     pub fn mark_cancelled(&self, agent_id: &str, id: i64) -> Result<()> {
         let c = self.0.lock().unwrap();
         c.execute("UPDATE messages SET meta = json_set(meta, '$.cancelled', json('true')) WHERE agent_id = ?1 AND id = ?2", params![agent_id, id])?;
+        Ok(())
+    }
+
+    /// Marks a queued message as sent into the run in progress (Send now), or not any more when it went back to the queue.
+    pub fn mark_sent_now(&self, agent_id: &str, id: i64, sent: bool) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        let sql = if sent {
+            "UPDATE messages SET meta = json_set(meta, '$.sent_now', json('true')) WHERE agent_id = ?1 AND id = ?2"
+        } else {
+            "UPDATE messages SET meta = json_remove(meta, '$.sent_now') WHERE agent_id = ?1 AND id = ?2"
+        };
+        c.execute(sql, params![agent_id, id])?;
         Ok(())
     }
 

@@ -47,6 +47,8 @@ export type Agent = {
   session_id: string | null;
   /** Tokens in the Claude session's context as of its last reply; null until a run reports it. */
   context_tokens?: number | null;
+  /** The `/goal` condition active in its Session (Goal active); null when there's none. */
+  goal?: string | null;
   last_run_at: string | null;
   next_run_at: string | null;
   total_cost_usd: number;
@@ -763,8 +765,8 @@ export const api = {
   needsYouList: () => req<NeedsYouList>("GET", "/needs-you"),
   /** Marks the Needs you items shown as seen, for every client: the counter stops counting them. */
   needsYouSeen: (ids: string[]) => req<{ ok: boolean; new: number; new_urgent: number }>("POST", "/needs-you/seen", { ids }),
-  /** Done on every item that offers it, in one call; returns how many it cleared. */
-  needsYouClearAll: () => req<{ ok: boolean; cleared: number }>("POST", "/needs-you/dismiss-all"),
+  /** Done on these items (the ones shown) that still offer it, in one call; returns how many it cleared. */
+  needsYouClearAll: (ids: string[]) => req<{ ok: boolean; cleared: number }>("POST", "/needs-you/dismiss-all", { ids }),
   /** Sends one of a Needs you item's actions as the item gives it; its path starts with `/api`. */
   needsYouCall: (a: NeedsYouAction, body?: Record<string, unknown>) =>
     req<{ delivered_to?: unknown }>(a.method ?? "POST", (a.path ?? "").replace(/^\/api(?=\/)/, ""), body ?? a.body ?? {}),
@@ -810,6 +812,10 @@ export const api = {
   markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
   /** Takes an agent's message back out of the queue before a run takes it; `ok` is false when one already did. */
   cancelQueued: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/cancel`),
+  /** Send now: the user's queued message into the agent's run in progress; `ok` is false when it stays queued (the run is ending, or takes no input). */
+  sendNow: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/send-now`),
+  /** Goal active's button: sends `/goal clear` as the user's message, into the run in progress when there is one. */
+  clearGoal: (agent: string) => req<{ ok: boolean; message: Message | null }>("POST", `/agents/${agent}/goal/clear`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
   /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */
