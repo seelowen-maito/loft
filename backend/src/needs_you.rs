@@ -550,6 +550,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 format!("{}\n\n{}", crate::delivery::stalled_reason(state, &d), a.text),
                 format!("{who} asks you something"),
             ),
+            // A Billing block's reason is long: the item's text has all of it.
+            None if d.stall_reason == "billing" => (crate::delivery::stalled_reason(state, &d), crate::delivery::stalled_reason(state, &d), title.clone()),
             None => (crate::delivery::stalled_reason(state, &d), String::new(), title.clone()),
         };
         let mut actions = vec![action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec }))];
@@ -557,19 +559,30 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             actions.push(action("answer", "Reply", "POST", format!("/api/agents/{agent_id}/messages"), json!({ "text": "" })));
             actions.push(open_chat(agent_id));
         }
+        let mut links: Vec<Value> = issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default();
+        // A Billing block: the owner's billing page comes first, and tapping the push opens it.
+        let billing = d.billing.as_ref().filter(|_| d.stall_reason == "billing");
+        if let Some(b) = billing {
+            actions.push(json!({ "kind": "open", "label": "Open billing", "target": { "url": b.url } }));
+            links.push(json!({ "label": "Billing on GitHub", "url": b.url }));
+        }
         actions.extend([open, dismiss(&id)]);
+        let (title, push) = match billing {
+            Some(_) => (format!("GitHub Actions blocked by billing: {title}"), ("GitHub Actions blocked by billing".to_string(), title)),
+            None => (format!("Delivery stalled: {title}"), ("Delivery stalled".to_string(), push)),
+        };
         items.push(Item {
             kind: "delivery_stalled",
             urgency: 2,
             agent: ask.as_ref().map(|(who, _)| who.clone()),
             task_id: issue.map(|t| t.id.clone()),
-            title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
+            title: text(&title, MAX_TITLE),
             reason: text(&reason, MAX_REASON),
             text: text(&body, MAX_TEXT),
             created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
-            links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
+            links,
             actions,
-            push: ("Delivery stalled".to_string(), push),
+            push,
             project: Some(d.project.clone()).filter(|p| !p.is_empty()),
             pr: None,
             id,

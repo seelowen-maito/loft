@@ -5278,7 +5278,7 @@ pub(crate) mod tests {
         assert_eq!(woken(&st, &dev).len(), 1);
         // After a reload the page asks Loft, which says who has it.
         let shown = crate::delivery::issue_delivery(State(st.clone()), Path(t.id.clone())).await.unwrap().0;
-        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "draft_again": null, "behind": null }));
+        assert_eq!(shown, json!({ "state": "running", "stall_reason": null, "billing_url": null, "state_line": { "tone": "running", "text": "Running." }, "can_pause": true, "can_resume": false, "can_reopen": false, "needs_human": false, "started": true, "agent_id": dev.id, "agent_name": "Builder", "pr": 500, "checks_url": "https://github.com/octo/solo-issue/pull/500/checks", "ci_since": null, "actions_minutes": 0, "draft_again": null, "behind": null }));
 
         // A spec's ticket starts from the spec's card; an issue that isn't a ticket has no Delivery.
         delivery_40(&st, slug);
@@ -8879,5 +8879,204 @@ pub(crate) mod tests {
         let saved = crate::project_settings::get(State(st.clone()), axum::extract::Query(serde_json::from_value(json!({ "project": "ci-second" })).unwrap())).await.unwrap();
         let s = saved.0["settings"].as_array().unwrap().iter().find(|s| s["key"] == "ci_mode").unwrap().clone();
         assert_eq!((&s["value"], &s["changed"]["agent"]["id"]), (&json!("per_ticket"), &json!(a.id)));
+    }
+
+    // ---- Billing block (#456) ----
+
+    /// A job GitHub refused to start, as check run `id` of workflow run 1, with one annotation.
+    fn refused(id: i64) -> Value {
+        json!({ "id": id, "name": "test", "status": "completed", "conclusion": "failure", "app": { "slug": "github-actions" }, "details_url": format!("https://github.com/octo/ci/actions/runs/1/job/{id}"), "output": { "title": "", "annotations_count": 1 } })
+    }
+
+    /// Check run `id`'s annotation: GitHub's own when it refuses a job for billing.
+    fn billing_note(fake: &Fake, slug: &str, id: i64) {
+        let message = "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section of your settings";
+        fake.route("GET", &format!("/repos/{slug}/check-runs/{id}/annotations"), 200, json!([{ "path": ".github", "annotation_level": "failure", "message": message }]));
+    }
+
+    #[tokio::test]
+    async fn a_billing_block_stalls_the_delivery_with_no_round_and_resume_reruns_the_failed_jobs() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-billing";
+        let (dev, team) = building(&st, &fake, "ci-billing", &["qa"]).await;
+        spec_issue(&st, &fake, "ci-billing", slug);
+        fake.route("GET", &format!("/repos/{slug}"), 200, json!({ "default_branch": "main", "owner": { "login": "octo", "type": "Organization" } }));
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.route("GET", &runs, 200, json!({ "check_runs": [refused(77)] }));
+        billing_note(&fake, slug, 77);
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let wakes = woken(&st, &dev).len();
+
+        // QA passes it, so its CI is read at once: refused for billing. The Delivery stalls, with no round, no log
+        // read and no wake for the Dev, and nothing posted on the spec PR.
+        let out = tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        assert!(out.contains("GitHub refused to run the CI jobs of the spec branch `spec/40-rounds` for billing (a failed payment or the spending limit): the Delivery stalled until the user fixes it (https://github.com/organizations/octo/settings/billing) and resumes it."), "{out}");
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.stalled_on.clone()), ("stalled", "running", "billing", vec![41]));
+        let t = d.ticket(41).unwrap();
+        assert_eq!((t.state.as_str(), t.rounds, t.verdicts.get("ci").map(String::as_str)), ("review", 0, Some("pending")));
+        assert_eq!(d.billing.as_ref().map(|b| (b.runs.clone(), b.checks.clone(), b.rerun_at.as_str())), Some((vec![1], vec![77], "")));
+        assert_eq!(woken(&st, &dev).len(), wakes, "the Dev isn't asked to fix anything");
+        assert!(fake.seen(&format!("/repos/{slug}/actions/jobs/")).is_empty(), "no log read");
+        assert!(posts(&fake, slug, "issues/500/comments").iter().all(|c| !c["body"].as_str().unwrap_or_default().contains("**CI** failed")));
+
+        // Needs you: its own title and the owner's billing page, pushed (tapping it opens that page).
+        let items = stalled_items(&st);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["title"], "GitHub Actions blocked by billing: Rounds");
+        assert!(items[0]["text"].as_str().unwrap().contains("Stopped at: the CI of #41."), "{}", items[0]["text"]);
+        assert!(items[0]["links"].as_array().unwrap().contains(&json!({ "label": "Billing on GitHub", "url": "https://github.com/organizations/octo/settings/billing" })));
+        let kinds: Vec<&str> = items[0]["actions"].as_array().unwrap().iter().map(|a| a["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["resume", "open", "open", "dismiss"]);
+        let all = crate::needs_you::collect(&st).unwrap();
+        let p = crate::needs_you::to_push(all.iter().find(|i| i.kind == "delivery_stalled").unwrap());
+        assert_eq!((p.kind, p.title.as_str(), p.body.as_str()), ("delivery_stalled", "GitHub Actions blocked by billing", "Rounds"));
+        assert_eq!(p.target, json!({ "url": "https://github.com/organizations/octo/settings/billing" }));
+
+        // The card says so and links the billing page.
+        let v = crate::delivery::delivery_json(&st, &d);
+        assert_eq!((&v["stall_reason"], &v["billing_url"], &v["can_resume"]), (&json!("billing"), &json!("https://github.com/organizations/octo/settings/billing"), &json!(true)));
+        assert!(v["state_line"]["text"].as_str().unwrap().starts_with("Stalled: GitHub Actions is blocked by billing"), "{}", v["state_line"]);
+
+        // Stalled, the poller doesn't read its CI.
+        let reads = fake.seen(&runs).len();
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(fake.seen(&runs).len(), reads);
+
+        // GitHub refuses the re-run: nothing is resumed.
+        let rerun = format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs");
+        fake.route("POST", &rerun, 403, json!({ "message": "Forbidden" }));
+        let err = crate::delivery::resume(&st, slug, 40).await.unwrap_err();
+        assert!(err.starts_with("Nothing was resumed: GitHub refused to re-run the failed jobs of workflow run 1"), "{err}");
+        assert_eq!(delivery(&st, slug).state, "stalled");
+
+        // The billing is fixed: Resume re-runs the failed jobs, with no push and no wake.
+        fake.route("POST", &rerun, 201, json!({}));
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert_eq!(out, "Resumed spec #40. Loft asked GitHub to re-run the failed jobs of workflow run 1 and follows the CI again; if GitHub still refuses them for billing, it stalls again.");
+        assert_eq!(fake.seen(&rerun).iter().filter(|s| s.method == "POST").count(), 2);
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str()), ("running", ""));
+        assert!(!d.billing.as_ref().unwrap().rerun_at.is_empty());
+        assert_eq!(woken(&st, &dev).len(), wakes, "no new push asked for");
+        assert!(stalled_items(&st).is_empty());
+
+        // GitHub hasn't replaced the refused check yet: the CI still runs.
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).state, "running");
+
+        // The re-run's job is refused again: stalled again, for the same reason, still no round.
+        fake.route("GET", &runs, 200, json!({ "check_runs": [refused(78)] }));
+        billing_note(&fake, slug, 78);
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.stall_reason.as_str(), d.stalled_on.clone(), d.ticket(41).unwrap().rounds), ("stalled", "billing", vec![41], 0));
+        assert_eq!(d.billing.as_ref().map(|b| (b.checks.clone(), b.rerun_at.as_str())), Some((vec![78], "")));
+        assert_eq!(stalled_items(&st)[0]["title"], "GitHub Actions blocked by billing: Rounds");
+
+        // Resumed again, and this time the jobs run and pass: #41 closes and the next ticket starts.
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(standing(&st, slug, 41), ("closed".into(), Some(42), None));
+        assert!(woken(&st, &dev)[wakes..].iter().any(|w| w.contains("build ticket #42")));
+    }
+
+    #[tokio::test]
+    async fn a_refused_check_that_stays_after_resume_stalls_again_past_the_grace() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-billing-stuck";
+        let (dev, team) = building(&st, &fake, "ci-billing-stuck", &["qa"]).await;
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        fake.route("GET", &runs, 200, json!({ "check_runs": [refused(77)] }));
+        billing_note(&fake, slug, 77);
+        fake.route("POST", &format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs"), 201, json!({}));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        // A user account's repo: its billing page is the account's own.
+        assert_eq!(delivery(&st, slug).billing.unwrap().url, "https://github.com/settings/billing");
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+
+        // GitHub never re-ran it: once the grace is past, the same refused check stalls it again.
+        crate::delivery::update(&st, slug, 40, |d| d.billing.as_mut().unwrap().rerun_at = (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339());
+        crate::delivery::follow_all(&st).await;
+        assert_eq!((delivery(&st, slug).state.as_str(), delivery(&st, slug).stall_reason.as_str()), ("stalled", "billing"));
+    }
+
+    #[tokio::test]
+    async fn a_failure_with_other_annotations_is_still_the_codes_round() {
+        let (fake, st) = (fake_github(), state());
+        let slug = "octo/ci-billing-not";
+        let (dev, _) = building(&st, &fake, "ci-billing-not", &[]).await;
+        ci_on(&fake, slug, "spec/40-rounds", json!([refused(77)]));
+        fake.route("GET", &format!("/repos/{slug}/check-runs/77/annotations"), 200, json!([{ "annotation_level": "failure", "message": "Process completed with exit code 101." }]));
+        fake.route("GET", &format!("/repos/{slug}/actions/jobs/77/logs"), 200, json!("thread 'store::total' panicked"));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ticket(41).unwrap().state.as_str(), d.ticket(41).unwrap().rounds), ("running", "started", 1));
+        assert!(woken(&st, &dev).last().unwrap().contains("thread 'store::total' panicked"));
+    }
+
+    #[tokio::test]
+    async fn a_billing_block_on_the_ready_prs_ci_stalls_it_and_resume_follows_that_ci_again() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ready-billing";
+        let runs = format!("/repos/{slug}/commits/{CI_HEAD}/check-runs");
+        billing_note(&fake, slug, 77);
+        let (dev, _) = ready_with_ci(&st, &fake, "ready-billing", json!([refused(77)])).await;
+        let wakes = woken(&st, &dev).len();
+
+        crate::delivery::follow_all(&st).await;
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.final_rounds), ("stalled", "ready", "billing", 0));
+        assert_eq!(woken(&st, &dev).len(), wakes, "no final round");
+        assert!(crate::delivery::stalled_reason(&st, &d).ends_with("Stopped at: the CI of the ready spec PR #500."));
+        assert!(done_items(&st).is_empty());
+
+        fake.route("POST", &format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs"), 201, json!({}));
+        crate::delivery::resume(&st, slug, 40).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.final_ci.as_str()), ("ready", "following"));
+        fake.route("GET", &runs, 200, json!({ "check_runs": [run("completed", Some("success"))] }));
+        crate::delivery::follow_all(&st).await;
+        assert_eq!(delivery(&st, slug).final_ci, "");
+        assert_eq!(done_items(&st).len(), 1, "done once the re-run is green");
+    }
+
+    #[tokio::test]
+    async fn a_billing_block_takes_over_a_stall_and_its_resume_resumes_that_stalls_ticket_too() {
+        let st = state();
+        let fake = own_fake(&st);
+        let slug = "octo/ci-billing-over";
+        let (dev, team) = building(&st, &fake, "ci-billing-over", &["qa"]).await;
+        fake.route("GET", &format!("/repos/{slug}/commits/{CI_HEAD}/check-runs"), 200, json!({ "check_runs": [refused(77)] }));
+        billing_note(&fake, slug, 77);
+        fake.route("POST", &format!("/repos/{slug}/actions/runs/1/rerun-failed-jobs"), 201, json!({}));
+        tool(&st, &dev, "submit_ticket", submit_41()).await.unwrap();
+        // #42 is with the Dev, and the Dev's run on it ended without its call: stalled on #42.
+        crate::delivery::update(&st, slug, 40, |d| {
+            let t = d.ticket_mut(42).unwrap();
+            (t.state, t.agent) = ("started".into(), dev.id.clone());
+            d.resume_to = std::mem::replace(&mut d.state, "stalled".into());
+            (d.stall_reason, d.stalled_at, d.stalled_on) = ("no_call".into(), crate::db::now(), vec![42]);
+        });
+
+        // QA's pass reads #41's CI: the Billing block takes the stall over, as a new one.
+        let before = delivery(&st, slug).stalled_at;
+        tool(&st, &team[0], "review_ticket", json!({ "number": 41, "verdict": "pass", "notes": "ok" })).await.unwrap();
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.resume_to.as_str(), d.stall_reason.as_str(), d.stalled_on.clone()), ("stalled", "running", "billing", vec![42, 41]));
+        assert!(d.stalled_at >= before && stalled_items(&st)[0]["title"].as_str().unwrap().starts_with("GitHub Actions blocked by billing"));
+
+        // Resume re-runs the jobs and wakes the Dev on #42 again; #41 just waits for the re-run's CI.
+        let wakes = woken(&st, &dev).len();
+        let out = crate::delivery::resume(&st, slug, 40).await.unwrap();
+        assert!(out.contains("re-run the failed jobs of workflow run 1") && out.contains("Builder is building #42 again."), "{out}");
+        assert_eq!(woken(&st, &dev).len(), wakes + 1);
+        let d = delivery(&st, slug);
+        assert_eq!((d.state.as_str(), d.ticket(41).unwrap().state.as_str()), ("running", "review"));
     }
 }

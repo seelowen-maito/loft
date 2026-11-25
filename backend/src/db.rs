@@ -38,11 +38,12 @@ pub struct Delivery {
     /// step's call: see `resume_to`), "paused" (the user paused it: see `resume_to`), "ready" (Loft marked the spec PR ready; a plan kept in Loft waits for
     /// Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready, merged or closed).
     pub state: String,
-    /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes").
+    /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes", or "ready"
+    /// for a Billing block on the ready PR's CI).
     #[serde(default)]
     pub resume_to: String,
-    /// Why it stalled: "run_failed", "no_call" (the run ended without its call) or "restart" (the run was
-    /// lost when Loft restarted).
+    /// Why it stalled: "run_failed", "no_call" (the run ended without its call), "restart" (the run was
+    /// lost when Loft restarted), or "billing" (a Billing block: see `billing`), among others.
     #[serde(default)]
     pub stall_reason: String,
     /// When it stalled (RFC 3339): a new stall is a new Needs you item.
@@ -102,6 +103,10 @@ pub struct Delivery {
     /// while there's something to warn about. See `crate::workflows`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflows: Option<crate::workflows::Check>,
+    /// The last Billing block on its CI: GitHub refused to run its jobs because the owner's payments failed or its
+    /// spending limit was reached. Kept after Resume re-runs the jobs, so their old checks aren't taken for a new block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<BillingBlock>,
     /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
     /// ticket or final review waiting for the user hands them to the Dev.
     #[serde(default)]
@@ -166,7 +171,8 @@ impl Delivery {
             if self.stall_ask.as_ref().is_some_and(|a| a.ticket == Some(n)) {
                 self.stall_ask = None;
             }
-            if self.stalled_on.is_empty() {
+            // A Billing block waits for the user's Resume, whatever its tickets do meanwhile.
+            if self.stalled_on.is_empty() && self.stall_reason != "billing" {
                 self.unstall();
             }
         }
@@ -179,6 +185,20 @@ pub struct DraftAgain {
     /// The PR is a draft again; false when GitHub refused, so it stayed ready for review.
     pub ok: bool,
     pub text: String,
+}
+
+/// See [`Delivery::billing`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BillingBlock {
+    /// The owner's billing page on GitHub.
+    pub url: String,
+    /// The workflow runs whose jobs GitHub refused: Resume re-runs their failed jobs.
+    pub runs: Vec<i64>,
+    /// The refused check runs (each an Actions job): a re-run gives its jobs new ones.
+    pub checks: Vec<i64>,
+    /// When Resume asked GitHub to re-run them (RFC 3339); empty while the block waits for the user.
+    #[serde(default)]
+    pub rerun_at: String,
 }
 
 /// A project setting changed from Loft's default: its value, who changed it (an agent's id, empty for the user, and
@@ -1705,6 +1725,7 @@ impl Db {
                 actions_runs: Default::default(),
                 reviewed_to: String::new(),
                 draft_again: None,
+                billing: None,
                 workflows: None,
                 last_notes: String::new(),
                 migrated: true,

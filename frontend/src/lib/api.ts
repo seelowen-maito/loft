@@ -122,8 +122,10 @@ export type WaitsOn = { blocker: string; delivery: { repo: string; spec: number;
 export type IssueDelivery = {
   /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
-  /** Why it stalled: "run_failed", "no_call", "restart" or "ci_missing"; null unless stalled. */
+  /** Why it stalled: "run_failed", "no_call", "restart", "ci_missing" or "billing" (a Billing block), among others; null unless stalled. */
   stall_reason?: string | null;
+  /** Stalled by a Billing block: the repo owner's billing page on GitHub; null otherwise. An older server doesn't send it. */
+  billing_url?: string | null;
   /** The card's state line as the server words it; null before it started. An older server doesn't send it. */
   state_line?: { tone: string; text: string } | null;
   /** Pause applies: the Delivery is running (its final review and fixes included), and no ticket waits for the user. */

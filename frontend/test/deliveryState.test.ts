@@ -42,6 +42,13 @@ test("the server's state line shows as is", () => {
   assert.equal(deliveryStateLine({ state: "planned", started: false, state_line: { tone: "running", text: "x" } }), null, "not before it started");
 });
 
+test("a Billing block links the owner's billing page", () => {
+  const url = "https://github.com/organizations/octo/settings/billing";
+  const state_line = { tone: "stalled", text: "Stalled: GitHub Actions is blocked by billing." };
+  assert.deepEqual(deliveryStateLine({ state: "stalled", started: true, stall_reason: "billing", state_line, billing_url: url }), { ...state_line, href: url });
+  assert.deepEqual(deliveryStateLine({ state: "stalled", started: true, stall_reason: "no_call", state_line, billing_url: null }), state_line, "another stall links nothing");
+});
+
 test("an older server without a state line gets today's wording", () => {
   assert.equal(at("stalled", { stall_reason: "restart" })?.text, "Stalled: its run was lost when Loft restarted.");
   assert.deepEqual(deliveryStateLine({ state: "running", started: true }), { tone: "running", text: "Running." });

@@ -76,6 +76,7 @@ pub fn record_spec(state: &AppState, repo: &str, spec: i64, project: &str, plann
             actions_runs: Default::default(),
             reviewed_to: String::new(),
             draft_again: None,
+            billing: None,
             workflows: None,
             last_notes: String::new(),
             migrated: false,
@@ -286,6 +287,18 @@ fn asked(reply: &str) -> Option<String> {
 /// agent should be working on: never a paused one, nor one waiting for the user (`needs_human`). `who` is
 /// the agent whose run ended, and `ask` what that run asked the user. The team's Lead is woken with it.
 fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>, who: Option<&str>, ask: Option<crate::db::StallAsk>) -> Option<Delivery> {
+    // A Billing block takes over a stall already there: it's what the user must fix first, and its Resume resumes
+    // the tickets that stalled before it too. A new stall, so a new Needs you item.
+    if d.state == "stalled" && reason == "billing" && d.stall_reason != "billing" {
+        tracing::info!("delivery {}#{}: stalled ({reason})", d.repo, d.spec);
+        let d = update(state, &d.repo, d.spec, |d| {
+            (d.stall_reason, d.stalled_at) = (reason.into(), crate::db::now());
+            let new: Vec<i64> = tickets.iter().copied().filter(|n| !d.stalled_on.contains(n)).collect();
+            d.stalled_on.extend(new);
+        })?;
+        tell_lead(state, &d, reason, &tickets, who);
+        return Some(d);
+    }
     // Already stalled: another ticket's step joins the ones that stall it.
     if d.state == "stalled" && !tickets.is_empty() {
         let new: Vec<i64> = tickets.iter().copied().filter(|n| !d.stalled_on.contains(n)).collect();
@@ -300,7 +313,8 @@ fn stall(state: &AppState, d: &Delivery, reason: &str, tickets: Vec<i64>, who: O
         }
         return Some(d);
     }
-    if !matches!(d.state.as_str(), "running" | "final_review" | "final_fixes") {
+    // The ready PR's CI stalls only for a Billing block: Resume brings it back to following that CI.
+    if !matches!(d.state.as_str(), "running" | "final_review" | "final_fixes") && !(reason == "billing" && follows_ready_ci(d)) {
         return None;
     }
     tracing::info!("delivery {}#{}: stalled ({reason})", d.repo, d.spec);
@@ -736,6 +750,7 @@ fn stall_why(reason: &str) -> &'static str {
         "wait_gone" => "a ticket waited on an issue or agent that is gone (deleted, or Loft can no longer read it): tell its Dev what to do, then Resume",
         "blocker_gone" => "a ticket waits on an issue in another spec or repo that is gone or that Loft can no longer read: restore access to it, then Resume",
         "ci_missing" => "its submitted commits aren't on its branch on GitHub, so Loft can't follow its CI: push them, then Resume",
+        "billing" => "GitHub Actions is blocked by billing (a failed payment or the spending limit): fix it on GitHub, then Resume, and Loft re-runs the failed jobs",
         _ => "the run Loft woke for its step ended without its call",
     }
 }
@@ -773,7 +788,10 @@ pub(crate) fn stalled_reason(state: &AppState, d: &Delivery) -> String {
     let why = format!("{}{}", why[..1].to_uppercase(), &why[1..]);
     // Every ticket in flight, with the agent on it.
     let in_flight: Vec<&DeliveryTicket> = d.tickets.iter().filter(|t| matches!(t.state.as_str(), "started" | "review" | "closing")).collect();
+    let on_ci: Vec<String> = d.stalled_on.iter().filter_map(|n| d.ticket(*n)).filter(|t| waits_for_ci(t)).map(|t| tag(d, t)).collect();
     let what = match d.resume_to.as_str() {
+        "ready" => format!("the CI of the ready {}", final_tag(d)),
+        _ if d.stall_reason == "billing" && !on_ci.is_empty() => format!("the CI of {}", list_of(&on_ci)),
         "final_review" => "the final Code Review".to_string(),
         "final_fixes" if d.final_ci == "fixing" => "the fixes for the CI of the ready PR".to_string(),
         "final_fixes" => "the fixes from the final Code Review".to_string(),
@@ -1044,7 +1062,7 @@ async fn assign(state: &AppState, me: &crate::db::Agent, args: &Value) -> Result
     let reassign = args["reassign"].as_bool() == Some(true) && t.state == "started" && !t.agent.is_empty();
     // A stall that waits on the Lead's hand-out (its run ended without one, or Loft restarted while it was due)
     // ends with it, whichever run hands the ticket out.
-    let lead_stall = d.state == "stalled" && d.resume_to == "running" && d.stalled_on.is_empty();
+    let lead_stall = d.state == "stalled" && d.resume_to == "running" && d.stalled_on.is_empty() && d.stall_reason != "billing";
     // A stalled Delivery (the Dev's run ended without submitting) can still move its ticket to another Dev.
     if d.state != "running" && !lead_stall && !(reassign && d.state == "stalled" && d.resume_to == "running") {
         return Err(format!("{name} can't be assigned: its Delivery isn't running."));
@@ -2173,6 +2191,9 @@ enum Ci {
     Absent,
     /// The failed check runs and commit statuses.
     Red(Vec<Value>, Vec<Value>),
+    /// A Billing block: GitHub refused to run the jobs (the owner's payments failed, or its spending limit was
+    /// reached). The failed check runs.
+    Billing(Vec<Value>),
 }
 
 /// Follows the CI of `d`'s tickets that wait for it, on the newest commit of its branch on GitHub. For the
@@ -2189,9 +2210,13 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
     // The CI first: which tickets the commit includes only matters once it's done.
     let since = waiting.iter().map(|t| t.submitted_at.as_str()).max().unwrap_or_default();
     let grace = ci_grace(state, d);
-    let ci = ci_of(state, &d.repo, &head, since, grace).await.map_err(err)?;
+    let ci = rerun_pending(d, ci_of(state, &d.repo, &head, since, grace).await.map_err(err)?, grace);
     if matches!(ci, Ci::Running) {
         return Ok(String::new());
+    }
+    // A Billing block isn't the code's fault: the whole Delivery stalls for the user, with no round for the Dev.
+    if let Ci::Billing(runs) = &ci {
+        return billing_block(state, d, runs, waiting.iter().map(|t| t.number).collect()).await;
     }
     // The tickets still open that the commit includes, oldest first.
     let mut included = vec![];
@@ -2213,7 +2238,7 @@ async fn follow_ci(state: &AppState, d: &Delivery) -> Result<String, String> {
         return Ok(String::new());
     }
     match ci {
-        Ci::Running => Ok(String::new()),
+        Ci::Running | Ci::Billing(_) => Ok(String::new()),
         ci @ (Ci::Green | Ci::Absent) => {
             let why = match ci {
                 Ci::Green => format!("its CI is green on `{}`", short(&head)),
@@ -2286,7 +2311,81 @@ async fn ci_of(state: &AppState, repo: &str, sha: &str, since: &str, grace: i64)
     if failed_runs.is_empty() && failed_statuses.is_empty() {
         return Ok(Ci::Green);
     }
+    if billing_blocked(state, repo, &failed_runs).await? {
+        return Ok(Ci::Billing(failed_runs));
+    }
     Ok(Ci::Red(failed_runs, failed_statuses))
+}
+
+/// What GitHub's annotation on a job it refused for billing says, in lower case: "The job was not started because
+/// recent account payments have failed or your spending limit needs to be increased."
+const BILLING_MARKS: [&str; 2] = ["payments have failed", "spending limit"];
+
+/// Whether GitHub refused to run any of these failed check runs for billing, as the annotations of those with some say.
+async fn billing_blocked(state: &AppState, repo: &str, failed_runs: &[Value]) -> anyhow::Result<bool> {
+    for c in failed_runs.iter().filter(|c| c["output"]["annotations_count"].as_i64().unwrap_or(0) > 0) {
+        let Some(id) = c["id"].as_i64() else { continue };
+        let notes = match crate::github::get(state, &format!("/repos/{repo}/check-runs/{id}/annotations?per_page=50")).await {
+            Ok(v) => v,
+            Err(e) if crate::github::is_gone(&e) => continue,
+            Err(e) => return Err(e),
+        };
+        let blocked = |a: &Value| a["message"].as_str().map(str::to_lowercase).is_some_and(|m| BILLING_MARKS.iter().any(|x| m.contains(x)));
+        if notes.as_array().is_some_and(|a| a.iter().any(blocked)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `ci` as `d` should take it: a Billing block whose checks are all the ones Resume asked GitHub to re-run is still
+/// running, until the re-run's checks take their place, or for `grace` minutes at most (GitHub didn't re-run them).
+fn rerun_pending(d: &Delivery, ci: Ci, grace: i64) -> Ci {
+    match (ci, &d.billing) {
+        (Ci::Billing(runs), Some(b))
+            if !b.rerun_at.is_empty() && !past_grace(&b.rerun_at, grace) && runs.iter().all(|c| c["id"].as_i64().is_some_and(|id| b.checks.contains(&id))) =>
+        {
+            Ci::Running
+        }
+        (ci, _) => ci,
+    }
+}
+
+/// The workflow run of check run `c`, an Actions job: from its link, else from GitHub. None for a check that isn't one.
+async fn workflow_run_of(state: &AppState, repo: &str, c: &Value) -> Option<i64> {
+    let linked = c["details_url"].as_str().and_then(|u| u.split("/actions/runs/").nth(1)).and_then(|r| r.split(['/', '?']).next()).and_then(|r| r.parse().ok());
+    if linked.is_some() {
+        return linked;
+    }
+    let id = c["id"].as_i64()?;
+    crate::github::get(state, &format!("/repos/{repo}/actions/jobs/{id}")).await.ok()?["run_id"].as_i64()
+}
+
+/// The billing page on GitHub of `repo`'s owner: an org's own, or the signed-in account's.
+async fn billing_url(state: &AppState, repo: &str) -> String {
+    let owner = repo.split('/').next().unwrap_or_default();
+    match crate::github::get(state, &format!("/repos/{repo}")).await {
+        Ok(v) if v["owner"]["type"] == "Organization" => format!("https://github.com/organizations/{owner}/settings/billing"),
+        _ => "https://github.com/settings/billing".to_string(),
+    }
+}
+
+/// GitHub refused to run `d`'s CI jobs (`failed`) for billing: a Billing block. The whole Delivery stalls, with the
+/// owner's billing page for the user and the workflow runs Resume re-runs, and with no round for the Dev: the code
+/// isn't at fault. `tickets` are those waiting for that CI. The lines for the reply.
+async fn billing_block(state: &AppState, d: &Delivery, failed: &[Value], tickets: Vec<i64>) -> Result<String, String> {
+    let checks: Vec<i64> = failed.iter().filter_map(|c| c["id"].as_i64()).collect();
+    let mut runs = vec![];
+    for c in failed {
+        if let Some(r) = workflow_run_of(state, &d.repo, c).await.filter(|r| !runs.contains(r)) {
+            runs.push(r);
+        }
+    }
+    let url = billing_url(state, &d.repo).await;
+    let block = crate::db::BillingBlock { url: url.clone(), runs, checks, rerun_at: String::new() };
+    let d = update(state, &d.repo, d.spec, |d| d.billing = Some(block.clone())).ok_or("The Delivery record couldn't be saved.")?;
+    stall(state, &d, "billing", tickets, None, None);
+    Ok(format!("\nGitHub refused to run the CI jobs of the {} for billing (a failed payment or the spending limit): the Delivery stalled until the user fixes it ({url}) and resumes it.", if follows_ready_ci(&d) { final_tag(&d) } else { format!("{} `{}`", branch_name(&d), d.branch) }))
 }
 
 /// The names of the failed check runs and commit statuses, and each one's failure with its log: read only when
@@ -2426,8 +2525,10 @@ async fn follow_ready_ci(state: &AppState, d: &Delivery) -> Result<String, Strin
         return Ok(format!("\nThe ready {} doesn't have the CI fix `{fix}`, so Loft can't follow its CI: the Delivery stalled.", final_tag(d)));
     }
     // Exhaustive like `follow_ci`'s: what stalls a ticket's CI stalls the ready PR's too.
-    match ci_of(state, repo, &head, &d.final_ci_since, ci_grace(state, d)).await.map_err(|e| e.to_string())? {
+    let grace = ci_grace(state, d);
+    match rerun_pending(d, ci_of(state, repo, &head, &d.final_ci_since, grace).await.map_err(|e| e.to_string())?, grace) {
         Ci::Running => Ok(String::new()),
+        Ci::Billing(runs) => billing_block(state, d, &runs, vec![]).await,
         ci @ (Ci::Green | Ci::Absent) => {
             let why = match ci {
                 Ci::Green => format!("its CI is green on `{}`", short(&head)),
@@ -2906,6 +3007,9 @@ async fn resume_needs_human(state: &AppState, d: Delivery) -> Result<String, Str
 pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, String> {
     let _held = state.publish_locks.of(repo).lock_owned().await;
     let d = state.db.get_delivery(repo, spec).map_err(|e| e.to_string())?.ok_or_else(|| format!("Spec #{spec} on {repo} has no Delivery."))?;
+    if d.state == "stalled" && d.stall_reason == "billing" {
+        return resume_billing(state, d).await;
+    }
     if waits_for_user(&d) {
         return resume_needs_human(state, d).await;
     }
@@ -2968,6 +3072,44 @@ pub async fn resume(state: &AppState, repo: &str, spec: i64) -> Result<String, S
         }
     };
     Ok(format!("Resumed {}.{closed}{}", subject(&d), line.replace('\n', " ").trim_end()))
+}
+
+/// Resume on a Delivery stalled by a Billing block, once the user fixed the billing: Loft asks GitHub to re-run the
+/// failed jobs of the refused workflow runs (no new push) and follows that CI again; refused again, it stalls again.
+/// No agent is woken for the CI, since the block stopped none: only a ticket whose step stalled meanwhile is resumed
+/// as usual. A re-run GitHub refuses leaves it stalled. The caller holds the repo's publish lock. The line saying what
+/// it did.
+async fn resume_billing(state: &AppState, d: Delivery) -> Result<String, String> {
+    let (repo, spec) = (d.repo.clone(), d.spec);
+    let runs = d.billing.as_ref().map(|b| b.runs.clone()).unwrap_or_default();
+    for r in &runs {
+        crate::github::request(state, reqwest::Method::POST, &format!("/repos/{repo}/actions/runs/{r}/rerun-failed-jobs"), None)
+            .await
+            .map_err(|e| format!("Nothing was resumed: GitHub refused to re-run the failed jobs of workflow run {r}: {e}."))?;
+    }
+    let stuck: Vec<DeliveryTicket> = d.tickets.iter().filter(|t| d.stalled_on.contains(&t.number) && matches!(t.state.as_str(), "started" | "review" | "closing") && !waits_for_ci(t)).cloned().collect();
+    let saved = update(state, &repo, spec, |d| {
+        d.unstall();
+        if let Some(b) = d.billing.as_mut() {
+            b.rerun_at = crate::db::now();
+        }
+    })
+    .ok_or("Nothing was resumed: the Delivery record couldn't be saved.")?;
+    let rerun = match runs.as_slice() {
+        [] => " Loft found no workflow run to re-run: re-run the failed jobs on GitHub, and Loft follows the CI again.".to_string(),
+        [r] => format!(" Loft asked GitHub to re-run the failed jobs of workflow run {r} and follows the CI again; if GitHub still refuses them for billing, it stalls again."),
+        rs => format!(" Loft asked GitHub to re-run the failed jobs of workflow runs {} and follows the CI again; if GitHub still refuses them for billing, it stalls again.", list_of(&rs.iter().map(i64::to_string).collect::<Vec<_>>())),
+    };
+    let mut lines = String::new();
+    let stalled = "the Delivery stalled while GitHub Actions was blocked by billing, and this ticket's step stopped meanwhile";
+    for t in &stuck {
+        lines += &resume_ticket(state, &repo, spec, t, stalled).await?;
+    }
+    let in_flight = saved.tickets.iter().any(|t| matches!(t.state.as_str(), "started" | "review" | "closing"));
+    if saved.state == "running" && !in_flight {
+        lines += &advance(state, &repo, spec).await;
+    }
+    Ok(format!("Resumed {}.{rerun}{}", subject(&saved), lines.replace('\n', " ").trim_end()))
 }
 
 /// Resume on one ticket of a stalled or paused Delivery that was in flight: wakes whoever its step waits on.
@@ -3411,6 +3553,7 @@ pub(crate) fn delivery_json(state: &AppState, d: &Delivery) -> Value {
     let mut v = json!({
         "state": d.state,
         "stall_reason": (d.state == "stalled").then_some(d.stall_reason.as_str()),
+        "billing_url": d.billing.as_ref().filter(|_| d.state == "stalled" && d.stall_reason == "billing").map(|b| b.url.as_str()),
         "state_line": state_line(state, d),
         "can_pause": pausable(d),
         "can_resume": matches!(d.state.as_str(), "stalled" | "paused") || waits_for_user(d),
