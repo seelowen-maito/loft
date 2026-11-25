@@ -112,10 +112,9 @@ pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>
     let mut s: crate::settings::Settings = serde_json::from_value(merged).map_err(|e| bad(e.to_string()))?;
     // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
     s.push.relay_url = state.settings.get().push.relay_url;
-    // Older clients don't know the global auto-publish switch: they keep it.
-    if s.auto_publish_all.is_none() {
-        s.auto_publish_all = state.settings.get().auto_publish_all;
-    }
+    // Older clients still send the GitHub publishing Settings had: it's each project's own now (#467), so it's dropped.
+    let now = state.settings.get();
+    (s.auto_publish_all, s.auto_publish, s.comment_approval, s.comment_approval_default) = (now.auto_publish_all, now.auto_publish, now.comment_approval, now.comment_approval_default);
     // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
     // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
     if s.backup_dir != state.settings.get().backup_dir
@@ -419,6 +418,16 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         created_by,
     };
     apply_patch(state, &mut a, p)?;
+    // The project's team defaults, for what the patch leaves out.
+    for (field, v) in crate::project_settings::team_defaults(state, &a.project) {
+        if p.get(field).is_none() {
+            match field {
+                "model" => a.model = v,
+                "effort" => a.effort = v,
+                _ => a.subagent_model = v,
+            }
+        }
+    }
     std::fs::create_dir_all(workspace(state, &id)).map_err(anyhow::Error::from)?;
     std::fs::write(
         workspace(state, &id).join("README.md"),
@@ -539,7 +548,9 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
         meta["reply_to"] = r;
     }
     let grill = m.meta.as_ref().and_then(|v| v.get("grill")).filter(|g| g.is_object());
-    let meta = match crate::grill::on_user_message(&state, &agent, m.text.trim(), grill, meta)? {
+    // A grill on a private repo asks its CI mode: GitHub says which repos are, before the grill starts.
+    let private = if crate::grill::starts_grill(m.text.trim(), grill) { crate::grill::private_projects(&state, &agent).await } else { vec![] };
+    let meta = match crate::grill::on_user_message_with(&state, &agent, m.text.trim(), grill, meta, &private)? {
         crate::grill::Routed::Normal(meta) => meta,
         crate::grill::Routed::Handled { message, wake } => {
             if let Some(p) = wake {
@@ -960,15 +971,16 @@ pub async fn refresh_pull_request(State(state): State<AppState>, Path(id): Path<
 
 #[derive(Deserialize)]
 pub struct MergeBody {
+    /// None: the project's merge method (#468).
     method: Option<String>,
 }
 
 pub async fn merge_pull_request(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<MergeBody>) -> ApiResult<Value> {
-    let method = b.method.unwrap_or_else(|| "squash".into());
-    if !["squash", "merge", "rebase"].contains(&method.as_str()) {
+    let method = b.method.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    if method.as_deref().is_some_and(|m| !["squash", "merge", "rebase"].contains(&m)) {
         return Err(bad("method must be squash | merge | rebase"));
     }
-    let pr = crate::prs::merge(&state, &id, &method).await.map_err(|e| bad(e.to_string()))?;
+    let pr = crate::prs::merge(&state, &id, method.as_deref()).await.map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!(pr)))
 }
 

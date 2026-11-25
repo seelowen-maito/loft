@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { RotateCw, TriangleAlert } from "lucide-react";
-import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { api, type ActionsOwner, type ActionsOwners, type AgentDevice, type AgentsSummary, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { monthName, parseQuota, quotaPercent, quotaTone } from "../lib/actionsQuota";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
@@ -54,20 +55,6 @@ export function Toggle({ on, onChange, label, hint }: { on: boolean; onChange: (
   );
 }
 
-const MODES: { value: ApprovalMode; label: string }[] = [
-  { value: "ask", label: "Ask for every comment" },
-  { value: "own", label: "Auto-approve my own comments" },
-  { value: "all", label: "Auto-approve everything" },
-];
-
-function ModeSelect({ value, onChange }: { value: ApprovalMode; onChange: (m: ApprovalMode) => void }) {
-  return (
-    <select value={value} onChange={(e) => onChange(e.target.value as ApprovalMode)} className="input">
-      {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-    </select>
-  );
-}
-
 const SOURCE_LABELS: Record<string, string> = {
   prs: "Pull request cards",
   mirror: "Issue mirror",
@@ -75,17 +62,19 @@ const SOURCE_LABELS: Record<string, string> = {
   inbox: "GitHub inbox",
   user: "Your clicks",
   agent: "Agents' Loft tools",
+  actions: "Actions minutes",
   other: "Other",
 };
 
-/** What's left of GitHub's hourly limit (shared with the agents' own `gh`), and where Loft's requests went. */
+/** What's left of GitHub's hourly limit (shared with the agents' own `gh`), where Loft's requests went, and each
+ *  owner's Actions minutes this month against its quota. */
 function GithubUsage() {
   const [b, setB] = useState<GithubBudget | null>(null);
   usePoll(() => api.githubBudget().then(setB).catch(() => {}), 15_000);
   const at = (s: number) => fmtClock(s);
   const rows = Object.entries(b?.by_source ?? {}).sort((x, y) => y[1].requests - x[1].requests);
   return (
-    <SettingsCard title="GitHub API">
+    <SettingsCard id="github" title="GitHub API">
       {!b || Object.keys(b.resources).length === 0 ? (
         <p className="text-[12.5px] text-fg-3">No answer from GitHub yet since Loft started.</p>
       ) : (
@@ -124,7 +113,95 @@ function GithubUsage() {
           )}
         </div>
       )}
+      <ActionsQuotas />
     </SettingsCard>
+  );
+}
+
+/** Each owner's GitHub Actions minutes this month, with its quota to edit: Needs you warns at 70% and 90% of it. */
+function ActionsQuotas() {
+  const [v, setV] = useState<ActionsOwners | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  usePoll(
+    () =>
+      api
+        .actionsOwners()
+        .then((v) => (setV(v), setErr(null)))
+        .catch((e) => setErr(errorText(e))),
+    60_000,
+  );
+  return (
+    <div className="space-y-3 border-t border-line pt-4">
+      <div className="eyebrow">Actions minutes{v ? ` · ${monthName(v.month)}` : ""}</div>
+      {err && !v && <ErrorLine error={err} />}
+      {!v && !err && <div className="skeleton h-12 rounded-xl" />}
+      {v && v.owners.length === 0 && <p className="text-[12.5px] text-fg-3">No repo on GitHub read yet: Loft reads each project's repo every 15 minutes.</p>}
+      {v?.owners.map((o) => <OwnerQuota key={o.owner} o={o} onSaved={setV} />)}
+      <p className="text-[11.5px] text-fg-3">
+        Per org or account: the sum of its private repos Loft knows, each job rounded up to the minute (public repos are free) and weighted as GitHub uses up included minutes (macOS jobs 10×, Windows 2×), or the org's own billed minutes when the token has <code className="font-mono">admin:org</code>. At 70% and 90% of a quota,
+        Needs you tells you, once a month.
+      </p>
+    </div>
+  );
+}
+
+function OwnerQuota({ o, onSaved }: { o: ActionsOwner; onSaved: (v: ActionsOwners) => void }) {
+  const saved = o.quota === null ? "" : String(o.quota);
+  const [draft, setDraft] = useState(saved);
+  useEffect(() => setDraft(saved), [saved]);
+  const save = useAction();
+  const commit = () => {
+    const q = parseQuota(draft);
+    if (q === undefined) return setDraft(saved);
+    if (q === o.quota) return setDraft(saved);
+    save.run(async () => onSaved(await api.setActionsQuota(o.owner, q)));
+  };
+  const pct = quotaPercent(o.minutes, o.quota);
+  const priv = o.repos.filter((r) => r.private).sort((a, b) => b.minutes - a.minutes);
+  const where =
+    o.source === "billing"
+      ? "As GitHub bills the org"
+      : priv.length === 0
+        ? "No private repo Loft knows"
+        : `${priv.length} private repo${priv.length === 1 ? "" : "s"}: ${priv
+            .slice(0, 3)
+            .map((r) => `${r.repo.split("/")[1]} ${r.minutes.toLocaleString()} min`)
+            .join(", ")}${priv.length > 3 ? ", …" : ""}`;
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-[13px]">
+        <span className="min-w-0 [overflow-wrap:anywhere]">
+          <span className="text-fg">{o.owner}</span>
+          {o.kind && <span className="ml-1.5 text-[11.5px] text-fg-3">{o.kind === "Organization" ? "org" : "account"}</span>}
+        </span>
+        <span className="flex items-center gap-3">
+          <span className="font-mono text-[12.5px] tabular-nums">
+            {o.minutes.toLocaleString()} min{pct !== null && <span className="text-fg-3"> · {Math.round(pct)}%</span>}
+          </span>
+          <label className="flex items-center gap-1.5 text-[11.5px] text-fg-3">
+            quota
+            <input
+              className="input w-24 py-1 text-right font-mono text-[12px] tabular-nums"
+              inputMode="numeric"
+              placeholder="none"
+              aria-label={`Monthly Actions quota of ${o.owner}, in minutes`}
+              value={draft}
+              disabled={save.busy}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => e.key === "Enter" && commit()}
+            />
+          </label>
+        </span>
+      </div>
+      {pct !== null && (
+        <div className="h-1.5 overflow-hidden rounded-full bg-ink-700">
+          <div className={cx("h-full rounded-full", quotaTone(pct))} style={{ width: `${Math.min(100, pct)}%` }} />
+        </div>
+      )}
+      <p className="text-[11.5px] text-fg-3 [overflow-wrap:anywhere]">{where}</p>
+      {save.error && <ErrorLine error={save.error} />}
+    </div>
   );
 }
 
@@ -596,18 +673,6 @@ export default function SettingsPage() {
             onChange={(v) => set("messaging_rules", v)}
             label="Messaging rules"
             hint="Tells every agent to message other agents only with a finding, report, verdict or request, never thanks or waiting notes."
-          />
-        </SettingsCard>
-
-        <SettingsCard title="GitHub issues">
-          <Field label="Comments going to GitHub" hint="Every comment on a GitHub issue waits for your approval unless this says otherwise.">
-            <ModeSelect value={draft.comment_approval_default} onChange={(m) => set("comment_approval_default", m)} />
-          </Field>
-          <Toggle
-            on={draft.auto_publish_all}
-            onChange={(v) => set("auto_publish_all", v)}
-            label="Publish new Loft issues to GitHub automatically"
-            hint="Each new Loft issue in a project with a GitHub repo becomes a GitHub issue right away. Off: it stays in Loft until you press Publish to GitHub."
           />
         </SettingsCard>
 

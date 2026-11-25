@@ -10,6 +10,7 @@ import { pendingItems } from "./lib/pending";
 import { useAgents, usePermissions } from "./hooks/lists";
 import { badgeText, badgeTitle, badgeTone, countAfter, countsOf, iconAction, type Counts } from "./lib/needsYou";
 import ReposPage from "./pages/Repos";
+import ProjectSettingsPage from "./pages/ProjectSettings";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
 import CleanPage from "./pages/Clean";
@@ -262,6 +263,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/repos" replace />} />
           <Route path="/repos" element={<ReposPage />} />
+          <Route path="/repos/:name/settings" element={<ProjectSettingsPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
           <Route path="/agents/:id/interview" element={<AgentsPage />} />

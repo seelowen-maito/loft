@@ -550,6 +550,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 format!("{}\n\n{}", crate::delivery::stalled_reason(state, &d), a.text),
                 format!("{who} asks you something"),
             ),
+            // A Billing block's (or an infrastructure failure's) reason is long: the item says what to do, and its text
+            // has where it stopped too.
+            None if crate::db::ci_stall(&d.stall_reason) => {
+                let all = crate::delivery::stalled_reason(state, &d);
+                (all.split(" Stopped at:").next().unwrap_or_default().to_string(), all, title.clone())
+            }
             None => (crate::delivery::stalled_reason(state, &d), String::new(), title.clone()),
         };
         let mut actions = vec![action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec }))];
@@ -557,19 +563,39 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             actions.push(action("answer", "Reply", "POST", format!("/api/agents/{agent_id}/messages"), json!({ "text": "" })));
             actions.push(open_chat(agent_id));
         }
+        let mut links: Vec<Value> = issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default();
+        // A Billing block: the owner's billing page comes first, and tapping the push opens it.
+        let billing = d.billing.as_ref().filter(|_| d.stall_reason == "billing");
+        if let Some(b) = billing {
+            actions.push(json!({ "kind": "open", "label": "Open billing", "target": { "url": b.url } }));
+            links.push(json!({ "label": "Billing on GitHub", "url": b.url }));
+        }
+        // An infrastructure failure, or a CI queued too long: the CI checks on GitHub, where the user sees what failed or
+        // waits, and can re-run it too.
+        let infra = d.stall_reason == "infra";
+        let queued = d.stall_reason == "ci_queued";
+        if let Some(url) = crate::delivery::checks_url(&d).filter(|_| infra || queued) {
+            links.push(json!({ "label": "Checks on GitHub", "url": url }));
+        }
         actions.extend([open, dismiss(&id)]);
+        let (title, push) = match billing {
+            Some(_) => (format!("GitHub Actions blocked by billing: {title}"), ("GitHub Actions blocked by billing".to_string(), title)),
+            None if infra => (format!("CI failed for GitHub's infrastructure: {title}"), ("CI failed for GitHub's infrastructure".to_string(), title)),
+            None if queued => (format!("CI queued, not started: {title}"), ("CI queued, not started".to_string(), title)),
+            None => (format!("Delivery stalled: {title}"), ("Delivery stalled".to_string(), push)),
+        };
         items.push(Item {
             kind: "delivery_stalled",
             urgency: 2,
             agent: ask.as_ref().map(|(who, _)| who.clone()),
             task_id: issue.map(|t| t.id.clone()),
-            title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
+            title: text(&title, MAX_TITLE),
             reason: text(&reason, MAX_REASON),
             text: text(&body, MAX_TEXT),
             created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
-            links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
+            links,
             actions,
-            push: ("Delivery stalled".to_string(), push),
+            push,
             project: Some(d.project.clone()).filter(|p| !p.is_empty()),
             pr: None,
             id,
@@ -600,6 +626,10 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
                 Value::Null,
             ),
+        };
+        let reason = match crate::delivery::minutes_line(&d) {
+            Some(m) => format!("{reason} {m}"),
+            None => reason,
         };
         let mut links: Vec<Value> = issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default();
         links.extend(Some(link).filter(|l| !l.is_null()));
@@ -694,7 +724,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         seen_prs.insert((p.slug.to_lowercase(), p.number));
         let id = format!("pr:{}:{}", p.id, p.head_sha);
         let who = name(&p.agent_id);
-        let method = p.merge_methods.first().cloned().unwrap_or_else(|| "squash".into());
+        // The project's merge method (#468), as the PR's last read set it.
+        let method = Some(p.merge_method.clone()).filter(|m| !m.is_empty()).or_else(|| p.merge_methods.first().cloned()).unwrap_or_else(|| "squash".into());
         let repo_name = p.slug.rsplit('/').next().unwrap_or(&p.slug).to_string();
         items.push(Item {
             kind: "pr_ready",
@@ -845,6 +876,35 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         });
     }
 
+    // An owner's GitHub Actions minutes reached 70% or 90% of the quota the user set: one item a line, a month. A
+    // higher line takes the lower one's place, and the item goes if the minutes fall under it (a higher quota).
+    for w in crate::actions::warnings(state, Utc::now()) {
+        let id = format!("actions_quota:{}:{}:{}", w.owner, w.month, w.line);
+        let pct = u64::from(w.minutes) * 100 / u64::from(w.quota.max(1));
+        let mut actions = vec![];
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#github") } }));
+        }
+        actions.push(dismiss(&id));
+        let source = if w.billed { "as GitHub bills the org" } else { "summed over its private repos Loft knows" };
+        items.push(Item {
+            kind: "actions_quota",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text(&format!("{} used {pct}% of its GitHub Actions minutes", w.owner), MAX_TITLE),
+            reason: text(&format!("{} of {} minutes this month, past {}% of the quota.", w.minutes, w.quota, w.line), MAX_REASON),
+            text: text(&format!("{} of {} minutes this month ({source}). When the quota runs out GitHub stops running its jobs. Settings → GitHub API shows each repo's minutes and changes the quota; a project's CI mode `at the end` (Project settings) runs the CI only when the spec PR is ready.", w.minutes, w.quota), MAX_TEXT),
+            created_at: w.at.clone(),
+            links: vec![json!({ "label": "Settings → GitHub API", "path": "/settings#github" })],
+            actions,
+            push: (format!("GitHub Actions: {} at {}% of its quota", w.owner, w.line), format!("{} of {} minutes this month", w.minutes, w.quota)),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
     // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low, and until 2 GB more are
     // free: near the line it would come and go, new each time.
     let free = crate::sweep::free_bytes(&state.cfg.storage_dir);
@@ -980,8 +1040,13 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     let target = i.actions.iter().find(|a| a["kind"] == "open").map(|a| a["target"].clone()).unwrap_or(Value::Null);
     PushItem {
         id: i.id.clone(),
-        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck".
-        kind: if i.kind == "mac_access" { "stuck" } else { i.kind },
+        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck", and an owner's
+        // Actions quota running out stops its Deliveries' CI, so it goes with "delivery_stalled".
+        kind: match i.kind {
+            "mac_access" => "stuck",
+            "actions_quota" => "delivery_stalled",
+            k => k,
+        },
         urgency: i.urgency,
         agent_id: i.agent.as_ref().map(|a| a.0.clone()),
         task_id: i.task_id.clone(),

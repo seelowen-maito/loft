@@ -329,6 +329,7 @@ pub(crate) mod tests {
     pub(crate) struct Fake {
         routes: ByRoute<std::collections::VecDeque<(u16, Value)>>,
         headers: ByRoute<Vec<(String, String)>>,
+        delays: ByRoute<std::time::Duration>,
         seen: Mutex<Vec<Seen>>,
     }
 
@@ -347,6 +348,11 @@ pub(crate) mod tests {
         pub(crate) fn with_headers(&self, method: &str, path: &str, headers: &[(&str, &str)]) {
             let hs = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
             self.headers.lock().unwrap().insert((method.into(), path.into()), hs);
+        }
+
+        /// Wait this long before answering `method path`, like a slow GitHub.
+        pub(crate) fn slow(&self, method: &str, path: &str, delay: std::time::Duration) {
+            self.delays.lock().unwrap().insert((method.into(), path.into()), delay);
         }
 
         /// Requests received whose path starts with `prefix`, oldest first.
@@ -388,6 +394,10 @@ pub(crate) mod tests {
                                 body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                             });
                             let route = (method.to_string(), uri.path().to_string());
+                            let delay = fake.delays.lock().unwrap().get(&route).copied();
+                            if let Some(d) = delay {
+                                tokio::time::sleep(d).await;
+                            }
                             let hit = fake.routes.lock().unwrap().get_mut(&route).and_then(|q| if q.len() > 1 { q.pop_front() } else { q.front().cloned() });
                             let (status, body) = hit.unwrap_or((404, json!({ "message": "Not Found" })));
                             let mut hs = HeaderMap::new();
