@@ -52,6 +52,8 @@ import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
 import { HoverTip } from "../../components/HoverTip";
 import { QuoteBlock, QuoteChip, ReplyButton, useLongPress } from "./Quote";
+import { SaveButton } from "./SaveMessage";
+import { linkedMessage } from "../../lib/saved";
 import { AnswerCard } from "./AnswerCard";
 import { answerCard } from "../../lib/answerCard";
 import { QUOTE_GONE_NOTE, jumpStep, messageAnchor, quotable, quoteGone, quoteOf, replyLabel, replyOf, copiedToBox } from "../../lib/reply";
@@ -95,7 +97,8 @@ function reachable(href: string | undefined) {
   return href.replace(LOOPBACK, `$1${host}`);
 }
 
-const MD_COMPONENTS: Components = {
+/** How chat Markdown renders links: issue links as chips, others reachable from the phone, external ones in a new tab. */
+export const MD_COMPONENTS: Components = {
   a: ({ node: _node, href: raw, children, ...rest }) => {
     const task = raw && TASK_LINK.exec(raw);
     if (task) return <TaskChip id={task[1]} />;
@@ -491,6 +494,14 @@ export function Chat({
     jumpTo.current = null;
     if (!flash(id)) setCmdNote(QUOTE_GONE_NOTE);
   }, [showEarlier]);
+  // A link to a message (a saved item's back-link, `#msg-<id>`): jump to it once the chat has loaded.
+  const linked = useRef<string | null>(null);
+  useEffect(() => {
+    const id = linkedMessage(location.hash);
+    if (id == null || loading || linked.current === location.hash) return;
+    linked.current = location.hash;
+    onJump(id);
+  }, [location.hash, loading, onJump]);
 
   const running = !!agent.running;
   // Re-render every 30 s so the "for N min" counts move while nothing else does.
@@ -901,7 +912,7 @@ function MessageTasks({ m }: { m: Message }) {
 
 /** Chips for the specs and issues a message tags with `#`: kind and title, opening the item. Its PRs get cards (MessagePrs). */
 function MessageTags({ m }: { m: Message }) {
-  const tags: { tag: string; kind: "spec" | "issue"; title: string; url?: string | null; task_id?: string }[] = (m.meta?.tags ?? []).filter((t: { kind: string }) => t.kind !== "pr");
+  const tags: { tag: string; kind: "spec" | "issue" | "saved"; title: string; url?: string | null; task_id?: string; saved_id?: number }[] = (m.meta?.tags ?? []).filter((t: { kind: string }) => t.kind !== "pr");
   if (!tags.length) return null;
   const cls = "chip max-w-full gap-1.5 text-[12px] hover:bg-white/[0.08]";
   return (
@@ -913,7 +924,9 @@ function MessageTags({ m }: { m: Message }) {
             <span className="truncate">{t.title}</span>
           </>
         );
-        return t.task_id ? (
+        return t.kind === "saved" ? (
+          <Link key={t.tag} to={`/saved/${t.saved_id}`} title={t.tag} className={cls}>{inner}</Link>
+        ) : t.task_id ? (
           <Link key={t.tag} to={`/issues/${t.task_id}`} title={t.tag} className={cls}>{inner}</Link>
         ) : (
           <a key={t.tag} href={t.url ?? undefined} target="_blank" rel="noopener noreferrer" title={t.tag} className={cls}>{inner}</a>
@@ -962,7 +975,8 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
   const canReply = quotable(m) && !m.meta?.cancelled;
   const longPress = useLongPress(() => onReply(m));
   const press = canReply ? longPress : {};
-  const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} label={replyLabel(m, agent.name)} />;
+  const reply = canReply && <ReplyButton onReply={() => onReply(m)} label={replyLabel(m, agent.name)} />;
+  const save = canReply && !!m.content?.trim() && <SaveButton agentId={agent.id} m={m} />;
   const cancel = useAction();
   const sendNow = useAction();
   // The footer's status on a message waiting in the queue, yours or another agent's: Cancel, or Copy to box once cancelled.
@@ -1085,7 +1099,7 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
-          <MessageFooter m={m} side="right" reply={replyButton} status={status} />
+          <MessageFooter m={m} side="right" reply={<>{save}{reply}</>} status={status} />
         </div>
         {from && <Sticker avatar={from.avatar} lead={from.role === "lead"} size={26} className="mt-5" />}
       </div>
@@ -1121,7 +1135,7 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
           <div className="font-mono text-[10.5px] text-fg-3">→ {m.meta.mentions_only ? "sent to" : "also sent to"} {m.meta.mentions.map((x: { name: string }) => x.name).join(", ")}</div>
         )}
         {m.meta?.mentioned_in && <div className="font-mono text-[10.5px] text-fg-3">mentioned in {m.meta.mentioned_in.name}'s chat</div>}
-        <MessageFooter m={m} side="right" reply={replyButton} status={status} />
+        <MessageFooter m={m} side="right" reply={<>{save}{reply}</>} status={status} />
       </div>
     );
   }
@@ -1146,13 +1160,13 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
         <Markdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{m.content}</Markdown>
       </div>
       <MessagePrs text={m.content ?? ""} project={agent.project} className="mt-2" />
-      <MessageFooter m={m} side="left" reply={replyButton} />
+      <MessageFooter m={m} side="left" reply={<>{reply}{save}</>} />
       </div>
     </div>
   );
 });
 
-/** A message's footer, its last line: its status with an action, the time, and Reply. Yours (right) end with Reply,
+/** A message's footer, its last line: its status with an action, the time, Save and Reply. Yours (right) end with Reply,
  * so it stays on the last line when the footer wraps; the agent's (left) start with it. */
 function MessageFooter({ m, side, reply, status }: { m: Message; side: "left" | "right"; reply: React.ReactNode; status?: React.ReactNode }) {
   const time = <time dateTime={m.created_at} title={fmtDateTime(m.created_at)} className="px-1 tabular-nums">{fmtClock(m.created_at)}</time>;

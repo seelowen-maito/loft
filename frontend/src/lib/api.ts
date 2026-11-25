@@ -461,6 +461,23 @@ export type AgentSummary = {
   prs: { total: number; open: number; merged: number };
 };
 
+/** A chat message kept in Saved (`/saved`). */
+export type SavedItem = {
+  id: number;
+  title: string;
+  tag: string;
+  /** The message as Markdown. */
+  content: string;
+  /** The agent it was saved from, and its name then: the agent may be gone. */
+  agent_id: string;
+  agent_name: string;
+  message_id: number;
+  created_at: string;
+  updated_at: string | null;
+  /** The pull request of its last export to docs (an id in /pull-requests). */
+  export_pr: string | null;
+};
+
 /** The home line's figures next to the per-agent summaries (`GET /agents/summary?totals=true`). */
 export type AgentsSummary = {
   agents: AgentSummary[];
@@ -748,6 +765,8 @@ export const api = {
   needsYouList: () => req<NeedsYouList>("GET", "/needs-you"),
   /** Marks the Needs you items shown as seen, for every client: the counter stops counting them. */
   needsYouSeen: (ids: string[]) => req<{ ok: boolean; new: number; new_urgent: number }>("POST", "/needs-you/seen", { ids }),
+  /** Done on every item that offers it, in one call; returns how many it cleared. */
+  needsYouClearAll: () => req<{ ok: boolean; cleared: number }>("POST", "/needs-you/dismiss-all"),
   /** Sends one of a Needs you item's actions as the item gives it; its path starts with `/api`. */
   needsYouCall: (a: NeedsYouAction, body?: Record<string, unknown>) =>
     req<{ delivered_to?: unknown }>(a.method ?? "POST", (a.path ?? "").replace(/^\/api(?=\/)/, ""), body ?? a.body ?? {}),
@@ -870,6 +889,15 @@ export const api = {
   resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),
   /** Redraw: the agent draws a new sticker in a quiet run; it arrives with the agent event. */
   redrawAvatar: (id: string) => req<{ ok: boolean }>("POST", `/agents/${id}/avatar/redraw`),
+  saveMessage: (agentId: string, messageId: number, title: string, tag: string) =>
+    req<SavedItem>("POST", "/saved", { agent_id: agentId, message_id: messageId, title, tag }),
+  savedList: (q = "", tag = "") => req<{ items: SavedItem[]; tags: string[] }>("GET", `/saved?${new URLSearchParams({ q, tag })}`),
+  /** `source_exists`: the message it came from is still in its agent's chat; `pr`: its last export to docs. */
+  savedItem: (id: number) => req<SavedItem & { source_exists: boolean; pr: PullRequest | null }>("GET", `/saved/${id}`),
+  /** Opens a pull request adding (or updating) `docs/<slug>.md` on the project's repo. */
+  exportSaved: (id: number, project: string) => req<PullRequest>("POST", `/saved/${id}/export`, { project }),
+  updateSaved: (id: number, title: string, tag: string, content: string) => req<SavedItem>("PUT", `/saved/${id}`, { title, tag, content }),
+  deleteSaved: (id: number) => req<{ ok: boolean }>("DELETE", `/saved/${id}`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
   addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),

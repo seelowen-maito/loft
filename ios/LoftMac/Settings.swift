@@ -91,7 +91,7 @@ struct SettingsSection: View {
         .task { await load(resetDraft: true) }
     }
 
-    static let shortcuts = [("⌘1 … ⌘5", "Go to Overview, Agents, Issues, Needs you, Settings"), ("⌘N", "New message"),
+    static let shortcuts = [("⌘1 … ⌘6", "Go to Overview, Agents, Issues, Needs you, Saved, Settings"), ("⌘N", "New message"),
                             ("⌥⌘I", "Show or hide an agent's settings"), ("⌘R", "Refresh"), ("⌘S", "Save an agent's settings")]
 
     private func note(_ s: String) -> some View { Text(s).font(.caption).foregroundStyle(.secondary) }

@@ -55,6 +55,15 @@ struct OverviewView: View {
                 .accessibilityLabel("Settings")
                 .accessibilityIdentifier("settingsButton")
             }
+            if store.info?.supports(.saved) == true {
+                ToolbarItem(placement: .topBarLeading) {
+                    NavigationLink(value: SavedRoute()) {
+                        Image(systemName: "bookmark")
+                    }
+                    .accessibilityLabel("Saved")
+                    .accessibilityIdentifier("savedButton")
+                }
+            }
         }
         .createMenu()
     }

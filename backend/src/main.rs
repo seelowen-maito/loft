@@ -32,6 +32,7 @@ mod prs;
 mod push;
 mod signin;
 mod reply;
+mod saved;
 mod sccache;
 mod repos;
 mod schedule;
@@ -156,6 +157,7 @@ fn api_routes() -> Router<AppState> {
         .route("/activity", get(tasks::activity))
         .route("/needs-you", get(needs_you::list))
         .route("/needs-you/seen", post(needs_you::mark_seen))
+        .route("/needs-you/dismiss-all", post(needs_you::dismiss_all))
         .route("/needs-you/{id}/dismiss", post(needs_you::dismiss_item))
         .route("/voice/clean", post(voice::clean))
         .route("/voice/brief", post(voice::brief))
@@ -166,6 +168,9 @@ fn api_routes() -> Router<AppState> {
         .route("/devices/{token}/test", post(devices::test))
         .route("/push", get(devices::status).put(devices::configure))
         .route("/push/signin", post(signin::start))
+        .route("/saved", get(saved::list).post(saved::create))
+        .route("/saved/{id}", get(saved::get).put(saved::update).delete(saved::delete))
+        .route("/saved/{id}/export", post(saved::export))
         .route("/permissions", get(api::list_permissions))
         .route("/permissions/{id}", post(api::decide_permission))
         .route("/pull-requests", get(api::list_pull_requests))

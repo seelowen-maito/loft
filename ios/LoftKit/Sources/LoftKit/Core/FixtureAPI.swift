@@ -240,6 +240,14 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
                             meta: ["duration_ms": .number(143_000)], createdAt: ago(93).addingTimeInterval(143)),
             ],
         ]
+        // `-fixture-queued`: two messages typed while the Orchestrator's run goes on, one still queued, one cancelled (#668).
+        if args.contains("-fixture-queued") {
+            msgs["orch", default: []] += [
+                m(14, "orch", "user", "text", "Skip the iPad layout for now.", 3, meta: ["cancelled": true]),
+                m(15, "orch", "user", "text", "Also add a dark mode toggle to the settings screen.", 1),
+            ]
+            agentList[0].queuedMessages = [15]
+        }
         perms = [
             PermissionRequest(id: "p1", agentId: "ios", source: "prompt", toolName: "Bash", input: ["command": "xcodebuild test -scheme Loft"],
                               reason: nil, rule: "Bash(xcodebuild *)", status: "pending", createdAt: ago(4)),
@@ -495,7 +503,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     public func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply", "saved"] + (grill ? ["grill"] : []))
     }
 
     public func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -712,6 +720,18 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
     public func stopRun(agentId: String) async throws { try check(); sent("stop", agentId) }
+    public func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool {
+        try check()
+        return locked {
+            guard let i = agentList.firstIndex(where: { $0.id == agentId }), agentList[i].queuedMessages?.contains(messageId) == true else { return false }
+            agentList[i].queuedMessages?.removeAll { $0 == messageId }
+            if let j = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), case .object(var o)? = msgs[agentId]![j].meta ?? .object([:]) {
+                o["cancelled"] = true
+                msgs[agentId]![j].meta = .object(o)
+            }
+            return true
+        }
+    }
     public func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
     /// `-fixture-slow-disk`: sizes take a while, as a real measure can, to show the loader.
     private func measure() async {
@@ -997,6 +1017,69 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         throw APIError.server(status: 409, message: "Herdr isn't running.")
     }
     public func updateDevice(token: String, _ fields: [String: JSONValue]) async throws { try check() }
+
+    /// Saved: two items kept from the chats, newest first; the tutorial's message is gone from its chat.
+    private var savedItems: [SavedItem] = [
+        SavedItem(id: 2, title: "Which Simulator the suite runs on", tag: "Good to know",
+                  content: "The iPhone 17 Pro on iOS 26.5. I can switch if you need another one.",
+                  agentId: "orch", agentName: "Orchestrator", messageId: 11, createdAt: Date().addingTimeInterval(-30 * 60)),
+        SavedItem(id: 1, title: "How to run the backend locally", tag: "Tutorial",
+                  content: "# Run the backend\n\n1. Install Rust with `rustup`.\n2. Run `cargo run` in **backend/**.\n3. Open http://localhost:7420.\n\nThe database lives in `~/.local/share/loft`.",
+                  agentId: "be", agentName: "Backend Agent", messageId: 501, createdAt: Date().addingTimeInterval(-2 * 86_400)),
+    ]
+    private var nextSavedId: Int64 = 3
+
+    public func savedList(query: String, tag: String) async throws -> SavedList {
+        try check()
+        return locked {
+            let q = query.lowercased()
+            let items = savedItems.filter {
+                (q.isEmpty || "\($0.title)\n\($0.content)".lowercased().contains(q)) && (tag.isEmpty || $0.tag.lowercased() == tag.lowercased())
+            }
+            return SavedList(items: items, tags: Array(Set(savedItems.map(\.tag).filter { !$0.isEmpty })).sorted())
+        }
+    }
+
+    public func savedItem(id: Int64) async throws -> SavedItem {
+        try check()
+        return try locked {
+            guard var i = savedItems.first(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "not found") }
+            i.sourceExists = msgs[i.agentId]?.contains { $0.id == i.messageId } ?? false
+            return i
+        }
+    }
+
+    public func saveMessage(agentId: String, messageId: Int64, title: String, tag: String) async throws -> SavedItem {
+        try check()
+        return try locked {
+            guard let m = msgs[agentId]?.first(where: { $0.id == messageId }), Saved.canSave(m) else {
+                throw APIError.server(status: 400, message: "Only a chat message with text can be saved.")
+            }
+            let name = agentList.first { $0.id == agentId }?.name ?? agentId
+            let i = SavedItem(id: nextSavedId, title: title.isEmpty ? Saved.defaultTitle(m.content) : title, tag: tag, content: m.content,
+                              agentId: agentId, agentName: name, messageId: messageId, createdAt: Date())
+            nextSavedId += 1
+            savedItems.insert(i, at: 0)
+            return i
+        }
+    }
+
+    public func updateSaved(id: Int64, title: String, tag: String, content: String) async throws -> SavedItem {
+        try check()
+        return try locked {
+            guard let k = savedItems.firstIndex(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "not found") }
+            savedItems[k].title = title
+            savedItems[k].tag = tag
+            savedItems[k].content = content
+            savedItems[k].updatedAt = Date()
+            return savedItems[k]
+        }
+    }
+
+    public func deleteSaved(id: Int64) async throws {
+        try check()
+        locked { savedItems.removeAll { $0.id == id } }
+    }
 
     public func resetSession(agentId: String) async throws {
         try check()
