@@ -2742,14 +2742,15 @@ pub(crate) mod tests {
     }
 
     /// The repo on the fake, private or public, with this `ci.yml` on its spec branch (and a README beside it,
-    /// which isn't a workflow) and one recent run of it, whose job `ios` took 7.5 minutes.
+    /// which isn't a workflow) and one recent run of it, whose job `ios` took 7.5 minutes, after a run of a workflow
+    /// that isn't on the spec branch.
     fn workflow_on(fake: &Fake, slug: &str, private: bool, ci: &str) {
         use base64::Engine;
         fake.route("GET", &format!("/repos/{slug}"), 200, json!({ "default_branch": "main", "private": private }));
         let files = json!([{ "type": "file", "name": "ci.yml", "path": ".github/workflows/ci.yml" }, { "type": "file", "name": "README.md", "path": ".github/workflows/README.md" }]);
         fake.route("GET", &format!("/repos/{slug}/contents/.github/workflows"), 200, files);
         fake.route("GET", &format!("/repos/{slug}/contents/.github/workflows/ci.yml"), 200, json!({ "encoding": "base64", "content": base64::engine::general_purpose::STANDARD.encode(ci) }));
-        fake.route("GET", &format!("/repos/{slug}/actions/runs"), 200, json!({ "total_count": 1, "workflow_runs": [{ "id": 9, "path": ".github/workflows/ci.yml", "status": "completed" }] }));
+        fake.route("GET", &format!("/repos/{slug}/actions/runs"), 200, json!({ "total_count": 2, "workflow_runs": [{ "id": 10, "path": ".github/workflows/pages.yml", "status": "completed" }, { "id": 9, "path": ".github/workflows/ci.yml", "status": "completed" }] }));
         let job = json!({ "name": "ios", "conclusion": "success", "started_at": "2026-11-01T10:00:00Z", "completed_at": "2026-11-01T10:07:30Z" });
         fake.route("GET", &format!("/repos/{slug}/actions/runs/9/jobs"), 200, json!({ "total_count": 1, "jobs": [job] }));
     }
@@ -2776,11 +2777,11 @@ pub(crate) mod tests {
         // The planner hears it, to tell the user.
         for want in [
             "The repo is private and its workflows spend more Actions minutes than they need to on the draft spec PR.",
-            "- `ci.yml` runs twice on every push to the spec branch, once for `push` and once for `pull_request`.",
+            "- `ci.yml` runs twice on every push to the Delivery's branch, once for `push` and once for `pull_request`.",
             "- `ci.yml` has no `concurrency` with `cancel-in-progress`",
-            "- `ci.yml` runs heavy jobs on the draft spec PR, where every ticket pushes: `ios` (macOS).",
+            "- `ci.yml` runs heavy jobs on the draft PR, where every ticket pushes: `ios` (macOS).",
             // 8 minutes (7.5 rounded up) a run, run twice a push, 1.8 pushes a ticket.
-            "Estimate: about 29 min of GitHub Actions per ticket (1.8 pushes to the spec branch per ticket, measured on the repo's recent runs).",
+            "Estimate: about 29 min of GitHub Actions per ticket (1.8 pushes per ticket, measured on the repo's recent runs).",
         ] {
             assert!(reply.contains(want), "missing {want:?} in {reply}");
         }
@@ -2794,6 +2795,8 @@ pub(crate) mod tests {
         // A retry of publish_spec says it again without reading the workflows again.
         assert!(publish(&st, &a, "Rounds").await.unwrap().contains("- `ci.yml` runs twice on every push"));
         assert_eq!(fake.seen(&format!("/repos/{slug}/contents/.github/workflows?")).len(), 1);
+        // Only the jobs of the workflows that run for the spec branch were fetched.
+        assert!(fake.seen(&format!("/repos/{slug}/actions/runs/10/jobs")).is_empty());
 
         // Started: read again, and the Delivery card warns too.
         busy(&st, "Builder", "wf-costly", "dev");

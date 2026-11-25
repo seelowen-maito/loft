@@ -104,7 +104,8 @@ async fn check(state: &AppState, d: &Delivery) -> anyhow::Result<Option<Check>> 
     if flows.is_empty() {
         return Ok(None);
     }
-    let measured = history(state, repo).await;
+    let paths: Vec<&str> = flows.iter().map(|f| f.path.as_str()).collect();
+    let measured = history(state, repo, &paths).await;
     Ok(judge(&flows, &measured))
 }
 
@@ -122,16 +123,17 @@ fn encode(s: &str) -> String {
 /// What each workflow's recent completed runs took: by its file, one list per run of (job name, minutes).
 type Measured = HashMap<String, Vec<Vec<(String, u32)>>>;
 
-/// The repo's recent completed runs, [`RUNS_PER_WORKFLOW`] of each workflow. Empty when GitHub can't say: the
-/// estimate is then a guess.
-async fn history(state: &AppState, repo: &str) -> Measured {
+/// The repo's recent completed runs of the workflows at `paths`, [`RUNS_PER_WORKFLOW`] of each. Empty when GitHub
+/// can't say: the estimate is then a guess.
+async fn history(state: &AppState, repo: &str, paths: &[&str]) -> Measured {
     let mut out: Measured = HashMap::new();
     let Ok(v) = crate::github::get(state, &format!("/repos/{repo}/actions/runs?status=completed&per_page=50")).await else { return out };
     for r in v["workflow_runs"].as_array().into_iter().flatten() {
         let (Some(path), Some(id)) = (r["path"].as_str(), r["id"].as_i64()) else { continue };
         // A run's path can carry `@ref`.
         let path = path.split('@').next().unwrap_or(path).to_string();
-        if out.get(&path).is_some_and(|runs| runs.len() >= RUNS_PER_WORKFLOW) {
+        // Only the workflows that run for the branch: the others (pages, releases, crons) don't count.
+        if !paths.contains(&path.as_str()) || out.get(&path).is_some_and(|runs| runs.len() >= RUNS_PER_WORKFLOW) {
             continue;
         }
         let Ok(jobs) = crate::github::get(state, &format!("/repos/{repo}/actions/runs/{id}/jobs?filter=latest&per_page=100")).await else { continue };
@@ -155,7 +157,8 @@ struct Flow {
 struct Job {
     /// Its `name`, else its id: how GitHub names its runs' jobs.
     label: String,
-    /// It doesn't run on a draft PR: its `if` or one it `needs` tests `draft`.
+    /// It doesn't run on a draft PR: its `if` or one it `needs` tests `draft`. Only on `pull_request` runs: a `push`
+    /// run has no PR, so `github.event.pull_request.draft == false` (and `!...draft`) holds and the job runs.
     skips_draft: bool,
     /// Its runner is macOS or Windows.
     big_runner: Option<&'static str>,
@@ -225,7 +228,7 @@ fn judge(flows: &[Flow], measured: &Measured) -> Option<Check> {
             warnings.push(Warning {
                 kind: "push_and_pull_request".into(),
                 workflow: f.path.clone(),
-                text: format!("`{name}` runs twice on every push to the spec branch, once for `push` and once for `pull_request`. Limit `push` to the base branch, like `push: {{ branches: [main] }}`."),
+                text: format!("`{name}` runs twice on every push to the Delivery's branch, once for `push` and once for `pull_request`. Limit `push` to the base branch, like `push: {{ branches: [main] }}`."),
             });
         }
         if !f.cancels {
@@ -240,23 +243,27 @@ fn judge(flows: &[Flow], measured: &Measured) -> Option<Check> {
         for j in &f.jobs {
             let (m, from_runs) = job_minutes(measured, &f.path, j);
             any_measured |= from_runs;
-            if j.skips_draft {
+            // A push run has every job; a pull_request run leaves out those skipping drafts.
+            let runs = u32::from(f.push) + u32::from(f.pull_request && !j.skips_draft);
+            if runs == 0 {
                 continue;
             }
-            run += m;
+            run += m * runs;
             match j.big_runner {
                 Some(os) => heavy.push(format!("`{}` ({os})", j.label)),
                 None if m >= HEAVY_MINUTES => heavy.push(format!("`{}` (about {m} min)", j.label)),
                 None => {}
             }
         }
-        per_push += run * (u32::from(f.push) + u32::from(f.pull_request));
+        per_push += run;
         if !heavy.is_empty() {
-            warnings.push(Warning {
-                kind: "heavy_in_draft".into(),
-                workflow: f.path.clone(),
-                text: format!("`{name}` runs heavy jobs on the draft spec PR, where every ticket pushes: {}. Skip them in drafts with `if: github.event.pull_request.draft == false`.", heavy.join(", ")),
-            });
+            const SKIP: &str = "skip them in drafts with `if: github.event.pull_request.draft == false`";
+            let fix = match (f.push, f.pull_request) {
+                (false, _) => format!("S{}.", &SKIP[1..]),
+                (true, true) => format!("Limit `push` to the base branch and {SKIP}: a draft filter doesn't skip a `push` run."),
+                (true, false) => format!("Run it on `pull_request` instead of `push` and {SKIP}: a draft filter doesn't skip a `push` run."),
+            };
+            warnings.push(Warning { kind: "heavy_in_draft".into(), workflow: f.path.clone(), text: format!("`{name}` runs heavy jobs on the draft PR, where every ticket pushes: {}. {fix}", heavy.join(", ")) });
         }
     }
     if warnings.is_empty() {
@@ -268,7 +275,7 @@ fn judge(flows: &[Flow], measured: &Measured) -> Option<Check> {
         warnings,
         minutes_per_ticket,
         measured: any_measured,
-        text: format!("Estimate: about {minutes_per_ticket} min of GitHub Actions per ticket ({PUSHES_PER_TICKET} pushes to the spec branch per ticket, {how})."),
+        text: format!("Estimate: about {minutes_per_ticket} min of GitHub Actions per ticket ({PUSHES_PER_TICKET} pushes per ticket, {how})."),
         checked_at: crate::db::now(),
     })
 }
@@ -313,15 +320,25 @@ fn syncs(filters: &Value) -> bool {
     filters.get("types").is_none_or(|t| strings(t).iter().any(|t| t == "synchronize"))
 }
 
-/// GitHub's branch filter patterns: `*` matches anything but `/`, `**` anything, `?` one character.
+/// GitHub's branch filter patterns: `*` matches anything but `/`, `**` anything, `?` one character. Each (pattern
+/// position, branch position) is worked out once, so many `**` in a pattern can't make it take exponential time.
 fn glob(p: &[u8], s: &[u8]) -> bool {
-    match p {
-        [] => s.is_empty(),
-        [b'*', b'*', rest @ ..] => (0..=s.len()).any(|i| glob(rest, &s[i..])),
-        [b'*', rest @ ..] => (0..=s.len()).take_while(|&i| i == 0 || s[i - 1] != b'/').any(|i| glob(rest, &s[i..])),
-        [b'?', rest @ ..] => !s.is_empty() && glob(rest, &s[1..]),
-        [c, rest @ ..] => s.first() == Some(c) && glob(rest, &s[1..]),
+    fn at(p: &[u8], s: &[u8], i: usize, j: usize, memo: &mut [Option<bool>]) -> bool {
+        let k = i * (s.len() + 1) + j;
+        if let Some(hit) = memo[k] {
+            return hit;
+        }
+        let hit = match &p[i..] {
+            [] => j == s.len(),
+            [b'*', b'*', ..] => (j..=s.len()).any(|t| at(p, s, i + 2, t, memo)),
+            [b'*', ..] => (j..=s.len()).take_while(|&t| t == j || s[t - 1] != b'/').any(|t| at(p, s, i + 1, t, memo)),
+            [b'?', ..] => j < s.len() && at(p, s, i + 1, j + 1, memo),
+            [c, ..] => s.get(j) == Some(c) && at(p, s, i + 1, j + 1, memo),
+        };
+        memo[k] = Some(hit);
+        hit
     }
+    at(p, s, 0, 0, &mut vec![None; (p.len() + 1) * (s.len() + 1)])
 }
 
 /// `concurrency` that cancels the run in progress: `cancel-in-progress` set to anything but false (an
@@ -663,6 +680,11 @@ pub(crate) mod tests {
         assert!(f(json!({ "tags": ["v*"] }), "main", false));
         assert!(syncs(&Value::Null));
         assert!(!syncs(&json!({ "types": ["opened", "ready_for_review"] })));
+        // Many `**` would take exponential time without the memo; this one only matches once the `Z` is reached.
+        let many = "**?".repeat(12) + "Z";
+        assert!(!glob(many.as_bytes(), b"spec/454-ci-seguro-e-barato-nas-deliveries"));
+        assert!(glob(many.as_bytes(), b"spec/454-ci-seguro-e-barato-nas-deliveriesZ"));
+        assert!(glob(b"spec/**/x?z", b"spec/a/b/xyz") && !glob(b"spec/*/x?z", b"spec/a/b/xyz"));
     }
 
     fn flow(text: &str) -> Option<Flow> {
@@ -698,5 +720,27 @@ pub(crate) mod tests {
         // (12 + 9) / 2 rounded up, once a push: 11 × 1.8.
         assert_eq!((c.minutes_per_ticket, c.measured), (20, true));
         assert!(c.warnings[1].text.contains("`Test` (about 11 min)"), "{}", c.warnings[1].text);
+    }
+
+    #[test]
+    fn a_draft_filter_doesnt_skip_a_push_run() {
+        let none = Measured::new();
+        let draft_only = "    if: github.event.pull_request.draft == false\n";
+        // Push for every branch, cancelling: the macOS job runs on each push, draft filter or not.
+        let push = flow(&format!("on: push\nconcurrency: {{ group: x, cancel-in-progress: true }}\njobs:\n  ios:\n    runs-on: macos-latest\n{draft_only}")).unwrap();
+        let c = judge(&[push], &none).expect("a macOS job on every push");
+        assert_eq!(c.warnings.iter().map(|w| w.kind.as_str()).collect::<Vec<_>>(), ["heavy_in_draft"]);
+        assert!(c.warnings[0].text.contains("`ios` (macOS)") && c.warnings[0].text.contains("doesn't skip a `push` run"), "{}", c.warnings[0].text);
+        // 3 min once a push: 3 × 1.8.
+        assert_eq!(c.minutes_per_ticket, 6);
+        // Both triggers: the push run's macOS minutes count, the pull_request run's don't.
+        let both = flow(&format!("on: [push, pull_request]\nconcurrency: {{ group: x, cancel-in-progress: true }}\njobs:\n  ios:\n    runs-on: macos-latest\n{draft_only}  lint:\n    runs-on: ubuntu-latest\n")).unwrap();
+        let c = judge(&[both], &none).unwrap();
+        assert_eq!(c.warnings.iter().map(|w| w.kind.as_str()).collect::<Vec<_>>(), ["push_and_pull_request", "heavy_in_draft"]);
+        // ios 3 on push, lint 3 on push and 3 on pull_request: 9 × 1.8.
+        assert_eq!(c.minutes_per_ticket, 17);
+        // pull_request only: the filter skips it.
+        let pr = flow(&format!("on: pull_request\nconcurrency: {{ group: x, cancel-in-progress: true }}\njobs:\n  ios:\n    runs-on: macos-latest\n{draft_only}")).unwrap();
+        assert_eq!(judge(&[pr], &none), None);
     }
 }
