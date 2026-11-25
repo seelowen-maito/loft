@@ -176,10 +176,11 @@ public final class LoftStore {
         return true
     }
 
-    /// Clear all: Done on every item that offers it, in one call (the asks stay), then refreshes.
-    public func clearAllNeedsYou() async throws {
+    /// Clear all: Done on the items it was taken from that offer it, in one call (the asks, and anything newer, stay),
+    /// then refreshes.
+    public func clearAllNeedsYou(_ c: NeedsYouClearAll) async throws {
         let api = try requireWrite()
-        try await api.needsYouRequest(method: "POST", path: NeedsYouClearAll.path, body: nil)
+        try await api.needsYouRequest(method: "POST", path: NeedsYouClearAll.path, body: .object(["ids": .array(c.ids.map { .string($0) })]))
         await refreshNeedsYou()
     }
 

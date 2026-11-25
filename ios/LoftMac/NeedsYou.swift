@@ -6,7 +6,8 @@ import SwiftUI
 struct NeedsYouScreen: View {
     @Environment(LoftStore.self) private var store
     @Environment(MacNav.self) private var nav
-    @State private var confirmingClear = false
+    /// Clear all's items, taken when its confirm opens: one that arrives while it's up stays.
+    @State private var clearing: NeedsYouClearAll?
     @State private var clearError: String?
 
     var body: some View {
@@ -49,21 +50,22 @@ struct NeedsYouScreen: View {
         .overlay(alignment: .top) { NeedsYouNotice().padding(.top, 8) }
         .navigationTitle("Needs you")
         .toolbar {
-            // Clear all: every item with Done, after a confirm; hidden when there's nothing to clear.
+            // Clear all: every item shown with Done, after a confirm; hidden when there's nothing to clear.
             if clearAll.clear > 0 {
-                Button(clearAll.label) { confirmingClear = true }
+                Button(clearAll.label) { clearing = clearAll }
                     .accessibilityIdentifier("needsYouClearAll")
             }
             Button { Task { await store.refreshNeedsYou() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                 .keyboardShortcut("r")
         }
-        .confirmationDialog(clearAll.question, isPresented: $confirmingClear) {
+        .confirmationDialog(clearing?.question ?? "", isPresented: Binding(get: { clearing != nil }, set: { if !$0 { clearing = nil } }),
+                            presenting: clearing) { taken in
             Button("Clear all", role: .destructive) {
                 Task {
-                    do { try await store.clearAllNeedsYou() } catch { clearError = error.localizedDescription }
+                    do { try await store.clearAllNeedsYou(taken) } catch { clearError = error.localizedDescription }
                 }
             }
-        } message: {
+        } message: { _ in
             Text("Each one is marked Done and leaves the list, on every device.")
         }
         .alert("Couldn't clear", isPresented: Binding(get: { clearError != nil }, set: { if !$0 { clearError = nil } })) {

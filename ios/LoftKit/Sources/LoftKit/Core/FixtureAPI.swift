@@ -935,7 +935,9 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             return
         }
         if path == NeedsYouClearAll.path {
-            let ids = try await needsYou().items.filter(\.canDismiss).map(\.id)
+            guard case .array(let a)? = body?["ids"] else { throw APIError.server(status: 400, message: "ids is required.") }
+            let shown = Set(a.compactMap(\.stringValue))
+            let ids = try await needsYou().items.filter { $0.canDismiss && shown.contains($0.id) }.map(\.id)
             _ = locked { needsYouDone.formUnion(ids) }
             return
         }

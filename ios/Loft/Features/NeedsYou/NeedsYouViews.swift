@@ -36,7 +36,8 @@ struct NeedsYouListView: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @State private var fresh: Set<String> = []
-    @State private var confirmingClear = false
+    /// Clear all's items, taken when its confirm opens: one that arrives while it's up stays.
+    @State private var clearing: NeedsYouClearAll?
     @State private var clearError: String?
     var focus: String?
 
@@ -80,20 +81,21 @@ struct NeedsYouListView: View {
         .onChange(of: scenePhase) { Task { await markSeen() } }
     }
 
-    /// Clear all: every item with Done, after a confirm; hidden when there's nothing to clear.
+    /// Clear all: every item shown with Done, after a confirm; hidden when there's nothing to clear.
     @ToolbarContentBuilder private var clearAllButton: some ToolbarContent {
         let c = NeedsYouClearAll(store.needsYou?.items ?? [])
         if c.clear > 0 {
             ToolbarItem(placement: .topBarTrailing) {
-                Button(c.label) { confirmingClear = true }
+                Button(c.label) { clearing = c }
                     .accessibilityIdentifier("needsYouClearAll")
-                    .confirmationDialog(c.question, isPresented: $confirmingClear, titleVisibility: .visible) {
+                    .confirmationDialog(clearing?.question ?? "", isPresented: Binding(get: { clearing != nil }, set: { if !$0 { clearing = nil } }),
+                                        titleVisibility: .visible, presenting: clearing) { taken in
                         Button("Clear all", role: .destructive) {
                             Task {
-                                do { try await store.clearAllNeedsYou() } catch { clearError = error.localizedDescription }
+                                do { try await store.clearAllNeedsYou(taken) } catch { clearError = error.localizedDescription }
                             }
                         }
-                    } message: {
+                    } message: { _ in
                         Text("Each one is marked Done and leaves the list, on every device.")
                     }
                     .alert("Couldn't clear", isPresented: Binding(get: { clearError != nil }, set: { if !$0 { clearError = nil } })) {
