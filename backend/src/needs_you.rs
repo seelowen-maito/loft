@@ -714,7 +714,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     // opened here (they can be merged from the app), then the user's other ready PRs and review
     // requests found on GitHub (github_inbox).
     let mut seen_prs: HashSet<(String, i64)> = HashSet::new();
-    for p in prs {
+    for p in &prs {
         let checks = &p.checks;
         let n = |k: &str| checks[k].as_i64().unwrap_or(0);
         let ready = p.state == "open" && !p.draft && p.mergeable == Some(true) && ["clean", "unstable", "has_hooks"].contains(&p.mergeable_state.as_str()) && n("failed") == 0 && n("pending") == 0;
@@ -745,6 +745,28 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             push: ("Ready to merge".to_string(), format!("{}#{}: {}", p.slug, p.number, p.title)),
             project: Some(repo_name.clone()),
             pr: Some(pr_fields(&p.slug, &repo_name, p.number, &p.title, &p.url, &p.author, if n("total") > 0 { "passing" } else { "none" }, false)),
+            id,
+        });
+    }
+    // Open PRs that changed a GitHub Actions workflow or action: pushed to a branch of the repo, it runs with the repo's
+    // secrets, so the user checks it (#701). One item per PR and change: a later revert doesn't hide it, and a dismissed
+    // one comes back when the workflows change again.
+    for p in prs.iter().filter(|p| p.state == "open" && !p.gone && p.changes_workflows == Some(true)) {
+        let id = format!("pr_workflows:{}:{}", p.id, p.workflows_key);
+        items.push(Item {
+            kind: "pr_workflows",
+            urgency: 2,
+            title: text(&format!("{}#{}: {}", p.slug, p.number, p.title), MAX_TITLE),
+            reason: text("It changed .github/workflows/ or .github/actions/: its CI may already have run with the repo's secrets.", MAX_REASON),
+            text: text("A workflow or action changed on a branch of the repo runs with the repo's secrets as soon as it's pushed. Read the change and its Actions runs on GitHub; if it shouldn't run, cancel the runs and close the PR.", MAX_TEXT),
+            agent: name(&p.agent_id),
+            task_id: None,
+            created_at: p.created_at.clone(),
+            links: vec![json!({ "label": "Pull request", "url": p.url })],
+            actions: vec![json!({ "kind": "open", "label": "Open on GitHub", "target": { "url": format!("{}/files", p.url) } }), dismiss(&id)],
+            push: ("A PR changes workflows".to_string(), format!("{}#{}: {}", p.slug, p.number, p.title)),
+            project: Some(p.slug.rsplit('/').next().unwrap_or(&p.slug).to_string()),
+            pr: None,
             id,
         });
     }
@@ -1041,10 +1063,10 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     PushItem {
         id: i.id.clone(),
         // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck", and an owner's
-        // Actions quota running out stops its Deliveries' CI, so it goes with "delivery_stalled".
+        // Actions quota running out stops its Deliveries' CI, so it goes with "delivery_stalled", like a PR changing workflows.
         kind: match i.kind {
             "mac_access" => "stuck",
-            "actions_quota" => "delivery_stalled",
+            "actions_quota" | "pr_workflows" => "delivery_stalled",
             k => k,
         },
         urgency: i.urgency,

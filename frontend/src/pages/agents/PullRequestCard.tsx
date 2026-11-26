@@ -169,6 +169,12 @@ export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number
         </div>
       </div>
 
+      {pr.state === "open" && pr.changes_workflows && (
+        <Callout tone="warn" icon={<AlertTriangle />} className="mx-4 mb-3">
+          It changed <code className="font-mono">.github/workflows/</code> or <code className="font-mono">.github/actions/</code>: on a branch of the repo those run with its secrets as soon as they're pushed, so its CI may already have run. Read the change and its Actions runs.
+        </Callout>
+      )}
+
       {/* merge box */}
       <div className="flex flex-wrap items-center gap-3 border-t border-line bg-ink-950/50 px-4 py-3">
         <div className={cx("flex min-w-0 flex-1 basis-48 items-start gap-2", TONE[m.tone])}>

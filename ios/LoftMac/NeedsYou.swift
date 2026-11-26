@@ -116,6 +116,12 @@ struct NeedsYouRow: View {
                 .lineLimit(showsText ? nil : 4)
                 .font(showsText ? .body.monospaced() : nil)
                 .textSelection(.enabled)
+            if item.changesWorkflows {
+                Label(WorkflowWarning.text, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Theme.attentionInk)
+                    .accessibilityIdentifier("workflowWarning")
+            }
             if item.type == "permission", let request = store.permissions.first(where: { "permission:\($0.id)" == item.id }) {
                 PermissionExplainerRow(request: request)
             }

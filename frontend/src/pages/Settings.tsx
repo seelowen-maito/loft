@@ -91,6 +91,7 @@ function GithubUsage() {
             </div>
           ))}
           <p className="text-[11.5px] text-fg-3">The limit is per GitHub account, so the agents' own <code className="font-mono">gh</code> commands use it too.</p>
+          <WorkflowScope scopes={b.scopes} />
           {rows.length > 0 && (
             <table className="w-full text-[12.5px]">
               <thead>
@@ -115,6 +116,25 @@ function GithubUsage() {
       )}
       <ActionsQuotas />
     </SettingsCard>
+  );
+}
+
+/** Whether Loft's own GitHub token can push changes to `.github/workflows/` (the `workflow` scope), which run with a
+ *  repo's secrets once pushed to one of its branches. Git pushing over SSH or another credential isn't limited by it. */
+function WorkflowScope({ scopes }: { scopes?: string[] | null }) {
+  if (scopes === undefined) return null;
+  const code = (s: string) => <code className="font-mono">{s}</code>;
+  return (
+    <p className="text-[12.5px] text-fg-2">
+      {scopes === null ? (
+        <>Workflows: GitHub lists no scopes for Loft's token (fine-grained or app), so check its Workflows permission on GitHub.</>
+      ) : scopes.includes("workflow") ? (
+        <>Workflows: Loft's token has the {code("workflow")} scope, so it can push changes to {code(".github/workflows/")}.</>
+      ) : (
+        <>Workflows: Loft's token has no {code("workflow")} scope, so it can't push changes to {code(".github/workflows/")} itself.</>
+      )}{" "}
+      Git pushes over SSH or with another credential aren't limited by it. Loft flags a PR that changes workflows or actions.
+    </p>
   );
 }
 

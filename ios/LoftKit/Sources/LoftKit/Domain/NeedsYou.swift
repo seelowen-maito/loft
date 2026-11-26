@@ -57,6 +57,8 @@ public struct NeedsYouItem: Codable, Hashable, Identifiable {
     }
 
     public var isPullRequest: Bool { pr != nil || type.hasPrefix("pr_") }
+    /// A PR that changes CI workflows (`pr_workflows`): shown with the warning, never folded into its project.
+    public var changesWorkflows: Bool { type == "pr_workflows" }
 
     /// Answerable by typing (a reply, an interview answer, a task comment).
     public var answerAction: NeedsYouAction? { actions.first { $0.kind == "answer" } }
@@ -161,7 +163,7 @@ public enum NeedsYouSection: Identifiable, Hashable {
 
     public static func build(_ items: [NeedsYouItem]) -> [NeedsYouSection] {
         func project(_ i: NeedsYouItem) -> String? {
-            guard i.isPullRequest else { return nil }
+            guard i.isPullRequest, !i.changesWorkflows else { return nil }
             let p = (i.pr?.project ?? i.pr?.repo.map { String($0.split(separator: "/").last ?? "") } ?? i.project)?.trimmingCharacters(in: .whitespaces)
             return p?.isEmpty == false ? p : nil
         }

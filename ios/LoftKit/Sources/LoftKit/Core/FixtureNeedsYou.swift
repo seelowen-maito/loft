@@ -426,6 +426,28 @@ public enum FixtureNeedsYou {
 }
 """#
 
+    /// `-fixture-pr-workflows`: a PR that changed `.github/workflows/`, as the server words it (#701).
+    public static let prWorkflows = #"""
+{
+ "actions": [
+  { "kind": "open", "label": "Open on GitHub", "target": { "url": "https://github.com/octo/loft/pull/214/files" } },
+  { "body": {}, "kind": "dismiss", "label": "Done", "method": "POST", "path": "/api/needs-you/pr_workflows%3Apr1%3Aabc123/dismiss" }
+ ],
+ "age_seconds": 120,
+ "agent": { "id": "be", "name": "Backend Agent" },
+ "created_at": "2026-11-26T09:00:00+00:00",
+ "id": "pr_workflows:pr1:abc123",
+ "links": [{ "label": "Pull request", "url": "https://github.com/octo/loft/pull/214" }],
+ "project": "loft",
+ "reason": "It changed .github/workflows/ or .github/actions/: its CI may already have run with the repo's secrets.",
+ "task_id": null,
+ "text": "A workflow changed on a branch of the repo runs with the repo's secrets. Read the workflow change on GitHub; if it shouldn't run, close the PR or cancel its run there.",
+ "title": "octo/loft#214: Settings endpoints",
+ "type": "pr_workflows",
+ "urgency": 2
+}
+"""#
+
     /// `-fixture-disk-low`: under 20 GB free, as the server words it.
     public static let diskLow = #"""
 {

@@ -723,10 +723,13 @@ async fn set_tool(state: &AppState, me: &Agent, args: &Value) -> Result<String, 
     Ok(format!("Saved, as changed by you now.\n{}", tool_text(state, &project)))
 }
 
-/// The CI mode the user answered in `me`'s grill, saved when its spec is published: the user gave it, so any
-/// grilling agent saves it, not only the Lead, with `me` as who changed it.
+/// The CI mode the user answered in `me`'s grill, saved when its spec is published, with `me` as who changed it:
+/// by the Lead, or by another agent only when its running grill on a private repo has the user's answer naming it.
 pub async fn grill_ci_mode(state: &AppState, me: &Agent, mode: &str) -> Result<String, String> {
     let project = me.project.trim().to_string();
+    if me.role != "lead" && !crate::grill::answered_ci_mode(state, &me.id, &project, mode) {
+        return Err(format!("no answer in your grill chose `{mode}`, and only the Lead changes Project settings otherwise."));
+    }
     save(state, &project, CI_MODE, &json!(mode), Some(me)).await?;
     Ok(project)
 }
