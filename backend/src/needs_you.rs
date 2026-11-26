@@ -1086,11 +1086,12 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
     Ok(Json(json!({ "ok": true })))
 }
 
-/// `POST /api/needs-you/dismiss-all`: Done on every item that offers it, in one call; asks without Done stay.
-/// Returns how many it cleared.
-pub async fn dismiss_all(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+/// `POST /api/needs-you/dismiss-all` with `{ "ids": [...] }`: Done on those of the items the client showed that still
+/// offer it, in one call. An item that arrived since, or that is an ask without Done, stays. Returns how many it cleared.
+pub async fn dismiss_all(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let shown: HashSet<&str> = body["ids"].as_array().ok_or_else(|| crate::api::bad("ids is required."))?.iter().filter_map(Value::as_str).collect();
     let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let clearable = |i: &Item| i.actions.iter().any(|a| a["kind"] == "dismiss");
+    let clearable = |i: &Item| shown.contains(i.id.as_str()) && i.actions.iter().any(|a| a["kind"] == "dismiss");
     let cleared = items.iter().filter(|i| clearable(i)).count();
     for i in items.iter().filter(|i| clearable(i)) {
         state.db.dismiss_needs_you(&i.id)?;
@@ -1460,20 +1461,27 @@ mod tests {
         assert!(dismiss_item(State(st.clone()), Path(item(&v, "grill_round")["id"].as_str().unwrap().into())).await.is_err(), "an open round can't be dismissed");
         assert!(dismiss_item(State(st.clone()), Path("question:999999".into())).await.is_err(), "unknown ids are refused");
 
-        // Clear all: every item with Done goes, in one call; the asks without it stay, and it stays cleared.
+        // Clear all: the shown items with Done go, in one call; the asks without it stay, an item the client didn't show
+        // stays too, and what went stays cleared.
         let before = ids(&snapshot(&st).unwrap());
         let asks: Vec<String> = collect(&st).unwrap().iter().filter(|i| !i.actions.iter().any(|a| a["kind"] == "dismiss")).map(|i| i.id.clone()).collect();
         assert!(asks.iter().any(|i| i.starts_with("permission:")) && asks.iter().any(|i| i.starts_with("grill:")), "{asks:?}");
-        let Json(r) = dismiss_all(State(st.clone())).await.unwrap();
+        assert!(dismiss_all(State(st.clone()), Json(json!({}))).await.is_err(), "ids are required");
+        let late = before.iter().find(|i| !asks.contains(i)).unwrap().clone();
+        let shown: Vec<&String> = before.iter().filter(|i| **i != late).collect();
+        let Json(r) = dismiss_all(State(st.clone()), Json(json!({ "ids": shown }))).await.unwrap();
         let after = ids(&snapshot(&st).unwrap());
         assert_eq!(r["cleared"], json!(before.len() - after.len()));
         assert!(r["cleared"].as_u64().unwrap() > 0);
         let mut left = after.clone();
         left.sort();
         let mut want = asks.clone();
+        want.push(late.clone());
         want.sort();
-        assert_eq!(left, want, "only the asks without Done stay");
-        assert_eq!(dismiss_all(State(st.clone())).await.unwrap().0["cleared"], json!(0), "nothing left to clear");
+        assert_eq!(left, want, "only the asks without Done and the unshown item stay");
+        let Json(r) = dismiss_all(State(st.clone()), Json(json!({ "ids": [late] }))).await.unwrap();
+        assert_eq!(r["cleared"], json!(1));
+        assert_eq!(dismiss_all(State(st.clone()), Json(json!({ "ids": before }))).await.unwrap().0["cleared"], json!(0), "nothing left to clear");
     }
 
     #[test]
