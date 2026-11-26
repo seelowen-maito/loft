@@ -1230,7 +1230,7 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
         )}
       >
         <Wrench className={cx("size-3.5 shrink-0", pending ? "animate-pulse-soft text-accent" : isErr ? "text-bad" : "text-fg-3")} />
-        <span className="shrink-0 font-mono text-[11.5px] text-fg-2">{shortName}</span>
+        <span className="max-w-[60%] shrink-0 truncate font-mono text-[11.5px] text-fg-2" title={name}>{shortName}</span>
         <span className="truncate text-[12.5px] text-fg-3">{use.content}</span>
         {use.meta?.subagent && <span className="chip ml-1 shrink-0 py-0 text-[10px]">subagent</span>}
         <ChevronRight className={cx("ml-auto size-3 shrink-0 text-fg-3 transition", open && "rotate-90")} />

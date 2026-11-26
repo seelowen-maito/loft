@@ -44,16 +44,16 @@ export default function SimulatorPage() {
       <div className="flex w-full items-center gap-3">
         <h1 className="text-[15px] font-medium tracking-tight">Simulator</h1>
         {data && data.devices.length > 1 && (
-          <select className="input ml-auto w-auto" aria-label="Device" value={device?.udid} onChange={(e) => pick(e.target.value)}>
+          <select className="input ml-auto w-auto min-w-0 max-w-full" aria-label="Device" value={device?.udid} onChange={(e) => pick(e.target.value)}>
             {data.devices.map((d) => (
               <option key={d.udid} value={d.udid}>{label(d)}</option>
             ))}
           </select>
         )}
-        {data?.devices.length === 1 && device && <span className="ml-auto font-mono text-[11px] text-fg-3">{label(device)}</span>}
+        {data?.devices.length === 1 && device && <span className="ml-auto min-w-0 truncate font-mono text-[11px] text-fg-3">{label(device)}</span>}
       </div>
       {data === null ? (
-        <div className="skeleton aspect-[9/19.5] h-full max-h-[75vh] rounded-[2.5rem]" />
+        <div className="skeleton aspect-[9/19.5] h-full max-h-[75vh] max-w-full rounded-[2.5rem]" />
       ) : data.error ? (
         <p className="text-fg-3">{data.error}</p>
       ) : !device ? (
