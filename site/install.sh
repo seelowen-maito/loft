@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# loft installer:  curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
+# loft installer:  curl -fsSL https://get-loft.com/install.sh | bash
 # Downloads loft as a git checkout (so auto-update keeps working), then hands off to setup.sh.
 # Safe to re-run: an existing install is updated in place.
 #
@@ -11,7 +11,7 @@
 # Everything runs inside main, so a partially downloaded script does nothing.
 set -uo pipefail
 
-INSTALL_CMD="curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash"
+INSTALL_CMD="curl -fsSL https://get-loft.com/install.sh | bash"
 
 main() {
   local dir=${LOFT_DIR:-$HOME/loft} repo=${LOFT_REPO:-https://github.com/seelowen-maito/loft.git} branch=${LOFT_BRANCH:-main}
@@ -47,7 +47,7 @@ main() {
     fi
   elif [ -e "$dir" ]; then
     fail "$(pretty "$dir") already exists and isn't a loft checkout"
-    tip "Install somewhere else:  curl -fsSL https://seelowen-maito.github.io/loft/install.sh | LOFT_DIR=~/somewhere/loft bash"
+    tip "Install somewhere else:  curl -fsSL https://get-loft.com/install.sh | LOFT_DIR=~/somewhere/loft bash"
     exit 1
   elif spin "Downloading loft" git clone --quiet --branch "$branch" "$repo" "$dir"; then
     ok "downloaded to $(pretty "$dir") ${D}($(git -C "$dir" rev-parse --short HEAD))${N}"
