@@ -7,7 +7,7 @@ import {
   AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Copy, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, SendHorizontal, Square, Wrench, X,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
+import { cx, fmtInterval, fmtQuiet, fmtSchedule, shortToolName } from "../../lib/format";
 import { Callout, ErrorLine, ResultLine } from "../../components/Callout";
 import { ActionButton } from "../../components/ActionButton";
 import { errorText, useAction } from "../../lib/useAction";
@@ -1219,7 +1219,7 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
   const name: string = use.meta?.name ?? "tool";
   const isErr = result?.meta?.is_error;
   const pending = !result;
-  const shortName = name.startsWith("mcp__loft__") ? name.slice(15) : name.replace(/^mcp__/, "").replace("__", " › ");
+  const shortName = shortToolName(name);
   return (
     <div className="pl-9">
       <button
