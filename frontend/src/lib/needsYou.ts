@@ -158,12 +158,16 @@ export function headline(total: number, fresh: number): string {
   return fresh > 0 ? `${fresh} new · ${total} in all` : `${total} waiting, none new`;
 }
 
-/** What Clear all does: the items that offer Done go, the asks without it stay. */
-export function clearAll(items: NeedsYouItem[]): { clear: number; stay: number; label: string } {
-  const clear = items.filter((i) => i.actions.some((a) => a.kind === "dismiss")).length;
+/** What Clear all does: the items that offer Done go (`ids`, what the call sends), the others stay. */
+export function clearAll(items: NeedsYouItem[]): { ids: string[]; clear: number; stay: number; label: string } {
+  const ids = items.filter((i) => i.actions.some((a) => a.kind === "dismiss")).map((i) => i.id);
+  const clear = ids.length;
   const stay = items.length - clear;
-  return { clear, stay, label: stay > 0 ? `Clear ${clear} · ${stay} ${stay === 1 ? "ask stays" : "asks stay"}` : `Clear ${clear}` };
+  return { ids, clear, stay, label: stay > 0 ? `Clear ${clear} · ${stay} ${stay === 1 ? "needs" : "need"} an answer` : `Clear ${clear}` };
 }
+
+/** The confirm's title for the items Clear all was opened with. */
+export const clearTitle = (n: number) => `Clear ${n} ${n === 1 ? "item" : "items"}?`;
 
 /** Whether a `needs_you` event's ids differ from the items shown, so the page reloads. */
 export function idsChanged(shown: string[], ids: string[]): boolean {

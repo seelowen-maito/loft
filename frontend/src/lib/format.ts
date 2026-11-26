@@ -173,3 +173,9 @@ export type CleanFilter = { agent: string; type: string; deletable: boolean };
 export function filterClean(items: CleanItem[], f: CleanFilter): CleanItem[] {
   return items.filter((i) => (!f.agent || i.agent === f.agent) && (!f.type || cleanType(i) === f.type) && (!f.deletable || !cleanStatus(i, 0).locked));
 }
+
+/** A tool call's short name: Loft's own tools without their `mcp__loft__` prefix, other servers as `server › tool`. */
+export function shortToolName(name: string): string {
+  if (name.startsWith("mcp__loft__")) return name.slice("mcp__loft__".length);
+  return name.replace(/^mcp__/, "").replace("__", " › ");
+}

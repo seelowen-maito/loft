@@ -195,7 +195,7 @@ export default function App() {
   const showSimulator = useShowSimulator();
   const tab = ({ isActive }: { isActive: boolean }) =>
     cx(
-      "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors",
+      "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors max-[21rem]:px-2",
       isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg",
     );
   return (

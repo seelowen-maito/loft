@@ -841,8 +841,8 @@ export const api = {
   needsYouList: () => req<NeedsYouList>("GET", "/needs-you"),
   /** Marks the Needs you items shown as seen, for every client: the counter stops counting them. */
   needsYouSeen: (ids: string[]) => req<{ ok: boolean; new: number; new_urgent: number }>("POST", "/needs-you/seen", { ids }),
-  /** Done on every item that offers it, in one call; returns how many it cleared. */
-  needsYouClearAll: () => req<{ ok: boolean; cleared: number }>("POST", "/needs-you/dismiss-all"),
+  /** Done on these items (the ones shown) that still offer it, in one call; returns how many it cleared. */
+  needsYouClearAll: (ids: string[]) => req<{ ok: boolean; cleared: number }>("POST", "/needs-you/dismiss-all", { ids }),
   /** Sends one of a Needs you item's actions as the item gives it; its path starts with `/api`. */
   needsYouCall: (a: NeedsYouAction, body?: Record<string, unknown>) =>
     req<{ delivered_to?: unknown }>(a.method ?? "POST", (a.path ?? "").replace(/^\/api(?=\/)/, ""), body ?? a.body ?? {}),

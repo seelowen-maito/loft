@@ -934,6 +934,13 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             _ = locked { needsYouSeen.formUnion(ids) }
             return
         }
+        if path == NeedsYouClearAll.path {
+            guard case .array(let a)? = body?["ids"] else { throw APIError.server(status: 400, message: "ids is required.") }
+            let shown = Set(a.compactMap(\.stringValue))
+            let ids = try await needsYou().items.filter { $0.canDismiss && shown.contains($0.id) }.map(\.id)
+            _ = locked { needsYouDone.formUnion(ids) }
+            return
+        }
         let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
         guard let item = list.items.first(where: { $0.actions.contains { $0.path == path } }) else { return }
         _ = locked { needsYouDone.insert(item.id) }

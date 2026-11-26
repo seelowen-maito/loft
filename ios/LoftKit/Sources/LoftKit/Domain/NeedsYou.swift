@@ -72,6 +72,27 @@ public struct NeedsYouItem: Codable, Hashable, Identifiable {
     }
 }
 
+/// Clear all (POST /api/needs-you/dismiss-all with `ids`): the items shown that offer Done go, the asks without it
+/// stay. The web's `clearAll()` rule; the button is hidden when `clear` is 0. Taken when the confirm opens, so an item
+/// that arrives while it's up isn't cleared.
+public struct NeedsYouClearAll: Equatable {
+    public static let path = "/api/needs-you/dismiss-all"
+    /// The items to clear: those shown that offer Done.
+    public let ids: [String]
+    public let stay: Int
+
+    public init(_ items: [NeedsYouItem]) {
+        ids = items.filter(\.canDismiss).map(\.id)
+        stay = items.count - ids.count
+    }
+
+    public var clear: Int { ids.count }
+    /// "Clear 14", or "Clear 14 · 2 need an answer".
+    public var label: String { stay > 0 ? "Clear \(clear) · \(stay) \(stay == 1 ? "needs" : "need") an answer" : "Clear \(clear)" }
+    /// The confirm's question: "Clear 14 items?"
+    public var question: String { "Clear \(clear) \(clear == 1 ? "item" : "items")?" }
+}
+
 /// The seen mark (POST /api/needs-you/seen), shared with the web: opening the list marks what it shows.
 public enum NeedsYouSeen {
     /// The items shown that no client has seen yet: the ones to mark.

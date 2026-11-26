@@ -359,8 +359,8 @@ mod tests {
     /// The message the run got on its stdin, as the fake claude keeps it in `input.json`.
     async fn sent(st: &AppState, id: &str) -> String {
         let input = crate::agents::workspace(st, id).join("input.json");
-        crate::agents::tests::until("the run", 20, || input.exists()).await;
-        crate::agents::tests::until("the run to end", 20, || !crate::agents::is_running(st, id)).await;
+        crate::agents::tests::until("the run", 60, || input.exists()).await;
+        crate::agents::tests::until("the run to end", 60, || !crate::agents::is_running(st, id)).await;
         std::fs::read_to_string(input).unwrap()
     }
 

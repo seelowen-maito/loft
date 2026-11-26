@@ -4,7 +4,7 @@ import { AlertCircle, ArrowRight, Brain, ChevronDown, ChevronUp, GitMerge, GitPu
 import { api, type AgentSummary, type AgentsSummary } from "../lib/api";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { byActivity, cardsPerRow } from "../lib/agentRow";
-import { cx, fmtSchedule } from "../lib/format";
+import { cx, fmtSchedule, shortToolName } from "../lib/format";
 import { dayLabel, relTime } from "../lib/time";
 import { costChange, exactDollars, wholeDollars } from "../lib/usage";
 import { NEEDS_YOU_LABEL } from "../lib/taskStatus";
@@ -22,10 +22,6 @@ function onResize(cb: () => void) {
 
 function sum(a: number[]) {
   return a.reduce((x, y) => x + y, 0);
-}
-
-function toolName(n: string) {
-  return n.startsWith("mcp__loft__") ? n.slice(15) : n.replace(/^mcp__/, "").replace("__", " › ");
 }
 
 /** Stacked daily runs: on request (bottom) + autonomous (top), 2px gap between segments. */
@@ -138,7 +134,7 @@ function AgentCard({ s, index }: { s: AgentSummary; index: number }) {
         </span>
         {s.top_tools.slice(0, 2).map(([n, k]) => (
           <span key={n} className="chip">
-            <Wrench className="size-3" /> {toolName(n)} <span className="text-fg-3">×{k}</span>
+            <Wrench className="size-3" /> {shortToolName(n)} <span className="text-fg-3">×{k}</span>
           </span>
         ))}
       </div>
