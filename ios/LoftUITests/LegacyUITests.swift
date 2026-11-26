@@ -333,6 +333,7 @@ final class LoftLegacyUITests: XCTestCase {
         let app = launch()
         let talk = app.buttons["talkButton"]
         XCTAssertTrue(talk.appears(timeout: 5))
+        XCTAssertTrue(app.navigationBars.buttons["talkButton"].exists, "in the top bar, clear of the Needs you buttons (#710)")
         talk.tap()
         let close = app.buttons["voiceClose"]
         XCTAssertTrue(close.appears(timeout: 5))
