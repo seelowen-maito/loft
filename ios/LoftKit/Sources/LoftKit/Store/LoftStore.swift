@@ -176,6 +176,14 @@ public final class LoftStore {
         return true
     }
 
+    /// Clear all: Done on the items it was taken from that offer it, in one call (the asks, and anything newer, stay),
+    /// then refreshes.
+    public func clearAllNeedsYou(_ c: NeedsYouClearAll) async throws {
+        let api = try requireWrite()
+        try await api.needsYouRequest(method: "POST", path: NeedsYouClearAll.path, body: .object(["ids": .array(c.ids.map { .string($0) })]))
+        await refreshNeedsYou()
+    }
+
     public func agent(_ id: String?) -> Agent? { id.flatMap { id in agents.first { $0.id == id } } }
     public func task(_ id: String?) -> HBTask? { id.flatMap { id in tasks.first { $0.id == id } } }
 
