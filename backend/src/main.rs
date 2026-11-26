@@ -1,3 +1,4 @@
+mod actions;
 mod agents;
 mod apns;
 mod api;
@@ -28,6 +29,7 @@ mod mcp;
 mod mentions;
 mod mirror;
 mod processes;
+mod project_settings;
 mod prs;
 mod push;
 mod signin;
@@ -53,6 +55,7 @@ mod testdir;
 mod updater;
 mod uploads;
 mod voice;
+mod workflows;
 mod usage;
 
 use std::path::PathBuf;
@@ -96,6 +99,11 @@ fn api_routes() -> Router<AppState> {
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
+        .route("/project-settings", get(project_settings::get).put(project_settings::put))
+        .route("/project-settings/branches", get(project_settings::branches))
+        .route("/project-settings/merge-methods", get(project_settings::merge_methods))
+        .route("/project-settings/reviewer", post(project_settings::create_reviewer))
+        .route("/project-settings/apply-team", post(project_settings::apply_team))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
@@ -177,6 +185,9 @@ fn api_routes() -> Router<AppState> {
         .route("/pull-requests/{id}/refresh", post(api::refresh_pull_request))
         .route("/pull-requests/{id}/merge", post(api::merge_pull_request))
         .route("/github/budget", get(github::budget))
+        .route("/actions/owners", get(actions::owners_get))
+        .route("/actions/owners/{owner}", put(actions::set_quota))
+        .route("/actions/project", get(actions::project))
         // Herdr UI: Loft's agents in the Herdr terminal multiplexer (herdr.rs, herdr/ at the root).
         .route("/herdr", get(herdr::status))
         .route("/herdr/setup", post(herdr::setup_local))
@@ -266,8 +277,9 @@ async fn serve() -> anyhow::Result<()> {
     state.rt.lock().unwrap().workspaces_not_moved = not_moved;
     setup::ensure_loft(&state);
     {
-        let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();
-        if let Err(e) = state.settings.migrate_github_settings(&with_repo) {
+        // GitHub publishing moved from Settings to each project's Project settings: the projects there now inherit it.
+        let projects: Vec<String> = repos::list(&state, false).await.into_iter().map(|r| r.name).collect();
+        if let Err(e) = project_settings::migrate_github_settings(&state, &projects) {
             tracing::warn!("GitHub settings migration: {e}");
         }
     }
@@ -291,6 +303,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || tailnet::check_https(port));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(delivery::ci_poller(state.clone()));
+    tokio::spawn(actions::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
     tokio::spawn(simulator::tidier(state.clone()));

@@ -1641,7 +1641,11 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    crate::sccache::apply(&mut cmd, state.settings.dir());
+    if crate::project_settings::sccache_on(state, &a.project) {
+        crate::sccache::apply(&mut cmd, state.settings.dir());
+    } else {
+        crate::sccache::remove(&mut cmd);
+    }
     // Its own Simulator device, once it has one (an earlier run asked for it).
     match state.db.agent_device(&a.id)? {
         Some(udid) => cmd.env(crate::simulator::DEVICE_VAR, udid),
@@ -2608,6 +2612,28 @@ pub(crate) mod tests {
         let out = git(&ws.join("repo"), &["rev-parse", "--show-toplevel"]);
         assert!(out.status.success(), "{out:?}");
         assert_eq!(std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), std::fs::canonicalize(ws.join("repo")).unwrap());
+    }
+
+    #[test]
+    fn a_project_with_sccache_off_runs_its_agents_without_it() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Worker");
+        a.project = "rusty".into();
+        let env = |cmd: &Command, k: &str| cmd.as_std().get_envs().find(|(n, _)| *n == k).map(|(_, v)| v.map(|v| v.to_owned()));
+        // On (Loft's default): the shared cache, once sccache is installed.
+        let cmd = build_command(&st, &a, false).unwrap();
+        if crate::sccache::installed().is_some() {
+            assert_eq!(env(&cmd, "SCCACHE_DIR"), Some(Some(crate::sccache::cache_dir(st.settings.dir()).into_os_string())));
+        }
+        // Off: none of it, even when Loft's own environment has it.
+        crate::project_settings::set(&st, "rusty", crate::project_settings::SCCACHE, &serde_json::json!("off"), None).unwrap();
+        let cmd = build_command(&st, &a, false).unwrap();
+        assert_eq!((env(&cmd, "SCCACHE_DIR"), env(&cmd, "SCCACHE_CACHE_SIZE")), (Some(None), Some(None)));
+        assert!(!matches!(env(&cmd, "RUSTC_WRAPPER"), Some(Some(_))));
+        // Another project's agents keep it.
+        a.project = "other".into();
+        let cmd = build_command(&st, &a, false).unwrap();
+        assert_ne!(env(&cmd, "SCCACHE_DIR"), Some(None));
     }
 
     #[test]

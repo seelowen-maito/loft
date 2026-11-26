@@ -48,11 +48,11 @@ pub(crate) fn log(state: &AppState, t: &Task, author: &str, kind: &str, text: &s
     }
     // A comment on a mirrored issue waits for the user's approval before it reaches GitHub (mirror.rs).
     // Progress notes, status entries, private notes and the note handed over with the work stay in Loft,
-    // whatever the approval mode.
+    // whatever the project's approval mode.
     let mut auto = false;
     let loft_only = meta["private"] == true || meta["handoff"] == true || meta["loft_only"] == true;
     if kind == "comment" && t.github.is_some() && author != crate::mirror::FROM_GITHUB && !loft_only {
-        auto = match state.settings.get().approval_mode() {
+        auto = match crate::project_settings::comment_approval(state, &t.project).as_str() {
             "all" => true,
             "own" => author == "user",
             _ => false,

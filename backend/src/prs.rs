@@ -123,6 +123,7 @@ async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
         }
         Err(e) => pr.error = Some(e.to_string()),
     }
+    set_merge_method(state, &mut pr).await;
     pr.checked_at = Some(now());
     state.db.save_pull_request(&pr)?;
     emit(state, &pr);
@@ -153,15 +154,52 @@ fn apply(pr: &mut PullRequest, v: &Value) {
     pr.merged_by = v["merged_by"]["login"].as_str().map(Into::into);
     pr.merged_at = v["merged_at"].as_str().map(Into::into);
     pr.closed_at = v["closed_at"].as_str().map(Into::into);
-    let repo = &v["base"]["repo"];
-    let allowed = |k: &str| repo[k].as_bool().unwrap_or(true);
     pr.node_id = s("node_id");
     pr.labels = v["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect();
-    pr.merge_methods = [("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"), ("rebase", "allow_rebase_merge")]
+    pr.merge_methods = merge_methods_of(&v["base"]["repo"]);
+}
+
+/// The merge methods a repo allows, from GitHub's REST answer for it (a method it doesn't say is allowed).
+pub(crate) fn merge_methods_of(repo: &Value) -> Vec<String> {
+    let allowed = |k: &str| repo[k].as_bool().unwrap_or(true);
+    [("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"), ("rebase", "allow_rebase_merge")]
         .iter()
         .filter(|(_, k)| allowed(k))
         .map(|(m, _)| m.to_string())
-        .collect();
+        .collect()
+}
+
+/// The project in the projects folder whose GitHub repo is `slug`, when there is one.
+async fn project_of(state: &AppState, slug: &str) -> Option<String> {
+    let known = crate::repos::list(state, false).await;
+    if let Some(r) = known.iter().find(|r| r.github.as_deref().is_some_and(|g| g.eq_ignore_ascii_case(slug))) {
+        return Some(r.name.clone());
+    }
+    // Not in the list read a while ago: the folder named after the repo, when its origin is that repo.
+    let name = slug.rsplit('/').next()?;
+    let theirs = crate::repos::github_repo(state, name).await.ok()?;
+    theirs.eq_ignore_ascii_case(slug).then(|| name.to_string())
+}
+
+/// Sets the method the PR's Merge uses: its project's merge method, as far as the repo allows it.
+async fn set_merge_method(state: &AppState, pr: &mut PullRequest) {
+    let project = project_of(state, &pr.slug).await.unwrap_or_default();
+    pr.merge_method = crate::project_settings::merge_method(state, &project, &pr.merge_methods);
+}
+
+/// After `project`'s merge method changed: its open PRs' Merge uses the new one.
+pub async fn merge_method_changed(state: &AppState, project: &str) {
+    let Ok(prs) = state.db.list_pull_requests(None) else { return };
+    for mut pr in prs.into_iter().filter(|p| p.state == "open" && !p.gone) {
+        if project_of(state, &pr.slug).await.as_deref() != Some(project) {
+            continue;
+        }
+        let before = pr.merge_method.clone();
+        set_merge_method(state, &mut pr).await;
+        if pr.merge_method != before && state.db.save_pull_request(&pr).is_ok() {
+            emit(state, &pr);
+        }
+    }
 }
 
 /// What one check of a commit says: a check run, by its status and conclusion, or a legacy commit status, by its state.
@@ -429,8 +467,10 @@ async fn clear_stale_passes(state: &AppState, pr: &mut PullRequest) {
     pr.passes_sha.clear();
 }
 
-pub async fn merge(state: &AppState, id: &str, method: &str) -> Result<PullRequest> {
+/// Merges an open PR with `method`, or with its project's merge method when None.
+pub async fn merge(state: &AppState, id: &str, method: Option<&str>) -> Result<PullRequest> {
     let pr = refresh(state, id).await?;
+    let method = method.or(Some(pr.merge_method.as_str()).filter(|m| !m.is_empty())).unwrap_or("squash");
     if pr.state != "open" {
         bail!("pull request is already {}", pr.state);
     }
@@ -515,6 +555,7 @@ async fn refresh_batch(state: &AppState, prs: &[PullRequest]) -> Result<()> {
             pr.error = None;
             clear_stale_passes(state, &mut pr).await;
             mark_ready_if_due(state, &mut pr).await;
+            set_merge_method(state, &mut pr).await;
         }
         pr.checked_at = Some(now());
         state.db.save_pull_request(&pr)?;

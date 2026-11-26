@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deliveryButtons, deliveryStateLine } from "../src/lib/deliveryState.ts";
+import { actionsMinutesLine, deliveryButtons, deliveryStateLine } from "../src/lib/deliveryState.ts";
 
 const at = (state: string, more: { stall_reason?: string | null; needs_human?: boolean; started?: boolean } = {}) =>
   deliveryStateLine({ state, started: more.started ?? true, stall_reason: more.stall_reason ?? null, needs_human: more.needs_human ?? false });
@@ -40,6 +40,13 @@ test("the server's state line shows as is", () => {
   assert.deepEqual(line({ tone: "blocked", text: "Blocked: a new state." }), { tone: "running", text: "Blocked: a new state." }, "an unknown tone takes running's colour");
   assert.equal(line(null), null);
   assert.equal(deliveryStateLine({ state: "planned", started: false, state_line: { tone: "running", text: "x" } }), null, "not before it started");
+});
+
+test("a Billing block links the owner's billing page", () => {
+  const url = "https://github.com/organizations/octo/settings/billing";
+  const state_line = { tone: "stalled", text: "Stalled: GitHub Actions is blocked by billing." };
+  assert.deepEqual(deliveryStateLine({ state: "stalled", started: true, stall_reason: "billing", state_line, billing_url: url }), { ...state_line, href: url });
+  assert.deepEqual(deliveryStateLine({ state: "stalled", started: true, stall_reason: "no_call", state_line, billing_url: null }), state_line, "another stall links nothing");
 });
 
 test("an older server without a state line gets today's wording", () => {
@@ -87,4 +94,16 @@ test("waiting for CI counts from the Delivery's ci_since and links to the checks
   assert.deepEqual(deliveryStateLine({ ...d, checks_url: null, ci_since: null }, now), { tone: "ci", text: "Waiting for CI on #412, #413" }, "no start time, no checks page: the line alone");
   assert.equal(deliveryStateLine({ ...d, ci_since: "soon" }, now)?.text, "Waiting for CI on #412, #413", "an unreadable time shows no elapsed");
   assert.equal(deliveryStateLine({ ...d, state_line: { tone: "running", text: "Running." } }, now)?.href, undefined, "only waiting for CI links");
+});
+
+test("the Actions minutes its branch spent, once started and only when the server sends them", () => {
+  assert.equal(actionsMinutesLine({ state: "running", started: true, actions_minutes: 12 }), "GitHub Actions: 12 min of jobs so far");
+  assert.equal(actionsMinutesLine({ state: "running", started: true, actions_minutes: 7, actions_weighted: 28 }), "GitHub Actions: 7 min of jobs so far · 28 of the quota (macOS 10×, Windows 2×)");
+  assert.equal(actionsMinutesLine({ state: "ready", started: true, actions_minutes: 7, actions_weighted: 7 }), "GitHub Actions: 7 min of jobs");
+  assert.equal(actionsMinutesLine({ state: "stalled", started: true, actions_minutes: 0 }), "GitHub Actions: 0 min of jobs so far");
+  for (const state of ["ready", "settled", "merged"]) assert.equal(actionsMinutesLine({ state, started: true, actions_minutes: 112 }), "GitHub Actions: 112 min of jobs", state);
+  assert.equal(actionsMinutesLine({ state: "running", started: true, actions_minutes: null }), null);
+  assert.equal(actionsMinutesLine({ state: "running", started: true }), null);
+  assert.equal(actionsMinutesLine({ state: "planned", started: false, actions_minutes: 3 }), null);
+  assert.equal(actionsMinutesLine(null), null);
 });

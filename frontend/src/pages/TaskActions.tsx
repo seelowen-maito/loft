@@ -13,8 +13,9 @@ import { issuePickerOrder, outsideWarning, projectChoices, projectsOf } from "..
 import { MentionMenu } from "../components/MentionMenu";
 import { ActionButton } from "../components/ActionButton";
 import { StartWarning } from "../components/StartWarning";
+import { WorkflowWarnings } from "../components/WorkflowWarnings";
 import { Callout, ErrorLine, ResultLine } from "../components/Callout";
-import { deliveryButtons } from "../lib/deliveryState";
+import { actionsMinutesLine, deliveryButtons } from "../lib/deliveryState";
 import { DeliveryLine } from "../components/DeliveryLine";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { latestOnly } from "../lib/latest";
@@ -166,12 +167,18 @@ function useIssueDelivery(t: Task) {
   return [d, latest.set, reload] as const;
 }
 
-/** Where a started Delivery stands: running, waiting for CI (how long, linked to its checks), stalled (and why), paused, needs you, final review or done. */
+/** Where a started Delivery stands: running, waiting for CI (how long, linked to its checks), stalled (and why), paused, needs you, final review or done,
+ *  the GitHub Actions minutes its branch spent so far, a spec PR Loft put back to draft (or couldn't) when a ticket started, and the tickets
+ *  that passed with no CI run on their commit although the repo has workflows. */
 function DeliveryState({ d }: { d: IssueDelivery | null }) {
+  const minutes = actionsMinutesLine(d);
   return (
     <>
       <DeliveryLine d={d} className="mt-1" />
+      {minutes && <div className="mt-1 text-[12.5px] text-fg-3" data-delivery-minutes>{minutes}</div>}
       {d?.behind && <div className="mt-1 text-[12.5px] text-warn" data-delivery-behind>{d.behind.count} behind {d.behind.base}: the Dev merges it in before submitting.</div>}
+      {d?.draft_again && <div className={`mt-1 text-[12.5px] ${d.draft_again.ok ? "text-fg-3" : "text-warn"}`} data-delivery-draft-again>{d.draft_again.text}</div>}
+      {d?.no_ci?.map((line) => <div key={line} className="mt-1 text-[12.5px] text-warn" data-delivery-no-ci>{line}</div>)}
     </>
   );
 }
@@ -325,6 +332,7 @@ export function SpecDeliveryCard({ task: t }: { task: Task }) {
         <DeliveryButtons d={started} a={r} />
       </div>
       {warn && !started && !!d?.waits_on?.length && <StartWarning waits={d.waits_on} onStart={start} startPending={starting.busy} onCancel={() => setWarn(false)} onStarted={reload} />}
+      {d?.workflows && <WorkflowWarnings check={d.workflows} className="mt-3" />}
       <ResultLine said={r.said} className="mt-2" />
       <ErrorLine error={r.error} className="mt-2" />
       {running.length > 0 && (

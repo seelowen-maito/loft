@@ -63,6 +63,7 @@ pub(crate) fn tools(state: &AppState) -> Value {
     all.as_array_mut().unwrap().extend(crate::planning::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::delivery::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
+    all.as_array_mut().unwrap().extend(crate::project_settings::mcp_tools());
     all
 }
 
@@ -223,7 +224,10 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
         if let Some(r) = match crate::setup::mcp_call(state, &me, name, &args).await {
             None => match crate::planning::mcp_call(state, &me, name, &args).await {
                 None => match crate::delivery::mcp_call(state, &me, name, &args).await {
-                    None => crate::greenfield::mcp_call(state, &me, name, &args).await,
+                    None => match crate::greenfield::mcp_call(state, &me, name, &args).await {
+                        None => crate::project_settings::mcp_call(state, &me, name, &args).await,
+                        r => r,
+                    },
                     r => r,
                 },
                 r => r,

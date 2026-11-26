@@ -14,14 +14,14 @@ const DELIVERY_TONE: Record<DeliveryTone, string> = {
 };
 
 /** A started Delivery's state line. Waiting for CI counts its minutes (re-rendering only this line) and opens the
- *  Checks tab on GitHub. */
+ *  Checks tab on GitHub; a Billing block opens the owner's billing page. */
 export function DeliveryLine({ d, className }: { d: Parameters<typeof deliveryStateLine>[0]; className?: string }) {
   const now = useNow(30_000, d?.state_line?.tone === "ci");
   const line = deliveryStateLine(d, now);
   if (!line) return null;
   const cls = cx("text-[12.5px]", DELIVERY_TONE[line.tone], className);
   return line.href ? (
-    <a href={line.href} target="_blank" rel="noreferrer" className={cx(cls, "inline-flex items-center gap-1 hover:underline")} data-delivery-state={line.tone} title="The CI checks on GitHub">
+    <a href={line.href} target="_blank" rel="noreferrer" className={cx(cls, "inline-flex items-center gap-1 hover:underline")} data-delivery-state={line.tone} title={line.tone === "ci" ? "The CI checks on GitHub" : "The billing page on GitHub"}>
       {line.text} <ExternalLink className="size-3 shrink-0" />
     </a>
   ) : (

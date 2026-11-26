@@ -6,7 +6,7 @@ import { mergeOrder, namedPrs, refLabel, type MergeRow } from "../../lib/prRefs"
 import { isOpen, mergeability } from "../../lib/mergeability";
 import { useAction } from "../../lib/useAction";
 import { ActionButton } from "../../components/ActionButton";
-import { Checks, PullRequestCard, StateBadge, Verdicts, useCatchUp } from "./PullRequestCard";
+import { Checks, PullRequestCard, StateBadge, Verdicts, mergeMethod, mergeTitle, useCatchUp } from "./PullRequestCard";
 
 /** Every tracked pull request, live, for the messages that name them. */
 export const PrsContext = createContext<PullRequest[]>([]);
@@ -41,11 +41,11 @@ function Row({ row: { pr, after }, label }: { row: MergeRow; label: string }) {
   const [confirming, setConfirming] = useState(false);
   const merging = useAction();
   const m = mergeability(pr, after);
-  const method = pr.merge_methods[0] ?? "squash";
+  const method = mergeMethod(pr);
   useCatchUp(pr);
 
   const merge = () => merging.run(async () => {
-    await api.mergePullRequest(pr.id, method);
+    await api.mergePullRequest(pr.id);
     setConfirming(false);
   });
 
@@ -87,7 +87,7 @@ function Row({ row: { pr, after }, label }: { row: MergeRow; label: string }) {
               className="ml-auto inline-flex h-[26px] items-center gap-1.5 rounded-full bg-accent px-3 text-[12.5px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3"
               onClick={() => setConfirming(true)}
               disabled={!m.canMerge}
-              title={m.canMerge ? undefined : m.label}
+              title={m.canMerge ? mergeTitle(pr) : m.label}
               aria-label={`Merge ${label}`}
             >
               <GitMerge className="size-3.5" /> Merge
