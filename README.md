@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://seelowen-maito.github.io/loft/">Website</a> ·
+  <a href="https://get-loft.com">Website</a> ·
   <a href="#install">Install</a> ·
   <a href="#why-loft">Why loft</a>
 </p>
@@ -23,7 +23,7 @@
 **One-line installer**
 
 ```sh
-curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
+curl -fsSL https://get-loft.com/install.sh | bash
 ```
 
 ---
@@ -57,7 +57,7 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 **One-line installer**
 
 ```sh
-curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
+curl -fsSL https://get-loft.com/install.sh | bash
 ```
 
 The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
