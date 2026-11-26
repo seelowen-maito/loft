@@ -67,15 +67,18 @@ function PendingBadge() {
   }, [open]);
   const count = items.length;
   if (!count) return null;
-  const pill = "flex items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2.5 py-1 font-mono text-[11px] text-warn";
+  // Below 2xl it is just the icon with the count on its corner, like the Needs you badge, so the top bar still fits.
+  const pill = "relative flex items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2.5 py-1 font-mono text-[11px] text-warn max-2xl:size-7 max-2xl:justify-center max-2xl:p-0";
+  const ariaLabel = `${count} permission${count > 1 ? "s" : ""} pending`;
   const label = (
     <>
       <ShieldAlert className="size-3.5" />
-      {count}<span className="max-md:hidden"> permission{count > 1 ? "s" : ""} pending</span>
+      <span className="max-2xl:hidden">{count} permission{count > 1 ? "s" : ""} pending</span>
+      <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-warn px-1 text-[9.5px] font-medium leading-none text-ink-950 2xl:hidden">{count}</span>
     </>
   );
   if (count === 1) {
-    return <Link to={items[0].href} className={pill} title={items[0].title}>{label}</Link>;
+    return <Link to={items[0].href} className={pill} title={items[0].title} aria-label={ariaLabel}>{label}</Link>;
   }
   return (
     <div ref={box} className="relative">
@@ -83,6 +86,7 @@ function PendingBadge() {
         type="button"
         className={pill}
         title={`Oldest: ${items[0].title}`}
+        aria-label={ariaLabel}
         aria-expanded={open}
         onClick={() => {
           if (!open) navigate(items[0].href);
@@ -195,7 +199,7 @@ export default function App() {
   const showSimulator = useShowSimulator();
   const tab = ({ isActive }: { isActive: boolean }) =>
     cx(
-      "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors max-[21rem]:px-2",
+      "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors max-lg:px-2 max-[24rem]:px-1.5",
       isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg",
     );
   return (
@@ -206,7 +210,7 @@ export default function App() {
             <Logo />
             <span className="text-[15px] font-medium tracking-tight max-sm:hidden">loft</span>
           </NavLink>
-          <nav className="flex items-center gap-1 rounded-full border border-line bg-ink-900 p-1">
+          <nav className="flex items-center gap-1 rounded-full border border-line bg-ink-900 p-1 max-[24rem]:gap-0 max-[24rem]:p-0.5">
             <NavLink to="/repos" className={tab} aria-label="Repos">
               <GitBranch className="size-3.5" /> <span className="max-md:hidden">Repos</span>
             </NavLink>
@@ -230,14 +234,14 @@ export default function App() {
               </NavLink>
             )}
           </nav>
-          <div className="ml-auto flex items-center gap-4 max-md:gap-3 max-[21rem]:gap-2">
+          <div className="ml-auto flex items-center gap-4 max-lg:gap-2 max-[21rem]:gap-1">
             <button className="rounded-full p-1.5 text-fg-3 transition-colors hover:text-fg" title="Talk to an agent" aria-label="Talk" onClick={() => openTalk()}>
               <Mic className="size-4" />
             </button>
             <PendingBadge />
             <NeedsYouBadge live={live} />
             {/* The meters and the clock don't fit on a phone; the live dot and settings do. */}
-            <div className="flex items-center gap-4 max-lg:hidden">
+            <div className="flex items-center gap-4 max-xl:hidden">
               <UpdateStatus live={live} />
               <UsageMeter live={live} />
               <TempMeter live={live} />
@@ -246,7 +250,7 @@ export default function App() {
               <span className={cx("size-1.5 rounded-full", live ? "bg-good animate-pulse-soft" : "bg-bad")} />
               <span className="max-sm:hidden">{live ? "live" : "offline"}</span>
             </span>
-            <span className="max-lg:hidden">
+            <span className="max-xl:hidden">
               <Clock />
             </span>
             <NavLink to="/settings" title="Settings" className={({ isActive }) => cx("rounded-full p-1.5 transition-colors", isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
