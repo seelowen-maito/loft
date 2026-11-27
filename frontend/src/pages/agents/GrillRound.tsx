@@ -1,20 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, CornerDownLeft, MessageCircle, Send, Sparkles, Wand2 } from "lucide-react";
 import { api, grillError, type GrillQuestion, type GrillSession, type Message } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { NOTE_DRAFT, clearAnswerDrafts, loadAnswerDraft, saveAnswerDraft } from "../../lib/draft";
-import { draftImages, type Attachment } from "../../lib/useDraft";
-import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
+import { NOTE_DRAFT, clearAnswerDrafts } from "../../lib/draft";
 import { AttachmentTile } from "../../components/AttachmentTile";
-import { useAutoGrow } from "../../lib/autoGrow";
-import { useMention } from "../../components/MentionMenu";
 import { questionAnchor } from "../../lib/interview";
 import { ActionButton } from "../../components/ActionButton";
 import { ErrorLine } from "../../components/Callout";
 import { useAction } from "../../lib/useAction";
 import { RoundNote, sendRound } from "./RoundNote";
+import { useDraftField } from "./useDraftField";
 
 type Posted = Pick<GrillQuestion, "id" | "text" | "recommendation" | "from_round">;
 
@@ -87,44 +84,16 @@ type Doing = "accept" | "decide" | "save" | "discuss";
 
 export function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q: GrillQuestion; agentId: string; sessionId: string; round: number }) {
   const written = (q.state === "answered" && !q.accepted) || q.state === "discuss";
-  const saved = q.images ?? [];
-  // A half-typed answer, with its pasted images, is this question's Draft, so it survives switching agents or tabs.
-  // A saved answer keeps showing its text and thumbnails.
-  const [initial] = useState(() => {
-    const d = loadAnswerDraft(sessionId, round, q.id);
-    return d.text || d.images.length > 0 ? d : { text: written ? (q.answer ?? "") : "", images: written ? saved : [] };
-  });
-  const [draft, setDraft] = useState(initial.text);
-  const [attachments, setAttachments] = useState<Attachment[]>(() => draftImages(agentId, initial.images));
+  // A half-typed answer, with its pasted images, is this question's Draft. A saved answer keeps showing its text
+  // and thumbnails, and answers given elsewhere (the app) show here too.
+  const savedImages = (q.images ?? []).join("\n");
+  const saved = written ? { text: q.answer ?? "", images: savedImages ? savedImages.split("\n") : [] } : undefined;
+  const { text: draft, setText: setDraft, attachments, images, pending: uploading, failed, same, error: attachErr, setError: setAttachErr, removeImage, paste, drop, field, mention } =
+    useDraftField(agentId, sessionId, round, q.id, "answer", saved);
   const saving = useAction();
   // Which button the running save came from: it shows the spinner.
   const [doing, setDoing] = useState<Doing | null>(null);
   const busy = saving.busy;
-  const [attachErr, setAttachErr] = useState<string | null>(null);
-  // Answers given elsewhere (the app) show here too; on mount the Draft wins.
-  const savedList = saved.join("\n");
-  const seen = useRef({ written, answer: q.answer, images: savedList });
-  useEffect(() => {
-    if (seen.current.written === written && seen.current.answer === q.answer && seen.current.images === savedList) return;
-    seen.current = { written, answer: q.answer, images: savedList };
-    if (!written) return;
-    setDraft(q.answer ?? "");
-    const files = savedList ? savedList.split("\n") : [];
-    // Just saved from here: keep the tiles already shown.
-    setAttachments((a) =>
-      a.map((x) => x.file).join("\n") === savedList ? a : (a.forEach((x) => URL.revokeObjectURL(x.preview)), draftImages(agentId, files)),
-    );
-  }, [written, q.answer, savedList, agentId]);
-
-  const addImages = (files: File[]) => setAttachErr(attachImages(agentId, files, attachments.length, setAttachments, "answer"));
-  const removeImage = (key: string) =>
-    setAttachments((a) => a.filter((x) => (x.key === key ? (URL.revokeObjectURL(x.preview), false) : true)));
-  // Images are dropped on the card, not on the chat around it.
-  const drop = useFileDrop(addImages, true);
-  const uploading = attachments.some((a) => !a.file && !a.error);
-  const failed = attachments.some((a) => a.error);
-  const images = attachments.flatMap((a) => (a.file ? [a.file] : []));
-  const imageList = images.join("\n");
 
   const run = (what: Doing, f: () => Promise<unknown>) => {
     if (busy) return;
@@ -142,16 +111,7 @@ export function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q
     });
   };
 
-  const same = written && q.answer === draft.trim() && savedList === imageList;
-  useEffect(() => {
-    saveAnswerDraft(sessionId, round, q.id, same ? { text: "", images: [] } : { text: draft, images: imageList ? imageList.split("\n") : [] });
-  }, [sessionId, round, q.id, same, draft, imageList]);
   const empty = !draft.trim() && images.length === 0;
-  // Grows with the answer up to 5 lines, then scrolls.
-  const field = useRef<HTMLTextAreaElement>(null);
-  useAutoGrow(field, draft, 1, 5);
-  // "@" picks a file from the agent's workspace, as in the chat; no agents, an answer goes only to this one.
-  const mention = useMention(agentId, draft, setDraft);
   const wait = failed ? "Remove the image that failed to upload" : uploading ? "Waiting for images to upload" : undefined;
   return (
     <div
@@ -227,10 +187,7 @@ export function QuestionCard({ n, q, agentId, sessionId, round }: { n: number; q
               answer(draft);
             }
           }}
-          onPaste={(e) => {
-            const files = pastedImages(e);
-            if (files.length > 0) addImages(files);
-          }}
+          onPaste={paste}
           aria-label={`Answer to question ${n}`}
         />
         {same && q.state === "answered" ? (
