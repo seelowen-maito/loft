@@ -13,6 +13,7 @@ use serde_json::Value;
 use tokio::process::Command;
 
 use crate::state::AppState;
+use crate::sys::Canonical;
 
 const ACTIVITY_DAYS: i64 = 182;
 const GIT_TTL: Duration = Duration::from_secs(120);
@@ -191,9 +192,9 @@ pub fn project_name(raw: &str) -> Result<String, String> {
 /// can make a repo there with any origin.
 pub fn project_dir(state: &AppState, project: &str) -> Option<std::path::PathBuf> {
     let name = project_name(project).ok().filter(|n| !n.is_empty())?;
-    let root = state.settings.boot().projects_dir.canonicalize().ok()?;
-    let dir = root.join(&name).canonicalize().ok()?;
-    let workspaces = state.cfg.storage_dir.canonicalize().unwrap_or_else(|_| state.cfg.storage_dir.clone());
+    let root = state.settings.boot().projects_dir.canonical().ok()?;
+    let dir = root.join(&name).canonical().ok()?;
+    let workspaces = state.cfg.storage_dir.canonical().unwrap_or_else(|_| state.cfg.storage_dir.clone());
     (dir.starts_with(&root) && !dir.starts_with(&workspaces)).then_some(dir)
 }
 
@@ -481,7 +482,7 @@ fn discover(root: &Path) -> Vec<(String, PathBuf)> {
                 continue;
             }
             if p.join(".git").is_dir() {
-                let name = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                let name = crate::sys::forward_slashes(p.strip_prefix(root).unwrap());
                 out.push((name, p));
             } else if depth < MAX_DEPTH {
                 walk(root, &p, depth + 1, out);
@@ -740,6 +741,7 @@ mod tests {
         assert_eq!(super::strip_userinfo("git@gitlab.com:o/r.git"), "git@gitlab.com:o/r.git");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_project_outside_the_projects_folder_reaches_no_repo_and_no_github() {
         use serde_json::json;
@@ -773,6 +775,7 @@ mod tests {
     }
 
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_project_cant_borrow_another_repos_origin_from_inside_the_projects_folder() {
         let st = crate::mirror::tests::state();

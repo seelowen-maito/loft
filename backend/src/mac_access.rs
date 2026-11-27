@@ -203,6 +203,8 @@ pub async fn watcher(state: AppState) {
 }
 
 #[cfg(test)]
+// Some of these use symlinks, file modes or shell commands, which are Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
 
@@ -216,6 +218,7 @@ mod tests {
         assert_eq!(parse_signature(dev).1.as_deref(), Some("Apple Development: A B (TEAM123456)"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn each_folder_reads_as_allowed_blocked_waiting_or_missing_and_a_prompt_never_hangs_the_check() {
         let home = crate::testdir::for_this_test("mac");
@@ -260,6 +263,7 @@ mod tests {
         format!("2026-11-01 18:51:48.260 Df tccd[1110:270c] [com.apple.TCC:access] AUTHREQ_RESULT: msgID={id}, authValue=2, authReason=2, authVersion=1, desired_auth=0, error=(null),")
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unanswered_folder_request_in_loft_s_name_is_a_needs_you_item_until_answered() {
         let st = crate::tasks::tests::state();

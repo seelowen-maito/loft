@@ -1143,6 +1143,7 @@ mod tests {
         assert!(!st.rt.lock().unwrap().queued.contains_key("a2") && !st.rt.lock().unwrap().queued.contains_key("a3"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_dev_agent_waits_for_a_direction_and_opens_the_interview() {
         let st = state();
@@ -1173,6 +1174,7 @@ mod tests {
         assert!(!st.rt.lock().unwrap().queued.contains_key(&r.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kickoff_that_never_opens_the_interview_is_asked_again_and_its_text_stays_hidden() {
         let st = state();

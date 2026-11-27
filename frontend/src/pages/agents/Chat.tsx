@@ -56,6 +56,7 @@ import { SaveButton } from "./SaveMessage";
 import { linkedMessage } from "../../lib/saved";
 import { AnswerCard } from "./AnswerCard";
 import { answerCard } from "../../lib/answerCard";
+import { useOffered } from "../../hooks/useOffered";
 import { QUOTE_GONE_NOTE, jumpStep, messageAnchor, quotable, quoteGone, quoteOf, replyLabel, replyOf, copiedToBox } from "../../lib/reply";
 
 type Item =
@@ -137,6 +138,7 @@ export function Chat({
 }) {
   const { text, setText, attachments, setAttachments, images, taskId, setTaskId, reply, setReply, putDraft, removeImage } = useDraft(agent.id);
   const commands = useCommands(agent.id, !!agent.running);
+  const offers = useOffered();
   const commandNames = useMemo(() => commands.map((c) => c.name), [commands]);
   const sending = useAction();
   const stop = useAction();
@@ -871,9 +873,11 @@ export function Chat({
                   className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
                 />
               </div>
-              <button className="btn-ghost size-8 justify-center p-0" onClick={() => openTalk(agent.id)} aria-label="Talk" title={`Talk to ${agent.name}`}>
-                <Mic className="size-4" />
-              </button>
+              {offers.voice && (
+                <button className="btn-ghost size-8 justify-center p-0" onClick={() => openTalk(agent.id)} aria-label="Talk" title={`Talk to ${agent.name}`}>
+                  <Mic className="size-4" />
+                </button>
+              )}
               <ActionButton
                 className="size-8 justify-center p-0"
                 icon={<ArrowUp className="size-4" />}

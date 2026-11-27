@@ -8,6 +8,7 @@ import { cx } from "../lib/format";
 import { parseGlossary } from "../lib/glossary";
 import { formatCombo, loadCombos, openShortcut } from "../lib/shortcuts";
 import { openTalk } from "../lib/talk";
+import { useOffered } from "../hooks/useOffered";
 import { Dialog } from "./Dialog";
 import { Tip } from "./HoverTip";
 
@@ -19,6 +20,8 @@ export function HelpMenu({ live }: { live: boolean }) {
   const [open, setOpen] = useState(false);
   const [shown, setShown] = useState<"commands" | "glossary" | null>(null);
   const box = useRef<HTMLDivElement>(null);
+  // Talk is a Mac-only feature: its row shows only where the server offers it.
+  const { voice } = useOffered();
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
@@ -58,10 +61,12 @@ export function HelpMenu({ live }: { live: boolean }) {
             {live ? "Connected" : "Reconnecting…"}
           </div>
           <hr className="my-1 border-line sm:hidden" />
-          <button role="menuitem" autoFocus className={row} onClick={pick(() => openTalk())}>
-            <Mic className="size-3.5 text-fg-3" /> Talk to an agent {kbd("T")}
-          </button>
-          <button role="menuitem" className={row} onClick={pick(() => openShortcut("sheet"))}>
+          {voice && (
+            <button role="menuitem" autoFocus className={row} onClick={pick(() => openTalk())}>
+              <Mic className="size-3.5 text-fg-3" /> Talk to an agent {kbd("T")}
+            </button>
+          )}
+          <button role="menuitem" autoFocus={!voice} className={row} onClick={pick(() => openShortcut("sheet"))}>
             <Keyboard className="size-3.5 text-fg-3" /> Keyboard shortcuts {kbd("?")}
           </button>
           <button role="menuitem" className={row} onClick={pick(() => setShown("commands"))}>

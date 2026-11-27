@@ -12,7 +12,8 @@ for (const k of ["HTMLElement", "Node", "Event", "MouseEvent", "KeyboardEvent", 
 Object.assign(globalThis, { EventSource: class { close() {} } });
 const COMMANDS = [{ name: "/clear", description: "Clear the context", tag: "loft", reason: null }, { name: "/loop", description: "Repeat a prompt", tag: "loft", reason: null }];
 globalThis.fetch = (async (url: string) => {
-  const body = url.endsWith("/agents/a1/commands") ? COMMANDS : url.endsWith("/agents") ? [{ id: "a1", name: "Dev" }] : [];
+  // The server is a Mac's: `/api/info` lists Talk (voice), a Mac-only feature, so Help shows its row.
+  const body = url.endsWith("/info") ? { features: ["voice"] } : url.endsWith("/agents/a1/commands") ? COMMANDS : url.endsWith("/agents") ? [{ id: "a1", name: "Dev" }] : [];
   return new Response(JSON.stringify(body), { status: 200 });
 }) as typeof fetch;
 
@@ -42,8 +43,9 @@ const click = (el: Element) => act(() => void el.dispatchEvent(new dom.window.Mo
 const items = (div: Element) => [...div.querySelectorAll('[role="menuitem"]')].map((i) => i.textContent?.replace(/\s+/g, " ").trim());
 const help = (div: Element) => div.querySelector('button[aria-label="Help"]')!;
 
-test("Help opens its six items, and the phone's connection line says whether it's live", () => {
+test("Help opens its six items, and the phone's connection line says whether it's live", async () => {
   const div = render(h(HelpMenu as any, { live: true }));
+  await settle();
   assert.equal(div.querySelector('[role="menu"]'), null);
   click(help(div));
   assert.equal(help(div).getAttribute("aria-expanded"), "true");
@@ -56,11 +58,12 @@ test("Help opens its six items, and the phone's connection line says whether it'
   assert.match(off.querySelector('[role="menu"]')!.textContent!, /Reconnecting…/);
 });
 
-test("Talk, Keyboard shortcuts and Search and jump open the Talk dialog, the existing sheet and the switcher", () => {
+test("Talk, Keyboard shortcuts and Search and jump open the Talk dialog, the existing sheet and the switcher", async () => {
   const opened: string[] = [];
   window.addEventListener(OPEN_SHORTCUT, (e) => opened.push((e as CustomEvent).detail));
   window.addEventListener("loft:talk", () => opened.push("talk"));
   const div = render(h(HelpMenu as any, { live: true }));
+  await settle();
   const pick = (name: string) => {
     click(help(div));
     click([...div.querySelectorAll('[role="menuitem"]')].find((i) => i.textContent!.trim().startsWith(name))!);

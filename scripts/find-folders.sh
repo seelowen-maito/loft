@@ -1,4 +1,4 @@
-# Finding a folder by name for setup.sh's folder questions (projects, backups). scripts/test-setup.sh tests it.
+# Finding a folder by name for setup.sh's folder questions (projects, backups). scripts/test-find-folders.sh tests it.
 
 # Folders under $3 (default: home), at most 3 levels down, named $1 (any case) and passing test $2 (a function given
 # the folder), sorted, one per line. Hidden folders, Library, node_modules, caches, build output and the like aren't

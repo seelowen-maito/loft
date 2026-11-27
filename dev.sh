@@ -5,6 +5,6 @@ cd "$(dirname "$0")"
 . scripts/frontend-pm.sh
 [ -d frontend/node_modules ] || (cd frontend && fe_install)
 trap 'kill 0' EXIT
-(cd backend && cargo run) &
+bash scripts/run-backend.sh &
 (cd frontend && fe run dev) &
 wait

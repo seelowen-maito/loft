@@ -20,6 +20,8 @@ mod planning;
 mod ports;
 mod guard;
 mod herdr;
+#[cfg(windows)]
+mod job;
 mod kill_guard;
 mod chat_commands;
 mod login;
@@ -29,6 +31,7 @@ mod mac_access;
 mod mcp;
 mod mentions;
 mod mirror;
+mod owner_only;
 mod processes;
 mod project_settings;
 mod prs;
@@ -47,6 +50,7 @@ mod simulator;
 mod state;
 mod storage;
 mod sweep;
+mod sys;
 mod system;
 mod tailnet;
 mod tags;
@@ -79,6 +83,8 @@ fn main() -> anyhow::Result<()> {
         Some(signing::ARG) => signing::cli(),
         _ => {}
     }
+    // Before any thread starts: read once, and kept from everything Loft runs (see updater::take_restart_by_exit).
+    updater::take_restart_by_exit();
     serve()
 }
 
@@ -295,13 +301,16 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(prs::backfill(state.clone()));
     tokio::spawn(delivery::track_open_prs(state.clone()));
     tokio::spawn(agents::backfill_context(state.clone()));
+    tokio::spawn(updater::clear_set_aside());
     tokio::spawn(updater::updater(state.clone(), root.clone()));
     tokio::spawn(system::sampler(state.clone()));
     tokio::spawn(grill::sweeper(state.clone()));
     tokio::spawn(needs_you::watcher(state.clone()));
     tokio::spawn(agents::quiet_watcher(state.clone()));
     tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
-    tokio::spawn(mac_access::watcher(state.clone()));
+    if api::ON_MAC {
+        tokio::spawn(mac_access::watcher(state.clone()));
+    }
     let port = state.cfg.port;
     tokio::task::spawn_blocking(move || tailnet::check_https(port));
     tokio::spawn(mirror::poller(state.clone()));
@@ -309,7 +318,9 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(actions::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
-    tokio::spawn(simulator::tidier(state.clone()));
+    if api::ON_MAC {
+        tokio::spawn(simulator::tidier(state.clone()));
+    }
     tokio::spawn(processes::idle_stopper(state.clone()));
 
     // Serve the built frontend when present (production mode).
@@ -425,6 +436,9 @@ mod tests {
             assert_eq!(encoding(&r), None, "{path}");
         }
         assert!(get("/api/info", "").send().await.unwrap().content_length().unwrap() < 1024, "/api/info isn't small any more");
+        let info: serde_json::Value = get("/api/info", "").send().await.unwrap().json().await.unwrap();
+        assert_eq!(info["platform"], std::env::consts::OS);
+        assert_eq!(info["features"].as_array().unwrap().iter().any(|f| f == "simulator"), cfg!(target_os = "macos"), "{info}");
 
         // The event stream's first message arrives right away, uncompressed.
         let mut r = get("/api/events", "gzip, br").send().await.unwrap();

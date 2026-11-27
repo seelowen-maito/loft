@@ -22,9 +22,11 @@ import { ClaudeLoginSection } from "./ClaudeLogin";
 import { HerdrSetup } from "./HerdrSetup";
 import { cleanLineText, cx, fmtBytes, oneLine } from "../lib/format";
 import { fmtClock, fmtDateTime, relTime } from "../lib/time";
-import { comboFromEvent, FIXED, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
+import { comboFromEvent, fixedShortcuts, formatCombo, isReserved, loadCombos, normalizeCombo, REBINDABLE, recording, saveCombo, SHORTCUTS_CHANGED, type Rebindable } from "../lib/shortcuts";
 import { Keys } from "../components/Shortcuts";
 import { usePoll } from "../hooks/usePoll";
+import { useOffered } from "../hooks/useOffered";
+import type { MacOnly } from "../lib/platform";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
@@ -269,7 +271,7 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
           </Callout>
         )}
         <Field label="Backups folder" hint="Loft backs up its database and settings once a day." help="Backups are owner-only; Loft keeps 7 daily and 4 weekly ones. Point the folder at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
-          {(id) => <input id={id} className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />}
+          {(id) => <input id={id} className="input font-mono" placeholder={s?.dir ?? ""} value={folder} onChange={(e) => onFolder(e.target.value)} />}
         </Field>
         {folderErr && <p className="text-[12.5px] text-bad [overflow-wrap:anywhere]">{folderErr}</p>}
     </SettingsCard>
@@ -466,6 +468,7 @@ function Spend() {
 
 /** The keyboard shortcuts: ⌘K and ⌘J can be recorded anew or reset, kept in this browser and used at once (no Save needed); the rest are fixed. */
 function ShortcutSettings() {
+  const offers = useOffered();
   const [combos, setCombos] = useState(loadCombos);
   const [listening, setListening] = useState<Rebindable | null>(null);
   const [hint, setHint] = useState<string | null>(null);
@@ -520,7 +523,7 @@ function ShortcutSettings() {
         {hint ?? "These two work from any page, even while typing. Press Record, then the new keys; they need ⌘, Ctrl or Alt. Kept in this browser."}
       </span>
       <ul className="space-y-2 border-t border-line pt-3">
-        {FIXED.map((f) => (
+        {fixedShortcuts(offers).map((f) => (
           <li key={f.keys} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0 text-fg-2">{f.label}</span>
             <Keys keys={f.keys} />
@@ -539,6 +542,9 @@ const SECTIONS = [
   ["herdr", "Herdr UI"], ["push", "Push notifications"], ["https", "Https on the tailnet"], ["voice", "Voice on this Mac"],
   ["claude-login", "Claude login"], ["mac-access", "Mac access"],
 ] as const;
+
+/** The cards that are Mac-only features: listed only where the server offers the feature, like the cards themselves. */
+const MAC_ONLY_CARDS: Partial<Record<(typeof SECTIONS)[number][0], MacOnly>> = { navigation: "simulator", herdr: "herdr", voice: "voice", "mac-access": "mac_access" };
 
 const goTo = (id: string) => {
   document.getElementById(id)?.scrollIntoView({ block: "start" });
@@ -589,7 +595,11 @@ function useCardInView(ready: boolean) {
 }
 
 export default function SettingsPage() {
-
+  const offers = useOffered();
+  const sections = SECTIONS.filter(([id]) => {
+    const feature = MAC_ONLY_CARDS[id];
+    return !feature || offers[feature];
+  });
   const [view, setView] = useState<SettingsView | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   // Write-only: undefined keeps the saved token, "" clears it.
@@ -674,7 +684,7 @@ export default function SettingsPage() {
         <nav aria-label="On this page" className="hidden lg:block">
           <div className="sticky top-6 space-y-0.5">
             <span className="eyebrow block px-2.5 pb-2">On this page</span>
-            {SECTIONS.map(([id, title]) => (
+            {sections.map(([id, title]) => (
               <a
                 key={id}
                 href={`#${id}`}
@@ -697,7 +707,7 @@ export default function SettingsPage() {
             onChange={(e) => e.target.value && (goTo(e.target.value), pin(e.target.value))}
           >
             <option value="">Jump to…</option>
-            {SECTIONS.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
+            {sections.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
           </select>
         </div>
 
@@ -779,29 +789,31 @@ export default function SettingsPage() {
           />
         </SettingsCard>
 
-        <SettingsCard id="navigation" title="Navigation">
-          <Toggle
-            on={draft.show_simulator}
-            onChange={(v) => set("show_simulator", v)}
-            label="Show Simulator"
-            hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
-          />
-        </SettingsCard>
+        {offers.simulator && (
+          <SettingsCard id="navigation" title="Navigation">
+            <Toggle
+              on={draft.show_simulator}
+              onChange={(v) => set("show_simulator", v)}
+              label="Show Simulator"
+              hint="Adds a tab to view and control a booted iOS Simulator on this Mac."
+            />
+          </SettingsCard>
+        )}
 
         <SettingsCard id="shortcuts" title="Keyboard shortcuts">
           <ShortcutSettings />
         </SettingsCard>
 
-        <HerdrSetup />
+        {offers.herdr && <HerdrSetup />}
 
         <PushSettings />
 
         <HttpsAccess />
-        <VoiceOnThisMac />
+        {offers.voice && <VoiceOnThisMac />}
 
         <ClaudeLoginSection />
 
-        <MacAccess />
+        {offers.mac_access && <MacAccess />}
 
         {(dirty || err || save.error || restartAsk.error) && (
           <FloatingBar at="bottom">

@@ -26,7 +26,9 @@ main() {
   case "$(uname -s)" in
     Darwin) ok "macOS $(sw_vers -productVersion 2>/dev/null)" ;;
     Linux) ok "Linux ${D}($(uname -m))${N}" ;;
-    *) fail "loft runs on macOS and Linux"; tip "On Windows, install WSL (wsl --install) and run this in an Ubuntu shell."; exit 1 ;;
+    MINGW*|MSYS*) ok "Windows ${D}(Git Bash, $(uname -m))${N}" ;;
+    CYGWIN*) fail "loft runs in Git Bash on Windows, not Cygwin"; tip "Install Git for Windows (winget install -e --id Git.Git), then run this in Git Bash."; exit 1 ;;
+    *) fail "loft runs on macOS, Linux and Windows (Git Bash)"; exit 1 ;;
   esac
   if command -v git >/dev/null; then ok "git $(git --version | cut -d' ' -f3)"
   else
@@ -86,8 +88,9 @@ tip() { printf '    %s%s%s\n' "$D" "$1" "$N"; }
 pretty() { case $1 in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 retry() { printf '\n  %sFix the above, then run the installer again:%s\n    %s\n\n' "$R" "$N" "$INSTALL_CMD"; exit 1; }
 
-# How to install a package here: Homebrew, the distro's package manager, or a fallback (e.g. xcode-select).
+# How to install a package here: Homebrew, winget, the distro's package manager, or a fallback (e.g. xcode-select).
 install_hint() {
+  case "$(uname -s)" in MINGW*|MSYS*) echo "Install Git for Windows (winget install -e --id Git.Git), then run this in Git Bash."; return ;; esac
   if [ "$(uname -s)" = Darwin ]; then
     if [ "${2:-}" = xcode-select ]; then echo "Run: xcode-select --install   (Apple's command line tools, includes git)"
     elif command -v brew >/dev/null; then echo "Run: brew install $1"

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use crate::api::{ApiResult, bad, not_found};
 use crate::db::{Delivery, DeliveryTicket};
 use crate::state::AppState;
+use crate::sys::Canonical;
 
 /// Has Loft track the Delivery's PR, owned by its Dev or else its planner, so its card shows and checkers can
 /// set verdicts on it. A PR Loft already tracks keeps its owner and is read again: the planner, when it was
@@ -4445,7 +4446,7 @@ fn dev_clone(state: &AppState, d: &Delivery, project: &std::path::Path) -> Optio
                 let origin = cfg.split("[remote \"origin\"]").nth(1).unwrap_or("").split("\n[").next().unwrap_or("");
                 let url = origin.lines().find_map(|l| l.trim().strip_prefix("url").map(|r| r.trim_start().trim_start_matches('=').trim()));
                 let to = url.map(|u| std::path::PathBuf::from(u.strip_prefix("file://").unwrap_or(u)));
-                if to.and_then(|t| t.canonicalize().ok()).is_some_and(|t| t == project) {
+                if to.and_then(|t| t.canonical().ok()).is_some_and(|t| t == project) {
                     return Some(p);
                 }
             } else if depth < 3
@@ -4459,7 +4460,7 @@ fn dev_clone(state: &AppState, d: &Delivery, project: &std::path::Path) -> Optio
     if d.dev.is_empty() {
         return None;
     }
-    walk(&crate::agents::workspace(state, &d.dev), 1, &project.canonicalize().ok()?)
+    walk(&crate::agents::workspace(state, &d.dev), 1, &project.canonical().ok()?)
 }
 
 /// Merges a plan kept in Loft whose last review passed: its spec branch, as the Dev last pushed it, into

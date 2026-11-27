@@ -17,6 +17,7 @@ use tokio::sync::{Notify, oneshot};
 use crate::db::{Agent, Message, PermissionRequest, now};
 use crate::schedule;
 use crate::state::{AppState, Decision, Event};
+use crate::sys::Canonical;
 
 pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -44,7 +45,7 @@ pub fn workspace(state: &AppState, agent_id: &str) -> PathBuf {
 pub fn at_base(state: &AppState, a: &Agent) -> PathBuf {
     let projects = &state.settings.boot().projects_dir;
     let project = projects.join(a.project.trim());
-    match (a.project.trim().is_empty(), project.canonicalize(), projects.canonicalize()) {
+    match (a.project.trim().is_empty(), project.canonical(), projects.canonical()) {
         (false, Ok(p), Ok(root)) if p.starts_with(&root) && p.is_dir() => p,
         _ => workspace(state, &a.id),
     }
@@ -571,6 +572,33 @@ These rules are Loft's and apply to every message you send another agent with `m
 7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
+    system_prompt_on(state, a, std::env::consts::OS)
+}
+
+/// The prompt line saying where the agent runs, on Windows.
+const ON_WINDOWS: &str = "- This computer runs Windows. Your Bash tool is Git Bash: use Unix commands, and paths with forward slashes (`C:/Users/…`), which Bash and your file tools both read. There is no PowerShell tool.\n";
+
+/// The Showing your work line on the Simulator, which only a Mac has.
+fn simulator_line(state: &AppState, a: &Agent) -> String {
+    let device = match state.db.agent_device(&a.id).ok().flatten() {
+        Some(udid) => format!(
+            "Your device's UDID is `{udid}` (also in `${var}`); if simctl says it doesn't exist, call `mcp__loft__simulator_device` for a new one.",
+            var = crate::simulator::DEVICE_VAR
+        ),
+        None => "You have none yet: call `mcp__loft__simulator_device` the first time you need one. It creates your device and gives you its UDID.".into(),
+    };
+    let axe = crate::simulator::axe()
+        .map(|p| format!(" To drive the app, use AXe at `{}`: `tap -x <x> -y <y> --tap-style physical`, `swipe`, `type`, `describe-ui` (coordinates in points; see `--help`), always with `--udid <udid>`.", p.display()))
+        .unwrap_or_default();
+    format!(
+        "\n- iOS apps: run them in the Simulator on this Mac, only on your own device (`<udid>` below), never `booted` or another one: other agents run theirs. {device} Boot it with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install <udid> \"$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME\"` and `xcrun simctl launch <udid> <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io <udid> screenshot <file>.png` and read the image.{axe}"
+    )
+}
+
+/// The agent's system prompt for Loft on `os` (as `std::env::consts::OS` names it): on Windows it says so and shows
+/// paths with forward slashes; off the Mac it leaves out the Simulator and calls the host "this computer".
+fn system_prompt_on(state: &AppState, a: &Agent, os: &str) -> String {
+    let (windows, mac) = (os == "windows", os == "macos");
     let ws = workspace(state, &a.id);
     let mem_block = a.memory_index.clone().unwrap_or_else(|| memory_block(state, &a.id));
     let schedule = if a.interval_minutes > 0 {
@@ -612,7 +640,7 @@ You are **{name}** ({role}), an autonomous agent living inside Loft — the user
 {schedule}
 
 # Workspace
-- Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
+{on_windows}- Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review while that clone exists; if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first and carry on. Never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
 - Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first, in a command of its own: run git on the new clone in the next command, not in the same one (`git clone x t && git -C t …` asks the user, because the guard can't know yet what the clone brought).
@@ -632,8 +660,7 @@ Each message starts a run that ends with your reply. Claude Code background work
 
 # Showing your work
 The user usually reads this chat from another device, where `localhost` doesn't reach this machine.
-- Dev servers (web apps, APIs, docs sites): serve them only on your own ports, {ports} (`$PORT` is the first, `${range_var}` the whole range): they are yours on every run, and no other agent uses them. Start them detached (see Runs), listening on all interfaces (`vite --host --port $PORT`, `next dev -H 0.0.0.0` (it reads `$PORT`), `python3 -m http.server $PORT --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`, a port in your range. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).
-- iOS apps: run them in the Simulator on this Mac, only on your own device (`<udid>` below), never `booted` or another one: other agents run theirs. {device} Boot it with `xcrun simctl boot <udid>` and `open -a Simulator`. Build with `xcodebuild -scheme <scheme> -destination 'platform=iOS Simulator,id=<udid>' -IDEBuildLocationStyle=Unique`, with no `-derivedDataPath`, so the output goes to Xcode's DerivedData and not into your workspace. Find the .app with the same flags and `-showBuildSettings` (`BUILT_PRODUCTS_DIR`, `FULL_PRODUCT_NAME`), then `xcrun simctl install <udid> "$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"` and `xcrun simctl launch <udid> <bundle id>`. The user watches it live at [Simulator](/simulator) in Loft, so include that link in your reply. To check the screen yourself, save `xcrun simctl io <udid> screenshot <file>.png` and read the image.{axe}
+- Dev servers (web apps, APIs, docs sites): serve them only on your own ports, {ports} (`$PORT` is the first, `${range_var}` the whole range): they are yours on every run, and no other agent uses them. Start them detached (see Runs), listening on all interfaces (`vite --host --port $PORT`, `next dev -H 0.0.0.0` (it reads `$PORT`), `python3 -m http.server $PORT --bind 0.0.0.0`), then check `curl -sI http://{host}:<port>` answers and reply with the link `http://{host}:<port>`, a port in your range. Never share a `localhost` or `127.0.0.1` link. If the framework rejects the host name, allow it in its config (e.g. Next.js `allowedDevOrigins`).{simulator}
 
 # Long-term memory
 You have persistent memory that survives across conversations and session resets. The titles of your memories as of this session's start, newest first (ones you save, change or forget now show here from your next session):
@@ -667,24 +694,21 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         role = crate::planning::role_label(if a.role.is_empty() { "custom" } else { &a.role }),
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
-        ws = ws.display(),
-        at = at_base(state, a).display(),
-        projects = state.settings.boot().projects_dir.display(),
-        axe = crate::simulator::axe()
-            .map(|p| format!(" To drive the app, use AXe at `{}`: `tap -x <x> -y <y> --tap-style physical`, `swipe`, `type`, `describe-ui` (coordinates in points; see `--help`), always with `--udid <udid>`.", p.display()))
-            .unwrap_or_default(),
-        host = crate::tailnet::host().unwrap_or_else(|| "<this Mac's Tailscale or LAN host name>".into()),
+        on_windows = if windows { ON_WINDOWS } else { "" },
+        ws = shown(&ws),
+        at = shown(&at_base(state, a)),
+        projects = shown(&state.settings.boot().projects_dir),
+        simulator = if mac { simulator_line(state, a) } else { String::new() },
+        host = crate::tailnet::host().unwrap_or_else(|| if mac { "<this Mac's Tailscale or LAN host name>" } else { "<this computer's Tailscale or LAN host name>" }.into()),
         ports = crate::ports::range(state, &a.id).map(|r| format!("{}–{}", r.start(), r.end())).unwrap_or_else(|_| "your port range".into()),
         range_var = crate::ports::RANGE_VAR,
         tool_wait = TOOL_WAIT.as_millis(),
-        device = match state.db.agent_device(&a.id).ok().flatten() {
-            Some(udid) => format!(
-                "Your device's UDID is `{udid}` (also in `${var}`); if simctl says it doesn't exist, call `mcp__loft__simulator_device` for a new one.",
-                var = crate::simulator::DEVICE_VAR
-            ),
-            None => "You have none yet: call `mcp__loft__simulator_device` the first time you need one. It creates your device and gives you its UDID.".into(),
-        },
     )
+}
+
+/// A path as the prompt shows it: with forward slashes on Windows (see [`crate::sys::forward_slashes`]).
+fn shown(p: &Path) -> String {
+    crate::sys::forward_slashes(p)
 }
 
 /// The Workspace lines naming its group and projects, main first; none when it has neither.
@@ -926,6 +950,7 @@ pub fn compact(state: &AppState, agent_id: &str, instructions: &str) {
 /// Deliver a message from one agent to another. It shows in the recipient's chat
 /// under the sender's sticker, and the recipient is told how to answer.
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn message_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str) {
     message_from_agent_with(state, from, to, text, json!({}));
 }
@@ -1129,6 +1154,12 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             crate::delivery::run_ended(&state, &agent_id, failed).await;
             // Test browsers the run left open hold gigabytes of memory: stop them, and say so in the next run.
             let closed = crate::processes::stop_test_browsers(&state.cfg.storage_dir, &agent_id).await;
+            // On Windows, what a Loft that restarts will know of the agent's job (see job.rs).
+            #[cfg(windows)]
+            {
+                let (storage, id) = (state.cfg.storage_dir.clone(), agent_id.clone());
+                let _ = tokio::task::spawn_blocking(move || crate::job::remember(&storage, &id)).await;
+            }
             if closed > 0
                 && let Ok(Some(a)) = state.db.get_agent(&agent_id)
             {
@@ -1515,12 +1546,11 @@ fn write_agent_file(state: &AppState, agent_id: &str, kind: &str, text: &str) ->
 
 /// Writes `text` to `path` readable by the user only, in a folder only they can open.
 pub fn write_private(path: &Path, text: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = path.parent().unwrap();
     std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    crate::owner_only::dir(dir)?;
     std::fs::write(path, text)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    crate::owner_only::file(path)?;
     Ok(())
 }
 
@@ -1586,6 +1616,8 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     let mut allowed: Vec<String> = a.allowed_tools.iter().filter(|r| !r.starts_with("Kill(")).cloned().collect();
     allowed.push("mcp__loft".into());
     let mut disallowed = a.disallowed_tools.clone();
+    // Agents use only the Bash tool, whose commands the kill guard sees: not Claude Code's PowerShell tool (Windows).
+    disallowed.push("PowerShell".into());
     if a.max_subagents == Some(0) {
         disallowed.push("Agent".into());
     }
@@ -1603,7 +1635,7 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     let user_plugin = crate::commands::sync_user_plugin(&state.cfg.storage_dir.join(AGENT_FILES), &crate::sessions::claude_dir())
         .map(|p| PathBuf::from("..").join(AGENT_FILES).join(p.file_name().unwrap()));
     let ports = crate::ports::range(state, &a.id)?;
-    let mut cmd = Command::new(state.settings.get().claude_bin);
+    let mut cmd = Command::new(crate::sys::program(&state.settings.get().claude_bin));
     cmd.current_dir(workspace(state, &a.id))
         .arg("-p")
         .args(["--output-format", "stream-json", "--verbose"])
@@ -1624,9 +1656,12 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .args(user_plugin.iter().flat_map(|p| [std::ffi::OsStr::new("--plugin-dir"), p.as_os_str()]))
         .args(["--name", &a.name])
         .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
+        // Only the script running Loft itself restarts it (main takes it out of Loft's environment too).
+        .env_remove("LOFT_RESTART_BY_EXIT")
         // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
         .env("BASH_MAX_TIMEOUT_MS", TOOL_WAIT.as_millis().to_string())
-        .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
+        .env("CLAUDE_ENV_FILE", crate::sys::forward_slashes(&agent_file(state, &a.id, "env.sh")))
+        .env("CLAUDE_CODE_USE_POWERSHELL_TOOL", "0")
         .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
         .env(crate::kill_guard::URL_VAR, format!("http://127.0.0.1:{}/guard/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
@@ -1658,9 +1693,13 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
     crate::processes::write_shims(storage, &exe)?;
     // Its own process session: Loft knows the run's processes by it, and a group kill (`kill 0`) in the agent's
     // commands can't reach Loft.
+    #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
     }
+    // On Windows the agent's job stands in for the session: claude starts suspended until it is in it (see job.rs).
+    #[cfg(windows)]
+    cmd.creation_flags(crate::job::CREATION_FLAGS);
     if !a.model.is_empty() {
         cmd.args(["--model", &a.model]);
     }
@@ -1719,13 +1758,22 @@ async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str,
 }
 
 /// Stop claude the way it can clean up after itself: SIGTERM ends its background shells too, while
-/// SIGKILL would orphan them. SIGKILL only if it is still alive after the grace period.
-async fn terminate(child: &mut tokio::process::Child) {
+/// SIGKILL would orphan them. SIGKILL only if it is still alive after the grace period. Windows has no SIGTERM:
+/// there claude and the processes under it in the agent's job end right away.
+async fn terminate(state: &AppState, agent_id: &str, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
     if let Some(pid) = child.id() {
+        let _ = (state, agent_id);
         unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_ok() {
             return;
         }
+    }
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let storage = state.cfg.storage_dir.clone();
+        let agent_id = agent_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || crate::job::kill_tree(&storage, &agent_id, pid)).await;
     }
     let _ = child.kill().await;
 }
@@ -1903,10 +1951,16 @@ async fn run_process(
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
     // Its session id is its PID.
+    #[cfg(unix)]
     if let Some(pid) = child.id()
         && let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
             tracing::warn!("agent {agent_id}: could not record its process session: {e}");
         }
+    #[cfg(windows)]
+    if let Err(e) = crate::job::join(&state.cfg.storage_dir, agent_id, &child) {
+        let _ = child.kill().await;
+        anyhow::bail!("failed to start `{}` in the agent's job: {e}", state.settings.get().claude_bin);
+    }
     let mut stdin = child.stdin.take();
     stdin.as_mut().unwrap().write_all(first.as_bytes()).await?;
     // A run the user reads takes their messages sent now (`send_now`) while it lasts; a quiet one only its prompt.
@@ -1974,7 +2028,10 @@ async fn run_process(
             }
             _ = kill.notified() => {
                 tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
-                terminate(&mut child).await;
+                // Windows has no SIGTERM for claude to end its background work with: the agent's whole job ends.
+                #[cfg(windows)]
+                crate::job::terminate(&state.cfg.storage_dir, agent_id);
+                terminate(state, agent_id, &mut child).await;
                 loft_stopped = true;
                 killed = true;
                 None
@@ -1997,7 +2054,7 @@ async fn run_process(
                     }
                 }
                 tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
-                terminate(&mut child).await;
+                terminate(state, agent_id, &mut child).await;
                 loft_stopped = true;
                 None
             }
@@ -2012,7 +2069,7 @@ async fn run_process(
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
                 // Replied with nothing left in the background, yet still alive: don't hold the queue for it.
                 tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its reply");
-                terminate(&mut child).await;
+                terminate(state, agent_id, &mut child).await;
                 loft_stopped = true;
                 None
             }
@@ -2043,7 +2100,7 @@ async fn run_process(
         if sub.is_none() && brake.see(&ev) {
             tracing::info!("agent {agent_id}: stopping run {run_id}: {BRAKE_TURNS} turns in a row without a tool call");
             run_msg(quiet, state, agent_id, rid, "system", "notice", &brake.notice(), json!({ "brake": true }));
-            terminate(&mut child).await;
+            terminate(state, agent_id, &mut child).await;
             loft_stopped = true;
             braked = true;
             break;
@@ -2373,7 +2430,7 @@ async fn run_process(
         Ok(s) => s?,
         Err(_) => {
             tracing::info!("agent {agent_id}: stopping run {run_id}: claude didn't exit after its output ended");
-            terminate(&mut child).await;
+            terminate(state, agent_id, &mut child).await;
             loft_stopped = true;
             child.wait().await?
         }
@@ -2389,8 +2446,11 @@ async fn run_process(
         if !killed {
             let tail: String = err.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
             // A SIGTERM Loft didn't send came from another process. Not SIGKILL: macOS ends a process out of memory with it.
-            use std::os::unix::process::ExitStatusExt;
-            let outside = if !loft_stopped && (status.signal() == Some(libc::SIGTERM) || status.code() == Some(143)) {
+            #[cfg(unix)]
+            let by_sigterm = std::os::unix::process::ExitStatusExt::signal(&status) == Some(libc::SIGTERM);
+            #[cfg(not(unix))]
+            let by_sigterm = false;
+            let outside = if !loft_stopped && (by_sigterm || status.code() == Some(143)) {
                 " It was stopped by a signal from outside Loft, for example a `pkill` or `kill` in some agent's command."
             } else {
                 ""
@@ -2492,6 +2552,8 @@ pub async fn scheduler(state: AppState) {
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts, which run on Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub(crate) mod tests {
     use super::*;
 
@@ -2527,6 +2589,48 @@ pub(crate) mod tests {
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
         assert!(p.contains("Start servers with `nohup … &`, never with a daemon option (`--daemonize`, `--detach`, `pg_ctl start`)."));
         assert!(!p.contains("start them in the background"));
+    }
+
+    #[test]
+    fn on_windows_the_prompt_says_git_bash_and_leaves_out_the_mac() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let mac = system_prompt_on(&st, &a, "macos");
+        assert!(mac.contains("in the Simulator on this Mac") && !mac.contains("Git Bash"), "{mac}");
+        let win = system_prompt_on(&st, &a, "windows");
+        assert!(win.contains("This computer runs Windows. Your Bash tool is Git Bash") && win.contains("There is no PowerShell tool."), "{win}");
+        // Linux has no Simulator either, and isn't Windows.
+        let linux = system_prompt_on(&st, &a, "linux");
+        assert!(!linux.contains("Git Bash") && !linux.contains("runs Windows"), "{linux}");
+        for p in [&win, &linux] {
+            for gone in ["Simulator", "simctl", "simulator_device", "Mac"] {
+                assert!(!p.contains(gone), "{gone} in {p}");
+            }
+            // The rest is the same prompt.
+            assert!(p.contains("# Showing your work") && p.contains("# Long-term memory") && p.contains("Dev servers (web apps"));
+        }
+        if crate::tailnet::host().is_none() {
+            assert!(linux.contains("<this computer's Tailscale or LAN host name>") && mac.contains("<this Mac's Tailscale"));
+        }
+    }
+
+    #[test]
+    fn agents_dont_inherit_how_loft_restarts() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cmd = build_command(&st, &a, false).unwrap();
+        assert!(cmd.as_std().get_envs().any(|(k, v)| k == "LOFT_RESTART_BY_EXIT" && v.is_none()), "removed from the agent's environment");
+    }
+
+    #[test]
+    fn agents_get_no_powershell_tool() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cmd = build_command(&st, &a, false).unwrap();
+        let env = |k: &str| cmd.as_std().get_envs().find(|(n, _)| *n == k).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(env("CLAUDE_CODE_USE_POWERSHELL_TOOL").as_deref(), Some("0"));
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(agent_file(&st, &a.id, "settings.json")).unwrap()).unwrap();
+        assert!(settings["permissions"]["deny"].as_array().unwrap().contains(&json!("PowerShell")), "{settings}");
     }
 
     #[test]
@@ -2612,7 +2716,7 @@ pub(crate) mod tests {
         assert!(git(&ws.join("repo"), &["init", "-q"]).status.success());
         let out = git(&ws.join("repo"), &["rev-parse", "--show-toplevel"]);
         assert!(out.status.success(), "{out:?}");
-        assert_eq!(std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), std::fs::canonicalize(ws.join("repo")).unwrap());
+        assert_eq!(crate::sys::canonical(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), crate::sys::canonical(ws.join("repo")).unwrap());
     }
 
     #[test]
@@ -2653,7 +2757,7 @@ pub(crate) mod tests {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
         let p = system_prompt(&st, &a);
-        assert!(p.contains(&format!("Run git only inside your clone (`git -C {}/<repo>`), never from the workspace root", workspace(&st, &a.id).display())), "{p}");
+        assert!(p.contains(&format!("Run git only inside your clone (`git -C {}/<repo>`), never from the workspace root", crate::sys::forward_slashes(&workspace(&st, &a.id)))), "{p}");
         assert!(p.contains("Write git commands with the literal absolute path: no shell variables, `cd` chains or `$(…)` in them."), "{p}");
         assert!(p.contains("Name the program you run literally (a path or a command name), never a variable like `$BIN` or `$A` as the command"), "{p}");
     }
@@ -2661,7 +2765,8 @@ pub(crate) mod tests {
     #[test]
     fn ios_builds_use_xcodes_derived_data_not_the_workspace() {
         let st = crate::tasks::tests::state();
-        let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
+        // The Simulator line is the Mac's: Windows and Linux leave it out.
+        let p = system_prompt_on(&st, &crate::tasks::tests::agent(&st, "Worker"), "macos");
         assert!(p.contains("-showBuildSettings") && p.contains("-IDEBuildLocationStyle=Unique") && p.contains("$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"));
         assert!(!p.contains("-derivedDataPath build"));
     }
@@ -2789,8 +2894,9 @@ pub(crate) mod tests {
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
     /// A Redraw costs 0.25 on session "s-redraw" and waits for a `go` file before it replies.
-    /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command, in a process session of
-    /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
+    /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command (in zsh, or bash where
+    /// there is no zsh, as on Linux), in a process session of its own after `CLAUDE_ENV_FILE`, and appends what it
+    /// printed and its exit status to `bash.out`.
     /// "goal-loop" asks for a password over and over, each text-only turn sent back by a Stop hook, and never ends
     /// on its own; "goal-tools" does the same with a tool call after four turns and three more after it, then replies.
     /// The goal scenarios send the lines the probe for #476 recorded from the real claude: "goal-pass" sets a goal,
@@ -3023,7 +3129,8 @@ case "$prompt" in *goal-loop*|*goal-tools*)
   for i in 5 6 7; do turn $i; done;;
 esac
 case "$prompt" in *bash-cmd*)
-  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/zsh -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
+  shell=/bin/zsh; [ -x "$shell" ] || shell=/bin/bash
+  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "$ARGV[0]: $!\n"' "$shell" -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
   echo "exit $?" >> bash.out;;
 esac
 reply=started
@@ -3037,6 +3144,7 @@ case "$prompt" in *linger*|*hang*)
 esac
 "#;
 
+    #[cfg(unix)]
     pub(crate) fn fake_claude_state() -> (AppState, Agent) {
         let mut st = crate::tasks::tests::state();
         let dir = st.cfg.root.as_path().to_path_buf();
@@ -3072,6 +3180,7 @@ esac
             .collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_system_prompt_is_read_from_a_file_not_claude_s_command_line() {
         let (st, a) = fake_claude_state();
@@ -3091,6 +3200,7 @@ esac
         assert!(!system.contains("never with `pkill -f`"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_s_end_is_saved_so_the_idle_time_survives_a_restart() {
         let (st, a) = fake_claude_state();
@@ -3104,6 +3214,7 @@ esac
         assert!(!super::idle(&st, &saved, std::time::SystemTime::now()));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn claude_s_files_are_private_relative_and_hold_the_tool_lists_and_the_kill_guard() {
         let (st, mut a) = fake_claude_state();
@@ -3122,7 +3233,7 @@ esac
         assert!(argv.contains(&format!("../.agent-files/{}.settings.json", a.id)), "{argv}");
         // The fake read the settings file from that relative path.
         let settings: Value = serde_json::from_str(&std::fs::read_to_string(workspace(&st, &a.id).join("settings.log")).unwrap()).unwrap();
-        assert_eq!(settings["permissions"], json!({ "allow": ["Bash(npm *)", "mcp__loft"], "deny": ["WebFetch", "Agent"] }));
+        assert_eq!(settings["permissions"], json!({ "allow": ["Bash(npm *)", "mcp__loft"], "deny": ["WebFetch", "PowerShell", "Agent"] }));
         let hook = &settings["hooks"]["PreToolUse"][0];
         assert_eq!(hook["matcher"], "Bash");
         assert!(hook["hooks"][0]["command"].as_str().unwrap().ends_with("' kill-guard"), "{settings}");
@@ -3148,6 +3259,7 @@ esac
         std::fs::read_to_string(workspace(st, id).join("ports.log")).unwrap_or_default().lines().map(String::from).collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn each_agent_serves_on_its_own_port_range_on_every_run_until_it_is_deleted() {
         let (st, a) = fake_claude_state();
@@ -3171,6 +3283,7 @@ esac
         assert_eq!(ports_seen(&st, &b.id)[1], "20010 20010-20019");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn each_agent_builds_cargo_dependencies_in_its_own_workspace() {
         let (st, a) = fake_claude_state();
@@ -3182,6 +3295,7 @@ esac
         assert_ne!(seen(&a.id), seen(&b.id));
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_agent_runs_on_its_own_simulator_device_from_the_run_after_it_asks_and_it_goes_with_the_agent() {
         use crate::simulator::tests::{ask_for_device, boot, fake_devices, fake_xcrun, simctl_log};
@@ -3226,6 +3340,7 @@ esac
         st.db.list_messages(id, 50, None).unwrap().into_iter().find(|m| m.kind == "error").map(|m| m.content)
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_sigterm_from_outside_loft_is_named_in_the_error() {
         for prompt in ["sigterm", "exit-143"] {
@@ -3236,6 +3351,7 @@ esac
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_sigkill_is_not_blamed_on_the_outside() {
         // macOS ends a process that runs out of memory with SIGKILL, so it isn't named as some agent's kill.
@@ -3248,6 +3364,7 @@ esac
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_file_write_fails_the_run_with_nothing_on_argv() {
         let (st, a) = fake_claude_state();
@@ -3274,6 +3391,7 @@ esac
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn loft_s_own_stops_are_not_blamed_on_the_outside() {
         let (st, a) = fake_claude_state();
@@ -3302,6 +3420,7 @@ esac
         until("the run", 60, || !is_running(st, id) && memory_parts(st, id).len() == runs).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_pr_shared_in_a_run_is_tracked_for_the_agent_that_shared_it() {
         let (st, a) = fake_claude_state();
@@ -3313,6 +3432,7 @@ esac
         assert_eq!(pr.tool_use_id.as_deref(), Some("s1"), "its card sits on the tool call");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_part_stays_the_same_for_a_session_and_is_rebuilt_after_clear_and_compact() {
         let (st, a) = fake_claude_state();
@@ -3340,6 +3460,7 @@ esac
         assert!(memory_parts(&st, &a.id)[4].contains("Release on Fridays"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn each_run_costs_what_it_added_to_the_session() {
         let (st, a) = fake_claude_state();
@@ -3388,6 +3509,7 @@ esac
         assert!((cost - 0.023).abs() < 1e-9, "{cost}");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn resuming_a_past_session_resumes_it_with_a_fresh_memory_index() {
         let (st, a) = fake_claude_state();
@@ -3630,6 +3752,7 @@ esac
         assert!(client_json(&a).get("memory_index").is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn reply_with_live_background_task_does_not_hold_the_queue() {
         let (st, a) = fake_claude_state();
@@ -3651,6 +3774,7 @@ esac
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().status, "idle");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn messages_queued_during_the_run_preempt_background_work_at_the_reply() {
         let (st, a) = fake_claude_state();
@@ -3663,6 +3787,7 @@ esac
         assert!(std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("follow up"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn empty_result_before_a_slow_turn_does_not_end_the_run() {
         let (st, a) = fake_claude_state();
@@ -3673,6 +3798,7 @@ esac
         assert_eq!(msgs.iter().filter(|m| m.kind == "run_end").count(), 1, "the empty result doesn't count as a finished run");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn stop_keeps_the_queue() {
         let (st, a) = fake_claude_state();
@@ -3688,6 +3814,7 @@ esac
         assert!(msgs.iter().any(|m| m.kind == "notice" && m.content == "Stopped by user. The queued message runs next."));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn five_turns_in_a_row_without_a_tool_stop_the_run_and_the_queue_goes_on() {
         let (st, a) = fake_claude_state();
@@ -3714,6 +3841,7 @@ esac
         st.db.list_messages(id, 100, None).unwrap().iter().filter(|m| m.content == "What is the password?").count() >= n
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn send_now_delivers_the_users_queued_message_into_the_run_in_progress() {
         let (st, a) = fake_claude_state();
@@ -3753,6 +3881,7 @@ esac
         assert!(unread(&st, &a.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_sent_now_that_claude_never_took_goes_back_to_the_queue() {
         let (st, a) = fake_claude_state();
@@ -3770,6 +3899,7 @@ esac
         assert!(st.rt.lock().unwrap().queued_messages[&a.id].iter().any(|(i, _)| *i == later));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hook_block_sends_the_users_queued_messages_now_and_not_the_agents() {
         let (st, a) = fake_claude_state();
@@ -3796,6 +3926,7 @@ esac
         assert!(unread(&st, &a.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn without_a_hook_block_the_users_queued_message_waits_for_the_next_run() {
         let (st, a) = fake_claude_state();
@@ -3822,6 +3953,7 @@ esac
         st.db.list_messages(id, 100, None).unwrap().into_iter().filter(|m| m.meta["hook_block"] == true).map(|m| m.content).collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn each_block_says_why_in_the_chat_and_goal_active_lasts_until_the_goal_passes() {
         let (st, a) = fake_claude_state();
@@ -3840,6 +3972,7 @@ esac
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_goal_over_claudes_limit_stays_active_until_the_button_clears_it() {
         let (st, a) = fake_claude_state();
@@ -3861,6 +3994,7 @@ esac
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().context_tokens, Some(5000), "the synthetic reply's zero usage isn't the context size");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_button_clears_a_goal_blocking_the_run_in_progress() {
         let (st, a) = fake_claude_state();
@@ -3878,6 +4012,7 @@ esac
         assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_resumed_run_takes_messages_sent_now_after_its_empty_replay() {
         let (st, a) = fake_claude_state();
@@ -3899,6 +4034,7 @@ esac
         prompts(st, id).split("\n---\n").filter(|p| !p.is_empty()).map(String::from).collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_buttons_goal_clear_runs_alone_and_pending_fyis_wait_for_the_next_run() {
         let (st, a) = fake_claude_state();
@@ -3913,6 +4049,7 @@ esac
         assert!(fyis.len() == 1 && fyis[0].1.ends_with("The build is green."), "the FYI waits for a real run: {fyis:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_queued_goal_clear_runs_on_its_own_before_the_rest_of_the_queue() {
         let (st, a) = fake_claude_state();
@@ -3931,6 +4068,7 @@ esac
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_error_with_no_turns_and_nothing_said_ends_the_run() {
         let (st, a) = fake_claude_state();
@@ -3945,6 +4083,7 @@ esac
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "On it."), "the queued run replied");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_command_claude_answers_itself_with_nothing_said_still_ends_the_run() {
         let (st, a) = fake_claude_state();
@@ -3978,6 +4117,7 @@ esac
         assert_eq!(hook_block_line(true, ""), "Goal not met: no reason given");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tool_call_starts_the_count_over() {
         let (st, a) = fake_claude_state();
@@ -4048,6 +4188,7 @@ esac
         v
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_json_shows_what_the_run_waits_on() {
         let (st, a) = fake_claude_state();
@@ -4087,6 +4228,7 @@ esac
         seen.lock().unwrap().last().cloned().unwrap_or_default()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_json_shows_its_running_subagents() {
         let (st, a) = fake_claude_state();
@@ -4107,6 +4249,7 @@ esac
         until("the run to end", 60, || !is_running(&st, &a.id)).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_run_ending_clears_its_subagents() {
         let (st, a) = fake_claude_state();
@@ -4131,6 +4274,7 @@ esac
         subagents(st, id).iter().map(|s| s["id"].clone()).collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_background_subagent_counts_until_the_task_list_drops_it() {
         for prompt in ["bg-agent", "bg-agent no-task-id"] {
@@ -4154,6 +4298,7 @@ esac
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tool_call_leaves_the_status_text_alone() {
         let (st, a) = fake_claude_state();
@@ -4173,6 +4318,7 @@ esac
         until("the run to end", 60, || !is_running(&st, &a.id)).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_waiting_bar_names_shells_and_follows_the_task_list() {
         let (st, a) = fake_claude_state();
@@ -4195,6 +4341,7 @@ esac
         until("the run to end", 60, || !is_running(&st, &a.id)).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_new_message_stopping_the_run_clears_its_background_subagents() {
         let (st, a) = fake_claude_state();
@@ -4207,6 +4354,7 @@ esac
         assert!(subagents(&st, &a.id).is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn restart_keeps_the_queue_and_says_so() {
         let (st, a) = fake_claude_state();
@@ -4226,6 +4374,7 @@ esac
 
     /// A Delivery wake's real run: one that ends without the step's call stalls the Delivery (failed or not),
     /// and a Restart carries the wake over to the run it starts instead of stalling it.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_delivery_runs_end_without_its_call_stalls_it() {
         let (st, a) = fake_claude_state();
@@ -4263,6 +4412,7 @@ esac
         assert_eq!(stalled(60), "no_call");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_mention_reaches_the_agent_and_its_reply_comes_back() {
         let (st, orch) = fake_claude_state();
@@ -4320,13 +4470,14 @@ esac
         let st = AppState { settings: std::sync::Arc::new(crate::settings::Store::load(&dir).unwrap()), ..st };
         let mut a = crate::tasks::tests::agent(&st, "Dev");
         a.project = "work/notes".into();
-        assert_eq!(at_base(&st, &a), projects.join("work/notes").canonicalize().unwrap());
+        assert_eq!(at_base(&st, &a), projects.join("work/notes").canonical().unwrap());
         for tag in ["Marketing", "../..", ""] {
             a.project = tag.into();
             assert_eq!(at_base(&st, &a), workspace(&st, &a.id), "{tag:?} falls back to the workspace");
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn process_left_alive_after_the_reply_is_stopped() {
         let (st, a) = fake_claude_state();
@@ -4352,6 +4503,7 @@ esac
         until("the runs to end", 60, || !is_running(st, id)).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_claude_that_dies_while_a_leftover_process_holds_its_output_ends_the_run() {
         let (st, a) = fake_claude_state();
@@ -4364,6 +4516,7 @@ esac
         assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_panic_in_a_run_ends_it_and_loft_keeps_serving() {
         let (st, a) = fake_claude_state();
@@ -4379,6 +4532,7 @@ esac
         assert_eq!(saved(&st, &a.id).0, "idle");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stop_left_over_from_the_last_run_doesnt_stop_the_next_queued_one() {
         let (st, a) = fake_claude_state();
@@ -4395,6 +4549,7 @@ esac
         assert_eq!(saved(&st, &a.id).0, "idle");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_stores_the_commands_its_cli_reports_and_the_api_lists_them_tagged() {
         let (st, a) = fake_claude_state();
@@ -4412,6 +4567,7 @@ esac
         assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|w| w == ["--setting-sources", ""]), "no settings file is read");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_reply_to_the_user_is_unread_until_marked_read_everywhere() {
         let (st, a) = fake_claude_state();
@@ -4429,6 +4585,7 @@ esac
         assert!(crate::api::mark_read(axum::extract::State(st.clone()), axum::extract::Path("nope".into())).await.is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn errors_and_scheduled_runs_leave_an_unread_reply() {
         let (st, a) = fake_claude_state();
@@ -4448,6 +4605,7 @@ esac
         assert!(unread(&st, &c.id), "Run now is the user starting it");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_that_cannot_start_leaves_an_unread_reply() {
         let (st, a) = fake_claude_state();
@@ -4460,6 +4618,7 @@ esac
         assert!(unread(&st, &a.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_task_comment_sent_to_the_agent_counts() {
         let (st, a) = fake_claude_state();
@@ -4471,6 +4630,7 @@ esac
         assert!(unread(&st, &a.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn runs_started_only_by_agents_leave_none() {
         let (st, a) = fake_claude_state();
@@ -4499,6 +4659,7 @@ esac
         crate::api::redraw_avatar(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()))
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn redraw_draws_in_a_quiet_run_on_a_throwaway_session() {
         let (st, a) = fake_claude_state();
@@ -4554,6 +4715,7 @@ esac
         last
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_agent_says_redrawing_while_a_redraw_waits_or_draws() {
         let (st, a) = fake_claude_state();
@@ -4591,6 +4753,7 @@ esac
         until("the last event to say it's done", 60, hears_done).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_redraw_ending_with_work_queued_after_it_says_so_before_that_work_ends() {
         let (st, a) = fake_claude_state();
@@ -4606,6 +4769,7 @@ esac
         idle(&st, &a.id).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn redraw_on_a_busy_agent_waits_for_its_run() {
         let (st, a) = fake_claude_state();
@@ -4628,6 +4792,7 @@ esac
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().session_id.as_deref(), Some("s1"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn redraw_does_not_stop_background_work_the_agent_waits_on() {
         let (st, a) = fake_claude_state();
@@ -4651,6 +4816,7 @@ esac
         assert!(!msgs.iter().any(|m| m.content.contains("Stopped background work")));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn clicking_redraw_again_while_it_draws_draws_once() {
         let (st, a) = fake_claude_state();
@@ -4669,6 +4835,7 @@ esac
         assert_eq!(prompts(&st, &a.id).matches("redraw your sticker").count(), 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_queued_run_mixing_the_users_message_and_an_agents_counts() {
         let (st, a) = fake_claude_state();
@@ -4686,6 +4853,7 @@ esac
         let _ = crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(id.to_string())).await.ok().unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_restarted_run_keeps_answering_the_user() {
         let (st, a) = fake_claude_state();
@@ -4726,6 +4894,7 @@ esac
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_quiet_run_with_nothing_to_wait_on_is_restarted_like_the_restart_button() {
         let (st, a) = fake_claude_state();
@@ -4875,6 +5044,7 @@ esac
         assert_eq!(saved(&st, &a.id), ("idle".into(), String::new()));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_that_stays_quiet_is_restarted_twice_then_left_to_the_user() {
         let (st, a) = fake_claude_state();
@@ -4902,6 +5072,7 @@ esac
         let _ = crate::api::stop_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn restarting_an_agents_run_leaves_none() {
         let (st, a) = fake_claude_state();
@@ -4914,6 +5085,7 @@ esac
         assert!(!unread(&st, &a.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn restarting_runs_whats_queued_as_whoever_sent_it() {
         let (st, a) = fake_claude_state();
@@ -4949,6 +5121,7 @@ esac
         assert!(unread(&st, &c.id), "my message among the queued ones");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn only_a_run_the_user_started_asks_them_something() {
         let (st, a) = fake_claude_state();
@@ -4983,6 +5156,7 @@ esac
         std::fs::read_to_string(workspace(st, id).join("resumed.log")).unwrap_or_default().lines().count()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn fresh_context_clears_before_a_new_delivery_ticket_as_set() {
         let (st, a) = fake_claude_state();
@@ -5033,6 +5207,7 @@ esac
         assert!(FRESH_CONTEXT.iter().filter(|f| f.starts_with("above_")).all(|f| fresh_threshold(f) >= CONTEXT_WARN_AT));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_is_cleared_by_delivery_only_as_the_builder() {
         let (st, a) = fake_claude_state();
@@ -5052,6 +5227,7 @@ esac
         assert!(crate::delivery::fresh_context_applies(&st, &st.db.get_agent(&dev.id).unwrap().unwrap()));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_ticket_queued_behind_a_run_clears_only_when_that_run_ends() {
         let (st, a) = fake_claude_state();

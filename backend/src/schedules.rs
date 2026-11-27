@@ -146,6 +146,8 @@ pub async fn cancel(State(state): State<AppState>, Path((id, sid)): Path<(String
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts, which run on Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
 
@@ -182,6 +184,7 @@ mod tests {
         assert!(parse("today 9:00 go", now).unwrap_err().contains("passed"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_one_off_goes_out_once_and_is_removed() {
         let (st, a) = agents::tests::fake_claude_state();
@@ -196,6 +199,7 @@ mod tests {
         assert_eq!(tick(&st, at(13, 9, 1)), 0, "once");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_repeat_moves_to_its_next_time_and_a_missed_one_runs_once() {
         let (st, a) = agents::tests::fake_claude_state();
@@ -211,6 +215,7 @@ mod tests {
         assert_eq!(tick(&st, at(15, 12, 1)), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn quiet_hours_do_not_hold_a_schedule() {
         let (st, a) = agents::tests::fake_claude_state();

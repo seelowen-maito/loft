@@ -3,8 +3,15 @@
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// The CLI may not be on a background service's PATH; the Mac app bundles its own copy.
-const BINS: &[&str] = &["tailscale", "/usr/local/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+/// What `tailscale <args>` prints, from the first copy of the CLI that answers. It may not be on a background
+/// service's PATH, so its usual install folders are tried too: the Mac app bundles its own copy, and on Windows it is
+/// `C:\Program Files\Tailscale\tailscale.exe`.
+fn tailscale(args: &[&str]) -> Option<serde_json::Value> {
+    crate::sys::find_tools("tailscale").iter().find_map(|bin| {
+        let out = crate::sys::no_window(Command::new(bin).args(args)).output().ok().filter(|o| o.status.success())?;
+        serde_json::from_slice(&out.stdout).ok()
+    })
+}
 
 /// MagicDNS name, e.g. `my-mac.tail1234.ts.net`. None when Tailscale isn't installed or running; retried until found.
 pub fn host() -> Option<String> {
@@ -12,12 +19,11 @@ pub fn host() -> Option<String> {
     if let Some(h) = HOST.get() {
         return Some(h.clone());
     }
-    let h = BINS.iter().find_map(|bin| {
-        let out = Command::new(bin).args(["status", "--json"]).output().ok().filter(|o| o.status.success())?;
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-        let name = v["Self"]["DNSName"].as_str()?.trim_end_matches('.');
-        (!name.is_empty()).then(|| name.to_string())
-    })?;
+    let v = tailscale(&["status", "--json"])?;
+    let h = v["Self"]["DNSName"].as_str()?.trim_end_matches('.').to_string();
+    if h.is_empty() {
+        return None;
+    }
     Some(HOST.get_or_init(|| h).clone())
 }
 
@@ -28,11 +34,7 @@ static HTTPS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 /// Asks Tailscale whether it serves Loft over https, and keeps the answer for `web_url`. When Tailscale doesn't
 /// answer (tailscaled restarting), the last answer stays. Runs a process: call it off the async threads.
 pub fn check_https(port: u16) -> Option<String> {
-    let status = BINS.iter().find_map(|bin| {
-        let out = Command::new(bin).args(["serve", "status", "--json"]).output().ok().filter(|o| o.status.success())?;
-        serde_json::from_slice::<serde_json::Value>(&out.stdout).ok()
-    });
-    keep(&HTTPS, status, port)
+    keep(&HTTPS, tailscale(&["serve", "status", "--json"]), port)
 }
 
 /// Stores the https address read from `status` in `slot`; no status (Tailscale didn't answer) keeps what's there.

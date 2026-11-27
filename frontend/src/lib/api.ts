@@ -562,7 +562,7 @@ export type Settings = {
   auto_update: boolean;
   show_simulator: boolean;
   messaging_rules: boolean;
-  /** Where the daily backups go; "" is ~/Library/Application Support/Loft/backups. */
+  /** Where the daily backups go; "" is Loft/backups in the system's data folder (~/Library/Application Support on a Mac, %APPDATA% on Windows). */
   backup_dir: string;
   /** Hours with no run before an agent counts as idle and Loft shuts its Simulator device down. At least 1. */
   idle_timeout_hours: number;
@@ -711,7 +711,7 @@ export type SystemReading = {
 
 /** A folder suggested for the Projects folder: `label` is `path` with `~` for home; `repos` counts the git repos in it. */
 export type FolderSuggestion = { path: string; label: string; repos: number };
-export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
+export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string; platform: string; features: string[] };
 
 /** One of a project's settings: its choices, Loft's default, its value and, once changed, when and by which agent (none: the user).
  *  A `branch` setting takes one of the repo's branches (`projectBranches`) instead of `choices`; empty is the repo's default branch.

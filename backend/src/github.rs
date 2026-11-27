@@ -121,7 +121,7 @@ fn gh_auth_token() -> Option<String> {
     if cfg!(test) {
         return None;
     }
-    let out = std::process::Command::new("gh").args(["auth", "token"]).output().ok()?;
+    let out = crate::sys::no_window(std::process::Command::new(crate::sys::find_tool("gh")?).args(["auth", "token"])).output().ok()?;
     let t = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (out.status.success() && !t.is_empty()).then_some(t)
 }

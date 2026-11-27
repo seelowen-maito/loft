@@ -14,7 +14,6 @@
 //! secret as it). Each push carries the phone's token and environment; the relay passes Apple's answer
 //! back. With neither, nothing is pushed.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -219,22 +218,24 @@ pub fn remove_relay_key() -> Result<()> {
 
 /// Writes `text` to `path` in the key folder, owner-only, through a uniquely named temporary file beside it, so concurrent writes never share one.
 fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
+    // One write at a time: Windows refuses to rename over a file another write is still setting the ACL of.
+    static WRITING: Mutex<()> = Mutex::new(());
+    let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let dir = key_dir();
     std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    crate::owner_only::dir(&dir)?;
     let tmp = path.with_file_name(format!("{}.{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("secret"), uuid::Uuid::new_v4()));
     // Created owner-only from the start (never 0644, even briefly); `create_new` refuses to reuse a file.
     let result = (|| -> Result<()> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = crate::owner_only::options()
             .write(true)
             .create_new(true)
-            .mode(0o600)
             .open(&tmp)?;
         file.write_all(text.as_bytes())?;
         drop(file);
         std::fs::rename(&tmp, path)?;
+        crate::owner_only::file(path)?;
         Ok(())
     })();
     if result.is_err() {
@@ -458,6 +459,9 @@ pub fn valid_token(t: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     #[tokio::test]
     async fn a_401_stops_relay_pushes_until_a_new_key_is_stored() {
         let st = crate::tasks::tests::state();
@@ -525,6 +529,7 @@ pub(crate) mod tests {
         assert!(relay_key_refused() && !relay_key_present());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failed_secret_write_leaves_no_temp_file_and_a_good_one_is_owner_only() {
         fake_apns();
@@ -768,6 +773,7 @@ pub(crate) mod tests {
         assert_eq!([Route::OwnKey, Route::Relay, Route::Off].map(Route::name), ["own_key", "relay", "none"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn only_a_relay_key_shaped_like_one_is_stored() {
         fake_apns();

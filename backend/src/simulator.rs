@@ -493,6 +493,8 @@ pub async fn input(State(state): State<AppState>, Json(req): Json<InputReq>) -> 
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts; those through the agent's tool run on a Mac only, where it's offered.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
@@ -534,6 +536,7 @@ esac
 "#;
 
     /// Points the state's `xcrun` at a fake of its own.
+    #[cfg(unix)]
     pub(crate) fn fake_xcrun(st: &mut AppState) {
         let dir = st.cfg.root.as_path().join("xcrun");
         std::fs::create_dir_all(&dir).unwrap();
@@ -545,6 +548,7 @@ esac
 
     /// A fake `xcode-select` printing `selected` for `-p` and logging each call, and a temp root for /Applications and
     /// /Volumes, beside the fake `xcrun`, with nothing found yet. Returns the root.
+    #[cfg(unix)]
     pub(crate) fn fake_xcode_select(st: &mut AppState, selected: &str, developer_dir: Option<PathBuf>) -> PathBuf {
         let dir = st.cfg.root.as_path().join("xcode");
         let root = dir.join("root");
@@ -634,6 +638,7 @@ esac
         fake_devices(st).into_iter().find(|d| d.0 == udid).map(|d| d.1)
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn orphaned_agent_devices_are_deleted_and_no_other_device_is_touched() {
         let mut st = crate::tasks::tests::state();
@@ -679,6 +684,7 @@ esac
         assert_eq!(st.db.agent_devices().unwrap(), [(kept, a.id)], "a deleted device is forgotten");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_idle_agent_s_device_is_shut_down_after_the_timeout_never_during_a_run() {
         let mut st = crate::tasks::tests::state();
@@ -714,6 +720,7 @@ esac
         assert!(tidy(&st).await.is_empty(), "a shut-down device is left alone");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn settings_lists_agents_devices_with_their_size_and_state_and_the_tidy_is_logged() {
         let mut st = crate::tasks::tests::state();
@@ -744,6 +751,7 @@ esac
         assert_eq!((log.what.as_str(), done), ("Simulator cleanup", vec![("Deleted Simulator device", "Gone (Loft)"), ("Shut down Simulator device", "Builder (Loft)")]));
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_agent_gets_its_own_device_once_named_after_it_and_the_simulator_page_lists_agents_devices() {
         let mut st = crate::tasks::tests::state();
@@ -789,6 +797,7 @@ esac
         assert!(again["content"][0]["text"].as_str().unwrap().contains(&replaced));
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn with_no_device_to_copy_the_newest_runtime_s_iphone_is_used_and_without_simctl_the_agent_is_told() {
         let mut st = crate::tasks::tests::state();
@@ -804,6 +813,7 @@ esac
         assert!(simctl_log(&st).contains("create Builder (Loft) com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-0"));
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn with_xcode_select_on_the_command_line_tools_simctl_runs_with_the_xcode_found_or_says_xcode_is_missing() {
         let mut st = crate::tasks::tests::state();
@@ -846,6 +856,7 @@ esac
         assert_eq!(find_xcode(&st.cfg.xcode).await, Xcode::At(nested));
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_developer_dir_already_set_or_an_xcode_already_selected_is_used_as_is() {
         let mut st = crate::tasks::tests::state();
@@ -866,6 +877,7 @@ esac
         assert!(listed(&st).await["error"].is_null());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn repeated_simctl_calls_look_xcode_up_once_until_the_lookup_is_stale() {
         let mut st = crate::tasks::tests::state();

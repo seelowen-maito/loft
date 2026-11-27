@@ -7,7 +7,7 @@ import { isSpec, specProgress } from "../lib/issueOrder";
 import { cx } from "../lib/format";
 import { teamOf } from "../lib/team";
 import {
-  FIXED, formatCombo, isTyping, loadCombos, loadRecent, nextNeedsYou, OPEN_SHORTCUT, REBINDABLE, recording, shortcutAction,
+  fixedShortcuts, formatCombo, isTyping, loadCombos, loadRecent, nextNeedsYou, OPEN_SHORTCUT, REBINDABLE, recording, shortcutAction,
   searchRows, SHORTCUTS_CHANGED, switcherAgents, type Combos, type Openable,
 } from "../lib/shortcuts";
 import { statusOf } from "../pages/agents/Status";
@@ -15,6 +15,7 @@ import { openTalk } from "../lib/talk";
 import { Dialog } from "./Dialog";
 import { toast } from "./FloatingBar";
 import { Sticker } from "./Sticker";
+import { useOffered } from "../hooks/useOffered";
 
 const G_WINDOW_MS = 1500;
 
@@ -23,6 +24,8 @@ export function Shortcuts() {
   const navigate = useNavigate();
   const [open, setOpen] = useState<"switcher" | "sheet" | null>(null);
   const combos = useRef<Combos>(loadCombos());
+  const offers = useRef(useOffered());
+  offers.current = useOffered();
   const gAt = useRef(0);
   const close = useCallback(() => setOpen(null), []);
 
@@ -37,7 +40,7 @@ export function Shortcuts() {
       const afterG = Date.now() - gAt.current < G_WINDOW_MS;
       gAt.current = 0;
       // Plain keys don't act on the page behind any open dialog (Glossary, a confirm, Talk itself).
-      const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG, dialog: !!document.querySelector('[role="dialog"]') });
+      const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG, dialog: !!document.querySelector('[role="dialog"]'), simulator: offers.current.simulator, voice: offers.current.voice });
       if (!a) return;
       const shown = document.querySelector<HTMLElement>('[role="dialog"][data-shortcuts]');
       e.preventDefault();
@@ -82,8 +85,8 @@ export function Shortcuts() {
 }
 
 /** Every shortcut with its current keys, for the sheet and Settings. */
-export function shortcutRows(combos: Combos): { keys: string; label: string }[] {
-  return [...REBINDABLE.map((r) => ({ keys: formatCombo(combos[r.id]), label: r.label })), ...FIXED];
+export function shortcutRows(combos: Combos, offers: { simulator: boolean; voice: boolean }): { keys: string; label: string }[] {
+  return [...REBINDABLE.map((r) => ({ keys: formatCombo(combos[r.id]), label: r.label })), ...fixedShortcuts(offers)];
 }
 
 export function Keys({ keys }: { keys: string }) {
@@ -97,6 +100,7 @@ export function Keys({ keys }: { keys: string }) {
 }
 
 function Sheet({ combos, onClose }: { combos: Combos; onClose: () => void }) {
+  const offers = useOffered();
   return (
     <Dialog title="Keyboard shortcuts" data-shortcuts="" top onClose={onClose} className="p-5">
       <div className="mb-3 flex items-center justify-between">
@@ -104,7 +108,7 @@ function Sheet({ combos, onClose }: { combos: Combos; onClose: () => void }) {
         <button autoFocus className="btn-ghost" onClick={onClose} aria-label="Close"><X className="size-4" /></button>
       </div>
       <ul className="space-y-2">
-        {shortcutRows(combos).map((r) => (
+        {shortcutRows(combos, offers).map((r) => (
           <li key={r.label} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0 text-fg-2">{r.label}</span>
             <Keys keys={r.keys} />

@@ -52,6 +52,14 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 - [Claude Code](https://claude.com/claude-code) (`claude`), installed and logged in. Agents use your login.
 - Optional: [`gh`](https://cli.github.com), logged in, for GitHub pull requests and issues.
 
+loft runs on macOS, Linux and Windows (x64, Windows 10 22H2 or 11). On Windows it runs natively, with these on top:
+
+- [Git for Windows](https://gitforwindows.org): run the installer, `setup.sh` and `start.sh` in its Git Bash. Agents use Git Bash too.
+- The Visual Studio Build Tools with the C++ workload (Rust's MSVC toolchain links with them).
+- Long paths on, in Windows (`LongPathsEnabled`) and in git (`git config --global core.longpaths true`), so agents' clones don't hit the 260-character limit.
+
+`setup.sh` checks each of these and gives the `winget` command for whatever is missing. loft also runs inside WSL2, as on Linux.
+
 ## Install
 
 **One-line installer**
@@ -60,11 +68,11 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 curl -fsSL https://get-loft.com/install.sh | bash
 ```
 
-The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
+The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On Windows, run it in Git Bash: it saves the projects folder as `C:/…`, the form loft reads. It can also run loft in the background from login: on macOS as a launchd service (logs in `~/Library/Logs/loft.log`), on Windows as a logon task that runs it without a window (logs in `%LOCALAPPDATA%\Loft\loft.log`). Either one starts loft again after an update or a crash; run setup again to update it. The installer and setup are safe to run again at any time, for example after you move Node or Claude Code.
 
 Already have a clone? Run `./setup.sh` from it instead.
 
-To run loft in the foreground instead, use `./start.sh`.
+To run loft in the foreground instead, use `./start.sh`. It starts loft again after an update or a restart, and stops when loft exits for any other reason. On Windows, Loft restarts by exiting, so a loft started some other way (running its binary directly) stays stopped after one; elsewhere it replaces itself with the new build.
 
 Then open http://localhost:7420 and check **Settings** (gear icon, top right). Settings are saved to `.loft/settings.json`:
 
@@ -72,7 +80,9 @@ Then open http://localhost:7420 and check **Settings** (gear icon, top right). S
 - **Claude command**: the command agents run.
 - **GitHub token**: needed for private repos and merging pull requests. Without one, loft uses `gh auth token`.
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
-- **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (and `npm` when pnpm and corepack are missing) on `PATH`.
+- **Auto-update**: checks the upstream branch every minute and, once no agent is running, pulls, rebuilds and restarts. Needs `cargo` and `node` (and `npm` when pnpm and corepack are missing) on `PATH`. On Windows the running build is renamed to `loft.old.exe` while the new one builds; the new Loft deletes it (the daily sweep retries if it was still in use), so only one is ever kept, and a failed build leaves the running one in place.
+
+Some features exist only when loft runs on a Mac: the iOS Simulator tab, Talk (voice), Mac access, Open Terminal in Settings › Claude login, and Herdr setup. Elsewhere the web app doesn't show them.
 
 ### Use it from other devices
 

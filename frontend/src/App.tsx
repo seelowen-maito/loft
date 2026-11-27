@@ -28,6 +28,7 @@ import { Talk } from "./components/Talk";
 import { HelpMenu } from "./components/HelpMenu";
 import { Tip } from "./components/HoverTip";
 import { goKeys } from "./lib/shortcuts";
+import { useOffered } from "./hooks/useOffered";
 import { fmtClock } from "./lib/time";
 import { useNow } from "./lib/useNow";
 
@@ -200,7 +201,8 @@ function issuesLink(path: string): string {
 export default function App() {
   const location = useLocation();
   const live = useLiveConnection();
-  const showSimulator = useShowSimulator();
+  const offers = useOffered();
+  const showSimulator = useShowSimulator() && offers.simulator;
   const tab = ({ isActive }: { isActive: boolean }) =>
     cx(
       "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors max-lg:px-2 max-[24rem]:px-1.5",
@@ -295,7 +297,7 @@ export default function App() {
           <Route path="/needs-you" element={<NeedsYouPage />} />
           <Route path="/saved" element={<SavedPage />} />
           <Route path="/saved/:id" element={<SavedPage />} />
-          <Route path="/simulator" element={<SimulatorPage />} />
+          {offers.simulator && <Route path="/simulator" element={<SimulatorPage />} />}
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/clean" element={<CleanPage />} />
         </Routes>

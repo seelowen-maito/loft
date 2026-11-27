@@ -4,7 +4,6 @@
 //! Restoring one is manual: see docs/backups.md.
 
 use std::collections::HashSet;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,9 +16,11 @@ use serde::Serialize;
 
 use crate::api::ApiResult;
 use crate::state::AppState;
+use crate::sys::Canonical;
 
-/// Under the home folder, when Settings names no other.
-const DEFAULT_DIR: &str = "Library/Application Support/Loft/backups";
+/// Under the system's data folder (`~/Library/Application Support` on a Mac, `%APPDATA%` on Windows,
+/// `$XDG_DATA_HOME` or `~/.local/share` on Linux), when Settings names no other.
+const DEFAULT_DIR: &str = "Loft/backups";
 /// iCloud Drive's own folder under the home folder, there only once iCloud Drive is on.
 const ICLOUD_DRIVE: &str = "Library/Mobile Documents/com~apple~CloudDocs";
 /// A backup's folder name: when it was made, in local time.
@@ -61,13 +62,42 @@ pub struct Failure {
 /// The backups folder Settings names, or the default one.
 pub fn dir(s: &crate::settings::Settings) -> PathBuf {
     match s.backup_dir.trim() {
-        "" => dirs::home_dir().unwrap_or_default().join(DEFAULT_DIR),
+        "" => dirs::data_dir().unwrap_or_default().join(DEFAULT_DIR),
         d => PathBuf::from(d),
     }
 }
 
-/// The iCloud Drive choice for this Mac's user.
+/// Where Linux kept the default backups folder before it moved to the system's data folder (under the home folder).
+const OLD_LINUX_DIR: &str = "Library/Application Support/Loft/backups";
+
+/// On Linux, moves the default backups folder from where it used to be to where it is now, once: when the old one
+/// exists and the new one doesn't yet, so retention and restore-backup.sh see the backups made before.
+fn move_old_default(settings: &crate::settings::Settings) {
+    if !cfg!(target_os = "linux") || !settings.backup_dir.trim().is_empty() {
+        return;
+    }
+    if let Some(home) = dirs::home_dir() {
+        move_old(&home.join(OLD_LINUX_DIR), &dir(settings));
+    }
+}
+
+/// Moves the folder `old` to `new` when `old` is a folder and nothing is at `new` yet.
+fn move_old(old: &Path, new: &Path) {
+    if !old.is_dir() || std::fs::symlink_metadata(new).is_ok() {
+        return;
+    }
+    let moved = new.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::rename(old, new));
+    match moved {
+        Ok(()) => tracing::info!("moved the backups folder from {} to {}", old.display(), new.display()),
+        Err(e) => tracing::warn!("couldn't move the backups folder from {} to {}: {e}", old.display(), new.display()),
+    }
+}
+
+/// The iCloud Drive choice for this Mac's user: iCloud Drive is Mac-only.
 fn icloud() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
     dirs::home_dir().and_then(|h| icloud_in(&h))
 }
 
@@ -81,7 +111,7 @@ fn icloud_in(home: &Path) -> Option<PathBuf> {
 /// Backs up `db` (and `settings`, when there is one) into a new folder under `root` named for `at`, and
 /// checks the copy. Blocking. The folder appears only once it's complete.
 pub fn make(db: &Path, settings: &Path, root: &Path, at: NaiveDateTime) -> Result<Last> {
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(root).with_context(|| format!("can't create {}", root.display()))?;
+    crate::owner_only::create_dir(root, true).with_context(|| format!("can't create {}", root.display()))?;
     let done = root.join(at.format(NAME).to_string());
     // Back up now twice in the same second: the backup just made is as fresh, so it is the answer.
     if done.join("loft.db").is_file() {
@@ -89,13 +119,13 @@ pub fn make(db: &Path, settings: &Path, root: &Path, at: NaiveDateTime) -> Resul
     }
     let partial = done.with_extension("partial");
     let _ = std::fs::remove_dir_all(&partial);
-    std::fs::DirBuilder::new().mode(0o700).create(&partial).with_context(|| format!("can't create {}", partial.display()))?;
+    crate::owner_only::create_dir(&partial, false).with_context(|| format!("can't create {}", partial.display()))?;
     let made = (|| -> Result<u64> {
         let out = partial.join("loft.db");
         // Never create: a missing database is an error, not an empty backup.
         let src = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         src.execute("VACUUM INTO ?1", [out.to_string_lossy()])?;
-        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600))?;
+        crate::owner_only::file(&out)?;
         let check: String = Connection::open_with_flags(&out, OpenFlags::SQLITE_OPEN_READ_ONLY)?.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
         if check != "ok" {
             bail!("the copy failed its integrity check: {check}");
@@ -104,7 +134,7 @@ pub fn make(db: &Path, settings: &Path, root: &Path, at: NaiveDateTime) -> Resul
         if settings.exists() {
             let to = partial.join("settings.json");
             std::fs::copy(settings, &to)?;
-            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))?;
+            crate::owner_only::file(&to)?;
             bytes += std::fs::metadata(&to)?.len();
         }
         Ok(bytes)
@@ -167,7 +197,7 @@ fn resolved(p: &Path) -> PathBuf {
     let mut rest = vec![];
     let mut cur = p;
     loop {
-        if let Ok(real) = cur.canonicalize() {
+        if let Ok(real) = cur.canonical() {
             return rest.iter().rev().fold(real, |acc, name| acc.join(name));
         }
         match (cur.parent(), cur.file_name()) {
@@ -268,6 +298,8 @@ fn due(s: &Status, now: DateTime<Local>, quiet: bool) -> bool {
 /// The day's backup. Looks at the backups folder at start and whenever Settings points elsewhere;
 /// otherwise each tick reads only what the last backup recorded.
 pub async fn scheduler(state: AppState) {
+    let settings = state.settings.get();
+    let _ = tokio::task::spawn_blocking(move || move_old_default(&settings)).await;
     let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
     loop {
         tick.tick().await;
@@ -310,6 +342,7 @@ pub async fn now(State(state): State<AppState>) -> ApiResult<Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
 
     fn t(s: &str) -> NaiveDateTime {
@@ -322,6 +355,25 @@ mod tests {
         d
     }
 
+    #[test]
+    fn the_old_default_folder_moves_to_the_new_one_once() {
+        let d = temp();
+        let (old, new) = (d.join("home/Library/Application Support/Loft/backups"), d.join("data/Loft/backups"));
+        std::fs::create_dir_all(old.join("2026-11-08_031500")).unwrap();
+        std::fs::write(old.join("2026-11-08_031500/loft.db"), "db").unwrap();
+        move_old(&old, &new);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read_to_string(new.join("2026-11-08_031500/loft.db")).unwrap(), "db");
+        // A new folder already there (backups made since) is left alone, as is the old one then.
+        std::fs::create_dir_all(old.join("2026-11-01_031500")).unwrap();
+        move_old(&old, &new);
+        assert!(old.join("2026-11-01_031500").is_dir() && !new.join("2026-11-01_031500").exists());
+        // No old folder: nothing happens.
+        let none = d.join("nothing");
+        move_old(&none, &d.join("other"));
+        assert!(!d.join("other").exists());
+    }
+
     /// A state whose backups go to a temp folder, never the real one.
     fn state_backing_up_to(root: &Path) -> AppState {
         let st = crate::tasks::tests::state();
@@ -331,10 +383,12 @@ mod tests {
         st
     }
 
+    #[cfg(unix)]
     fn mode(p: &Path) -> u32 {
         std::fs::metadata(p).unwrap().mode() & 0o777
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_backup_made_while_loft_writes_has_every_committed_row_and_is_owner_only() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -388,6 +442,21 @@ mod tests {
         assert_eq!(settings["backup_dir"], serde_json::json!(root.to_string_lossy()));
     }
 
+    #[test]
+    fn the_default_folder_is_in_the_system_data_folder() {
+        let s = crate::settings::Settings::default();
+        #[cfg(unix)]
+        let home = dirs::home_dir().unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(dir(&s), home.join("Library/Application Support/Loft/backups"), "unchanged on a Mac");
+        #[cfg(windows)]
+        assert_eq!(dir(&s), PathBuf::from(std::env::var_os("APPDATA").unwrap()).join("Loft").join("backups"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(dir(&s), std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|d| d.is_absolute()).unwrap_or(home.join(".local/share")).join("Loft/backups"));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(icloud(), None, "iCloud Drive is Mac-only");
+    }
+
     #[tokio::test]
     async fn two_backups_in_the_same_second_both_succeed_with_one_folder() {
         let base = temp();
@@ -404,6 +473,7 @@ mod tests {
         assert!(names.iter().all(|n| !n.ends_with(".partial")), "{names:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_backup_is_recorded_until_a_good_one_and_leaves_nothing_behind() {
         let base = temp();
@@ -518,6 +588,7 @@ mod tests {
         assert_eq!(items(&st).len(), 1, "never a good one");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn icloud_drive_is_offered_only_when_it_is_on_and_takes_the_next_backup() {
         let home = temp();
@@ -548,6 +619,7 @@ mod tests {
         assert!(put(&home.join(ICLOUD_DRIVE).join("Other backups")).await.is_err_and(|e| e.1.contains("git repository")));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn settings_refuse_a_backups_folder_that_is_relative_or_inside_loft_or_a_repo() {
         let st = crate::tasks::tests::state();

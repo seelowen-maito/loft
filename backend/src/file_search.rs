@@ -129,7 +129,7 @@ fn walk(base: &Path) -> BTreeSet<(String, bool)> {
             let p = e.path();
             let Ok(rel) = p.strip_prefix(base) else { continue };
             let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-            entries.insert((rel.to_string_lossy().into_owned(), is_dir));
+            entries.insert((crate::sys::forward_slashes(rel), is_dir));
             if is_dir {
                 stack.push(p);
             }

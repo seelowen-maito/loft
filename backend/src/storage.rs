@@ -2,10 +2,10 @@
 //! so a command in a workspace whose clone is missing finds no checkout above it. They used to live in Loft's own
 //! checkout; [`migrate`] moves them out on start, and finishes a move a crash interrupted.
 
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::db::Db;
+use crate::sys::Canonical;
 
 /// The storage folder's name, kept where it moved: the checkout guard knows a workspace by it (kill_guard.rs).
 pub const NAME: &str = "agent-local-storage";
@@ -24,10 +24,26 @@ const TEXT_MAX: u64 = 1_000_000;
 /// 200-character name limit.
 pub fn dir_for(root: &Path, data_home: &Path) -> PathBuf {
     use sha2::{Digest, Sha256};
-    let real = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let real = root.canonical().unwrap_or_else(|_| root.to_path_buf());
     let base: String = real.file_name().unwrap_or_default().to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let hash: String = Sha256::digest(real.as_os_str().as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect();
+    let hash: String = Sha256::digest(real.as_os_str().as_encoded_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect();
     data_home.join("loft").join(format!("{base}-{hash}")).join(NAME)
+}
+
+/// A path as a file's contents: its bytes on Unix, UTF-8 on Windows.
+fn path_bytes(p: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    return std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()).to_vec();
+    #[cfg(not(unix))]
+    p.to_string_lossy().into_owned().into_bytes()
+}
+
+/// The path [`path_bytes`] wrote.
+fn path_from_bytes(b: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    return PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b));
+    #[cfg(not(unix))]
+    PathBuf::from(String::from_utf8_lossy(b).into_owned())
 }
 
 /// `$XDG_DATA_HOME`, else `~/.local/share`, on macOS too: `~/Library/Application Support` has a space, which every
@@ -50,7 +66,7 @@ pub fn chosen(root: &Path, data_dir: &Path, data_home: impl FnOnce() -> anyhow::
         tracing::warn!("agents' workspaces: {} doesn't hold a full path; choosing again", file.display());
     }
     let dir = dir_for(root, &data_home()?);
-    std::fs::write(&file, dir.as_os_str().as_bytes())?;
+    std::fs::write(&file, path_bytes(&dir))?;
     tracing::info!("agents' workspaces: chose {}", dir.display());
     Ok(dir)
 }
@@ -85,7 +101,7 @@ pub fn migrate(old: &Path, new: &Path, root: &Path, projects_dir: &Path, data_di
     };
     let old = match std::fs::read(&marker) {
         Ok(path) => {
-            let old = PathBuf::from(std::ffi::OsStr::from_bytes(&path));
+            let old = path_from_bytes(&path);
             tracing::warn!("agents' workspaces: finishing the move from {} to {} an earlier start began", old.display(), new.display());
             old
         }
@@ -120,7 +136,7 @@ pub fn migrate(old: &Path, new: &Path, root: &Path, projects_dir: &Path, data_di
             let copy = data_dir.join(DB_COPY);
             // A copy left by an earlier attempt whose rename failed is older than the database now.
             let _ = std::fs::remove_file(&copy);
-            let started = db.copy_to(&copy).and_then(|_| Ok(std::fs::write(&marker, old.as_os_str().as_bytes())?));
+            let started = db.copy_to(&copy).and_then(|_| Ok(std::fs::write(&marker, path_bytes(old))?));
             if let Err(e) = started {
                 return kept(old, format!("couldn't copy the database or write {}: {e}", marker.display()));
             }
@@ -155,7 +171,7 @@ pub fn migrate(old: &Path, new: &Path, root: &Path, projects_dir: &Path, data_di
     ok &= move_transcripts(projects, &old, new);
     let memory = crate::sessions::transcripts_dir_in(projects, old.parent().unwrap_or(&old)).join("memory");
     for entry in std::fs::read_dir(new).into_iter().flatten().flatten() {
-        if entry.file_name().as_bytes().starts_with(b".") || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+        if entry.file_name().as_encoded_bytes().starts_with(b".") || !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let ws = entry.path();
@@ -216,7 +232,6 @@ pub fn reappeared(root: &Path, storage: &Path) -> Option<PathBuf> {
 /// the data folder by design). A git work tree around it only gets a warning. Makes `<data home>/loft` and the folder for this checkout,
 /// owner-only.
 fn safe_destination(new: &Path, root: &Path, projects_dir: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let key = new.parent().ok_or("it has no parent folder")?;
     let loft = key.parent().ok_or("it has no parent folder")?;
     for p in [loft, key, new] {
@@ -224,17 +239,17 @@ fn safe_destination(new: &Path, root: &Path, projects_dir: &Path) -> Result<(), 
             return Err(format!("{} is a symlink", p.display()));
         }
     }
-    let made = std::fs::create_dir_all(loft.parent().unwrap_or(loft)).and_then(|_| std::fs::DirBuilder::new().recursive(true).mode(0o700).create(key));
+    let made = std::fs::create_dir_all(loft.parent().unwrap_or(loft)).and_then(|_| crate::owner_only::create_dir(key, true));
     made.map_err(|e| format!("couldn't make {}: {e}", key.display()))?;
     for p in [loft, key] {
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("couldn't make {} owner-only: {e}", p.display()))?;
+        crate::owner_only::dir(p).map_err(|e| format!("couldn't make {} owner-only: {e}", p.display()))?;
     }
     // Links anywhere above count: the real path decides.
-    let real = key.canonicalize().map_err(|e| format!("couldn't resolve {}: {e}", key.display()))?;
-    if real.starts_with(root.canonicalize().unwrap_or_else(|_| root.to_path_buf())) {
+    let real = key.canonical().map_err(|e| format!("couldn't resolve {}: {e}", key.display()))?;
+    if real.starts_with(root.canonical().unwrap_or_else(|_| root.to_path_buf())) {
         return Err(format!("{} is inside Loft's checkout", real.display()));
     }
-    let real_of = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let real_of = |p: &Path| p.canonical().unwrap_or_else(|_| p.to_path_buf());
     let projects_dir = real_of(projects_dir);
     let home = dirs::home_dir().map(|h| real_of(&h));
     if real.starts_with(&projects_dir) && !home.is_some_and(|h| h.starts_with(&projects_dir)) {
@@ -314,7 +329,7 @@ fn rewrite_files(dir: &Path, from: &str, to: &str, depth: usize) -> bool {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let Ok(ty) = entry.file_type() else { continue };
         let name = entry.file_name();
-        if name.as_bytes().starts_with(b".") {
+        if name.as_encoded_bytes().starts_with(b".") {
             continue;
         }
         if ty.is_file() && entry.metadata().is_ok_and(|m| m.len() <= TEXT_MAX) {
@@ -336,7 +351,7 @@ fn move_transcripts(projects: &Path, old: &Path, new: &Path) -> bool {
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().as_bytes().starts_with(b"."))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().as_encoded_bytes().starts_with(b"."))
         .map(|e| format!("-{}", encode(&e.file_name().to_string_lossy())))
         .collect();
     let mut ok = true;
@@ -385,6 +400,8 @@ fn copy_files(from: &Path, to: &Path) -> bool {
 }
 
 #[cfg(test)]
+// Some of these use symlinks or file modes, which are Unix only.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod tests {
     use super::*;
     use std::process::Command;
@@ -402,7 +419,7 @@ mod tests {
     /// A temporary home with the user's loft checkout at `dev/loft`, a git repository.
     fn home() -> (crate::testdir::TempDir, PathBuf, PathBuf) {
         let home = crate::testdir::TempDir::new("home");
-        let home_path = home.canonicalize().unwrap();
+        let home_path = home.canonical().unwrap();
         let root = home_path.join("dev/loft");
         std::fs::create_dir_all(root.join(".loft")).unwrap();
         ok(git(&root, &["init", "-q"]));
@@ -486,6 +503,7 @@ mod tests {
         }
 
         /// Everything an agent had works at the new place.
+        #[cfg(unix)]
         fn assert_moved(&self) {
             let ws = self.new_dir().join("agent-1");
             assert!(!self.old_dir().exists() && self.new_dir().join(".agent-files").is_dir());
@@ -557,6 +575,7 @@ mod tests {
         assert_eq!(crate::kill_guard::checkout_changes("git checkout main", &old, &[])[0].folder, root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_existing_install_moves_its_workspaces_once_and_agents_keep_their_clones_notes_transcripts_and_memory() {
         let o = Old::make();
@@ -567,11 +586,12 @@ mod tests {
         o.assert_moved();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_move_a_crash_interrupted_is_finished_on_the_next_start() {
         // Killed after the marker, before the rename.
         let o = Old::make();
-        std::fs::write(o.data().join(MARKER), o.old_dir().as_os_str().as_bytes()).unwrap();
+        std::fs::write(o.data().join(MARKER), path_bytes(&o.old_dir())).unwrap();
         o.db.copy_to(&o.data().join(DB_COPY)).unwrap();
         assert_eq!(o.migrate(), o.new_dir());
         o.assert_moved();
@@ -579,19 +599,20 @@ mod tests {
         // Killed right after the rename: nothing else was updated.
         let o = Old::make();
         o.db.copy_to(&o.data().join(DB_COPY)).unwrap();
-        std::fs::write(o.data().join(MARKER), o.old_dir().as_os_str().as_bytes()).unwrap();
+        std::fs::write(o.data().join(MARKER), path_bytes(&o.old_dir())).unwrap();
         safe_destination(&o.new_dir(), &o.root, &o.home.join("dev")).unwrap();
         std::fs::rename(o.old_dir(), o.new_dir()).unwrap();
         assert_eq!(o.migrate(), o.new_dir());
         o.assert_moved();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_move_to_finish_checks_the_destination_again() {
         // Killed right after the rename; the destination is then swapped for a link into the checkout.
         let o = Old::make();
         o.db.copy_to(&o.data().join(DB_COPY)).unwrap();
-        std::fs::write(o.data().join(MARKER), o.old_dir().as_os_str().as_bytes()).unwrap();
+        std::fs::write(o.data().join(MARKER), path_bytes(&o.old_dir())).unwrap();
         safe_destination(&o.new_dir(), &o.root, &o.home.join("dev")).unwrap();
         std::fs::rename(o.old_dir(), o.new_dir()).unwrap();
         let moved = o.home.join("moved");
@@ -610,6 +631,7 @@ mod tests {
         o.assert_moved();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_step_that_fails_is_tried_again_on_the_next_start() {
         let o = Old::make();
@@ -623,6 +645,7 @@ mod tests {
         o.assert_moved();
     }
 
+    #[cfg(unix)]
     #[test]
     fn both_folders_full_moves_nothing_and_an_empty_new_one_is_no_obstacle() {
         let o = Old::make();
@@ -641,6 +664,7 @@ mod tests {
         o.assert_moved();
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_old_folder_that_reappears_after_the_move_is_never_used_again() {
         // Docker recreated the old folder's bind-mount sources, empty, after the move.
@@ -698,6 +722,7 @@ mod tests {
         assert!(!old.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_planted_destination_moves_nothing() {
         // The destination is a link to a folder an agent made.
@@ -752,7 +777,7 @@ mod tests {
 
     #[test]
     fn only_the_configured_storage_folder_holds_workspaces() {
-        let storage = Path::new("/data/loft/loft-1a2b3c4d/agent-local-storage");
+        let storage = Path::new(if cfg!(windows) { "C:/data/loft/loft-1a2b3c4d/agent-local-storage" } else { "/data/loft/loft-1a2b3c4d/agent-local-storage" });
         assert!(holds_in(&storage.join("agent-1/loft"), storage));
         assert!(holds_in(storage, storage));
         // The old folder, or any other of that name, isn't trusted.
@@ -784,6 +809,7 @@ mod tests {
         assert!(kept.ends_with(" (later)") && kept.contains(&o.old_dir().display().to_string()), "{kept}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_rename_that_failed_leaves_no_sign_of_a_finished_move() {
         use std::os::unix::fs::PermissionsExt;

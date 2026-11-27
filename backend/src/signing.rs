@@ -10,7 +10,6 @@
 //! lists the signed copy under Login Items. Started that way after an update, the copy hands over to the newer
 //! build, which signs a fresh copy and runs it.
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -116,7 +115,7 @@ pub fn ensure() {
     let build = build_of(&exe);
     if build != exe {
         if stale(&exe, &build) {
-            let err = Command::new(&build).args(std::env::args_os().skip(1)).exec();
+            let err = crate::sys::exec(Command::new(&build).args(std::env::args_os().skip(1)));
             eprintln!("signing: running the newer build failed: {err}");
         }
         return;
@@ -127,7 +126,7 @@ pub fn ensure() {
         return;
     };
     println!("signed a copy with the \"{IDENTITY}\" identity, running it");
-    let err = Command::new(&copy).args(std::env::args_os().skip(1)).exec();
+    let err = crate::sys::exec(Command::new(&copy).args(std::env::args_os().skip(1)));
     eprintln!("signing: running the signed copy failed: {err}");
 }
 

@@ -64,6 +64,10 @@ pub(crate) fn tools(state: &AppState) -> Value {
     all.as_array_mut().unwrap().extend(crate::delivery::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::project_settings::mcp_tools());
+    // The Simulator is the Mac's: off it the tool isn't offered (and is refused).
+    if !crate::api::ON_MAC {
+        all.as_array_mut().unwrap().retain(|t| t["name"] != "simulator_device");
+    }
     all
 }
 
@@ -344,6 +348,7 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
                 Err(e) => tool_error(format!("Couldn't read that pull request: {e}")),
             }
         }
+        "simulator_device" if !crate::api::ON_MAC => tool_error("There is no iOS Simulator here: it needs a Mac."),
         "simulator_device" => match state.db.get_agent(agent_id) {
             Ok(Some(me)) => match crate::simulator::agent_device(state, &me).await {
                 Ok((udid, name)) => {
@@ -591,14 +596,30 @@ pub async fn handle(State(state): State<AppState>, Path(agent_id): Path<String>,
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts, which run on Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
-    use crate::agents::tests::{fake_claude_state, until};
+    use crate::agents::tests::until;
+    #[cfg(unix)]
+    use crate::agents::tests::fake_claude_state;
     use crate::agents::{enqueue, is_running, workspace};
     use std::time::Duration;
 
     fn said(r: &Value) -> (&str, bool) {
         (r["content"][0]["text"].as_str().unwrap(), r["isError"].as_bool().unwrap_or(false))
+    }
+
+    #[tokio::test]
+    async fn the_simulator_tool_is_offered_only_on_a_mac() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let listed = tools(&st).as_array().unwrap().iter().any(|t| t["name"] == "simulator_device");
+        assert_eq!(listed, crate::api::ON_MAC);
+        if !crate::api::ON_MAC {
+            let r = call_tool(&st, &a.id, "simulator_device", json!({})).await;
+            assert_eq!(said(&r), ("There is no iOS Simulator here: it needs a Mac.", true));
+        }
     }
 
     #[test]
@@ -833,6 +854,7 @@ mod tests {
         format!("To answer {}, call `mcp__loft__message_agent`", from.name)
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_without_a_kind_is_rejected_with_both_kinds_explained() {
         let (st, to) = fake_claude_state();
@@ -854,6 +876,7 @@ mod tests {
         assert!(tool["description"].as_str().unwrap().contains(KINDS));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn needs_action_starts_a_run_with_the_reply_hint() {
         let (st, to) = fake_claude_state();
@@ -867,6 +890,7 @@ mod tests {
         assert_eq!((m.content.as_str(), m.meta.get("fyi")), ("Review PR #12", None));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_to_a_busy_agent_shows_as_queued_until_its_next_run_takes_it() {
         let (st, to) = fake_claude_state();
@@ -898,6 +922,7 @@ mod tests {
         assert_eq!(queued(&st).await, json!([]));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_fyi_starts_no_run_and_reaches_the_next_run_only() {
         let (st, to) = fake_claude_state();
@@ -920,6 +945,7 @@ mod tests {
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn pending_fyis_stay_out_of_agent_payloads() {
         let (st, to) = fake_claude_state();
@@ -939,6 +965,7 @@ mod tests {
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn one_prompt_takes_the_newest_fyis_in_order_and_counts_the_rest() {
         let (st, to) = fake_claude_state();
@@ -954,6 +981,7 @@ mod tests {
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn pending_fyis_survive_clear_and_resume() {
         let (st, to) = fake_claude_state();
@@ -976,6 +1004,7 @@ mod tests {
         assert!(p.contains("Merged #12") && !p.contains("Tests pass on abc123"), "{p}");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn with_the_global_setting_off_every_message_wakes_as_before() {
         let (st, to) = fake_claude_state();
@@ -993,6 +1022,7 @@ mod tests {
         assert!(st.db.list_messages(&to.id, 50, None).unwrap().iter().all(|m| m.meta.get("fyi").is_none()));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn no_fyi_is_lost_to_concurrent_writes_of_the_same_agent() {
         let (st, to) = fake_claude_state();
@@ -1015,6 +1045,7 @@ mod tests {
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 400);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn compact_and_avatar_runs_leave_fyis_for_the_next_real_run() {
         let (st, to) = fake_claude_state();
@@ -1031,6 +1062,7 @@ mod tests {
         assert!(p.starts_with("[FYI from agent Lead") && p.contains("Merged #12"), "{p}");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_that_fails_to_start_keeps_its_fyis() {
         let (st, to) = fake_claude_state();
@@ -1052,6 +1084,7 @@ mod tests {
         assert!(p.find("Merged #12").unwrap() < p.find("Released v2").unwrap(), "{p}");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_that_fails_after_claude_has_its_prompt_delivers_its_fyis_once() {
         let (st, to) = fake_claude_state();
@@ -1070,6 +1103,7 @@ mod tests {
         assert!(st.db.list_messages(&to.id, 100, None).unwrap().iter().filter(|m| m.kind == "error").count() >= 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stale_session_that_never_acted_on_the_prompt_keeps_its_fyis() {
         let (st, to) = fake_claude_state();
@@ -1089,6 +1123,7 @@ mod tests {
         assert!(p.contains("Merged #12"), "{p}");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_that_only_acknowledges_is_refused_and_not_stored() {
         let (st, to) = fake_claude_state();
@@ -1105,6 +1140,7 @@ mod tests {
         assert!(st.db.list_messages(&to.id, 50, None).unwrap().is_empty() && st.db.count_pending_fyis(&to.id).unwrap() == 0 && !is_running(&st, &to.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_with_substance_goes_through_even_with_thanks() {
         let (st, to) = fake_claude_state();
@@ -1117,6 +1153,7 @@ mod tests {
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), texts.len());
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_handed_over_ticket_asks_the_recipient_to_report_back_to_the_sender() {
         let (st, to) = fake_claude_state();
@@ -1144,6 +1181,7 @@ mod tests {
         assert!(!prompts(&st, &to)[2].contains("report back"), "{}", prompts(&st, &to)[2]);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_hand_over_is_not_answered_by_a_report() {
         let (st, to) = fake_claude_state();
@@ -1159,6 +1197,7 @@ mod tests {
         assert!(prompts(&st, &from)[0].contains("report back"), "{}", prompts(&st, &from)[0]);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn with_the_global_setting_off_nothing_is_refused() {
         let (st, to) = fake_claude_state();
@@ -1188,6 +1227,7 @@ mod tests {
     }
 
     /// Messages naming tickets: Fresh context applies between tickets only, as on a Delivery wake (#251).
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_about_a_new_ticket_clears_as_set() {
         let (st, to) = fake_claude_state();
@@ -1256,6 +1296,7 @@ mod tests {
         assert_eq!(clears(), 3, "still the same ticket");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_coordinating_lead_is_never_cleared_by_a_ticket_message() {
         let (st, lead) = fake_claude_state();

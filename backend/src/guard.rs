@@ -73,10 +73,7 @@ fn in_list(list: &str, host: &str) -> bool {
 
 /// This Mac's name, as `gethostname` gives it.
 fn mac_name() -> String {
-    let mut buf = [0u8; 256];
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let n = buf.iter().position(|&b| b == 0).unwrap_or(0);
-    if ok { String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase() } else { String::new() }
+    crate::sys::hostname()
 }
 
 /// The Tailscale name. Asking the CLI is a process, so a failed look is not repeated for 30 seconds.

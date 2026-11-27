@@ -449,8 +449,7 @@ fn model_status(reason: &str) -> String {
 /// Adds `audio` to the session's file, readable only by this user; returns its size.
 fn append(file: &std::path::Path, audio: &[u8]) -> Result<u64, ApiError> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let open = || std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(file);
+    let open = || crate::owner_only::options().create(true).append(true).open(file);
     let mut f = open().or_else(|_| {
         std::fs::create_dir_all(file.parent().unwrap())?;
         open()
@@ -477,6 +476,8 @@ fn plausible(input: &str, output: &str) -> bool {
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts, which run on Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
@@ -526,6 +527,7 @@ case "$input" in
 esac
 "#;
 
+    #[cfg(unix)]
     fn fake_state() -> AppState {
         let mut st = crate::tasks::tests::state();
         let dir = st.cfg.root.as_path().to_path_buf();
@@ -548,6 +550,7 @@ esac
         format!("{tag} so the cart total is wrong after a split payment and {}", "we really need to look at it again ".repeat(12))
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn briefs_long_dictations_and_keeps_the_original_otherwise() {
         let st = fake_state();
@@ -591,6 +594,7 @@ esac
     }
 
     /// A stand-in `fm` with `body` as its script; it logs its arguments.
+    #[cfg(unix)]
     fn fake_fm(st: &AppState, body: &str) {
         let bin = st.cfg.root.as_path().join("fake-fm");
         std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.args\"\n{body}\n")).unwrap();
@@ -602,6 +606,7 @@ esac
         clean(State(st.clone()), Json(CleanBody { text: text.into() })).await.ok().unwrap().0
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cleanup_runs_on_the_device_model_and_falls_back_to_haiku() {
         let st = fake_state();
@@ -684,6 +689,7 @@ esac
     }
 
     /// A stand-in `loft-transcribe` with `body` as its script, where the backend looks for the helper.
+    #[cfg(unix)]
     fn fake_helper(st: &AppState, body: &str) {
         let bin = helper(st);
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
@@ -740,6 +746,7 @@ esac
         assert!(!std::env::temp_dir().join("loft-voice").join(format!("{id}.pcm")).exists(), "the final chunk ends the session");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn refuses_a_session_id_that_isnt_a_plain_name_and_odd_audio() {
         let st = crate::tasks::tests::state();

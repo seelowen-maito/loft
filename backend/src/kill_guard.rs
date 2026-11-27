@@ -2,14 +2,16 @@
 //! `killall`) go through Loft, which lets them stop only the agent's own processes and asks the user about any
 //! other (processes.rs). This hook spots the kills that would skip it, because they don't run Loft's `kill`
 //! function or the commands it puts first on PATH:
-//! - the real command by path (`/bin/kill`, `/usr/bin/pkill`);
+//! - the real command by path (`/bin/kill`, `/usr/bin/pkill`), or on Windows by another spelling (`taskkill.exe`,
+//!   `TASKKILL`, `C:\Windows\System32\taskkill.exe`) that skips the function;
 //! - through `sudo` or `doas`, which reset PATH, or `command` or `builtin`, which skip functions;
 //! - a `kill` in another shell's script (`sh -c 'kill 123'`, `bash <<EOF`, `watch 'kill 1'`), where that shell's
-//!   own builtin runs;
+//!   own builtin runs, and on Windows any kill `cmd` runs (`cmd //c taskkill //PID 123`, `start taskkill ...`), which
+//!   finds the real taskkill;
 //! - with PATH emptied, changed or unset (`env -i kill 1`, `PATH=/bin; xargs kill`), which finds the real command;
 //! - after Loft's functions are removed or replaced (`unset -f kill`, `unfunction kill`, `alias kill=...`).
 //!
-//! It refuses those, telling the agent to run the kill by name, where Loft asks the user about any process that
+//! On Windows Loft's functions include `taskkill`. It refuses those, telling the agent to run the kill by name, where Loft asks the user about any process that
 //! isn't the agent's. (A hook's "ask" doesn't reach the user: in auto mode Claude Code's classifier answers it.)
 //! Everything else runs.
 //!
@@ -28,7 +30,9 @@
 //!
 //! Its limits, which the prompt rule covers: it reads shell text, so it doesn't see a script file the agent writes
 //! and runs, a command name built at run time (`k=/bin/kill; $k 123`), or other languages sending a signal
-//! (osascript, python, node). It fails open: input it can't read lets the command run.
+//! (osascript, python, node, PowerShell's `Stop-Process`, `wmic`), PowerShell running taskkill (`powershell -Command
+//! "taskkill /PID 1"`). It fails open: input it can't read lets the
+//! command run.
 
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -41,10 +45,11 @@ pub const ARG: &str = "kill-guard";
 /// claude's environment.
 pub const URL_VAR: &str = "LOFT_GUARD_URL";
 
-const REFUSAL: &str = "Loft refused this command: it runs kill, pkill or killall by path, through sudo, `command` \
-or `builtin`, as another shell's `kill`, with PATH changed, or after unsetting or redefining Loft's kill, where Loft \
-can't tell whose processes it stops. Run kill, pkill or killall by name, right in your command: Loft lets them stop \
-your own processes, and asks the user before stopping any other.";
+const REFUSAL: &str = "Loft refused this command: it runs kill, pkill, killall or taskkill by path or another \
+spelling (`taskkill.exe`), through sudo, `command` or `builtin`, as another shell's `kill` or inside `cmd`, with PATH \
+changed, or after unsetting or redefining Loft's kill, where Loft can't tell whose processes it stops. Run kill, \
+pkill or killall (or taskkill on Windows) by name, right in your command: Loft lets them stop your own processes, and \
+asks the user before stopping any other.";
 
 /// Runs as the hook: reads Claude Code's hook input on stdin and exits 2, which blocks the call and shows stderr to
 /// the agent, for a kill that skips Loft's or a change to a user's checkout the user didn't allow. Input it can't
@@ -71,9 +76,10 @@ pub fn hook() -> ! {
     std::process::exit(0)
 }
 
-/// The `hooks` of a settings file that installs the hook, run as `exe kill-guard`. It may wait for the user that long.
+/// The `hooks` of a settings file that installs the hook, run as `exe kill-guard` (by its Git Bash path on Windows, where
+/// Claude Code runs hooks in Git Bash). It may wait for the user that long.
 pub fn hooks(exe: &std::path::Path) -> Value {
-    let command = format!("'{}' {ARG}", exe.to_string_lossy().replace('\'', r"'\''"));
+    let command = format!("'{}' {ARG}", crate::sys::bash_path(exe).replace('\'', r"'\''"));
     let timeout = crate::agents::TOOL_WAIT.as_secs();
     json!({ "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": command, "timeout": timeout }] }] })
 }
@@ -1746,7 +1752,7 @@ fn real(path: PathBuf) -> PathBuf {
 fn real_at(path: PathBuf, links: usize) -> PathBuf {
     for base in path.ancestors() {
         let rest = path.strip_prefix(base).unwrap_or(Path::new(""));
-        if let Ok(r) = std::fs::canonicalize(base) {
+        if let Ok(r) = crate::sys::canonical(base) {
             return if rest.as_os_str().is_empty() { r } else { r.join(rest) };
         }
         // As many links as the system follows (a loop never resolves).
@@ -1913,6 +1919,7 @@ fn git_reads(sub: &str, rest: &[&str]) -> bool {
 }
 
 /// `~name` or `~name/rest` with the home folder of the user `name` (from the user database). None when there is no such user.
+#[cfg(unix)]
 fn tilde_user(path: &str) -> Option<String> {
     let (name, rest) = path.strip_prefix('~')?.split_once('/').map_or((&path[1..], ""), |(n, r)| (n, &path[path.len() - r.len() - 1..]));
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
@@ -1931,6 +1938,12 @@ fn tilde_user(path: &str) -> Option<String> {
         std::ffi::CStr::from_ptr(pw.pw_dir).to_string_lossy().into_owned()
     };
     Some(format!("{home}{rest}"))
+}
+
+/// Windows has no user database to look `~name` up in.
+#[cfg(not(unix))]
+fn tilde_user(_path: &str) -> Option<String> {
+    None
 }
 
 /// `path` from `cwd`, `~` and `$HOME` expanded and `..` folded (after the links on the way are followed when `physical`). None when it holds another variable or a substitution.
@@ -2010,7 +2023,8 @@ fn scan(text: &str, depth: usize, shell: bool) -> Found {
     f
 }
 
-const KILLS: [&str; 3] = ["kill", "pkill", "killall"];
+/// The kill tools Loft's functions stand in for (`taskkill` only on Windows).
+const KILLS: [&str; 4] = ["kill", "pkill", "killall", "taskkill"];
 
 /// What one simple command does, through its wrappers and any shell text it hands on.
 fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
@@ -2028,16 +2042,27 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
             }
         };
         let Some((name, args)) = words.split_first() else { continue };
+        if let Some(k) = kill_program(name) {
+            f.kill = true;
+            // A path, or another spelling Windows finds (`taskkill.exe`, `KILL`), runs the real command, not Loft's
+            // function.
+            f.unscoped |= bypass || name != k || (k == "kill" && shell);
+            continue;
+        }
+        if program(name) == "cmd" {
+            if let Some(text) = cmd_text(args).or_else(|| shell_script(cmds, i, &[])) {
+                f.add(scan_cmd(&text, depth + 1));
+            }
+            continue;
+        }
         match base(name) {
             _ if shell_name(&base(name).to_lowercase()) => {
                 if let Some(text) = shell_script(cmds, i, args) {
                     f.add(scan(&text, depth + 1, true));
                 }
             }
-            k if KILLS.contains(&k) => {
-                f.kill = true;
-                f.unscoped |= bypass || name.contains('/') || (k == "kill" && shell);
-            }
+            // Git Bash's `start` runs its command through cmd's.
+            "start" if name == "start" => f.add(scan_cmd(&words.join(" "), depth + 1)),
             "find" => runs.extend(find_execs(args)),
             "eval" => f.add(scan(&args.join(" "), depth + 1, shell)),
             // Removing or replacing Loft's functions, or pointing the name at the real command.
@@ -2075,6 +2100,120 @@ fn scan_command(cmds: &[Cmd], i: usize, depth: usize, shell: bool) -> Found {
             _ => {
                 let key = name.split_once('=').and_then(|(k, _)| subscript(k.strip_suffix('+').unwrap_or(k)));
                 f.unscoped |= key.is_some_and(|k| KILLS.contains(&k));
+            }
+        }
+    }
+    f
+}
+
+/// A command name as Windows finds it: its last part (after `/`, `\\` or a drive's `:`), lowercased, without `.exe`.
+fn program(name: &str) -> String {
+    let last = name.rsplit(['/', '\\', ':']).next().unwrap_or_default().to_lowercase();
+    last.strip_suffix(".exe").map(String::from).unwrap_or(last)
+}
+
+/// The kill tool a command name runs, by any spelling (see [`program`]).
+fn kill_program(name: &str) -> Option<&'static str> {
+    let p = program(name);
+    KILLS.iter().copied().find(|k| *k == p)
+}
+
+/// The command line `cmd` runs after `/c`, `/k` or `/r` (in any case, attached or not, and written `//c` in Git Bash,
+/// which would read `/c` as a path). None when it reads its commands from stdin.
+fn cmd_text(args: &[String]) -> Option<String> {
+    for (at, a) in args.iter().enumerate() {
+        let opt = a.strip_prefix("//").or_else(|| a.strip_prefix('/'))?;
+        if opt.starts_with(['c', 'C', 'k', 'K', 'r', 'R']) {
+            let rest = std::iter::once(&opt[1..]).chain(args[at + 1..].iter().map(String::as_str));
+            return Some(rest.collect::<Vec<_>>().join(" "));
+        }
+    }
+    None
+}
+
+/// What a `cmd` command line runs (see the module docs): each command in it, split at `&`, `|`, `(`, `)` and new lines
+/// outside quotes (with `^` escaping a character), past `@`, `call`, `start` and its options, a `for`'s `do`, and in an
+/// `if` any word. cmd has none of Loft's functions and finds the real taskkill, so any kill tool it runs skips Loft's.
+fn scan_cmd(text: &str, depth: usize) -> Found {
+    let mut f = Found::default();
+    if depth > MAX_DEPTH {
+        return f;
+    }
+    // Each command's words, and whether each was quoted.
+    let mut commands: Vec<Vec<(String, bool)>> = vec![vec![]];
+    let (mut word, mut quoted, mut in_quote, mut started) = (String::new(), false, false, false);
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        let end_word = |words: &mut Vec<(String, bool)>, word: &mut String, quoted: &mut bool, started: &mut bool| {
+            if std::mem::take(started) {
+                words.push((std::mem::take(word), std::mem::take(quoted)));
+            }
+        };
+        match ch {
+            '"' => {
+                in_quote = !in_quote;
+                (quoted, started) = (true, true);
+            }
+            '^' if !in_quote => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                    started = true;
+                }
+            }
+            '&' | '|' | '(' | ')' | '\n' | '\r' if !in_quote => {
+                end_word(commands.last_mut().unwrap(), &mut word, &mut quoted, &mut started);
+                commands.push(vec![]);
+            }
+            c if c.is_whitespace() && !in_quote => end_word(commands.last_mut().unwrap(), &mut word, &mut quoted, &mut started),
+            c => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        commands.last_mut().unwrap().push((word, quoted));
+    }
+    for words in commands {
+        let mut k = 0;
+        while let Some((w, _)) = words.get(k) {
+            let w = w.trim_start_matches('@');
+            match program(w).as_str() {
+                // `do` and `else` start a command after a `for`'s or an `if`'s parentheses.
+                "" | "call" | "do" | "else" => k += 1,
+                "start" => {
+                    k += 1;
+                    while words.get(k).is_some_and(|(o, q)| !q && o.starts_with('/')) {
+                        k += 1;
+                    }
+                    // A quoted first word is the window's title.
+                    if words.get(k).is_some_and(|(_, q)| *q) && words.len() > k + 1 {
+                        k += 1;
+                    }
+                }
+                "for" => match words[k..].iter().position(|(d, q)| !q && d.eq_ignore_ascii_case("do")) {
+                    Some(at) => k += at + 1,
+                    None => break,
+                },
+                "if" => {
+                    if words[k + 1..].iter().any(|(x, _)| kill_program(x.trim_start_matches('@')).is_some()) {
+                        (f.kill, f.unscoped) = (true, true);
+                    }
+                    break;
+                }
+                "cmd" => {
+                    let args: Vec<String> = words[k + 1..].iter().map(|(x, _)| x.clone()).collect();
+                    if let Some(text) = cmd_text(&args) {
+                        f.add(scan_cmd(&text, depth + 1));
+                    }
+                    break;
+                }
+                p => {
+                    if KILLS.contains(&p) {
+                        (f.kill, f.unscoped) = (true, true);
+                    }
+                    break;
+                }
             }
         }
     }
@@ -2742,10 +2881,13 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     i += 1;
                     match q {
                         '"' => break,
-                        '\\' => {
+                        // Bash keeps a backslash in double quotes but before these (`"C:\Windows\..."` is that
+                        // path), and drops it with a new line after it.
+                        '\\' if matches!(c.get(i), Some('$' | '`' | '"' | '\\')) => {
                             l.word.extend(c.get(i));
                             i += 1;
                         }
+                        '\\' if c.get(i) == Some(&'\n') => i += 1,
                         '$' if c.get(i) == Some(&'(') => {
                             l.word.push('$');
                             l.cmd(p);
@@ -3113,8 +3255,8 @@ pub async fn handle(
     axum::Json(req): axum::Json<GuardRequest>,
 ) -> axum::Json<Value> {
     let projects = state.settings.get().projects_dir;
-    let projects = std::fs::canonicalize(&projects).unwrap_or(projects);
-    let storage = std::fs::canonicalize(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone());
+    let projects = crate::sys::canonical(&projects).unwrap_or(projects);
+    let storage = crate::sys::canonical(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone());
     let deadline = tokio::time::Instant::now() + ASK_TIMEOUT;
     for change in req.changes {
         // Read again each time: an "Always allow" for one folder may cover the next.
@@ -3288,6 +3430,70 @@ mod tests {
     }
 
     #[test]
+    fn on_windows_taskkill_by_name_runs_and_other_spellings_or_cmd_are_refused() {
+        // Loft's taskkill function, or the command of that name first on PATH.
+        for cmd in [
+            "taskkill //PID 1234 //F",
+            "taskkill -im node.exe -f",
+            "tasklist | grep node; taskkill //IM node.exe //T",
+            "netstat -ano | grep :3000 | awk '{print $5}' | xargs taskkill //F //PID",
+            "cmd //c echo hi",
+            "cmd //c \"dir & echo taskkill\"",
+            "start notepad",
+            "echo dir | cmd",
+            "unset -f taskkills",
+        ] {
+            assert!(!unscoped(cmd), "should run: {cmd}");
+        }
+        for cmd in [
+            // Another spelling finds the real command, not Loft's function.
+            "taskkill.exe //PID 1",
+            "TASKKILL //PID 1",
+            "TaskKill //PID 1",
+            "kill.exe 12",
+            "Pkill node",
+            "/c/Windows/System32/taskkill //PID 1",
+            "C:/Windows/System32/taskkill.exe -PID 1",
+            "'C:\\Windows\\System32\\taskkill.exe' /PID 1",
+            // Bash keeps the backslashes of a path in double quotes.
+            "\"C:\\Windows\\System32\\taskkill.exe\" //PID 1",
+            "\"C:\\Windows\\System32\\cmd.exe\" //c taskkill //PID 1",
+            "cmd //c \"C:\\Windows\\System32\\taskkill.exe /pid 1\"",
+            "cmd //c \"%SystemRoot%\\System32\\taskkill.exe /F /PID 1\"",
+            "cmd //c \"x\\taskkill /pid 1\"",
+            "xargs taskkill.exe //PID < pids",
+            "sh -c 'taskkill.exe //PID 1'",
+            "unset -f taskkill",
+            // cmd runs the real taskkill, whatever is around it.
+            "cmd //c taskkill //PID 1",
+            "cmd /c \"taskkill /F /PID 1\"",
+            "cmd.exe /C taskkill /PID 1",
+            "CMD //C taskkill /PID 1",
+            "'C:\\Windows\\System32\\cmd.exe' /c taskkill /PID 1",
+            "cmd //d //s //c \"echo x & taskkill /PID 1\"",
+            "cmd /ctaskkill /PID 1",
+            "cmd //c \"@taskkill /PID 1\"",
+            "cmd //c \"call taskkill /PID 1\"",
+            "cmd //c \"start /b taskkill /PID 1\"",
+            "cmd //c \"start \\\"\\\" taskkill /PID 1\"",
+            "cmd //c \"for /f %i in (pids.txt) do taskkill /PID %i\"",
+            "cmd //c \"if exist x.pid taskkill /PID 1\"",
+            "cmd //c \"if exist x.pid (echo y) else (taskkill /PID 1)\"",
+            "cmd //c \"cmd /c taskkill /PID 1\"",
+            "cmd //c \"task^kill /PID 1\"",
+            "cmd //c \"kill 1\"",
+            "cmd //c 'echo hi && (taskkill /PID 1)'",
+            "echo taskkill /PID 1 | cmd",
+            "cmd <<'EOF'\ntaskkill /PID 1\nEOF",
+            "start taskkill //PID 1",
+            "sh -c 'cmd //c taskkill //PID 1'",
+            "xargs -I{} cmd //c taskkill //PID {} < pids",
+        ] {
+            assert!(unscoped(cmd), "should refuse: {cmd}");
+        }
+    }
+
+    #[test]
     fn path_changes_without_a_kill_and_appends_run() {
         for cmd in [
             "export PATH=\"$PWD/node_modules/.bin:$PATH\"; npm test",
@@ -3356,7 +3562,7 @@ mod tests {
     #[test]
     fn the_hook_refuses_only_a_kill_that_skips_loft() {
         let input = |cmd: &str| json!({ "tool_name": "Bash", "tool_input": { "command": cmd } }).to_string();
-        assert!(check(&input("cd x && sudo kill -9 1234")).unwrap_err().contains("Run kill, pkill or killall by name"));
+        assert!(check(&input("cd x && sudo kill -9 1234")).unwrap_err().contains("Run kill, pkill or killall (or taskkill on Windows) by name"));
         // Kills by name, even of a pattern, go through Loft.
         for cmd in ["pkill -f vite", "killall node", "kill 1234", "pgrep x | xargs kill"] {
             assert!(check(&input(cmd)).is_ok(), "{cmd}");
@@ -3375,7 +3581,9 @@ mod tests {
         assert_eq!(hook["hooks"][0]["timeout"], crate::agents::TOOL_WAIT.as_secs());
     }
 
-    // A user's checkout and an agent's clone of it, as the Loft workspace sits inside the user's repo.
+    // A user's checkout and an agent's clone of it, as the Loft workspace sits inside the user's repo. Unix paths:
+    // Windows reads `/nowhere` as a folder on the current drive (`D:\nowhere`), so the tests that compare the folders
+    // found run on Unix only.
     const USER: &str = "/nowhere/dev/loft";
     const STORAGE: &str = "/nowhere/dev/loft/agent-local-storage";
     const CLONE: &str = "/nowhere/dev/loft/agent-local-storage/abc/loft";
@@ -3386,6 +3594,7 @@ mod tests {
         outside_changes(&input, &[PathBuf::from(STORAGE)]).into_iter().map(|c| c.folder).collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn only_the_storage_folder_loft_uses_is_trusted_not_any_of_that_name() {
         // A folder an agent made, or the old one in the checkout, named like the storage folder.
@@ -3407,6 +3616,7 @@ mod tests {
         all.into_iter().next()
     }
 
+    #[cfg(unix)]
     #[test]
     fn changes_to_a_users_checkout_go_to_loft_with_the_folder() {
         let user = Some(PathBuf::from(USER));
@@ -3486,6 +3696,7 @@ mod tests {
         assert!(outside_changes("not json", &[]).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn every_folder_a_command_changes_is_asked_about() {
         let (other, user) = (PathBuf::from("/nowhere/dev/other"), PathBuf::from(USER));
@@ -3495,6 +3706,7 @@ mod tests {
         assert_eq!(asks_all("cd /nowhere/dev/loft; git pull; cargo build; pnpm install", CLONE), [user]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cd_dash_pushd_and_popd_follow_the_folder() {
         let user = Some(PathBuf::from(USER));
@@ -4078,6 +4290,7 @@ mod tests {
         assert!(!asks_all(&format!("x=$[ 1 << 2 ]\ngit -C {u} reset --hard"), CLONE).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shift_in_arithmetic_is_no_heredoc_and_a_continued_delimiter_is_unquoted() {
         let u = USER;
@@ -4440,6 +4653,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn git_commands_that_make_nothing_dont_hide_the_folder_of_the_next() {
         const WS: &str = "/nowhere/dev/loft/agent-local-storage/abc";
@@ -4519,6 +4733,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_option_with_a_variable_asks_and_chdir_is_cd() {
         const WORKSPACE: &str = "/nowhere/dev/loft/agent-local-storage/abc";
@@ -4677,6 +4892,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn autopushd_and_failed_cds_in_longer_forms_ask() {
         let (u, w) = (USER, "/nowhere/dev/loft/agent-local-storage/abc");
@@ -4721,6 +4937,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_subshells_cd_stays_in_it() {
         let user = Some(PathBuf::from(USER));
@@ -4732,6 +4949,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn git_dir_and_work_tree_name_the_checkout() {
         let user = Some(PathBuf::from(USER));
@@ -4751,6 +4969,7 @@ mod tests {
         assert_eq!(asks("git --git-dir=/nowhere/dev/loft/agent-local-storage/abc/loft/.git pull", USER), user);
     }
 
+    #[cfg(unix)]
     #[test]
     fn build_tools_folder_options_name_the_folder() {
         let user = Some(PathBuf::from(USER));
@@ -4771,6 +4990,7 @@ mod tests {
         assert_eq!(asks("pnpm -C frontend install", CLONE), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn every_git_subcommand_asks_but_the_ones_that_only_read() {
         let user = Some(PathBuf::from(USER));
@@ -4797,6 +5017,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn git_in_a_workspace_that_isnt_a_clone_changes_the_checkout_around_it() {
         let project = std::env::temp_dir().join(format!("loft-guard-{}", uuid::Uuid::new_v4())).join("loft");
@@ -4805,7 +5026,7 @@ mod tests {
         for d in [project.join(".git"), ws.join("notes"), clone.join(".git"), clone.join("backend")] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let project = std::fs::canonicalize(&project).unwrap();
+        let project = crate::sys::canonical(&project).unwrap();
         let at = |p: &Path| p.display().to_string();
         for cwd in [&ws, &ws.join("notes")] {
             for cmd in ["git checkout main", "git reset --hard origin/main", "git stash"] {
@@ -4833,7 +5054,7 @@ mod tests {
         assert_eq!(asks("cd link && git reset --hard", &at(&ws)), Some(other.clone()));
         assert_eq!(asks("git -C link checkout main", &at(&ws)), Some(other.clone()));
         // A new folder through that link is in the other checkout, though it doesn't exist yet.
-        let new = std::fs::canonicalize(other.join("src")).unwrap().join("new");
+        let new = crate::sys::canonical(other.join("src")).unwrap().join("new");
         assert_eq!(asks("git clone /src link/new", &at(&ws)), Some(new.clone()));
         assert_eq!(asks("git init link/new", &at(&ws)), Some(new));
         // A dangling symlink: where it points, not where it sits.
@@ -4935,6 +5156,7 @@ mod tests {
     }
 
     /// #578: the folder or repository git really touches is hidden by a link, a brace, a glob or a `.git` file.
+    #[cfg(unix)]
     #[test]
     fn links_braces_globs_and_git_files_that_hide_the_target_ask() {
         let root = std::env::temp_dir().join(format!("loft-guard-{}", uuid::Uuid::new_v4()));
@@ -4945,7 +5167,7 @@ mod tests {
         for d in [project.join(".git"), clone.join(".git"), other.join(".git/worktrees/w"), other.join("src")] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = crate::sys::canonical(&root).unwrap();
         let (project, ws, clone, other) = (root.join("loft"), root.join("loft/agent-local-storage/x"), root.join("loft/agent-local-storage/x/loft"), root.join("other"));
         let at = |p: &Path| p.display().to_string();
         // As Loft runs the hook: its ceiling is the storage folder.
@@ -5128,7 +5350,7 @@ mod tests {
         for d in [project.join(".git"), ws.join("notes"), ws.join("loft/.git")] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let project = std::fs::canonicalize(&project).unwrap();
+        let project = crate::sys::canonical(&project).unwrap();
         let at = |p: &Path| p.display().to_string();
         let asks_under = |cmd: &str, cwd: &Path, ceiling: &[PathBuf]| {
             let input = json!({ "tool_name": "Bash", "cwd": at(cwd), "tool_input": { "command": cmd } }).to_string();
@@ -5225,7 +5447,7 @@ mod tests {
         use axum::extract::{Path as P, State};
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Web QA");
-        let projects = std::fs::canonicalize(st.settings.get().projects_dir).unwrap();
+        let projects = crate::sys::canonical(st.settings.get().projects_dir).unwrap();
         let user = projects.join("loft");
         let guard = |folder: PathBuf| {
             let (st, id) = (st.clone(), a.id.clone());
@@ -5238,7 +5460,7 @@ mod tests {
         assert_eq!(guard(PathBuf::from("/tmp/elsewhere")).await.unwrap()["allow"], true);
         let clone = st.cfg.storage_dir.join("x/loft");
         std::fs::create_dir_all(&clone).unwrap();
-        assert_eq!(guard(std::fs::canonicalize(&clone).unwrap()).await.unwrap()["allow"], true);
+        assert_eq!(guard(crate::sys::canonical(&clone).unwrap()).await.unwrap()["allow"], true);
         assert!(pending().is_empty());
 
         // Denied: the agent is told to use its own clone.
@@ -5278,7 +5500,7 @@ mod tests {
         use axum::extract::{Path as P, State};
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Web QA");
-        let projects = std::fs::canonicalize(st.settings.get().projects_dir).unwrap();
+        let projects = crate::sys::canonical(st.settings.get().projects_dir).unwrap();
         let (one, two) = (projects.join("one"), projects.join("two"));
         let change = |f: &PathBuf| Change { folder: f.clone(), command: "git pull".into() };
         let pending = || st.db.list_permissions(Some(&a.id)).unwrap().into_iter().filter(|p| p.status == "pending").collect::<Vec<_>>();

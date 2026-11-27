@@ -184,7 +184,7 @@ fn files(src: &Path, rel: &Path, depth: u32, above: &mut Vec<std::path::PathBuf>
         let rel = rel.join(e.file_name());
         let Ok(m) = std::fs::metadata(e.path()) else { continue };
         if m.is_dir() {
-            let real = std::fs::canonicalize(e.path())?;
+            let real = crate::sys::canonical(e.path())?;
             if !SKIP.iter().any(|s| e.file_name() == *s) && !above.contains(&real) {
                 above.push(real);
                 let r = files(src, &rel, depth + 1, above, out);
@@ -205,10 +205,10 @@ fn listing(dir: &Path, out: &mut Vec<String>) {
     for e in rd.flatten() {
         let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
         let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-        use std::os::unix::fs::MetadataExt;
         // ctime can't be set back by an edit; the content is hashed too, for a copy that kept both times.
         let content = if m.is_file() { std::fs::read(e.path()).map_or(0, |b| b.iter().fold(14695981039346656037u64, |h, x| (h ^ *x as u64).wrapping_mul(1099511628211))) } else { 0 };
-        out.push(format!("{} {} {} {t} {}.{} {content}", e.path().display(), m.is_dir(), m.len(), m.ctime(), m.ctime_nsec()));
+        let c = crate::sys::ctime(&m).duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        out.push(format!("{} {} {} {t} {}.{} {content}", e.path().display(), m.is_dir(), m.len(), c.as_secs(), c.subsec_nanos()));
         if m.is_dir() {
             listing(&e.path(), out);
         }
@@ -240,7 +240,7 @@ pub fn sync_user_plugin(storage: &Path, claude_dir: &Path) -> Option<std::path::
     let mut all: Vec<(&str, Vec<_>)> = Vec::new();
     for kind in ["commands", "skills"] {
         let mut list = Vec::new();
-        if claude_dir.join(kind).is_dir() && files(&claude_dir.join(kind), Path::new(""), 0, &mut vec![std::fs::canonicalize(claude_dir.join(kind)).unwrap_or_default()], &mut list).is_ok() {
+        if claude_dir.join(kind).is_dir() && files(&claude_dir.join(kind), Path::new(""), 0, &mut vec![crate::sys::canonical(claude_dir.join(kind)).unwrap_or_default()], &mut list).is_ok() {
             all.push((kind, list));
         }
     }
@@ -351,6 +351,7 @@ mod tests {
         assert_eq!(load(&s, "a2"), Reported::default());
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_users_commands_and_skills_are_copied_into_a_plugin_and_nothing_else() {
         let (home, st) = (dir("plug-home"), dir("plug-st"));
@@ -402,6 +403,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(p.join("skills/big/SKILL.md")).unwrap(), "bigger");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_link_loop_in_the_skills_folder_ends() {
         let (home, st) = (dir("loop-home"), dir("loop-st"));
@@ -441,6 +443,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(p.join("commands/ship.md")).unwrap(), "ship");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_broken_link_is_skipped_and_the_other_skills_still_load() {
         let (home, st) = (dir("broken-home"), dir("broken-st"));
@@ -452,6 +455,7 @@ mod tests {
         assert!(!p.join("skills/dead").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_link_loop_is_copied_once() {
         let (home, st) = (dir("cycle-home"), dir("cycle-st"));

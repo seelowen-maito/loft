@@ -1,7 +1,16 @@
 //! Self-update: with auto-update on in Settings, poll the checkout's upstream branch and,
 //! once no agent is running, pull, rebuild and restart into the new binary.
+//!
+//! On Windows, Loft restarts by exiting with `RESTART_CODE` (it can't replace a running process with `exec`): whatever
+//! runs it starts it again, the logon task's scripts/run-service.sh or start.sh's scripts/run-backend.sh. Both export
+//! `LOFT_RESTART_BY_EXIT=1`, and under them Loft exits that way on every system. Elsewhere it `exec`s the build on
+//! disk, as before: an older start.sh ran `exec cargo run`, with no loop to start Loft again, and launchd's service
+//! keeps its process.
+//!
+//! Windows can't write over a running binary either, but it can rename one: before building, an update sets the
+//! running build aside as `loft.old.exe` (always that name, replaced by the next update), so cargo can write the new
+//! one. The new Loft removes it once it's up, and the daily sweep tries again if it was still in use.
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -13,8 +22,8 @@ use crate::state::{AppState, Event};
 
 const CHECK_EVERY: Duration = Duration::from_secs(60);
 const IDLE_POLL: Duration = Duration::from_secs(5);
-const RESTART_BACKOFF: Duration = Duration::from_secs(30);
-const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(600);
+/// The exit code asking whatever runs Loft to start it again. Keep in step with scripts/run-backend.sh.
+pub const RESTART_CODE: i32 = 75;
 /// How soon turning auto-update on in Settings takes effect.
 const OFF_POLL: Duration = Duration::from_secs(5);
 
@@ -57,14 +66,9 @@ pub fn newer_build_on_disk(started: SystemTime) -> bool {
 }
 
 /// True while an update is queued, being installed or about to be restarted into; the scheduler holds
-/// autonomous wake-ups then. Not after a failed exec: that would hold them for as long as the retries fail.
+/// autonomous wake-ups then.
 pub fn pending(state: &AppState) -> bool {
-    let s = state.update.lock().unwrap();
-    match s.phase {
-        Phase::Waiting | Phase::Updating => true,
-        Phase::Restart => !s.why.as_deref().is_some_and(|w| w.starts_with("restart failed")),
-        _ => false,
-    }
+    matches!(state.update.lock().unwrap().phase, Phase::Waiting | Phase::Updating | Phase::Restart)
 }
 
 fn set(state: &AppState, f: impl FnOnce(&mut UpdateStatus)) {
@@ -163,7 +167,14 @@ async fn install(root: &Path) -> Result<()> {
     if !cfg!(debug_assertions) {
         cargo.push("--release");
     }
-    run(&root.join("backend"), "cargo", &cargo).await?;
+    let aside = match running_build() {
+        Some(exe) if cfg!(windows) => set_aside(&exe).map_err(|e| anyhow::anyhow!("Couldn't set the running build aside: {e}"))?,
+        _ => SetAside::default(),
+    };
+    let built = run(&root.join("backend"), "cargo", &cargo).await;
+    // A failed build leaves the running build where a restart finds it.
+    aside.restore();
+    built?;
     let frontend = root.join("frontend");
     let (pm, pre) = pnpm(&frontend).await?;
     let pre: Vec<&str> = pre.iter().map(String::as_str).collect();
@@ -187,6 +198,131 @@ async fn install(root: &Path) -> Result<()> {
         tracing::warn!("voice transcriber: {e}");
     }
     Ok(())
+}
+
+/// The build this process runs (the signed copy's build on the Mac): what an update replaces.
+fn running_build() -> Option<PathBuf> {
+    std::env::current_exe().ok().map(|exe| crate::signing::build_of(&exe))
+}
+
+/// Where an update sets `exe` aside: `loft.old.exe` beside `loft.exe`.
+fn old_of(exe: &Path) -> PathBuf {
+    let mut name = exe.file_stem().unwrap_or_default().to_os_string();
+    name.push(".old");
+    if let Some(ext) = exe.extension() {
+        name.push(".");
+        name.push(ext);
+    }
+    exe.with_file_name(name)
+}
+
+/// Cargo's other name for `exe`: the file in `deps/` it was hard-linked from (`deps/loft-<hash>.exe`), which the
+/// linker writes. Each moves to its own `loft.old.exe`, both names of the one set-aside file.
+fn names_of(exe: &Path) -> Vec<PathBuf> {
+    let mut names = vec![exe.to_path_buf()];
+    let (Some(dir), Some(stem)) = (exe.parent(), exe.file_stem()) else { return names };
+    let prefix = format!("{}-", stem.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir.join("deps")) else { return names };
+    names.extend(
+        entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension() == exe.extension() && p.file_stem().is_some_and(|s| s.to_string_lossy().starts_with(&prefix)))
+            .filter(|p| same_file(p, exe)),
+    );
+    names
+}
+
+/// Whether `a` and `b` are names of one file (hard links).
+#[cfg(unix)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+    let id = |p: &Path| {
+        let f = std::fs::File::open(p).ok()?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        (unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } != 0).then_some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+    };
+    id(a).is_some_and(|a| id(b) == Some(a))
+}
+
+/// The names an update moved aside, as (name, set-aside name).
+#[derive(Debug, Default)]
+struct SetAside(Vec<(PathBuf, PathBuf)>);
+
+impl SetAside {
+    /// Moves back each name the build didn't write again, so a failed build leaves the running build in place.
+    fn restore(self) {
+        for (name, old) in self.0.into_iter().rev() {
+            if !name.exists()
+                && let Err(e) = std::fs::rename(&old, &name)
+            {
+                tracing::warn!("couldn't put {} back: {e}", name.display());
+            }
+        }
+    }
+}
+
+/// Renames the running build `exe`, under each of its names, to `loft.old.exe`, replacing what an earlier update
+/// left there, so cargo can write the new build. Windows refuses to write or delete a running binary, not to
+/// rename it. On an error, what moved is moved back.
+fn set_aside(exe: &Path) -> std::io::Result<SetAside> {
+    let (mut moved, old_name) = (SetAside::default(), old_of(exe).file_name().unwrap_or_default().to_os_string());
+    for name in names_of(exe) {
+        let old = name.with_file_name(&old_name);
+        if let Err(e) = std::fs::rename(&name, &old) {
+            moved.restore();
+            return Err(e);
+        }
+        moved.0.push((name, old));
+    }
+    Ok(moved)
+}
+
+/// Removes what an update set aside beside `exe`. False while a name is still there (in use: Windows won't delete
+/// a running binary).
+fn remove_set_aside(exe: &Path) -> bool {
+    let deps = exe.parent().map(|d| d.join("deps").join(old_of(exe).file_name().unwrap_or_default()));
+    let mut gone = true;
+    for old in std::iter::once(old_of(exe)).chain(deps) {
+        match std::fs::remove_file(&old) {
+            Ok(()) => tracing::info!("removed {}", old.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!("couldn't remove {}: {e}", old.display());
+                gone = false;
+            }
+        }
+    }
+    gone
+}
+
+/// Removes the build the last update set aside. Run as Loft starts: the old process has exited by then, but a
+/// virus scanner may still hold the file, so it tries for a minute; the daily sweep tries again after that.
+pub async fn clear_set_aside() {
+    let Some(exe) = running_build() else { return };
+    for _ in 0..12 {
+        if remove_set_aside(&exe) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// The daily sweep's try at a set-aside build that was still in use when Loft started.
+pub fn sweep_set_aside() {
+    if let Some(exe) = running_build() {
+        remove_set_aside(&exe);
+    }
 }
 
 /// Wait until no agent runs. False if auto-update was turned off meanwhile.
@@ -224,9 +360,6 @@ pub async fn updater(state: AppState, root: PathBuf) {
     let built = if BUILT_FROM.is_empty() { run(&root, "git", &["rev-parse", "HEAD"]).await.map_err(|e| e.to_string()) } else { Ok(BUILT_FROM.to_string()) };
     // A commit whose build failed, and why; skipped until upstream moves on.
     let mut failed: Option<(String, String)> = None;
-    // After a failed exec: when to try again, and how long to wait after the next failure.
-    let mut retry_at: Option<std::time::Instant> = None;
-    let mut backoff = RESTART_BACKOFF;
     loop {
         if !state.settings.get().auto_update {
             set(&state, |s| *s = UpdateStatus::default());
@@ -246,14 +379,11 @@ pub async fn updater(state: AppState, root: PathBuf) {
         };
         if newer_build_on_disk(started) {
             let n = running_agents(&state);
-            set(&state, |s| *s = restart_status(&head, n, s.why.take()));
-            // Restart by itself once agents are idle, as an update does; `restart` only returns when exec failed.
-            let now = std::time::Instant::now();
-            if should_restart(n, now, retry_at) {
+            set(&state, |s| *s = restart_status(&head, n));
+            // Restart by itself once agents are idle, as an update does.
+            if n == 0 {
                 before_restart(&state).await;
-                restart(&state);
-                retry_at = Some(std::time::Instant::now() + backoff);
-                backoff = next_backoff(backoff);
+                restart();
             }
             tokio::time::sleep(IDLE_POLL).await;
             continue;
@@ -267,7 +397,7 @@ pub async fn updater(state: AppState, root: PathBuf) {
             match install(&root).await {
                 Ok(()) => {
                     before_restart(&state).await;
-                    restart(&state);
+                    restart();
                 }
                 Err(e) => {
                     tracing::error!("update failed: {e:#}");
@@ -302,43 +432,48 @@ fn checked(state: &AppState, head: &str, result: Result<Option<String>, String>,
     None
 }
 
-fn next_backoff(b: Duration) -> Duration {
-    (b * 2).min(RESTART_BACKOFF_MAX)
-}
-
-/// Restart now: no agent runs, and a failed exec's backoff is over.
-fn should_restart(running_agents: usize, now: std::time::Instant, retry_at: Option<std::time::Instant>) -> bool {
-    running_agents == 0 && retry_at.is_none_or(|t| now >= t)
-}
-
-/// The status while a newer build waits on disk. A failed exec's reason stays until a restart works. The loop
-/// doesn't check upstream in this phase (the commit it would compare is the old one, so it would rebuild what's
-/// already on disk): it restarts when idle, and the new process checks.
-fn restart_status(head: &str, running_agents: usize, prev_why: Option<String>) -> UpdateStatus {
-    let why = prev_why.filter(|w| w.starts_with("restart failed")).or_else(|| {
-        (running_agents > 0).then(|| format!("{running_agents} agent{} running; restarts when they finish", if running_agents == 1 { " is" } else { "s are" }))
-    });
+/// The status while a newer build waits on disk. The loop doesn't check upstream in this phase (the commit it
+/// would compare is the old one, so it would rebuild what's already on disk): it restarts when idle, and the new
+/// process checks.
+fn restart_status(head: &str, running_agents: usize) -> UpdateStatus {
+    let why = (running_agents > 0).then(|| format!("{running_agents} agent{} running; restarts when they finish", if running_agents == 1 { " is" } else { "s are" }));
     UpdateStatus { phase: Phase::Restart, current: short(head), running_agents, why, ..Default::default() }
 }
 
-/// Replace this process with the build on disk (same args and env): after an update, the new build, which
-/// signs its own copy again. If exec fails, the old build keeps running and the status says why.
-pub fn restart(state: &AppState) {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(err) => return restart_failed(state, err),
-    };
-    let err = std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)).exec();
-    restart_failed(state, err)
+/// Start the build on disk in this process's place: after an update, the new build, which signs its own copy again
+/// (a stale signed copy runs the build first, see signing.rs). Exits with `RESTART_CODE` for a script that runs Loft
+/// again, and otherwise `exec`s the build with the same arguments.
+pub fn restart() -> ! {
+    if !restarts_by_exit(cfg!(windows), RESTART_BY_EXIT.get().and_then(|v| v.as_deref())) {
+        tracing::info!("restarting: replacing this process with the build on disk");
+        match std::env::current_exe() {
+            Ok(exe) => {
+                let err = crate::sys::exec(std::process::Command::new(crate::signing::build_of(&exe)).args(std::env::args_os().skip(1)));
+                tracing::error!("restart failed: {err}");
+            }
+            Err(err) => tracing::error!("restart failed: {err}"),
+        }
+    }
+    tracing::info!("restarting: exiting with code {RESTART_CODE}");
+    std::process::exit(RESTART_CODE)
 }
 
-fn restart_failed(state: &AppState, err: std::io::Error) {
-    tracing::error!("restart: exec failed: {err}");
-    // Stay up on the running build and say why it didn't switch.
-    set(state, |s| {
-        s.phase = Phase::Restart;
-        s.why = Some(format!("restart failed: {err}"));
-    });
+/// The `LOFT_RESTART_BY_EXIT` Loft started with.
+static RESTART_BY_EXIT: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+
+/// Reads `LOFT_RESTART_BY_EXIT` and takes it out of Loft's environment, so the agents, their shells and their dev
+/// servers don't inherit it: a Loft an agent starts from its clone has no script to start it again, and must `exec`.
+/// Called first thing in `main`, while Loft has one thread.
+pub fn take_restart_by_exit() {
+    let _ = RESTART_BY_EXIT.set(std::env::var_os("LOFT_RESTART_BY_EXIT"));
+    // SAFETY: no other thread runs yet to read the environment meanwhile.
+    unsafe { std::env::remove_var("LOFT_RESTART_BY_EXIT") };
+}
+
+/// Whether a restart exits with `RESTART_CODE` rather than `exec`ing: always on Windows, and wherever
+/// scripts/run-backend.sh or scripts/run-service.sh run Loft (they set `LOFT_RESTART_BY_EXIT=1`).
+fn restarts_by_exit(windows: bool, var: Option<&std::ffi::OsStr>) -> bool {
+    windows || var.is_some_and(|v| v == "1")
 }
 
 #[cfg(test)]
@@ -354,7 +489,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn wake_ups_are_held_until_the_restart_unless_it_failed() {
+    async fn wake_ups_are_held_until_the_restart() {
         let st = crate::tasks::tests::state();
         let phase = |p: super::Phase, why: Option<&str>| {
             *st.update.lock().unwrap() = super::UpdateStatus { phase: p, why: why.map(Into::into), ..Default::default() };
@@ -362,38 +497,198 @@ mod tests {
         };
         assert!(phase(super::Phase::Restart, None));
         assert!(phase(super::Phase::Restart, Some("1 agent is running; restarts when they finish")));
-        assert!(!phase(super::Phase::Restart, Some("restart failed: boom")));
         assert!(!phase(super::Phase::UpToDate, None));
     }
 
     #[test]
-    fn a_restart_waits_for_idle_and_for_its_backoff() {
-        use std::time::Instant;
-        let now = Instant::now();
-        assert!(!super::should_restart(1, now, None));
-        assert!(super::should_restart(0, now, None));
-        assert!(!super::should_restart(0, now, Some(now + Duration::from_secs(5))));
-        assert!(super::should_restart(0, now, Some(now)));
-        assert!(!super::should_restart(2, now, Some(now)));
+    fn the_restart_status_says_what_it_waits_for() {
+        assert_eq!(super::restart_status("abcdef012", 0).why, None);
+        assert_eq!(super::restart_status("abcdef012", 1).why.unwrap(), "1 agent is running; restarts when they finish");
+        assert!(super::restart_status("abcdef012", 2).why.unwrap().starts_with("2 agents are"));
     }
 
     #[test]
-    fn the_restart_backoff_doubles_up_to_its_cap() {
-        let mut b = super::RESTART_BACKOFF;
-        let mut seen = vec![b.as_secs()];
-        for _ in 0..6 {
-            b = super::next_backoff(b);
-            seen.push(b.as_secs());
+    fn a_restart_execs_unless_windows_or_a_script_starts_loft_again() {
+        use std::ffi::OsStr;
+        assert!(!super::restarts_by_exit(false, None));
+        assert!(!super::restarts_by_exit(false, Some(OsStr::new("0"))));
+        assert!(super::restarts_by_exit(false, Some(OsStr::new("1"))));
+        assert!(super::restarts_by_exit(true, None));
+        assert!(super::restarts_by_exit(true, Some(OsStr::new("1"))));
+    }
+
+    /// Runs `restart` in a copy of this test binary, since it ends the process: started as run-backend.sh starts
+    /// Loft, it takes the variable out of its environment (exit 1 if not) and exits with the restart code.
+    #[test]
+    fn a_restart_exits_with_the_restart_code() {
+        if std::env::var_os("LOFT_TEST_RESTART").is_some() {
+            super::take_restart_by_exit();
+            if std::env::var_os("LOFT_RESTART_BY_EXIT").is_some() {
+                std::process::exit(1);
+            }
+            super::restart();
         }
-        assert_eq!(seen, [30, 60, 120, 240, 480, 600, 600]);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "updater::tests::a_restart_exits_with_the_restart_code", "--test-threads=1"])
+            .env("LOFT_TEST_RESTART", "1")
+            .env("LOFT_RESTART_BY_EXIT", "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(super::RESTART_CODE));
+    }
+
+    /// The scripts that start Loft again keep their own copy of the code, and tell Loft they do.
+    #[test]
+    fn the_restart_scripts_use_the_restart_code_and_say_so() {
+        for script in ["run-backend.sh", "run-service.sh"] {
+            let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts").join(script)).unwrap();
+            assert!(text.contains(&format!("\nRESTART_CODE={}\n", super::RESTART_CODE)), "{script}");
+            assert!(text.contains("\nexport LOFT_RESTART_BY_EXIT=1\n"), "{script}");
+        }
+    }
+
+    /// start.sh's loop with a fake cargo that exits with the given codes in turn: how many times it ran, the
+    /// `LOFT_RESTART_BY_EXIT` and args it got, and the script's own exit code.
+    #[cfg(unix)]
+    fn run_backend(codes: &[i32]) -> (usize, String, Option<i32>) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("loft-run-backend-{}-{}", std::process::id(), codes.len()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let codes = codes.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+        let cargo = dir.join("cargo");
+        std::fs::write(
+            &cargo,
+            format!("#!/bin/sh\necho \"$LOFT_RESTART_BY_EXIT $*\" >> '{d}/runs'\nn=$(wc -l < '{d}/runs')\nset -- {codes}\nshift $((n - 1))\nexit \"$1\"\n", d = dir.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/run-backend.sh");
+        let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+        let status = std::process::Command::new("bash").arg(script).arg("--release").env("PATH", path).env_remove("LOFT_RESTART_BY_EXIT").stderr(std::process::Stdio::null()).status().unwrap();
+        let runs = std::fs::read_to_string(dir.join("runs")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        (runs.lines().count(), runs.lines().next().unwrap_or_default().to_string(), status.code())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_sh_runs_loft_again_after_a_restart_and_ends_on_any_other_exit() {
+        let code = super::RESTART_CODE;
+        assert_eq!(run_backend(&[code, code, 0]), (3, "1 run --release".into(), Some(0)));
+        assert_eq!(run_backend(&[1]), (1, "1 run --release".into(), Some(1)), "an error ends it instead of restarting");
+        assert_eq!(run_backend(&[code, 101, 0, 0]), (2, "1 run --release".into(), Some(101)));
+    }
+
+    /// A cargo output folder: `release/loft.exe`, hard-linked from `release/deps/loft-abc.exe` as cargo leaves it, and
+    /// another build's `deps/loft-def.exe`.
+    fn cargo_output(tmp: &std::path::Path) -> std::path::PathBuf {
+        let release = tmp.join("release");
+        std::fs::create_dir_all(release.join("deps")).unwrap();
+        std::fs::write(release.join("deps/loft-abc.exe"), "running").unwrap();
+        std::fs::hard_link(release.join("deps/loft-abc.exe"), release.join("loft.exe")).unwrap();
+        std::fs::write(release.join("deps/loft-def.exe"), "other build").unwrap();
+        std::fs::write(release.join("deps/libloft-abc.rlib"), "lib").unwrap();
+        release.join("loft.exe")
+    }
+
+    fn read(p: std::path::PathBuf) -> String {
+        std::fs::read_to_string(p).unwrap_or_default()
     }
 
     #[test]
-    fn a_failed_restart_keeps_its_reason_across_loop_ticks() {
-        let failed = Some("restart failed: boom".to_string());
-        assert_eq!(super::restart_status("abcdef012", 2, failed.clone()).why, failed);
-        assert_eq!(super::restart_status("abcdef012", 0, None).why, None);
-        assert!(super::restart_status("abcdef012", 1, Some("1 agent is running".into())).why.unwrap().starts_with("1 agent is"));
+    fn an_update_sets_the_running_build_aside_as_loft_old_under_both_its_names() {
+        let tmp = crate::testdir::TempDir::new("set-aside");
+        let exe = cargo_output(&tmp);
+        let release = exe.parent().unwrap().to_path_buf();
+        // What the last update set aside, if it was never removed: replaced, so there's only ever one.
+        std::fs::write(release.join("loft.old.exe"), "older").unwrap();
+        let aside = super::set_aside(&exe).unwrap();
+        assert!(!exe.exists() && !release.join("deps/loft-abc.exe").exists(), "cargo can write both names");
+        assert_eq!(read(release.join("loft.old.exe")), "running");
+        assert_eq!(read(release.join("deps/loft.old.exe")), "running");
+        assert_eq!(read(release.join("deps/loft-def.exe")), "other build", "another build's binary stays");
+        assert_eq!(read(release.join("deps/libloft-abc.rlib")), "lib");
+        // A build that worked wrote both names again: nothing goes back.
+        std::fs::write(release.join("deps/loft-abc.exe"), "new").unwrap();
+        std::fs::write(&exe, "new").unwrap();
+        aside.restore();
+        assert_eq!(read(exe.clone()), "new");
+        assert_eq!(read(release.join("loft.old.exe")), "running");
+        let olds = std::fs::read_dir(&release).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".old")).count();
+        assert_eq!(olds, 1);
+    }
+
+    #[test]
+    fn a_failed_build_puts_the_running_build_back() {
+        let tmp = crate::testdir::TempDir::new("set-aside");
+        let exe = cargo_output(&tmp);
+        let release = exe.parent().unwrap().to_path_buf();
+        super::set_aside(&exe).unwrap().restore();
+        assert_eq!(read(exe.clone()), "running", "a restart runs the build that was running");
+        assert_eq!(read(release.join("deps/loft-abc.exe")), "running");
+        assert!(super::same_file(&exe, &release.join("deps/loft-abc.exe")));
+        assert!(!release.join("loft.old.exe").exists() && !release.join("deps/loft.old.exe").exists());
+    }
+
+    #[test]
+    fn the_new_loft_removes_the_set_aside_build() {
+        let tmp = crate::testdir::TempDir::new("set-aside");
+        let exe = cargo_output(&tmp);
+        let release = exe.parent().unwrap().to_path_buf();
+        super::set_aside(&exe).unwrap();
+        std::fs::write(&exe, "new").unwrap();
+        assert!(super::remove_set_aside(&exe));
+        assert!(!release.join("loft.old.exe").exists() && !release.join("deps/loft.old.exe").exists());
+        assert_eq!(read(exe.clone()), "new");
+        assert!(super::remove_set_aside(&exe), "nothing left to remove");
+    }
+
+    /// Stands in for a running Loft in the Windows test below.
+    #[test]
+    fn a_running_build() {
+        if std::env::var_os("LOFT_TEST_RUNNING_BUILD").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+        }
+    }
+
+    /// Windows itself: a running binary can't be written over or deleted, but set aside it can, and it's removed
+    /// once it has exited.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_running_build_is_set_aside_written_over_and_removed_once_it_exits() {
+        let tmp = crate::testdir::TempDir::new("set-aside-running");
+        let exe = cargo_output(&tmp);
+        let release = exe.parent().unwrap().to_path_buf();
+        std::fs::remove_file(&exe).unwrap();
+        std::fs::remove_file(release.join("deps/loft-abc.exe")).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), release.join("deps/loft-abc.exe")).unwrap();
+        std::fs::hard_link(release.join("deps/loft-abc.exe"), &exe).unwrap();
+        let mut child = std::process::Command::new(&exe)
+            .args(["--exact", "updater::tests::a_running_build", "--test-threads=1"])
+            .env("LOFT_TEST_RUNNING_BUILD", "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(std::fs::write(release.join("deps/loft-abc.exe"), "new").is_err(), "Windows refuses to write a running binary");
+        super::set_aside(&exe).unwrap();
+        std::fs::write(release.join("deps/loft-abc.exe"), "new").unwrap();
+        std::fs::write(&exe, "new").unwrap();
+        assert!(!super::remove_set_aside(&exe), "still running: left for the sweep");
+        // Windows may let one name of the running file go, never both.
+        assert!(release.join("loft.old.exe").exists() || release.join("deps/loft.old.exe").exists());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // The process can take a moment to let go of its file.
+        let gone = (0..20).any(|_| super::remove_set_aside(&exe) || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            false
+        });
+        assert!(gone);
+        assert!(!release.join("loft.old.exe").exists() && !release.join("deps/loft.old.exe").exists());
+        assert_eq!(read(exe), "new");
     }
 
     #[test]
@@ -425,7 +720,7 @@ mod tests {
         // Untouched for 4 days.
         let then = SystemTime::now() - Duration::from_secs(4 * 24 * 60 * 60);
         for p in ["loft/Cargo.toml", "loft/target/debug/app", "loft/target", "loft/.git", "loft"] {
-            std::fs::File::open(ws.join(p)).unwrap().set_modified(then).unwrap();
+            crate::testdir::set_modified(&ws.join(p), then);
         }
         super::before_restart(&st).await;
         assert!(!ws.join("loft/target").exists(), "the update restarted with its build output");

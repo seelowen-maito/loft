@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::sys::Canonical;
+
 #[derive(Debug, Serialize)]
 pub struct PastSession {
     pub id: String,
@@ -44,7 +46,7 @@ pub fn transcripts_dir(cwd: &Path) -> PathBuf {
 
 /// [`transcripts_dir`] in Claude Code's `projects` folder.
 pub fn transcripts_dir_in(projects: &Path, cwd: &Path) -> PathBuf {
-    let real = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let real = cwd.canonical().unwrap_or_else(|_| cwd.to_path_buf());
     let name: String = real
         .to_string_lossy()
         .chars()
@@ -246,7 +248,7 @@ pub mod tests {
         let ws = dir.join("agent.local_1");
         std::fs::create_dir_all(&ws).unwrap();
         let name = transcripts_dir(&ws).file_name().unwrap().to_string_lossy().into_owned();
-        let real = ws.canonicalize().unwrap().to_string_lossy().replace(['/', '.', '_'], "-");
+        let real = ws.canonical().unwrap().to_string_lossy().replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         assert_eq!(name, real);
         assert!(name.ends_with("-agent-local-1"));
     }

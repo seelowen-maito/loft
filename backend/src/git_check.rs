@@ -18,6 +18,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
+use crate::sys::Canonical;
 
 /// How long one git call may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -131,7 +132,7 @@ fn place(storage: &Path, agent: &str, rel: &str) -> Result<(PathBuf, PathBuf), &
     if !plain(agent) || agent.starts_with('.') || !plain(rel) {
         return Err("not in a workspace");
     }
-    let root = storage.canonicalize().map_err(|_| "not in a workspace")?;
+    let root = storage.canonical().map_err(|_| "not in a workspace")?;
     let ws = root.join(agent);
     let repo = ws.join(rel);
     for p in [&ws, &repo] {
@@ -141,7 +142,7 @@ fn place(storage: &Path, agent: &str, rel: &str) -> Result<(PathBuf, PathBuf), &
         }
     }
     // APFS finds a name whatever its case or Unicode form; only the name on disk is checked.
-    if repo.canonicalize().ok().as_deref() != Some(repo.as_path()) {
+    if repo.canonical().ok().as_deref() != Some(repo.as_path()) {
         return Err("not the name on disk");
     }
     Ok((ws, repo))
@@ -172,7 +173,7 @@ fn plain_config(ws: &Path, repo: &Path) -> Result<GitDirs, &'static str> {
     // An agent could point them anywhere; git would then read config and objects from there.
     let mut real = vec![];
     for d in [&dir, &common] {
-        match d.canonicalize() {
+        match d.canonical() {
             Ok(c) if c.starts_with(ws) => real.push(c),
             _ => return Err("git folder outside the workspace"),
         }
@@ -349,7 +350,7 @@ mod tests {
         let storage = crate::testdir::for_this_test("gitcheck");
         let ws = storage.join("a");
         fs::create_dir_all(&ws).unwrap();
-        let storage = storage.canonicalize().unwrap();
+        let storage = storage.canonical().unwrap();
         let ws = storage.join("a");
         sh(&ws, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
         sh(&ws, &["clone", "-q", "origin.git", "loft"]);
@@ -507,10 +508,12 @@ mod tests {
         packed.set_len(MAX_FILE + 1).unwrap();
         assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its refs"));
         fs::remove_file(loft.join(".git/packed-refs")).unwrap();
-        fs::OpenOptions::new().append(true).open(loft.join(".git/HEAD")).unwrap().set_len(MAX_FILE + 1).unwrap();
+        // Windows sets no length through a handle that may only append.
+        fs::OpenOptions::new().write(true).open(loft.join(".git/HEAD")).unwrap().set_len(MAX_FILE + 1).unwrap();
         assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its HEAD"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fifo_for_a_git_file_is_unknown_without_hanging() {
         let (storage, loft) = setup();
@@ -522,10 +525,11 @@ mod tests {
         assert_eq!(run(&storage, "a", "loft", &[]).await, unknown("can't read its refs"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn only_a_real_folder_at_the_top_of_the_agent_s_own_workspace_is_checked() {
         let (storage, loft) = setup();
-        let outside = crate::testdir::for_this_test("gitcheck-out").canonicalize().unwrap();
+        let outside = crate::testdir::for_this_test("gitcheck-out").canonical().unwrap();
         std::os::unix::fs::symlink(&loft, storage.join("a/link")).unwrap();
         fs::create_dir_all(storage.join("a/plain")).unwrap();
         // A worktree whose `.git` points outside the workspace.
@@ -535,12 +539,14 @@ mod tests {
         fs::write(outside.join("g/commondir"), "../g\n").unwrap();
         fs::create_dir_all(storage.join("a/far")).unwrap();
         fs::write(storage.join("a/far/.git"), format!("gitdir: {}\n", outside.join("g").display())).unwrap();
+        // On a disk that tells case apart (Linux), another case is another name, one that isn't there.
+        let other_case = if storage.join("a/LOFT").exists() { "not the name on disk" } else { "no longer there" };
         for (agent, rel, why) in [
             ("a", "link", "not a folder"),
-            ("a", "LOFT", "not the name on disk"),
+            ("a", "LOFT", other_case),
             ("a", "../a/loft", "not in a workspace"),
             ("a", "..", "not in a workspace"),
-            ("A", "loft", "not the name on disk"),
+            ("A", "loft", other_case),
             (".x", "loft", "not in a workspace"),
             ("a", "plain", "not a git repo"),
             ("a", "away", "not a git repo"),

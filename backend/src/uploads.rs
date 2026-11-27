@@ -258,16 +258,11 @@ fn clock(secs: f64) -> String {
     format!("{m}:{:04.1}", secs - m * 60.0)
 }
 
-/// Where a tool may be: on PATH or Homebrew's (a background service has a short PATH).
-fn find_tool(name: &str) -> Option<PathBuf> {
-    let on_path = std::env::var_os("PATH").into_iter().flat_map(|p| std::env::split_paths(&p).map(|d| d.join(name)).collect::<Vec<_>>());
-    on_path.chain([FsPath::new("/opt/homebrew/bin").join(name), FsPath::new("/usr/local/bin").join(name)]).find(|p| p.is_file())
-}
-
 /// A tool's stdout, or `None` if it's missing, fails or takes over `limit`.
 async fn run_tool(name: &str, args: &[&std::ffi::OsStr], limit: Duration) -> Option<Vec<u8>> {
-    let mut cmd = tokio::process::Command::new(find_tool(name)?);
+    let mut cmd = tokio::process::Command::new(crate::sys::find_tool(name)?);
     cmd.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    crate::sys::no_window(cmd.as_std_mut());
     let out = tokio::time::timeout(limit, cmd.output()).await.ok()?.ok()?;
     (out.status.success() && !out.stdout.is_empty()).then_some(out.stdout)
 }
@@ -310,6 +305,8 @@ fn base64(b: &[u8]) -> String {
 }
 
 #[cfg(test)]
+// Most of these fake commands with shell scripts, which run on Unix only.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
 
@@ -364,9 +361,10 @@ mod tests {
         std::fs::read_to_string(input).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_video_reaches_the_agent_as_frames_with_timestamps_and_its_path() {
-        let Some(ffmpeg) = find_tool("ffmpeg") else { return eprintln!("skipped: no ffmpeg to make the test video") };
+        let Some(ffmpeg) = crate::sys::find_tool("ffmpeg") else { return eprintln!("skipped: no ffmpeg to make the test video") };
         let (st, a) = crate::agents::tests::fake_claude_state();
         let src = st.cfg.root.as_path().join("clip.mp4");
         let made = std::process::Command::new(ffmpeg)
@@ -390,6 +388,7 @@ mod tests {
         assert!(images.iter().all(|i| i["source"]["media_type"] == "image/jpeg" && i["source"]["data"].as_str().unwrap().starts_with("/9j/")));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_video_ffmpeg_cant_read_still_goes_with_its_path_and_a_note() {
         let (st, a) = crate::agents::tests::fake_claude_state();
@@ -463,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_video_over_30_seconds_gets_30_frames_spread_evenly() {
-        let Some(ffmpeg) = find_tool("ffmpeg") else { return eprintln!("skipped: no ffmpeg to make the test video") };
+        let Some(ffmpeg) = crate::sys::find_tool("ffmpeg") else { return eprintln!("skipped: no ffmpeg to make the test video") };
         let dir = crate::testdir::for_this_test("frames");
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("long.mp4");

@@ -61,7 +61,7 @@ mod tests {
         apply_with(&mut cmd, Some("/bin/sccache".into()), Path::new("/data"));
         let e = envs(&cmd);
         assert!(e.contains(&("RUSTC_WRAPPER".into(), "/bin/sccache".into())), "{e:?}");
-        assert!(e.contains(&("SCCACHE_DIR".into(), "/data/sccache".into())), "{e:?}");
+        assert!(e.contains(&("SCCACHE_DIR".into(), Path::new("/data").join("sccache").to_string_lossy().into_owned())), "{e:?}");
         assert!(e.contains(&("SCCACHE_CACHE_SIZE".into(), "10G".into())), "{e:?}");
     }
 

@@ -58,6 +58,20 @@ pub fn for_this_process(name: &str) -> PathBuf {
     path
 }
 
+/// Dates the file or folder `p` to `t`. Windows needs a handle that may write attributes (a folder's too), which a
+/// read-only one isn't.
+pub fn set_modified(p: &Path, t: std::time::SystemTime) {
+    #[cfg(unix)]
+    let f = std::fs::File::open(p);
+    #[cfg(windows)]
+    let f = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES};
+        std::fs::OpenOptions::new().access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(p)
+    };
+    f.unwrap_or_else(|e| panic!("{}: {e}", p.display())).set_modified(t).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

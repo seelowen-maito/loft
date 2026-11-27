@@ -5,7 +5,12 @@ use serde_json::{json, Value};
 
 use crate::api::{bad, ApiResult};
 
-pub const STEPS: &str = "Log in from a terminal on the Mac: run `claude auth login` and finish in the browser, or press Open Terminal in Settings › Claude login.";
+/// How to log in. Open Terminal is a Mac-only feature, so elsewhere only the command is offered.
+pub const STEPS: &str = if crate::api::ON_MAC {
+    "Log in from a terminal on the Mac: run `claude auth login` and finish in the browser, or press Open Terminal in Settings › Claude login."
+} else {
+    "Log in from a terminal on this machine: run `claude auth login` and finish in the browser."
+};
 
 /// The status from the stored credentials (Err: none found) and the account's email, if the CLI's config has it.
 pub fn status_from(creds: Result<Value, String>, email: Option<String>) -> Value {
@@ -58,7 +63,7 @@ pub async fn text() -> String {
     if s["logged_in"] == true {
         let who = s["account"].as_str().map_or(String::new(), |a| format!(" as {a}"));
         let plan = s["plan"].as_str().map_or(String::new(), |p| format!(" ({p} plan)"));
-        format!("Claude is logged in{who}{plan}. To switch accounts, log in again from a terminal on the Mac: run `claude auth login`, or press Open Terminal in Settings › Claude login.")
+        format!("Claude is logged in{who}{plan}. To switch accounts, log in again. {STEPS}")
     } else {
         format!("Claude is not logged in. {STEPS}")
     }

@@ -1,7 +1,6 @@
 //! User settings, edited on the Settings page and stored in `.loft/settings.json`.
 //! Most apply immediately; `RESTART_FIELDS` take effect on the next start.
 
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -43,7 +42,8 @@ pub struct Settings {
     #[serde(skip_serializing)]
     pub comment_approval_default: String,
     pub push: Push,
-    /// Where the daily backups go (see backup.rs). Empty: `~/Library/Application Support/Loft/backups`.
+    /// Where the daily backups go (see backup.rs). Empty: `Loft/backups` in the system's data folder
+    /// (`~/Library/Application Support` on a Mac, `%APPDATA%` on Windows).
     pub backup_dir: String,
     /// Hours with no run after which an agent counts as idle: Loft then shuts its Simulator device down.
     pub idle_timeout_hours: u32,
@@ -101,15 +101,10 @@ struct OnDisk<'a> {
     github_token: &'a str,
 }
 
-/// Whether `bin` names a file to run: a full path to one, or a bare name found in an absolute PATH folder.
+/// Whether `bin` names a file to run: a full path to one, or a bare name found in an absolute PATH folder or where
+/// it is usually installed ([`crate::sys::find_tool`]; on Windows `claude` may be `claude.exe` or `claude.cmd`).
 pub fn runnable(bin: &str) -> bool {
-    let p = Path::new(bin);
-    if p.is_absolute() {
-        return p.is_file();
-    }
-    !bin.is_empty()
-        && !bin.contains('/')
-        && std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.is_absolute() && d.join(bin).is_file()))
+    crate::sys::find_tool(bin).is_some()
 }
 
 /// Settings read once at startup; changing them asks for a restart.
@@ -165,7 +160,7 @@ impl Store {
         let tmp = self.path.with_extension("json.tmp");
         let _ = std::fs::remove_file(&tmp);
         // Owner-only from the first byte: it holds the GitHub token.
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut f = crate::owner_only::options().write(true).create_new(true).open(&tmp)?;
         std::io::Write::write_all(&mut f, serde_json::to_string_pretty(&OnDisk { settings: &s, github_token: &s.github_token })?.as_bytes())?;
         drop(f);
         std::fs::rename(&tmp, &self.path)?;
@@ -189,10 +184,10 @@ impl Store {
 /// files made before, and on every save.
 fn owner_only(settings: &Path) -> Result<()> {
     if let Some(dir) = settings.parent().filter(|d| d.is_dir()) {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        crate::owner_only::dir(dir)?;
     }
     if settings.exists() {
-        std::fs::set_permissions(settings, std::fs::Permissions::from_mode(0o600))?;
+        crate::owner_only::file(settings)?;
     }
     Ok(())
 }
@@ -200,15 +195,19 @@ fn owner_only(settings: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn store(json: &str) -> Store {
         let dir = crate::testdir::for_this_test("settings");
         std::fs::create_dir_all(dir.join("projects")).unwrap();
-        let json = json.replace("PROJECTS", &dir.join("projects").to_string_lossy());
+        // Inside a JSON string: a Windows path's backslashes escaped.
+        let json = json.replace("PROJECTS", &dir.join("projects").to_string_lossy().replace('\\', "\\\\"));
         std::fs::write(dir.join("settings.json"), json).unwrap();
         Store::load(&dir).unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn settings_and_their_folder_are_owner_only_at_start_and_on_save() {
         use std::os::unix::fs::MetadataExt;
@@ -248,6 +247,7 @@ mod tests {
         assert_eq!(Store::load(s.dir()).unwrap().get().github_token, "ghp_new", "survives a restart");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_runnable_claude_command_is_a_full_path_to_a_file_or_a_name_on_path() {
         let dir = crate::testdir::for_this_test("settings");
@@ -260,6 +260,19 @@ mod tests {
         assert!(!runnable("./sh"));
         assert!(!runnable("no-such-command-anywhere"));
         assert!(!runnable(""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_claude_command_may_leave_out_its_extension() {
+        let dir = crate::testdir::for_this_test("settings-windows");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("claude.cmd"), "@echo off\r\n").unwrap();
+        assert!(runnable(&dir.join("claude").to_string_lossy()));
+        assert!(runnable(&dir.join("claude.cmd").to_string_lossy()));
+        assert!(!runnable(&dir.join("codex").to_string_lossy()));
+        assert!(runnable("cmd"), "cmd.exe, on PATH");
+        assert!(!runnable(r"bin\claude"), "relative");
     }
 
     #[test]
