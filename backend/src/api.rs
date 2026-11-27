@@ -223,6 +223,15 @@ fn check_new_projects(state: &AppState, a: &Agent, ps: &[String]) -> Result<(), 
     Ok(())
 }
 
+/// A group name as typed, trimmed: at most 100 characters, with no control characters. "" is no group.
+pub fn group_name(v: &str) -> Result<String, String> {
+    let g = v.trim();
+    if g.chars().count() > 100 || g.chars().any(char::is_control) {
+        return Err("group must be at most 100 characters, with no control characters".into());
+    }
+    Ok(g.into())
+}
+
 /// Apply editable fields from a JSON patch onto an agent.
 fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiError> {
     let str_field = |k: &str| p.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -233,11 +242,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
         a.name = v.trim().into();
     }
     if let Some(v) = str_field("group") {
-        let g = v.trim();
-        if g.chars().count() > 100 || g.chars().any(char::is_control) {
-            return Err(bad("group must be at most 100 characters, with no control characters"));
-        }
-        a.group = g.into();
+        a.group = group_name(&v).map_err(bad)?;
     }
     if let Some(v) = p.get("projects") {
         let raw: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| bad("projects must be a list of strings"))?;
@@ -340,7 +345,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
 
 /// Makes `a` its group's only Lead (its team: `Agent::team`): any other Lead in the group becomes Custom.
 /// Returns the agent the role moved from.
-fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
+pub fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
     if a.role != "lead" {
         return Ok(None);
     }
