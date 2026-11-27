@@ -1,5 +1,6 @@
 import type { NeedsYouAction, NeedsYouList } from "./needsYou";
 import { errorText } from "./useAction.ts";
+import type { AgentTemplate } from "./newAgent";
 
 export type Avatar = { svg: string };
 
@@ -825,6 +826,8 @@ export const api = {
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
+  /** The Agent templates, their instructions filled in for `project` ("" before one is picked). */
+  agentTemplates: (project: string) => req<AgentTemplate[]>("GET", `/agent-templates?project=${encodeURIComponent(project)}`),
   projectSettings: (project: string) => req<ProjectSettingsView>("GET", `/project-settings?project=${encodeURIComponent(project)}`),
   setProjectSetting: (project: string, key: string, value: string | string[] | number) => req<ProjectSettingsView>("PUT", "/project-settings", { project, key, value }),
   /** Asks Loft's own agent `loft` to set up an agent in a reviewer role the project's team has no one in. */

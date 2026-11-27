@@ -88,6 +88,10 @@ const KICKOFF: &str = "[Loft: first launch] Loft just started with you in it. Th
 pub struct Template {
     pub key: &'static str,
     pub name: &'static str,
+    /// What it does, in a few words: its line in the New agent dialog's role picker.
+    pub summary: &'static str,
+    /// What it does, in a sentence for the user: the picker's footer when its line is highlighted.
+    pub about: &'static str,
     /// When this agent is worth having, for the agent that picks templates.
     pub fits: &'static str,
     /// When it isn't.
@@ -113,6 +117,8 @@ pub const TEMPLATES: &[Template] = &[
     Template {
         key: "dev",
         name: "Dev",
+        summary: "Builds new features and the tickets",
+        about: "Agrees on a roadmap with you, then ships it one small pull request at a time, and builds the tickets of a Delivery.",
         fits: "Projects the user is actively building and wants to push forward: apps, products, tools with a roadmap or a backlog of ideas. Suggest it for the most active projects.",
         skip: "Projects that already have a developer agent the user set up, finished or archived projects, and repos that only hold notes, config or dotfiles.",
         personality: "A builder who loves shipping. Curious about where the user wants to take the project, asks sharp questions before writing code, then delivers in small, reviewable steps. Upbeat, but never pads a reply.",
@@ -150,6 +156,8 @@ On each check-in, and whenever the user asks:
     Template {
         key: "lead",
         name: "Lead",
+        summary: "Plans the work with you",
+        about: "Turns your ideas into specs and tickets through a grill, then hands the tickets to the team. One per group.",
         fits: "Projects with more than one agent, or that the user wants to plan before building: someone to turn ideas into specs and tickets for the team. Suggest it once a project has a Dev or the user plans to grow its team.",
         skip: "Projects with a single agent and nothing to plan, projects that already have a Lead, and agents without a project (a Lead always belongs to a project).",
         personality: "A calm captain. Asks the questions that matter, always with a recommendation, looks facts up instead of asking for them, and keeps the team pointed at the same goal.",
@@ -180,6 +188,8 @@ Decisions the user made, one entry each. Ticket order lives in GitHub's blocking
     Template {
         key: "reviewer",
         name: "Reviewer",
+        summary: "Reviews every change",
+        about: "Reads new commits and pull requests for bugs first, then clarity, and points at the exact line with a fix.",
         fits: "Any project that changes often: recent commits, open pull requests, more than one contributor or agent working on it.",
         skip: "Repos that rarely change, generated code, notes or dotfiles.",
         personality: "Careful and specific. Points at the exact line and says why, separates real bugs from taste, and keeps praise and nitpicks short.",
@@ -203,6 +213,8 @@ If nothing changed, say so in one line. Report to whoever handed you the work."#
     Template {
         key: "security",
         name: "Security",
+        summary: "Looks for security problems",
+        about: "Audits the code for problems an attacker could really use, rated honestly, with how the attack would work.",
         fits: "Anything that can be reached or fed input by someone else: web apps, APIs, servers, mobile apps, browser extensions, bots, services that handle accounts, payments, personal data or secrets, and libraries other people install.",
         skip: "Local scripts, dotfiles, notes, static content with no input, throwaway experiments. Nothing reaches them from outside, so there is nothing to attack.",
         personality: "Calm and precise. Rates findings honestly, never inflates severity, and always explains how an attack would actually work.",
@@ -227,6 +239,8 @@ If you found nothing new, say so in one line."#,
     Template {
         key: "tests",
         name: "QA",
+        summary: "Tests the work",
+        about: "Keeps the test suite green, adds tests where they are missing and checks that each change does what it says.",
         fits: "Projects with real logic and a test setup, or ones that clearly need one: apps, services, libraries, CLIs.",
         skip: "Docs, notes, config and dotfiles repos, and tiny one-file scripts where a test would only repeat the code.",
         personality: "Methodical and skeptical. Trusts a passing test only once it has seen it fail for the right reason.",
@@ -250,6 +264,8 @@ If everything passes and nothing new needs tests, say so in one line. Report to 
     Template {
         key: "deps",
         name: "Deps",
+        summary: "Keeps dependencies up to date",
+        about: "Upgrades dependencies in small, safe steps, after reading the changelogs, and flags known vulnerabilities.",
         fits: "Projects with a dependency manifest (package.json, Cargo.toml, requirements.txt or pyproject.toml, go.mod, Gemfile, Podfile, Package.swift) that are still in use.",
         skip: "Projects with no dependencies, archived projects, and ones pinned on purpose.",
         personality: "Conservative. Small, safe upgrades over big jumps, and always reads the changelog first.",
@@ -273,6 +289,8 @@ If everything is current, say so in one line."#,
     Template {
         key: "docs",
         name: "Docs",
+        summary: "Keeps the docs true to the code",
+        about: "Updates the README and docs when the code changes, written plainly for a newcomer.",
         fits: "Projects other people read or use: libraries, public repos, APIs, apps with setup steps, projects with a docs folder.",
         skip: "Personal scripts, private experiments, and repos with no README worth keeping.",
         personality: "Clear and plain-spoken. Writes for a newcomer, cuts jargon, and keeps docs short.",
@@ -295,6 +313,8 @@ If the docs are already accurate, say so in one line."#,
     Template {
         key: "triage",
         name: "Triage",
+        summary: "Triages GitHub issues",
+        about: "Labels new issues, asks reporters for what is missing and spots duplicates, without closing anything it isn't sure about.",
         fits: "Projects on GitHub that get issues, especially from other people.",
         skip: "Projects with no GitHub remote, or with issues turned off or never used.",
         personality: "Friendly and organized. Thanks reporters, asks for exactly what's missing, and never closes an issue it isn't sure about.",
@@ -318,6 +338,8 @@ If there is nothing new, say so in one line."#,
     Template {
         key: "ci",
         name: "CI",
+        summary: "Watches CI",
+        about: "Reads failed CI runs, finds the first real error in the logs and says what broke it.",
         fits: "Projects on GitHub with CI workflows (.github/workflows) that run on every push or pull request.",
         skip: "Projects with no CI, or CI that only runs by hand.",
         personality: "Quick and to the point. Finds the first real error in a wall of logs and says what broke it.",
@@ -338,6 +360,43 @@ If CI is green, say so in one line."#,
         greeting: "",
     },
 ];
+
+/// A template's instructions for `project`, whose folder is `path`: no project reads as the user's projects.
+fn fill(prompt: &str, project: &str, path: &str) -> String {
+    prompt.replace("{project}", if project.is_empty() { "the user's projects" } else { project }).replace("{path}", path)
+}
+
+#[derive(serde::Deserialize)]
+pub struct TemplatesQuery {
+    #[serde(default)]
+    project: String,
+}
+
+/// `GET /api/agent-templates?project=<name>`: the templates `create_agent` starts from, for the New agent dialog,
+/// with `project`'s name and folder in their instructions.
+pub async fn templates_route(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Query(q): axum::extract::Query<TemplatesQuery>) -> axum::Json<Value> {
+    axum::Json(templates_for(&state, q.project.trim()))
+}
+
+fn templates_for(state: &AppState, project: &str) -> Value {
+    let path = if project.is_empty() { String::new() } else { state.settings.boot().projects_dir.join(project).display().to_string() };
+    TEMPLATES
+        .iter()
+        .map(|t| {
+            json!({
+                "key": t.key,
+                "name": t.name,
+                "role": t.role,
+                "summary": t.summary,
+                "about": t.about,
+                "personality": t.personality,
+                "prompt": fill(t.prompt, project, &path),
+                "model": t.model,
+                "interval_minutes": t.interval_minutes,
+            })
+        })
+        .collect()
+}
 
 pub fn template(key: &str) -> Option<&'static Template> {
     TEMPLATES.iter().find(|t| t.key.eq_ignore_ascii_case(key.trim()))
@@ -622,7 +681,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     let custom = s("prompt");
     let prompt = match tpl {
         Some(t) => {
-            let base = t.prompt.replace("{project}", if project.is_empty() { "the user's projects" } else { &project }).replace("{path}", &path);
+            let base = fill(t.prompt, &project, &path);
             match (custom.is_empty(), args["replace_prompt"].as_bool().unwrap_or(false)) {
                 (true, _) => base,
                 (false, true) => custom,
@@ -1079,6 +1138,46 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         // A Lead that hands out tickets by message names them, so Fresh context applies between tickets (#251).
         let lead = template("lead").unwrap();
         assert!(lead.prompt.contains("When you hand a ticket to an agent by message, name it in `ticket`"), "{}", lead.prompt);
+    }
+
+    #[tokio::test]
+    async fn the_templates_route_serves_every_template_for_the_chosen_project() {
+        let st = state();
+        let app = axum::Router::new().nest("/api", crate::api_routes()).with_state(st.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let get = |q: &'static str| {
+            let url = format!("{base}/api/agent-templates{q}");
+            async move { reqwest::get(url).await.unwrap().json::<Value>().await.unwrap() }
+        };
+
+        let all = get("?project=site").await;
+        let all = all.as_array().unwrap();
+        let rows: Vec<_> = all.iter().map(|t| (t["key"].as_str().unwrap(), t["role"].as_str().unwrap(), t["model"].as_str().unwrap(), t["interval_minutes"].as_i64().unwrap())).collect();
+        assert_eq!(rows, [
+            ("dev", "dev", "sonnet", 0),
+            ("lead", "lead", "opus", 0),
+            ("reviewer", "code_reviewer", "sonnet", 240),
+            ("security", "security", "sonnet", 1440),
+            ("tests", "qa", "sonnet", 720),
+            ("deps", "custom", "sonnet", 10080),
+            ("docs", "custom", "sonnet", 1440),
+            ("triage", "custom", "haiku", 180),
+            ("ci", "custom", "haiku", 120),
+        ]);
+        let path = st.settings.boot().projects_dir.join("site").display().to_string();
+        for t in all {
+            for k in ["name", "summary", "about", "personality"] {
+                assert!(!t[k].as_str().unwrap().is_empty(), "{} {k}", t["key"]);
+            }
+            let prompt = t["prompt"].as_str().unwrap();
+            assert!(prompt.contains("**site**") && prompt.contains(&format!("`{path}`")), "{}", t["key"]);
+            assert!(!prompt.contains("{project}") && !prompt.contains("{path}"), "{}", t["key"]);
+        }
+        // No project yet: the instructions read as the user's projects, as create_agent writes them.
+        let none = get("").await;
+        assert!(none[0]["prompt"].as_str().unwrap().contains("**the user's projects**"), "{}", none[0]["prompt"]);
     }
 
     #[tokio::test]
