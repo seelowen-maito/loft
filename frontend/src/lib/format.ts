@@ -35,9 +35,11 @@ export function fmtDays(days: number[]): string {
   return parts.join(", ");
 }
 
-/** "Mon–Fri 09:00–17:00; Sat, Sun all day". */
+/** "Works Mon–Fri 09:00–17:00; Sat, Sun all day", or "Never wakes on its own" when no window has a day. */
 export function fmtQuiet(windows: QuietWindow[]): string {
-  return windows.map((w) => `${fmtDays(w.days)} ${w.start === w.end ? "all day" : `${w.start}–${w.end}`}`).join("; ");
+  const days = windows.filter((w) => w.days.length > 0);
+  if (!days.length) return "Never wakes on its own";
+  return "Works " + days.map((w) => `${fmtDays(w.days)} ${w.start === w.end ? "all day" : `${w.start}–${w.end}`}`).join("; ");
 }
 
 /** The interval, marked custom when working hours shape it. */

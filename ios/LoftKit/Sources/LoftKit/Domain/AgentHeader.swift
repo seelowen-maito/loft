@@ -15,10 +15,12 @@ public enum AgentHeader {
         return s
     }
 
-    /// "Works Mon–Fri 22:00–07:00": its working hours, when it may wake up on its own; nil without any.
+    /// "Works Mon–Fri 22:00–07:00": its working hours, when it may wake up on its own ("Never wakes on its own" when no window has a day); nil without any.
     public static func quietHours(_ a: Agent) -> String? {
         guard (a.intervalMinutes ?? 0) > 0, let q = a.quietHours, !q.isEmpty else { return nil }
-        return "Works " + q.map { "\(days($0.days)) \($0.start == $0.end ? "all day" : "\($0.start)–\($0.end)")" }.joined(separator: "; ")
+        let working = q.filter { !$0.days.isEmpty }
+        if working.isEmpty { return "Never wakes on its own" }
+        return "Works " + working.map { "\(days($0.days)) \($0.start == $0.end ? "all day" : "\($0.start)–\($0.end)")" }.joined(separator: "; ")
     }
 
     /// Whether it has a Session: one to compact or clear. Older servers don't send the id; a known size still means one.

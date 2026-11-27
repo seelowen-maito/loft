@@ -31,6 +31,7 @@ final class AgentHeaderTests: XCTestCase {
         XCTAssertEqual(AgentHeader.schedule(a, now: now), "every 30m · custom · next in 12m")
         XCTAssertEqual(AgentHeader.quietHours(a), "Works Mon–Fri 22:00–07:00; Sat, Sun all day")
         XCTAssertNil(AgentHeader.quietHours(agent()))
+        XCTAssertEqual(AgentHeader.quietHours(agent(quiet: [QuietWindow(days: [], start: "00:00", end: "00:00")])), "Never wakes on its own")
         XCTAssertEqual(AgentHeader.days([0, 2, 3, 4]), "Mon, Wed–Fri")
     }
 
