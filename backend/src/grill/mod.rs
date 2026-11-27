@@ -81,6 +81,10 @@ pub struct Session {
     /// (see Planning: CI mode).
     #[serde(default)]
     pub private_repos: Vec<String>,
+    /// While preparing: when the sweep last saw the agent's run alive (RFC 3339). The preparation deadline counts
+    /// from the later of this and `updated_at`, so it only runs while the agent has no run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_seen_at: Option<String>,
 }
 
 fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Published>, D::Error> {
@@ -551,6 +555,7 @@ fn new_session(agent_id: &str, topic: &str, status: &str) -> Session {
         seen_commands: vec![],
         published: vec![],
         private_repos: vec![],
+        run_seen_at: None,
     }
 }
 
@@ -605,7 +610,7 @@ fn round_prompt(s: &Session, r: &Round, context: Option<u64>) -> String {
     };
     let ci = if s.private_repos.is_empty() { "" } else { ", and the user's CI mode as `ci_mode` (see Planning: CI mode)" };
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`{ci}), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first (in the foreground, or wait for their reports: a text-only reply ends the run), then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`{ci}), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -669,7 +674,7 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
         let which = which_project(agent);
         let ci = ci_mode_note(private, agent.projects.len() > 1);
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}{ci}]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents (in the foreground, or wait for their reports: a text-only reply ends the run), then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}{ci}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -958,8 +963,8 @@ fn write_notes(state: &AppState, s: &Session, summary: &str) -> Option<String> {
 /// No answer for this long pauses a grill; this long paused ends it.
 const PAUSE_AFTER_MINS: i64 = 30;
 const END_AFTER_HOURS: i64 = 24;
-/// A start request the agent never followed up on.
-const PREPARING_FOR_MINS: i64 = 10;
+/// A start request the agent never followed up on: this long without a run (a run held by a goal is one).
+const PREPARING_FOR_MINS: i64 = 20;
 
 /// Applies idle timeouts to every open grill. Returns the agents to wake with a summary request.
 fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, String)> {
@@ -970,7 +975,19 @@ fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, S
         // Read again under the lock: an answer may have just come in.
         let Some(mut s) = state.db.get_grill(&open.id).ok().flatten() else { continue };
         let Ok(at) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) else { continue };
-        let idle = now.signed_duration_since(at);
+        let mut idle = now.signed_duration_since(at);
+        if s.status == "preparing" {
+            // The agent may still be looking up facts for the first round: its run (claude's process, alive while a
+            // goal holds it or background work is pending) stops the clock, which restarts when the run ends.
+            if crate::agents::is_running(state, &s.agent_id) {
+                s.run_seen_at = Some(now.to_rfc3339());
+                let _ = state.db.save_grill(&s);
+                continue;
+            }
+            if let Some(seen) = s.run_seen_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
+                idle = idle.min(now.signed_duration_since(seen));
+            }
+        }
         match s.status.as_str() {
             "preparing" if idle.num_minutes() >= PREPARING_FOR_MINS => {
                 s.summarized = true;
@@ -1217,6 +1234,7 @@ The user asked to be grilled on an idea: interview them relentlessly until you s
 - Recommendations: give every question your recommended answer, and word the question so that "yes" accepts it ("Use Postgres for storage?", not "Which database?"). Give every question a `speak` version too: short and plain, no Markdown, links, ids or PR numbers, recommendation included.
 - Start from what's written: before the first round, read the project's existing documents (README, `GLOSSARY.md`, `docs/`, `docs/adr/`, `CLAUDE.md`, notes, earlier specs) and take them as facts. Never ask what they already answer.
 - Facts: never ask the user for a fact you can look up. Before each round, find facts (in the code, the docs, the project's history, the web) with your own sub-agents, several in parallel, inside the run. Don't message other agents on your team for this unless the user says so ("ask Dev").
+- Sub-agents finish inside the run: start them in the foreground (the `Agent` tool without `run_in_background`; several in one message run in parallel), or wait for each one's report before your turn ends. The report is the notification: there is no other to wait for. Don't wait with `sleep`: Claude Code blocks it. A reply with only text ends the run, and nothing wakes you again: while you prepare a round, end your turn only with `mcp__loft__grill_round`.
 - Decisions are the user's: ask for preferences, priorities and trade-offs, grounded in the facts you found.
 - Ask in the language the user used (pass it as `language` in the first round), and write the summary in it too.
 - Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered (with a project repo, offer a spec first: see Planning: spec).
@@ -1892,8 +1910,53 @@ pub(crate) mod tests {
         assert!(active(&st, &o.id).is_none());
         // A start request nobody followed up on just expires.
         on_user_message(&st, &o, "Grill me", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
-        assert!(sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(11)).is_empty());
+        assert!(sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(21)).is_empty());
         assert!(active(&st, &o.id).is_none());
+    }
+
+    #[test]
+    fn a_preparing_grill_expires_after_20_minutes_without_a_run() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Grill me", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        let now = chrono::Utc::now();
+        sweep(&st, now + chrono::Duration::minutes(19));
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
+        sweep(&st, now + chrono::Duration::minutes(20));
+        assert!(active(&st, &o.id).is_none());
+        assert_eq!(st.db.list_grills(&o.id).unwrap()[0].end_reason.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn a_preparing_grill_waits_while_the_agent_has_a_run() {
+        // The diagnosis (#496): a first round that took 11 minutes of a live run lost its grill to the deadline.
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Grill me", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        st.rt.lock().unwrap().running.insert(o.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        let now = chrono::Utc::now();
+        for m in [10, 25, 40, 60] {
+            sweep(&st, now + chrono::Duration::minutes(m));
+            assert_eq!(active(&st, &o.id).unwrap().status, "preparing", "{m} min into a live run");
+        }
+        // The run ended without a round (a text-only reply): the clock starts from when the sweep last saw it.
+        st.rt.lock().unwrap().running.remove(&o.id);
+        sweep(&st, now + chrono::Duration::minutes(79));
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
+        sweep(&st, now + chrono::Duration::minutes(80));
+        assert!(active(&st, &o.id).is_none());
+    }
+
+    #[test]
+    fn the_grill_brief_says_to_wait_for_subagents_inside_the_run() {
+        let b = brief();
+        for want in ["without `run_in_background`", "The report is the notification", "`sleep`", "end your turn only with `mcp__loft__grill_round`"] {
+            assert!(b.contains(want), "{want}");
+        }
+        let st = state();
+        let o = planner(&st, "Lead");
+        let Routed::Handled { wake, .. } = on_user_message(&st, &o, "Grill me on pricing", None, json!({})).unwrap() else { panic!() };
+        assert!(wake.unwrap().contains("a text-only reply ends the run"));
     }
 
     #[test]
