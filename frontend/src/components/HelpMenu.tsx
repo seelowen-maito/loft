@@ -35,7 +35,8 @@ export function HelpMenu({ live }: { live: boolean }) {
     f();
   };
   const row = "flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[13px] text-fg hover:bg-white/5 focus-visible:bg-white/5 focus-visible:outline-none";
-  const kbd = (k: string) => <kbd className="ml-auto rounded border border-b-2 border-line-strong bg-ink-850 px-1.5 font-mono text-[10.5px] text-fg-2">{k}</kbd>;
+  // A row's own shortcut; hidden on touch, where keys mean nothing.
+  const kbd = (k: string) => <kbd className="ml-auto rounded border border-b-2 border-line-strong bg-ink-850 px-1.5 font-mono text-[10.5px] text-fg-2 [@media(pointer:coarse)]:hidden">{k}</kbd>;
   return (
     <div ref={box} className="relative">
       <Tip name="Help" off={open}>
@@ -51,7 +52,7 @@ export function HelpMenu({ live }: { live: boolean }) {
         </button>
       </Tip>
       {open && (
-        <div role="menu" aria-label="Help" className="absolute right-0 top-full z-50 mt-2 flex w-64 flex-col rounded-xl border border-line-strong bg-ink-850 p-1.5 shadow-xl">
+        <div role="menu" aria-label="Help" className="absolute right-0 top-full z-50 mt-2 flex w-64 flex-col rounded-lg border border-line-strong bg-ink-800/95 p-1 shadow-xl backdrop-blur">
           <div className="flex items-center gap-2 px-2.5 py-1.5 text-[12.5px] text-fg-2 sm:hidden">
             <span className={cx("size-1.5 rounded-full", live ? "bg-good" : "bg-bad")} />
             {live ? "Connected" : "Reconnecting…"}
@@ -64,7 +65,7 @@ export function HelpMenu({ live }: { live: boolean }) {
             <Keyboard className="size-3.5 text-fg-3" /> Keyboard shortcuts {kbd("?")}
           </button>
           <button role="menuitem" className={row} onClick={pick(() => setShown("commands"))}>
-            <SquareSlash className="size-3.5 text-fg-3" /> Chat commands {kbd("/")}
+            <SquareSlash className="size-3.5 text-fg-3" /> Chat commands
           </button>
           <button role="menuitem" className={row} onClick={pick(() => openShortcut("switcher"))}>
             <Search className="size-3.5 text-fg-3" /> Search and jump {kbd(formatCombo(loadCombos().switcher))}
