@@ -213,7 +213,7 @@ export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number
           </div>
         ) : (
           <button
-            className="inline-flex h-[30px] shrink-0 items-center gap-1.5 rounded-full bg-accent px-3.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3"
+            className="inline-flex h-[30px] shrink-0 items-center gap-1.5 rounded-full bg-accent px-3.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3 disabled:opacity-50"
             onClick={() => setConfirming(true)}
             disabled={!m.canMerge}
             title={m.canMerge ? mergeTitle(pr) : m.label}

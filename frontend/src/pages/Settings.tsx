@@ -10,7 +10,8 @@ import { MacAccess } from "./MacAccess";
 import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { SettingsCard } from "../components/SettingsCard";
-import { HelpHint } from "../components/HelpHint";
+import { SettingsField as Field } from "../components/SettingsField";
+import { cardInView } from "../lib/settingsSpy";
 import { Callout, ErrorLine } from "../components/Callout";
 import { ActionButton } from "../components/ActionButton";
 import { errorText, useAction } from "../lib/useAction";
@@ -28,21 +29,6 @@ const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
 /** Window event fired after a save, with the saved Settings as detail, so the navbar can follow. */
 export const SETTINGS_SAVED = "loft:settings-saved";
-
-/** `hint` is the short line under the field; `help` is the rest, behind a (?) next to the label. */
-function Field({ label, hint, help, restart, children }: { label: string; hint?: string; help?: string; restart?: boolean; children: React.ReactNode }) {
-  return (
-    <label className="block space-y-1.5">
-      <span className="flex items-center gap-2">
-        <span className="eyebrow">{label}</span>
-        {restart && <span className="chip text-[10px]">restart</span>}
-        {help && <HelpHint label={label}>{help}</HelpHint>}
-      </span>
-      {children}
-      {hint && <span className="block text-[11.5px] text-fg-3">{hint}</span>}
-    </label>
-  );
-}
 
 export function Toggle({ on, onChange, label, hint }: { on: boolean; onChange: (v: boolean) => void; label: string; hint?: string }) {
   return (
@@ -282,7 +268,7 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
           </Callout>
         )}
         <Field label="Backups folder" hint="Loft backs up its database and settings once a day." help="Backups are owner-only; Loft keeps 7 daily and 4 weekly ones. Point the folder at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
-          <input className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />
+          {(id) => <input id={id} className="input font-mono" placeholder={s?.dir ?? "~/Library/Application Support/Loft/backups"} value={folder} onChange={(e) => onFolder(e.target.value)} />}
         </Field>
         {folderErr && <p className="text-[12.5px] text-bad [overflow-wrap:anywhere]">{folderErr}</p>}
     </SettingsCard>
@@ -353,13 +339,16 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
           </div>
         )}
         <Field label="Idle timeout (hours)" hint="After this long with no run, Loft stops what the agent left running." help="That means processes like a dev server, and the agent's Simulator device is shut down. Devices left under an agent's old name, or of a deleted agent, are deleted. Your own devices are never touched.">
-          <input
-            className="input w-24"
-            type="number"
-            min={1}
-            value={idleHours}
-            onChange={(e) => onIdleHours(Math.max(1, Math.round(Number(e.target.value)) || 1))}
-          />
+          {(id) => (
+            <input
+              id={id}
+              className="input w-24"
+              type="number"
+              min={1}
+              value={idleHours}
+              onChange={(e) => onIdleHours(Math.max(1, Math.round(Number(e.target.value)) || 1))}
+            />
+          )}
         </Field>
         <p className="text-[12px] text-fg-3">
           Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily, a ticket's scratch folder once the ticket is closed, and other scratch and test output in notes after 7 days.
@@ -555,30 +544,35 @@ const goTo = (id: string) => {
   history.replaceState(null, "", `#${id}`);
 };
 
-/** The id of the card in view: the last one whose top has passed the top of the page. The page's scroller isn't there
- * yet while Settings loads, and scroll events don't bubble: listen on the document, in the capture phase. */
-function useCardInView(): string {
+/** The card "On this page" highlights, from the page's scroll. The page's scroller isn't there yet while Settings loads,
+ * and scroll events don't bubble: listen on the document, in the capture phase. `ready`: the cards are on the page. */
+function useCardInView(ready: boolean) {
   const [current, setCurrent] = useState<string>(SECTIONS[0][0]);
+  const pinned = useRef<string | null>(null);
   useEffect(() => {
+    if (!ready) return;
     const update = () => {
       const scroller = document.querySelector<HTMLElement>("[data-settings-scroll]");
       if (!scroller) return;
-      const top = scroller.getBoundingClientRect().top + 96;
-      let id: string = SECTIONS[0][0];
-      for (const [i] of SECTIONS) {
-        const el = document.getElementById(i);
-        if (el && el.getBoundingClientRect().top <= top) id = i;
+      const box = scroller.getBoundingClientRect();
+      const tops: Record<string, number> = {};
+      for (const [id] of SECTIONS) {
+        const el = document.getElementById(id);
+        if (el) tops[id] = el.getBoundingClientRect().top;
       }
-      setCurrent(id);
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+      if (!atBottom) pinned.current = null;
+      setCurrent(cardInView(SECTIONS.map(([id]) => id), tops, box.top + 96, atBottom, pinned.current));
     };
     document.addEventListener("scroll", update, { capture: true, passive: true });
+    update();
     return () => document.removeEventListener("scroll", update, { capture: true });
-  }, []);
-  return current;
+  }, [ready]);
+  return { current, pin: (id: string) => (pinned.current = id) };
 }
 
 export default function SettingsPage() {
-  const inView = useCardInView();
+
   const [view, setView] = useState<SettingsView | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   // Write-only: undefined keeps the saved token, "" clears it.
@@ -603,6 +597,8 @@ export default function SettingsPage() {
       if (e.type === "agent_updated") load().catch(() => {});
     }, [load]),
   );
+
+  const { current: inView, pin } = useCardInView(!!view && !!draft);
 
   if (!view || !draft) {
     return <div className="mx-auto max-w-3xl px-5 py-8">{err ? <ErrorLine error={err} /> : <div className="skeleton h-96 rounded-2xl" />}</div>;
@@ -666,7 +662,7 @@ export default function SettingsPage() {
                 key={id}
                 href={`#${id}`}
                 aria-current={inView === id ? "true" : undefined}
-                onClick={(e) => (e.preventDefault(), goTo(id))}
+                onClick={(e) => (e.preventDefault(), pin(id), goTo(id))}
                 className={cx("block rounded-lg px-2.5 py-1 text-[13px] transition-colors", inView === id ? "bg-ink-800 text-fg" : "text-fg-2 hover:text-fg")}
               >
                 {title}
@@ -681,7 +677,7 @@ export default function SettingsPage() {
             aria-label="Jump to"
             className="input ml-auto w-auto max-w-[60%] py-1.5 text-[13px] lg:hidden"
             value=""
-            onChange={(e) => e.target.value && goTo(e.target.value)}
+            onChange={(e) => e.target.value && (pin(e.target.value), goTo(e.target.value))}
           >
             <option value="">Jump to…</option>
             {SECTIONS.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
@@ -711,30 +707,33 @@ export default function SettingsPage() {
 
         <SettingsCard id="general" title="General">
           <Field label="Projects folder" hint="Where your git repos live." restart>
-            <input className="input font-mono" value={draft.projects_dir} onChange={(e) => set("projects_dir", e.target.value)} />
+            {(id) => <input id={id} className="input font-mono" value={draft.projects_dir} onChange={(e) => set("projects_dir", e.target.value)} />}
           </Field>
           <Field label="Claude command" hint="What agents run.">
-            <input className="input font-mono" value={draft.claude_bin} onChange={(e) => set("claude_bin", e.target.value)} />
+            {(id) => <input id={id} className="input font-mono" value={draft.claude_bin} onChange={(e) => set("claude_bin", e.target.value)} />}
           </Field>
           <Field label="SSH host" hint="Leave empty if you only use Loft on this Mac." help="How other machines reach this one, e.g. loft. /code from them then opens VS Code over Remote-SSH (VS Code only).">
-            <input className="input font-mono" placeholder="none" value={draft.ssh_host} onChange={(e) => set("ssh_host", e.target.value)} />
+            {(id) => <input id={id} className="input font-mono" placeholder="none" value={draft.ssh_host} onChange={(e) => set("ssh_host", e.target.value)} />}
           </Field>
           <Field label="GitHub token" hint={view.github_token_set ? "A token is saved. Type a new one to replace it." : "Needed for private repos and merging PRs."} help={view.github_token_set ? undefined : "Without one, Loft uses gh auth token."}>
-            <div className="flex gap-2">
-              <input
-                className="input font-mono"
-                type="password"
-                autoComplete="off"
-                placeholder={view.github_token_set && token === undefined ? "•••••••• saved" : "ghp_…"}
-                value={token ?? ""}
-                onChange={(e) => setToken(e.target.value)}
-              />
-              {view.github_token_set && (
-                <button type="button" className="btn shrink-0" onClick={() => setToken("")}>
-                  Remove
-                </button>
-              )}
-            </div>
+            {(id) => (
+              <div className="flex gap-2">
+                <input
+                  id={id}
+                  className="input font-mono"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={view.github_token_set && token === undefined ? "•••••••• saved" : "ghp_…"}
+                  value={token ?? ""}
+                  onChange={(e) => setToken(e.target.value)}
+                />
+                {view.github_token_set && (
+                  <button type="button" className="btn shrink-0" onClick={() => setToken("")}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            )}
           </Field>
         </SettingsCard>
 
