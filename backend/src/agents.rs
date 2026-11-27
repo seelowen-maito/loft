@@ -3814,6 +3814,7 @@ esac
         assert!(msgs.iter().any(|m| m.kind == "notice" && m.content == "Stopped by user. The queued message runs next."));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn five_turns_in_a_row_without_a_tool_stop_the_run_and_the_queue_goes_on() {
         let (st, a) = fake_claude_state();
@@ -3840,6 +3841,7 @@ esac
         st.db.list_messages(id, 100, None).unwrap().iter().filter(|m| m.content == "What is the password?").count() >= n
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn send_now_delivers_the_users_queued_message_into_the_run_in_progress() {
         let (st, a) = fake_claude_state();
@@ -3879,6 +3881,7 @@ esac
         assert!(unread(&st, &a.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_sent_now_that_claude_never_took_goes_back_to_the_queue() {
         let (st, a) = fake_claude_state();
@@ -3896,6 +3899,7 @@ esac
         assert!(st.rt.lock().unwrap().queued_messages[&a.id].iter().any(|(i, _)| *i == later));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hook_block_sends_the_users_queued_messages_now_and_not_the_agents() {
         let (st, a) = fake_claude_state();
@@ -3922,6 +3926,7 @@ esac
         assert!(unread(&st, &a.id));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn without_a_hook_block_the_users_queued_message_waits_for_the_next_run() {
         let (st, a) = fake_claude_state();
@@ -3948,6 +3953,7 @@ esac
         st.db.list_messages(id, 100, None).unwrap().into_iter().filter(|m| m.meta["hook_block"] == true).map(|m| m.content).collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn each_block_says_why_in_the_chat_and_goal_active_lasts_until_the_goal_passes() {
         let (st, a) = fake_claude_state();
@@ -3966,6 +3972,7 @@ esac
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_goal_over_claudes_limit_stays_active_until_the_button_clears_it() {
         let (st, a) = fake_claude_state();
@@ -3987,6 +3994,7 @@ esac
         assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().context_tokens, Some(5000), "the synthetic reply's zero usage isn't the context size");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_button_clears_a_goal_blocking_the_run_in_progress() {
         let (st, a) = fake_claude_state();
@@ -4004,6 +4012,7 @@ esac
         assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_resumed_run_takes_messages_sent_now_after_its_empty_replay() {
         let (st, a) = fake_claude_state();
@@ -4025,6 +4034,7 @@ esac
         prompts(st, id).split("\n---\n").filter(|p| !p.is_empty()).map(String::from).collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_buttons_goal_clear_runs_alone_and_pending_fyis_wait_for_the_next_run() {
         let (st, a) = fake_claude_state();
@@ -4039,6 +4049,7 @@ esac
         assert!(fyis.len() == 1 && fyis[0].1.ends_with("The build is green."), "the FYI waits for a real run: {fyis:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_queued_goal_clear_runs_on_its_own_before_the_rest_of_the_queue() {
         let (st, a) = fake_claude_state();
@@ -4057,6 +4068,7 @@ esac
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_error_with_no_turns_and_nothing_said_ends_the_run() {
         let (st, a) = fake_claude_state();
@@ -4071,6 +4083,7 @@ esac
         assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "On it."), "the queued run replied");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_command_claude_answers_itself_with_nothing_said_still_ends_the_run() {
         let (st, a) = fake_claude_state();
@@ -4104,6 +4117,7 @@ esac
         assert_eq!(hook_block_line(true, ""), "Goal not met: no reason given");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tool_call_starts_the_count_over() {
         let (st, a) = fake_claude_state();
