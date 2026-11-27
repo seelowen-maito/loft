@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BLANK_CUSTOM, EMPTY_FORM, FRESH_CONTEXT, applyPick, createPayload, currentPick, pickLocked, refillTemplate, rolePicks, withTeam, type AgentTemplate } from "../src/lib/newAgent.ts";
+import { BLANK_CUSTOM, EMPTY_FORM, FRESH_CONTEXT, applyPick, createPayload, currentPick, pickLocked, pickNumber, pickerFooter, pickerKey, refillTemplate, rolePicks, withTeam, type AgentTemplate } from "../src/lib/newAgent.ts";
 
 // What `GET /api/agent-templates` serves, in its order, cut down.
 const tpl = (key: string, name: string, role: string, model = "sonnet", interval_minutes = 0, project = "site"): AgentTemplate => ({
@@ -98,4 +98,53 @@ test("the create payload carries group, projects and role", () => {
 
 test("a form has no title", () => {
   assert.equal("title" in EMPTY_FORM, false);
+});
+
+// The picker's lines in its order: Lead, Dev, Code reviewer, QA, Security, Custom, Deps, Docs, Triage, CI.
+const rows = () => {
+  const { team, solo } = picks();
+  return [...team, ...solo];
+};
+const lineAt = (move: ReturnType<typeof pickerKey>) => (move && "at" in move ? move.at : null);
+
+test("in the picker ↑↓ move the highlight and wrap around", () => {
+  const r = rows();
+  assert.equal(r.length, 10);
+  assert.deepEqual(pickerKey(0, r, "ArrowDown", EMPTY_FORM), { at: 1 });
+  assert.deepEqual(pickerKey(4, r, "ArrowUp", EMPTY_FORM), { at: 3 });
+  assert.deepEqual(pickerKey(9, r, "ArrowDown", EMPTY_FORM), { at: 0 }, "past the last line: the first");
+  assert.deepEqual(pickerKey(0, r, "ArrowUp", EMPTY_FORM), { at: 9 }, "before the first line: the last");
+});
+
+test("in the picker 1 to 9 jump to their line and 0 to the tenth; a number past the last line does nothing", () => {
+  const r = rows();
+  for (let i = 0; i < 10; i++) {
+    assert.equal(pickNumber(i), i < 9 ? String(i + 1) : "0");
+    assert.deepEqual(pickerKey(5, r, pickNumber(i), EMPTY_FORM), { at: i }, pickNumber(i));
+  }
+  assert.equal(r[lineAt(pickerKey(0, r, "7", EMPTY_FORM))!].label, "Deps");
+  assert.equal(r[lineAt(pickerKey(0, r, "0", EMPTY_FORM))!].label, "CI");
+  assert.equal(pickNumber(10), "", "no key after the tenth line");
+  const six = r.slice(0, 6);
+  for (const k of ["7", "9", "0"]) assert.equal(pickerKey(2, six, k, EMPTY_FORM), null, `${k} with six lines`);
+  for (const k of ["a", "Tab", " ", "Escape"]) assert.equal(pickerKey(2, r, k, EMPTY_FORM), null, k);
+  assert.equal(pickerKey(0, [], "ArrowDown", EMPTY_FORM), null, "no lines");
+});
+
+test("in the picker Enter picks the highlighted line, never a locked Lead", () => {
+  const r = rows();
+  assert.equal(r[0].role, "lead");
+  assert.equal(pickerKey(0, r, "Enter", EMPTY_FORM), null, "Lead without a group");
+  assert.deepEqual(pickerKey(0, r, "Enter", { ...EMPTY_FORM, group: "Acme" }), { pick: r[0] }, "Lead with a group");
+  assert.deepEqual(pickerKey(6, r, "Enter", EMPTY_FORM), { pick: r[6] });
+  assert.equal(r[6].label, "Deps");
+});
+
+test("the picker's footer is about the highlighted line, the Lead lock first", () => {
+  const r = rows();
+  assert.equal(pickerFooter(6, r, EMPTY_FORM), "Deps about");
+  assert.equal(pickerFooter(8, r, { ...EMPTY_FORM, role: "custom", prompt: r[6].template!.prompt }), "Triage about", "not the current line's");
+  assert.equal(pickerFooter(0, r, EMPTY_FORM), "Only an agent with a group can be Lead: set its group first. Lead about");
+  assert.equal(pickerFooter(0, r, { ...EMPTY_FORM, group: "Acme" }), "Lead about");
+  assert.equal(pickerFooter(0, [], EMPTY_FORM), "");
 });

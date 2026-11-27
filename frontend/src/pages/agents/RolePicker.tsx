@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { BookOpen, ChevronDown, Crown, FlaskConical, Hammer, Inbox, Lock, Package, ScanEye, ShieldCheck, Sparkles, Workflow, type LucideIcon } from "lucide-react";
 import { cx } from "../../lib/format";
-import { pickLocked, type NewAgentForm, type RolePick } from "../../lib/newAgent";
+import { pickLocked, pickNumber, pickerFooter, pickerKey, type NewAgentForm, type RolePick } from "../../lib/newAgent";
 import { Dialog } from "../../components/Dialog";
 import { ErrorLine } from "../../components/Callout";
 
@@ -21,9 +21,6 @@ const ICONS: Record<string, LucideIcon> = {
 };
 
 const iconOf = (p: RolePick) => ICONS[p.key] ?? Sparkles;
-
-/** Its number key: 1 to 9, then 0 for the tenth line. */
-const numberOf = (i: number) => (i < 9 ? String(i + 1) : i === 9 ? "0" : "");
 
 export function RoleField({ form, current, team, solo, error, onPick }: { form: NewAgentForm; current: RolePick; team: RolePick[]; solo: RolePick[]; error: string | null; onPick: (p: RolePick) => void }) {
   const [open, setOpen] = useState(false);
@@ -53,7 +50,6 @@ export function RoleField({ form, current, team, solo, error, onPick }: { form: 
 function RolePanel({ form, current, team, solo, error, onClose, onPick }: { form: NewAgentForm; current: RolePick; team: RolePick[]; solo: RolePick[]; error: string | null; onClose: () => void; onPick: (p: RolePick) => void }) {
   const rows = [...team, ...solo];
   const [at, setAt] = useState(() => Math.max(0, rows.findIndex((r) => r.key === current.key)));
-  const lit = rows[Math.min(at, rows.length - 1)];
   const list = useRef<HTMLDivElement>(null);
   useEffect(() => {
     list.current?.querySelector(`[data-row="${at}"]`)?.scrollIntoView({ block: "nearest" });
@@ -61,20 +57,11 @@ function RolePanel({ form, current, team, solo, error, onClose, onPick }: { form
   const choose = (p: RolePick | undefined) => p && !pickLocked(p, form) && onPick(p);
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      const step = e.key === "ArrowDown" ? 1 : -1;
-      setAt((i) => (i + step + rows.length) % rows.length);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      choose(lit);
-    } else if (/^[0-9]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      const i = e.key === "0" ? 9 : Number(e.key) - 1;
-      if (i < rows.length) {
-        e.preventDefault();
-        setAt(i);
-      }
-    }
+    if (/^[0-9]$/.test(e.key) && (e.metaKey || e.ctrlKey || e.altKey)) return;
+    const next = pickerKey(at, rows, e.key, form);
+    if (next || e.key === "Enter") e.preventDefault();
+    if (next && "at" in next) setAt(next.at);
+    else if (next) onPick(next.pick);
   };
 
   const section = (title: string, picks: RolePick[], from: number) => (
@@ -106,7 +93,7 @@ function RolePanel({ form, current, team, solo, error, onClose, onPick }: { form
               </span>
               <span className="block truncate text-[11.5px] text-fg-3">{p.summary}</span>
             </span>
-            <kbd className="chip hidden min-w-6 justify-center font-mono text-[11px] sm:inline-flex">{numberOf(i)}</kbd>
+            <kbd className="chip hidden min-w-6 justify-center font-mono text-[11px] sm:inline-flex">{pickNumber(i)}</kbd>
           </button>
         );
       })}
@@ -124,13 +111,12 @@ function RolePanel({ form, current, team, solo, error, onClose, onPick }: { form
       </div>
       <div className="sticky bottom-0 space-y-1.5 border-t border-line bg-ink-900 px-4 py-3">
         <p className="text-[12px] leading-snug text-fg-2">
-          {lit && pickLocked(lit, form) ? "Only an agent with a group can be Lead: set its group first. " : ""}
-          {lit?.about}
+          {pickerFooter(at, rows, form)}
         </p>
         <p className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-3">
           <span><kbd className="font-mono">↑↓</kbd> navigate</span>
           <span><kbd className="font-mono">↵</kbd> choose</span>
-          <span><kbd className="font-mono">1–{numberOf(Math.min(rows.length, 10) - 1)}</kbd> jump</span>
+          <span><kbd className="font-mono">1–{pickNumber(Math.min(rows.length, 10) - 1)}</kbd> jump</span>
           <span><kbd className="font-mono">esc</kbd> close</span>
         </p>
       </div>

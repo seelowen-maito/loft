@@ -78,6 +78,33 @@ export function currentPick(f: NewAgentForm, picks: RolePick[]): RolePick {
 /** Whether a line can't be picked yet: Lead, until the agent has a group. */
 export const pickLocked = (p: RolePick, f: NewAgentForm) => p.role === "lead" && !formTeam(f);
 
+/** A line's number key in the role picker: 1 to 9, then 0 for the tenth line, none after. */
+export const pickNumber = (i: number) => (i < 9 ? String(i + 1) : i === 9 ? "0" : "");
+
+/**
+ * What a key does in the role picker with line `at` highlighted: ↑↓ move the highlight and wrap around, a number jumps to
+ * its line (one past the last does nothing), Enter picks the highlighted line unless it's locked. Anything else: nothing.
+ */
+export function pickerKey(at: number, rows: RolePick[], key: string, f: NewAgentForm): { at: number } | { pick: RolePick } | null {
+  if (rows.length === 0) return null;
+  if (key === "ArrowDown" || key === "ArrowUp") return { at: (at + (key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length };
+  if (key === "Enter") {
+    const p = rows[Math.min(at, rows.length - 1)];
+    return pickLocked(p, f) ? null : { pick: p };
+  }
+  if (/^[0-9]$/.test(key)) {
+    const i = key === "0" ? 9 : Number(key) - 1;
+    return i < rows.length ? { at: i } : null;
+  }
+  return null;
+}
+
+/** The role picker's footer, about the highlighted line `at` (not the current one): why it's locked first, then what it does. */
+export function pickerFooter(at: number, rows: RolePick[], f: NewAgentForm): string {
+  const p = rows[Math.min(at, rows.length - 1)];
+  return !p ? "" : `${pickLocked(p, f) ? "Only an agent with a group can be Lead: set its group first. " : ""}${p.about}`;
+}
+
 /**
  * The form once a line is picked: its role, and the template's name, instructions, personality, schedule and model, all
  * still editable. Blank Custom clears what a template filled in, and keeps a name the user typed.
