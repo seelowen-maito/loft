@@ -32,7 +32,7 @@ import { runWatch } from "../../lib/runWatch";
 import { RunIndicator } from "../../components/RunTimer";
 import { lastFinishedRun } from "../../lib/runTimer";
 import { useAutoGrow } from "../../lib/autoGrow";
-import { formatCombo, loadCombo, openShortcut } from "../../lib/shortcuts";
+import { openShortcut } from "../../lib/shortcuts";
 import { EMPTY_DRAFT, loadDraft } from "../../lib/draft";
 import { openTalk } from "../../lib/talk";
 import { useDraft } from "../../lib/useDraft";
@@ -779,18 +779,21 @@ export function Chat({
               </div>
             )}
             <div className="flex items-end gap-2">
-              <button className="btn-ghost size-8 shrink-0 justify-center p-0" onClick={() => picker.current?.click()} aria-label="Attach images or videos" title="Attach images or videos">
-                <Plus className="size-4" />
-              </button>
-              <button
-                className={cx("btn-ghost size-8 shrink-0 justify-center p-0", (pickingTask || taskId) && "text-accent")}
-                onClick={() => setPickingTask((p) => !p)}
-                aria-label={ATTACH}
-                title={ATTACH}
-                aria-expanded={pickingTask}
-              >
-                <ListTodo className="size-4" />
-              </button>
+              <Tip up left name="Attach images or videos" className="shrink-0">
+                <button className="btn-ghost size-8 justify-center p-0" onClick={() => picker.current?.click()} aria-label="Attach images or videos">
+                  <Plus className="size-4" />
+                </button>
+              </Tip>
+              <Tip up left name={ATTACH} off={pickingTask} className="shrink-0">
+                <button
+                  className={cx("btn-ghost size-8 justify-center p-0", (pickingTask || taskId) && "text-accent")}
+                  onClick={() => setPickingTask((p) => !p)}
+                  aria-label={ATTACH}
+                  aria-expanded={pickingTask}
+                >
+                  <ListTodo className="size-4" />
+                </button>
+              </Tip>
               <input
                 ref={picker}
                 type="file"
@@ -866,7 +869,7 @@ export function Chat({
                     watch?.kind === "waiting" ? `${agent.name} is waiting on a background task. Sending stops it.`
                     : running ? `${agent.name} is working. Your message will be delivered next.`
                     : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
-                    : `Message ${agent.name}… (/ for commands, @ to mention, # to tag)`
+                    : `Message ${agent.name}…`
                   }
                   className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
                 />
@@ -887,15 +890,16 @@ export function Chat({
           </div>
           <ErrorLine error={shownError} className="mt-2" />
           <ResultLine said={cmdNote ? { ok: true, text: cmdNote } : null} className="mt-2 truncate" />
-          <div className="mt-2 font-mono text-[10.5px] text-fg-3">@ agents and files · # specs, issues and PRs</div>
-          <div className="mt-2 flex justify-between font-mono text-[10.5px] text-fg-3">
-            {/* Mouse down keeps focus in the chat box, so it returns there when the search or sheet closes. */}
-            <span className="max-md:hidden">
-              ↵ send · ⇧↵ newline · / commands ·{" "}
-              <button type="button" className="hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("switcher")}>{formatCombo(loadCombo("switcher"))} search</button> ·{" "}
-              <button type="button" className="hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("sheet")}>? shortcuts</button>
+          {/* One line of the keys people need; ↵, ⇧↵ and ⌘K are in the shortcuts sheet. The session id is in the side panel. */}
+          <div className="mt-2 flex items-center justify-between gap-4 font-mono text-[10.5px] text-fg-3">
+            <span className="flex items-center gap-1.5 max-md:hidden">
+              <Key k="/" /> commands · <Key k="@" /> mention · <Key k="#" /> tag ·{" "}
+              {/* Mouse down keeps focus in the chat box, so it returns there when the sheet closes. */}
+              <button type="button" className="flex items-center gap-1.5 hover:text-fg-2 focus-visible:text-fg-2" onMouseDown={(e) => e.preventDefault()} onClick={() => openShortcut("sheet")}>
+                <Key k="?" /> all shortcuts
+              </button>
             </span>
-            <span>{agent.session_id ? `session ${agent.session_id.slice(0, 8)}` : "new session"} · <span title="API list-price equivalent">est. ${agent.total_cost_usd.toFixed(2)} spent</span></span>
+            <span className="ml-auto" title="API list-price equivalent">est. ${agent.total_cost_usd.toFixed(2)} spent</span>
           </div>
         </div>
       </div>
@@ -1314,3 +1318,8 @@ function ScheduleList({ list, cancelling, onCancel }: { list: NonNullable<Agent[
 
 /** Loft commands that answer with a notice: they show or change a setting, or show usage. */
 const INFO_COMMANDS = ["/model", "/effort", "/cost", "/status", "/login"];
+
+/** A key in the chat box's hint line. */
+function Key({ k }: { k: string }) {
+  return <kbd className="rounded border border-b-2 border-line-strong bg-ink-850 px-1 font-mono text-[10px] text-fg-2">{k}</kbd>;
+}
