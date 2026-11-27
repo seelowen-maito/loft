@@ -59,7 +59,9 @@ function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean;
           <h2 title={title.full} className={cx("min-w-0 text-[14px] [overflow-wrap:anywhere]", fresh ? "font-medium" : "font-normal text-fg-2")}>{title.text}</h2>
           {fresh && <span className="self-center rounded-full bg-accent/15 px-1.5 py-px font-mono text-[10px] font-medium uppercase tracking-wide text-accent">New</span>}
           <span className="font-mono text-[11px] text-fg-3">
-            {[item.agent?.name, title.project, relTime(item.created_at)].filter(Boolean).join(" · ")}
+            {[item.agent?.name, title.project].filter(Boolean).join(" · ")}
+            {(item.agent?.name || title.project) && " · "}
+            <span className="whitespace-nowrap">{relTime(item.created_at)}</span>
           </span>
         </div>
         <p className="text-[13px] text-fg-2 [overflow-wrap:anywhere]">{item.reason}</p>

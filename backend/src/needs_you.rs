@@ -1649,6 +1649,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn items_of_the_same_urgency_come_newest_first() {
+        let st = state();
+        let gh = |n: i64, hours_ago: i64| crate::github_inbox::GhPr {
+            repo: "o/r".into(), number: n, title: format!("PR {n}"), url: format!("https://github.com/o/r/pull/{n}"), author: "octocat".into(),
+            head_sha: format!("sha{n}"), created_at: (Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339(), checks: "SUCCESS".into(), review_requested: false,
+        };
+        st.rt.lock().unwrap().github_inbox = vec![gh(1, 5), gh(2, 1), gh(3, 3)];
+        let numbers: Vec<i64> = snapshot(&st).unwrap()["items"].as_array().unwrap().iter().map(|i| i["pr"]["number"].as_i64().unwrap()).collect();
+        assert_eq!(numbers, [2, 3, 1]);
+    }
+
+    #[tokio::test]
     async fn a_finished_issues_result_leaves_when_the_issue_is_opened_or_after_24_hours() {
         let st = state();
         let done = |title: &str, hours_ago: i64| {
