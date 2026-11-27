@@ -700,6 +700,8 @@ export type SystemReading = {
   sampled_at: string | null;
 };
 
+/** A folder suggested for the Projects folder: `label` is `path` with `~` for home; `repos` counts the git repos in it. */
+export type FolderSuggestion = { path: string; label: string; repos: number };
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
 
 /** One of a project's settings: its choices, Loft's default, its value and, once changed, when and by which agent (none: the user).
@@ -826,6 +828,8 @@ export const api = {
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
+  /** Folders for what's typed in Settings → Projects folder: the typed parent's, then the ones found by name in home. */
+  suggestFolders: (q: string) => req<FolderSuggestion[]>("GET", `/folders/suggest?q=${encodeURIComponent(q)}`),
   /** The Agent templates, their instructions filled in for `project` ("" before one is picked). */
   agentTemplates: (project: string) => req<AgentTemplate[]>("GET", `/agent-templates?project=${encodeURIComponent(project)}`),
   projectSettings: (project: string) => req<ProjectSettingsView>("GET", `/project-settings?project=${encodeURIComponent(project)}`),

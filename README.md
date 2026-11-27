@@ -68,7 +68,7 @@ To run loft in the foreground instead, use `./start.sh`.
 
 Then open http://localhost:7420 and check **Settings** (gear icon, top right). Settings are saved to `.loft/settings.json`:
 
-- **Projects folder**: where your git repos live. Takes effect after a restart, which loft offers once no agent is running.
+- **Projects folder**: where your git repos live. As you type, it suggests folders: the ones in the folder you've typed so far, and the ones with that name in your home (Library, node_modules, hidden folders and caches are skipped), each with how many git repos it holds; ↑↓ move, Tab or Enter fills one in. Takes effect after a restart, which loft offers once no agent is running.
 - **Claude command**: the command agents run.
 - **GitHub token**: needed for private repos and merging pull requests. Without one, loft uses `gh auth token`.
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
