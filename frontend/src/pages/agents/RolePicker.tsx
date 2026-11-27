@@ -51,16 +51,23 @@ function RolePanel({ form, current, team, solo, error, onClose, onPick }: { form
   const rows = [...team, ...solo];
   const [at, setAt] = useState(() => Math.max(0, rows.findIndex((r) => r.key === current.key)));
   const list = useRef<HTMLDivElement>(null);
+  // Only the keyboard (and opening) scrolls the highlighted line into view: the mouse hovering near the list's edge would
+  // otherwise move the list under it, and the next line would take the highlight (#499).
+  const show = (i: number) => list.current?.querySelector(`[data-row="${i}"]`)?.scrollIntoView({ block: "nearest" });
   useEffect(() => {
-    list.current?.querySelector(`[data-row="${at}"]`)?.scrollIntoView({ block: "nearest" });
-  }, [at]);
+    show(at);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- on opening only
+  }, []);
   const choose = (p: RolePick | undefined) => p && !pickLocked(p, form) && onPick(p);
 
   const onKey = (e: KeyboardEvent) => {
     if (/^[0-9]$/.test(e.key) && (e.metaKey || e.ctrlKey || e.altKey)) return;
     const next = pickerKey(at, rows, e.key, form);
     if (next || e.key === "Enter") e.preventDefault();
-    if (next && "at" in next) setAt(next.at);
+    if (next && "at" in next) {
+      setAt(next.at);
+      show(next.at);
+    }
     else if (next) onPick(next.pick);
   };
 
@@ -101,16 +108,17 @@ function RolePanel({ form, current, team, solo, error, onClose, onPick }: { form
   );
 
   return (
-    <Dialog title="Choose a role" size="lg" top onClose={onClose} onKeyDown={onKey} className="scroll-pb-28">
-      <div ref={list} role="listbox" aria-label="Roles">
+    <Dialog title="Choose a role" size="lg" top onClose={onClose} onKeyDown={onKey} className="flex flex-col">
+      <div ref={list} role="listbox" aria-label="Roles" className="min-h-0 flex-1 overflow-y-auto">
         {section("Team", team, 0)}
         <div className="border-t border-line" />
         {section("On their own", solo, team.length)}
         {team.length === 0 && !error && <p className="px-4 pb-3 text-[12px] text-fg-3">Loading the team's templates…</p>}
         {error && <div className="px-4 pb-3"><ErrorLine error={error} /></div>}
       </div>
-      <div className="sticky bottom-0 space-y-1.5 border-t border-line bg-ink-900 px-4 py-3">
-        <p className="text-[12px] leading-snug text-fg-2">
+      {/* Outside the list, and always two lines high, so the line under the mouse never moves as the highlight does. */}
+      <div className="shrink-0 space-y-1.5 border-t border-line px-4 py-3">
+        <p className="line-clamp-2 h-[2.75em] text-[12px] leading-snug text-fg-2">
           {pickerFooter(at, rows, form)}
         </p>
         <p className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-3">
