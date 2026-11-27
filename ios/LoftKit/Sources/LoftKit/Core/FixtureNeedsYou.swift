@@ -277,7 +277,7 @@ public enum FixtureNeedsYou {
     },
     {
      "kind": "open",
-     "label": "Open on GitHub",
+     "label": "Open pull request",
      "target": {
       "url": "https://github.com/octo/loft/pull/214"
      }
@@ -430,7 +430,7 @@ public enum FixtureNeedsYou {
     public static let prWorkflows = #"""
 {
  "actions": [
-  { "kind": "open", "label": "Open on GitHub", "target": { "url": "https://github.com/octo/loft/pull/214/files" } },
+  { "kind": "open", "label": "See changed files", "target": { "url": "https://github.com/octo/loft/pull/214/files" } },
   { "body": {}, "kind": "dismiss", "label": "Done", "method": "POST", "path": "/api/needs-you/pr_workflows%3Apr1%3Aabc123/dismiss" }
  ],
  "age_seconds": 120,
