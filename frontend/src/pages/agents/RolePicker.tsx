@@ -116,9 +116,13 @@ function RolePanel({ form, current, team, solo, error, onClose, onPick }: { form
         {team.length === 0 && !error && <p className="px-4 pb-3 text-[12px] text-fg-3">Loading the team's templates…</p>}
         {error && <div className="px-4 pb-3"><ErrorLine error={error} /></div>}
       </div>
-      {/* Outside the list, and always two lines high, so the line under the mouse never moves as the highlight does. */}
+      {/* Outside the list, and a fixed height, so the line under the mouse never moves as the highlight does. Four lines on
+          a phone and three wider fit the longest text, the locked Lead line; the title shows whatever is still cut. */}
       <div className="shrink-0 space-y-1.5 border-t border-line px-4 py-3">
-        <p className="line-clamp-2 h-[2.75em] text-[12px] leading-snug text-fg-2">
+        <p
+          title={pickerFooter(at, rows, form)}
+          className="line-clamp-4 h-[5.5em] text-[12px] leading-snug text-fg-2 sm:line-clamp-3 sm:h-[4.125em]"
+        >
           {pickerFooter(at, rows, form)}
         </p>
         <p className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-3">

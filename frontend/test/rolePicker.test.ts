@@ -75,7 +75,7 @@ test("hovering a line highlights it without scrolling the list; the keys scroll 
   unmount();
 });
 
-test("the footer sits below the list, outside it, two lines high whatever the line says", () => {
+test("the footer sits below the list, outside it, a fixed height whatever the line says", () => {
   const { panel, rows, unmount } = open();
   const list = panel.querySelector('[role="listbox"]')!;
   assert.match(list.className, /\boverflow-y-auto\b/, "the list scrolls by itself");
@@ -87,8 +87,9 @@ test("the footer sits below the list, outside it, two lines high whatever the li
   for (const i of [6, 7]) {
     hover(rows[i]);
     assert.equal(about.textContent, TEMPLATES[i - 1].about);
-    assert.match(about.className, /\bline-clamp-2\b/);
-    assert.match(about.className, /\bh-\[[^\]]+\]/, "a fixed height, not one that follows the text");
+    assert.equal(about.title, TEMPLATES[i - 1].about, "whatever the clamp cuts can still be read");
+    assert.match(about.className, /(^| )line-clamp-4 h-\[5\.5em\]( |$)/, "four lines on a phone");
+    assert.match(about.className, /(^| )sm:line-clamp-3 sm:h-\[4\.125em\]( |$)/, "three lines wider");
   }
   unmount();
 });
