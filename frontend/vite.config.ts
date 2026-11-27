@@ -10,6 +10,8 @@ export default defineConfig({
   server: {
     port: Number(process.env.LOFT_WEB_PORT ?? 7421),
     strictPort: true,
+    // The Help menu's Glossary imports the repo's GLOSSARY.md: only that file outside the frontend is served.
+    fs: { allow: [".", "../GLOSSARY.md"] },
     proxy: {
       // changeOrigin sends the backend its own Host, so the Host check passes here; Vite's own allowedHosts
       // check on the dev server is what stops DNS rebinding in dev.

@@ -50,7 +50,7 @@ import { GoalChip } from "./GoalChip";
 import { CANCELLED_MARK, QUEUED_MARK, SENT_NOW_MARK, sendState, taskText } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
-import { HoverTip } from "../../components/HoverTip";
+import { HoverTip, Tip } from "../../components/HoverTip";
 import { QuoteBlock, QuoteChip, ReplyButton, useLongPress } from "./Quote";
 import { SaveButton } from "./SaveMessage";
 import { linkedMessage } from "../../lib/saved";
@@ -556,37 +556,42 @@ export function Chat({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {running ? (
-            <ActionButton
-              variant="secondary"
-              title="Stop"
-              icon={<Square className="size-3 fill-current" />}
-              pending={stop.busy}
-              pendingLabel={<span className="max-sm:hidden">Stopping…</span>}
-              onClick={() => act(stop, () => api.stop(agent.id))}
-            >
-              <span className="max-sm:hidden">Stop</span>
-            </ActionButton>
+            <Tip name="Stop the run">
+              <ActionButton
+                variant="secondary"
+                aria-label="Stop"
+                icon={<Square className="size-3 fill-current" />}
+                pending={stop.busy}
+                pendingLabel={<span className="max-sm:hidden">Stopping…</span>}
+                onClick={() => act(stop, () => api.stop(agent.id))}
+              >
+                <span className="max-sm:hidden">Stop</span>
+              </ActionButton>
+            </Tip>
           ) : (
-            <ActionButton
-              variant="secondary"
-              title="Wake: run an autonomous check-in now"
-              icon={<Play className="size-3 fill-current" />}
-              pending={wake.busy}
-              pendingLabel={<span className="max-sm:hidden">Waking…</span>}
-              onClick={() => act(wake, () => api.run(agent.id))}
-            >
-              <span className="max-sm:hidden">Wake</span>
-            </ActionButton>
+            <Tip name="Wake: run a check-in now">
+              <ActionButton
+                variant="secondary"
+                aria-label="Wake"
+                icon={<Play className="size-3 fill-current" />}
+                pending={wake.busy}
+                pendingLabel={<span className="max-sm:hidden">Waking…</span>}
+                onClick={() => act(wake, () => api.run(agent.id))}
+              >
+                <span className="max-sm:hidden">Wake</span>
+              </ActionButton>
+            </Tip>
           )}
-          <ActionButton
-            variant="ghost"
-            title="Clear context (/clear). Memory is kept."
-            icon={<RotateCcw className="size-3.5" />}
-            pending={clear.busy}
-            aria-label={clear.busy ? "Clearing context…" : "Clear context"}
-            onClick={() => clearContext()}
-            disabled={running}
-          />
+          <Tip name="Clear context (/clear): memory is kept">
+            <ActionButton
+              variant="ghost"
+              icon={<RotateCcw className="size-3.5" />}
+              pending={clear.busy}
+              aria-label={clear.busy ? "Clearing context…" : "Clear context"}
+              onClick={() => clearContext()}
+              disabled={running}
+            />
+          </Tip>
           {headerActions}
         </div>
       </div>

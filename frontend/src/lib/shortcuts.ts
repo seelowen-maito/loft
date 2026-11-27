@@ -24,6 +24,12 @@ export const GO: Record<string, { path: string; label: string }> = {
   m: { path: "/simulator", label: "Simulator" },
 };
 
+/** The `g` shortcut that opens `path`, as its tooltip shows it ("G A"); undefined when it has none. */
+export function goKeys(path: string): string | undefined {
+  const k = Object.entries(GO).find(([, g]) => g.path === path)?.[0];
+  return k && `G ${k.toUpperCase()}`;
+}
+
 /** The fixed shortcuts, for the sheet and Settings. */
 export const FIXED: { keys: string; label: string }[] = [
   ...Object.entries(GO).map(([k, g]) => ({ keys: `g ${k}`, label: `Go to ${g.label}` })),
