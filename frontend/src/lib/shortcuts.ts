@@ -34,6 +34,7 @@ export function goKeys(path: string): string | undefined {
 export const FIXED: { keys: string; label: string }[] = [
   ...Object.entries(GO).map(([k, g]) => ({ keys: `g ${k}`, label: `Go to ${g.label}` })),
   { keys: "/", label: "Focus the chat box" },
+  { keys: "T", label: "Talk to an agent" },
   { keys: "?", label: "Show shortcuts" },
 ];
 
@@ -131,7 +132,8 @@ export type Action =
   | { type: "go"; path: string }
   | { type: "g" }
   | { type: "focus-chat" }
-  | { type: "sheet" };
+  | { type: "sheet" }
+  | { type: "talk" };
 
 /** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field.
  * `afterG` is true when the previous key was a lone `g`: the next letter picks the page, any other key cancels it. */
@@ -147,6 +149,7 @@ export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; a
   if (e.key === "g") return { type: "g" };
   if (e.key === "/") return { type: "focus-chat" };
   if (e.key === "?") return { type: "sheet" };
+  if (e.key.toLowerCase() === "t") return { type: "talk" };
   return null;
 }
 

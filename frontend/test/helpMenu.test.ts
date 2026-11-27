@@ -42,12 +42,12 @@ const click = (el: Element) => act(() => void el.dispatchEvent(new dom.window.Mo
 const items = (div: Element) => [...div.querySelectorAll('[role="menuitem"]')].map((i) => i.textContent?.replace(/\s+/g, " ").trim());
 const help = (div: Element) => div.querySelector('button[aria-label="Help"]')!;
 
-test("Help opens its five items, and the phone's connection line says whether it's live", () => {
+test("Help opens its six items, and the phone's connection line says whether it's live", () => {
   const div = render(h(HelpMenu as any, { live: true }));
   assert.equal(div.querySelector('[role="menu"]'), null);
   click(help(div));
   assert.equal(help(div).getAttribute("aria-expanded"), "true");
-  assert.deepEqual(items(div).map((t) => t!.replace(/ (\?|\/|.?K|terms Loft uses|↗)$/, "")), ["Keyboard shortcuts", "Chat commands", "Search and jump", "Glossary", "Loft on GitHub"]);
+  assert.deepEqual(items(div).map((t) => t!.replace(/ (T|\?|\/|.?K|terms Loft uses|↗)$/, "")), ["Talk to an agent", "Keyboard shortcuts", "Chat commands", "Search and jump", "Glossary", "Loft on GitHub"]);
   assert.match(div.querySelector('[role="menu"]')!.textContent!, /Connected/);
   assert.equal(div.querySelector<HTMLAnchorElement>('a[role="menuitem"]')!.href, "https://github.com/get-loft/loft");
   const off = render(h(HelpMenu as any, { live: false }));
@@ -55,18 +55,20 @@ test("Help opens its five items, and the phone's connection line says whether it
   assert.match(off.querySelector('[role="menu"]')!.textContent!, /Reconnecting…/);
 });
 
-test("Keyboard shortcuts and Search and jump open the existing sheet and switcher", () => {
+test("Talk, Keyboard shortcuts and Search and jump open the Talk dialog, the existing sheet and the switcher", () => {
   const opened: string[] = [];
   window.addEventListener(OPEN_SHORTCUT, (e) => opened.push((e as CustomEvent).detail));
+  window.addEventListener("loft:talk", () => opened.push("talk"));
   const div = render(h(HelpMenu as any, { live: true }));
   const pick = (name: string) => {
     click(help(div));
     click([...div.querySelectorAll('[role="menuitem"]')].find((i) => i.textContent!.trim().startsWith(name))!);
   };
+  pick("Talk to an agent");
   pick("Keyboard shortcuts");
   assert.equal(div.querySelector('[role="menu"]'), null, "picking closes the menu");
   pick("Search and jump");
-  assert.deepEqual(opened, ["sheet", "switcher"]);
+  assert.deepEqual(opened, ["talk", "sheet", "switcher"]);
 });
 
 test("Chat commands lists the agent's commands, one line each; Glossary lists GLOSSARY.md's terms", async () => {

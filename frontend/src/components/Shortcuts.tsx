@@ -11,6 +11,7 @@ import {
   searchRows, SHORTCUTS_CHANGED, switcherAgents, type Combos, type Openable,
 } from "../lib/shortcuts";
 import { statusOf } from "../pages/agents/Status";
+import { openTalk } from "../lib/talk";
 import { Dialog } from "./Dialog";
 import { toast } from "./FloatingBar";
 import { Sticker } from "./Sticker";
@@ -39,7 +40,7 @@ export function Shortcuts() {
       if (!a) return;
       const shown = document.querySelector<HTMLElement>('[role="dialog"][data-shortcuts]');
       // Plain keys don't act on the page behind an open dialog.
-      if (shown && (a.type === "g" || a.type === "go" || a.type === "focus-chat" || a.type === "sheet")) return;
+      if (shown && (a.type === "g" || a.type === "go" || a.type === "focus-chat" || a.type === "sheet" || a.type === "talk")) return;
       e.preventDefault();
       if (a.type === "switcher" || a.type === "sheet") {
         if (a.type === "switcher" && shown?.getAttribute("aria-label") === SWITCHER) close();
@@ -47,6 +48,7 @@ export function Shortcuts() {
       }
       else if (a.type === "g") gAt.current = Date.now();
       else if (a.type === "go") navigate(a.path);
+      else if (a.type === "talk") openTalk();
       else if (a.type === "focus-chat") document.querySelector<HTMLTextAreaElement>("[data-chat-input]")?.focus();
       else if (a.type === "next") {
         const current = window.location.pathname.match(/^\/agents\/([^/]+)/)?.[1] ?? null;

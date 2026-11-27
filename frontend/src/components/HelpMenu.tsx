@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router";
-import { BookOpen, CircleHelp, ExternalLink, Keyboard, Search, SquareSlash, X } from "lucide-react";
+import { BookOpen, CircleHelp, ExternalLink, Keyboard, Mic, Search, SquareSlash, X } from "lucide-react";
 import glossaryMd from "../../../GLOSSARY.md?raw";
 import { api, type AgentCommand } from "../lib/api";
 import { useAgents } from "../hooks/lists";
 import { cx } from "../lib/format";
 import { parseGlossary } from "../lib/glossary";
 import { formatCombo, loadCombos, openShortcut } from "../lib/shortcuts";
+import { openTalk } from "../lib/talk";
 import { Dialog } from "./Dialog";
 import { Tip } from "./HoverTip";
 
 const REPO = "https://github.com/get-loft/loft";
 
-/** The top bar's Help (?): shortcuts, chat commands, search, the glossary and the repo. On a phone, where the live dot
+/** The top bar's Help (?): Talk (the top bar has no mic), shortcuts, chat commands, search, the glossary and the repo. On a phone, where the live dot
  *  doesn't fit, it also says whether the event stream is connected. */
 export function HelpMenu({ live }: { live: boolean }) {
   const [open, setOpen] = useState(false);
@@ -56,7 +57,10 @@ export function HelpMenu({ live }: { live: boolean }) {
             {live ? "Connected" : "Reconnecting…"}
           </div>
           <hr className="my-1 border-line sm:hidden" />
-          <button role="menuitem" autoFocus className={row} onClick={pick(() => openShortcut("sheet"))}>
+          <button role="menuitem" autoFocus className={row} onClick={pick(() => openTalk())}>
+            <Mic className="size-3.5 text-fg-3" /> Talk to an agent {kbd("T")}
+          </button>
+          <button role="menuitem" className={row} onClick={pick(() => openShortcut("sheet"))}>
             <Keyboard className="size-3.5 text-fg-3" /> Keyboard shortcuts {kbd("?")}
           </button>
           <button role="menuitem" className={row} onClick={pick(() => setShown("commands"))}>
