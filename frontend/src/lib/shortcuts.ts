@@ -5,7 +5,7 @@
 import type { PullRequest, Task } from "./api";
 
 type Store = Pick<Storage, "getItem" | "setItem">;
-type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">;
+type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey"> & { repeat?: boolean };
 
 /** The shortcuts that can be rebound in Settings. `Mod` is ⌘ on a Mac and Ctrl elsewhere. */
 export const REBINDABLE = [
@@ -135,13 +135,14 @@ export type Action =
   | { type: "sheet" }
   | { type: "talk" };
 
-/** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field.
- * `afterG` is true when the previous key was a lone `g`: the next letter picks the page, any other key cancels it. */
-export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; mac?: boolean }): Action | null {
+/** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field
+ * and any open dialog (`dialog`), and not again while held down. `afterG` is true when the previous key was a lone `g`: the next
+ * letter picks the page, any other key cancels it. */
+export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; dialog?: boolean; mac?: boolean }): Action | null {
   const mac = o.mac ?? isMac();
   if (matchesCombo(e, o.combos.switcher, mac)) return { type: "switcher" };
   if (matchesCombo(e, o.combos.next, mac)) return { type: "next" };
-  if (e.ctrlKey || e.metaKey || e.altKey || o.typing) return null;
+  if (e.ctrlKey || e.metaKey || e.altKey || o.typing || o.dialog || e.repeat) return null;
   if (o.afterG) {
     const go = GO[e.key.toLowerCase()];
     return go ? { type: "go", path: go.path } : null;

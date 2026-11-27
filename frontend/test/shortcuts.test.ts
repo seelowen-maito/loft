@@ -120,7 +120,7 @@ test("g then a letter opens a page; / focuses the chat box and ? opens the sheet
   assert.equal(at(key("KeyG", { metaKey: true })), null, "⌘G stays the browser's");
 });
 
-test("T opens Talk outside a text field only, and the sheet lists it (#712)", () => {
+test("T opens Talk outside a text field or dialog only, once per press, and the sheet lists it (#712)", () => {
   const at = (e: ReturnType<typeof key>, typing = false, afterG = false) => shortcutAction(e, { combos: defaults, typing, afterG, mac: true });
   assert.deepEqual(at(key("KeyT")), { type: "talk" });
   assert.deepEqual(at(key("KeyT", { shiftKey: true }, "T")), { type: "talk" });
@@ -128,6 +128,13 @@ test("T opens Talk outside a text field only, and the sheet lists it (#712)", ()
   assert.equal(at(key("KeyT", { metaKey: true })), null, "⌘T stays the browser's");
   assert.equal(at(key("KeyT"), false, true), null, "g then t isn't a page");
   assert.ok(FIXED.some((f) => f.keys === "T" && f.label === "Talk to an agent"));
+  // Any open dialog (Glossary, a confirm, Talk itself) keeps the plain keys from acting behind it; ⌘K still works.
+  const behind = (e: ReturnType<typeof key>) => shortcutAction(e, { combos: defaults, typing: false, afterG: false, dialog: true, mac: true });
+  assert.equal(behind(key("KeyT")), null);
+  assert.equal(behind(key("Slash", { shiftKey: true }, "?")), null);
+  assert.equal(behind(key("KeyG")), null);
+  assert.deepEqual(behind(key("KeyK", { metaKey: true })), { type: "switcher" });
+  assert.equal(at({ ...key("KeyT"), repeat: true }), null, "holding T doesn't open Talk again");
 });
 
 test("⌘J goes through the agents in Needs you, in its order, and wraps", () => {

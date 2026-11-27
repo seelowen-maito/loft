@@ -36,11 +36,10 @@ export function Shortcuts() {
       if (recording.on || e.isComposing) return;
       const afterG = Date.now() - gAt.current < G_WINDOW_MS;
       gAt.current = 0;
-      const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG });
+      // Plain keys don't act on the page behind any open dialog (Glossary, a confirm, Talk itself).
+      const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG, dialog: !!document.querySelector('[role="dialog"]') });
       if (!a) return;
       const shown = document.querySelector<HTMLElement>('[role="dialog"][data-shortcuts]');
-      // Plain keys don't act on the page behind an open dialog.
-      if (shown && (a.type === "g" || a.type === "go" || a.type === "focus-chat" || a.type === "sheet" || a.type === "talk")) return;
       e.preventDefault();
       if (a.type === "switcher" || a.type === "sheet") {
         if (a.type === "switcher" && shown?.getAttribute("aria-label") === SWITCHER) close();
