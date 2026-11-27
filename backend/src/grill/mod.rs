@@ -197,6 +197,15 @@ pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
     state.db.active_grill(agent_id).ok()?
 }
 
+/// The agent's newest grill when it expired without a first round less than a day ago: Loft woke the agent to post
+/// that round, and its `grill_round` takes the grill up again.
+fn resumable(state: &AppState, agent_id: &str) -> Option<Session> {
+    let s = state.db.list_grills(agent_id).ok()?.into_iter().next()?;
+    let ended = s.ended_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())?;
+    let recent = chrono::Utc::now().signed_duration_since(ended).num_hours() < END_AFTER_HOURS;
+    (s.status == "ended" && s.end_reason.as_deref() == Some("timeout") && s.rounds.is_empty() && recent).then_some(s)
+}
+
 /// Notes what Loft just published for this agent on its running grill, for the end-of-planning card.
 pub fn record_published(state: &AppState, agent_id: &str, repo: &str, spec: Option<IssueLink>, tickets: Vec<IssueLink>) {
     locked(state, agent_id, || record_published_locked(state, agent_id, repo, spec, tickets))
@@ -420,7 +429,7 @@ fn save(state: &AppState, s: &mut Session) -> Result<(), String> {
 /// en or pt, by counting common words of each.
 fn guess_lang(text: &str) -> &'static str {
     const PT: &[&str] = &["que", "nao", "voce", "uma", "um", "para", "como", "sobre", "do", "da", "os", "as", "e", "esta", "qual", "quem", "me", "de", "o", "com", "isso", "vai"];
-    const EN: &[&str] = &["the", "what", "which", "who", "is", "are", "you", "how", "about", "should", "do", "of", "to", "a", "and", "it", "for", "with", "this", "will"];
+    const EN: &[&str] = &["the", "what", "which", "who", "is", "are", "you", "how", "about", "should", "do", "of", "to", "a", "and", "it", "for", "with", "this", "will", "me", "on"];
     let n = commands::normalize(text);
     let words: Vec<&str> = n.split(' ').collect();
     let pt = words.iter().filter(|w| PT.contains(w)).count();
@@ -603,6 +612,12 @@ fn finish_with(state: &AppState, s: &mut Session, reason: &str, extra: Value) ->
     }
     let text = if reason == "superseded" {
         say(s, "Grill ended: a new one was requested", "Entrevista encerrada: uma nova foi pedida")
+    } else if reason == "timeout" && s.rounds.is_empty() {
+        say(
+            s,
+            &format!("Grill expired: no first round in {PREPARING_FOR_MINS} min. The agent was asked to post it and resume"),
+            &format!("Entrevista expirou: sem primeira rodada em {PREPARING_FOR_MINS} min. O agente foi chamado para postá-la e retomar"),
+        )
     } else {
         say(s, "Grill ended", "Entrevista encerrada")
     };
@@ -1050,8 +1065,18 @@ fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, S
         }
         match s.status.as_str() {
             "preparing" if idle.num_minutes() >= PREPARING_FOR_MINS => {
+                // No round has set the language yet: go by the user's request.
+                s.lang = guess_lang(&s.topic).into();
                 s.summarized = true;
-                let _ = finish(state, &mut s, "timeout");
+                if finish_with(state, &mut s, "timeout", json!({ "reason": "no_first_round" })).is_ok() {
+                    wakes.push((
+                        s.agent_id.clone(),
+                        format!(
+                            "[Grill {} on \"{}\" expired: no first round in {PREPARING_FOR_MINS} minutes]\n\nThe user is still waiting for it. Post the first round now: call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in. It resumes this grill. If you still need facts, look them up with your sub-agents in the foreground, or wait for their reports inside this run: a text-only reply ends the run.",
+                            s.id, s.topic
+                        ),
+                    ));
+                }
             }
             "active" if idle.num_minutes() >= PAUSE_AFTER_MINS => {
                 s.status = "paused".into();
@@ -1144,9 +1169,19 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
         "grill_round" => {
             let mut qs = parse_questions(&args["questions"])?;
             let topic = args["topic"].as_str().unwrap_or("").trim();
+            let mut resumed = false;
             let mut s = match active(state, &me.id) {
                 Some(s) => s,
-                None => new_session(&me.id, topic, "preparing"),
+                None => match resumable(state, &me.id) {
+                    // The grill that expired waiting for this round: open it again, as if it never ended.
+                    Some(mut s) => {
+                        resumed = true;
+                        s.status = "preparing".into();
+                        (s.end_reason, s.ended_at, s.run_seen_at, s.summarized) = (None, None, None, false);
+                        s
+                    }
+                    None => new_session(&me.id, topic, "preparing"),
+                },
             };
             if let Some(r) = open_round(&s) {
                 return Err(format!("Round {} is still waiting for the user's answers; you're woken with them when the user sends it. End your turn with no reply text.", r.index));
@@ -1193,7 +1228,12 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
                 };
                 s.status = "active".into();
                 s.started_at = Some(now());
-                status_row(state, &s, &say(&s, &format!("Grill started: {}", s.topic), &format!("Entrevista iniciada: {}", s.topic)), json!({ "state": "started" }));
+                let row = if resumed {
+                    say(&s, &format!("Grill resumed: {}", s.topic), &format!("Entrevista retomada: {}", s.topic))
+                } else {
+                    say(&s, &format!("Grill started: {}", s.topic), &format!("Entrevista iniciada: {}", s.topic))
+                };
+                status_row(state, &s, &row, json!({ "state": "started", "resumed": resumed }));
             }
             let r = Round { index: s.rounds.len() as u32 + 1, questions: qs, posted_at: now(), sent_at: None, note: None };
             post_round(state, &s, &r);
@@ -1460,7 +1500,7 @@ pub fn with_brief(state: &AppState, agent_id: &str, prompt: String) -> String {
     if !fresh {
         return prompt;
     }
-    let private = active(state, agent_id).map(|s| s.private_repos).unwrap_or_default();
+    let private = active(state, agent_id).or_else(|| resumable(state, agent_id)).map(|s| s.private_repos).unwrap_or_default();
     format!("{}\n\n{prompt}", brief_for(&private, several))
 }
 
@@ -2032,10 +2072,85 @@ pub(crate) mod tests {
         assert_eq!(wakes.len(), 1);
         assert!(wakes[0].1.contains("grill_end") && wakes[0].1.contains("A?"));
         assert!(active(&st, &o.id).is_none());
-        // A start request nobody followed up on just expires.
+        assert_eq!(rows(&st, &o).last().unwrap(), "Grill ended", "a day without answers ends it as before");
+        // A start request nobody followed up on expires, and the agent is asked for the round.
         on_user_message(&st, &o, "Grill me", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
-        assert!(sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(21)).is_empty());
+        assert_eq!(sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(21)).len(), 1);
         assert!(active(&st, &o.id).is_none());
+    }
+
+    #[test]
+    fn the_other_ends_keep_their_rows() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(31));
+        assert_eq!(rows(&st, &o).last().unwrap(), "Paused: no answer for 30 minutes");
+        on_user_message(&st, &o, "Grill me about onboarding", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        assert_eq!(rows(&st, &o).last().unwrap(), "Grill ended: a new one was requested");
+        // Superseded, a grill with rounds never comes back: the next round fills the new request.
+        round(&st, &o, &["B?"]).unwrap();
+        assert_eq!(st.db.list_grills(&o.id).unwrap().iter().filter(|s| s.status == "ended").count(), 1);
+    }
+
+    #[test]
+    fn an_expired_grill_says_why_wakes_the_agent_once_and_its_round_resumes_it() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Me entrevista sobre o board", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        let id = active(&st, &o.id).unwrap().id;
+        let now = chrono::Utc::now();
+        let wakes = sweep(&st, now + chrono::Duration::minutes(20));
+        assert_eq!(rows(&st, &o).last().unwrap(), "Entrevista expirou: sem primeira rodada em 20 min. O agente foi chamado para postá-la e retomar");
+        let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().rfind(|m| m.kind == "notice").unwrap();
+        assert_eq!((row.meta["grill"]["end_reason"].clone(), row.meta["grill"]["reason"].clone()), (json!("timeout"), json!("no_first_round")));
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].0, o.id);
+        assert!(wakes[0].1.contains(&id) && wakes[0].1.contains("no first round") && wakes[0].1.contains("grill_round") && wakes[0].1.contains("resumes this grill"), "{}", wakes[0].1);
+        // Once: the grill is no longer open, so later sweeps leave it alone.
+        assert!(sweep(&st, now + chrono::Duration::minutes(45)).is_empty());
+        assert!(sweep(&st, now + chrono::Duration::hours(30)).is_empty());
+
+        // The round the agent posts takes the same grill up again.
+        mcp_call(&st, &o, "grill_round", &json!({ "topic": "board", "language": "pt", "questions": [q("Mover o card?")] })).unwrap().unwrap();
+        let s = active(&st, &o.id).expect("resumed");
+        assert_eq!((s.id.as_str(), s.status.as_str(), s.end_reason.as_deref(), s.ended_at.as_deref(), s.rounds.len()), (id.as_str(), "active", None, None, 1));
+        assert!(!s.summarized, "a resumed grill gets its summary at the end");
+        assert!(rows(&st, &o).iter().any(|r| r == "Entrevista retomada: board"), "{:?}", rows(&st, &o));
+        assert_eq!(st.db.list_grills(&o.id).unwrap().len(), 1, "no new session");
+    }
+
+    #[test]
+    fn the_timeout_row_is_in_english_too_and_only_the_newest_expired_grill_resumes() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Grill me on pricing", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(20));
+        assert_eq!(rows(&st, &o).last().unwrap(), "Grill expired: no first round in 20 min. The agent was asked to post it and resume");
+        let expired = st.db.list_grills(&o.id).unwrap()[0].id.clone();
+        // The user asked again instead: that request gets the round, and once it ends nothing comes back.
+        on_user_message(&st, &o, "Grill me on onboarding", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        round(&st, &o, &["A?"]).unwrap();
+        let s = active(&st, &o.id).unwrap();
+        assert_ne!(s.id, expired);
+        send(&st, &o).unwrap();
+        mcp_call(&st, &o, "grill_end", &json!({ "summary": "done" })).unwrap().unwrap();
+        round(&st, &o, &["B?"]).unwrap();
+        assert!(![expired.as_str(), s.id.as_str()].contains(&active(&st, &o.id).unwrap().id.as_str()));
+    }
+
+    #[test]
+    fn a_grill_that_expired_over_a_day_ago_stays_ended() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Grill me on pricing", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(20));
+        let mut old = st.db.list_grills(&o.id).unwrap().remove(0);
+        old.ended_at = Some((chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339());
+        st.db.save_grill(&old).unwrap();
+        round(&st, &o, &["A?"]).unwrap();
+        assert_ne!(active(&st, &o.id).unwrap().id, old.id);
+        assert_eq!(st.db.get_grill(&old.id).unwrap().unwrap().status, "ended");
     }
 
     #[test]
