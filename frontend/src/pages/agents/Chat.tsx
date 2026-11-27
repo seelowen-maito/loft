@@ -871,7 +871,9 @@ export function Chat({
                     : grill?.round != null && !grill.waiting && grill.state !== "ended" ? `Answer in the cards above. A message here goes to ${agent.name} as chat.`
                     : `Message ${agent.name}…`
                   }
-                  className={cx("relative block w-full resize-none bg-transparent py-1.5 text-[14px] outline-none placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
+                  // One line, cut with an ellipsis, so a long agent name doesn't wrap and clip on a phone. Chrome draws the
+                  // ellipsis only with text-ellipsis on the textarea itself; typed text still wraps.
+                  className={cx("relative block w-full resize-none text-ellipsis bg-transparent py-1.5 text-[14px] outline-none placeholder:truncate placeholder:text-fg-3", highlighted && "text-transparent caret-fg")}
                 />
               </div>
               <button className="btn-ghost size-8 justify-center p-0" onClick={() => openTalk(agent.id)} aria-label="Talk" title={`Talk to ${agent.name}`}>

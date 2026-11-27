@@ -12,6 +12,10 @@ test("the placeholder is only Message {agent}…", () => {
   assert.doesNotMatch(chat, /for commands, @ to mention/);
 });
 
+test("the placeholder stays on one line and ends in an ellipsis", () => {
+  assert.match(chat, /className=\{cx\("relative block w-full resize-none text-ellipsis [^"]*placeholder:truncate/);
+});
+
 test("one hint line with its keys in kbd, hidden on a phone; spend stays and the session id goes", () => {
   assert.ok(under.length > 100, "the hint line is there");
   assert.deepEqual([...under.matchAll(/<Key k="(.)" \/> (\w[\w ]*)/g)].map((m) => `${m[1]} ${m[2].trim()}`), ["/ commands", "@ mention", "# tag", "? all shortcuts"]);
