@@ -468,7 +468,9 @@ mod tests {
         assert!(got(&seen, &phone).is_empty(), "nothing went straight to Apple");
         let (auth, body) = &sent[0];
         assert_eq!(*auth, format!("Bearer {}", crate::apns::tests::RELAY_KEY));
-        let item = collect(&st).unwrap().iter().map(to_push).find(|i| i.id.ends_with("relayed-0")).unwrap();
+        // Whichever item went first (the list is newest first): its payload is the one a key would send.
+        let item = collect(&st).unwrap().iter().map(to_push).find(|i| json!(i.id) == body["payload"]["needs_you_id"]).unwrap();
+        assert!(item.id.contains("relayed-"), "{}", item.id);
         assert_eq!(body["payload"], item_push(&item, 7).payload(), "the payload is the one Apple would get");
         assert_eq!((&body["environment"], &body["bundle_id"], &body["priority"]), (&json!("production"), &json!("com.example.loft"), &json!(10)), "a permission is time-sensitive");
         assert_eq!(body["collapse_id"], json!(item.id));
