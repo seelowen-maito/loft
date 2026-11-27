@@ -84,7 +84,7 @@ function Row({ row: { pr, after }, label }: { row: MergeRow; label: string }) {
             </span>
           ) : (
             <button
-              className="ml-auto inline-flex h-[26px] items-center gap-1.5 rounded-full bg-accent px-3 text-[12.5px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3"
+              className="ml-auto inline-flex h-[26px] items-center gap-1.5 rounded-full bg-accent px-3 text-[12.5px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3 disabled:opacity-50"
               onClick={() => setConfirming(true)}
               disabled={!m.canMerge}
               title={m.canMerge ? mergeTitle(pr) : m.label}

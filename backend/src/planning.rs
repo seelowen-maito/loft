@@ -111,7 +111,7 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
             None => match publish_spec(state, me, args["title"].as_str().unwrap_or(""), args["body"].as_str().unwrap_or(""), docs).await {
                 Ok((msg, slug, spec)) => {
                     crate::grill::record_published(state, &me.id, &slug, Some(spec), vec![]);
-                    // The user's answer in the grill, saved whatever the grilling agent's role.
+                    // The user's answer in the grill: saved for the Lead, or when the grill has it (`grill_ci_mode`).
                     let saved = match ci_mode {
                         None => String::new(),
                         Some(m) => match crate::project_settings::grill_ci_mode(state, me, m).await {
@@ -8849,7 +8849,7 @@ pub(crate) mod tests {
         assert!(at("- Test seams:") < at("# Planning: CI mode") && at("# Planning: CI mode") < at("# Planning: new project"));
         for want in [
             "Your project's repo is private, so GitHub bills every Actions minute",
-            "Right after the Test seams question, ask the project's CI mode as a round question with your recommendation: `per_ticket`",
+            "Right after the Test seams question, ask the project's CI mode as a `single_choice` round question whose options are exactly `per_ticket` and `at_the_end`",
             "suggest the draft pattern for the workflows",
             "`if: github.event.pull_request.draft == false`",
             "Pass the answer as `ci_mode` to `mcp__loft__publish_spec`",
@@ -8908,7 +8908,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn publishing_the_spec_with_the_grills_answer_saves_the_ci_mode_whoever_grilled() {
+    async fn publishing_the_spec_saves_the_ci_mode_for_the_lead_or_from_the_grills_answer() {
         let (fake, st) = (fake_github(), state());
         let slug = "octo/ci-answer";
         let mut a = planner_on(&st, "ci-answer", Some("git@github.com:octo/ci-answer.git"));
@@ -8922,11 +8922,30 @@ pub(crate) mod tests {
         assert_eq!(err, "`sometimes` isn't a CI mode: pass `per_ticket` or `at_the_end`, or leave `ci_mode` out. Nothing was published.");
         assert!(posts(&fake, slug, "issues").is_empty());
 
-        // Not the Lead: the user answered in its grill, so it's saved all the same, with the agent as who changed it.
+        // Not the Lead, and no grill answer chose it (#701): the spec is published, the CI mode isn't saved.
         a.role = "dev".into();
         st.db.save_agent(&a).unwrap();
         let out = mcp_call(&st, &a, "publish_spec", &spec("at_the_end")).await.unwrap().unwrap();
-        assert!(out.starts_with("Published the spec as #70") && out.ends_with("\nThe CI mode `at_the_end` is saved in ci-answer's Project settings, as changed by you."), "{out}");
+        assert!(out.starts_with("Published the spec as #70") && out.ends_with("\nThe CI mode wasn't saved: no answer in your grill chose `at_the_end`, and only the Lead changes Project settings otherwise."), "{out}");
+        assert!(!crate::project_settings::ci_at_the_end(&st, "ci-answer"));
+
+        // A grill on the private repo, whose sent answer chose `per_ticket`: `at_the_end` still isn't saved.
+        let start = json!({ "role": "start_request" });
+        crate::grill::on_user_message_with(&st, &a, "grill me on rounds", Some(&start), json!({}), &["ci-answer".into()]).unwrap();
+        crate::grill::tests::round(&st, &a, &["CI mode?"]).unwrap();
+        let qid = crate::grill::active(&st, &a.id).unwrap().rounds[0].questions[0].id.clone();
+        crate::grill::tests::answer(&st, &a, &qid, "per ticket, please");
+        crate::grill::tests::send(&st, &a);
+        let out = mcp_call(&st, &a, "publish_spec", &spec("at_the_end")).await.unwrap().unwrap();
+        assert!(out.contains("The CI mode wasn't saved"), "{out}");
+
+        // Once the user answered the CI-mode question in the grill, it's saved, with the agent as who changed it.
+        crate::grill::tests::ci_round(&st, &a);
+        let qid = crate::grill::active(&st, &a.id).unwrap().rounds[1].questions[0].id.clone();
+        crate::grill::tests::answer(&st, &a, &qid, "At the end");
+        crate::grill::tests::send(&st, &a);
+        let out = mcp_call(&st, &a, "publish_spec", &spec("at_the_end")).await.unwrap().unwrap();
+        assert!(out.starts_with("The spec \"Rounds\" is already published as #70") && out.ends_with("\nThe CI mode `at_the_end` is saved in ci-answer's Project settings, as changed by you."), "{out}");
         let s = ci().await;
         assert_eq!((&s["value"], &s["changed"]["agent"]), (&json!("at_the_end"), &json!({ "id": a.id, "name": a.name })));
         assert!(crate::project_settings::ci_at_the_end(&st, "ci-answer"));

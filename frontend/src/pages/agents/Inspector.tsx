@@ -16,6 +16,7 @@ import { QuietHours } from "./QuietHours";
 import { CommandsPanel } from "./CommandsPanel";
 import { ActionButton, DANGER } from "../../components/ActionButton";
 import { ErrorLine } from "../../components/Callout";
+import { Tip } from "../../components/HoverTip";
 import { errorText, useAction } from "../../lib/useAction";
 
 type Tab = "config" | "permissions" | "memory" | "commands" | "workspace";
@@ -66,22 +67,23 @@ export function Inspector({ agent, groups, projects, perms, onCleared }: { agent
   return (
     <div className="flex h-full flex-col">
       <div className="flex gap-1 border-b border-line px-3 py-2.5">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            title={t.label}
-            aria-label={t.label}
-            className={cx(
-              "relative flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] transition",
-              tab === t.id ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg",
-            )}
-          >
-            {t.icon}
-            {/* Only the open tab keeps its name: five names don't fit the panel. */}
-            {tab === t.id && t.label}
-            {!!t.badge && <span className="ml-0.5 rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{t.badge}</span>}
-          </button>
+        {tabs.map((t, i) => (
+          // The last tabs' tooltips open leftwards, so they stay inside the panel.
+          <Tip key={t.id} name={t.label} left={i < 3}>
+            <button
+              onClick={() => setTab(t.id)}
+              aria-label={t.label}
+              className={cx(
+                "relative flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] transition",
+                tab === t.id ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg",
+              )}
+            >
+              {t.icon}
+              {/* Only the open tab keeps its name: five names don't fit the panel. */}
+              {tab === t.id && t.label}
+              {!!t.badge && <span className="ml-0.5 rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{t.badge}</span>}
+            </button>
+          </Tip>
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
