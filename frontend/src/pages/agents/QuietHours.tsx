@@ -56,7 +56,7 @@ export function QuietHours({ value, onChange, interval }: { value: QuietWindow[]
             <button type="button" className="btn-ghost" onClick={() => onChange([...value, { days: [5, 6], start: "09:00", end: "17:00" }])}>
               <Plus className="size-3.5" /> Add hours
             </button>
-            <span className="text-[11px] text-fg-3">Times are this Mac's.</span>
+            <span className="text-[11px] text-fg-3">{value.some((w) => w.start === w.end) && "Same start and end = all day. "}Times are this Mac's.</span>
           </div>
           <ScheduleGrid windows={value} interval={interval} />
         </>
