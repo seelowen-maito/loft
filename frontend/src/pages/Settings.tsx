@@ -545,30 +545,47 @@ const goTo = (id: string) => {
 };
 
 /** The card "On this page" highlights, from the page's scroll. The page's scroller isn't there yet while Settings loads,
- * and scroll events don't bubble: listen on the document, in the capture phase. `ready`: the cards are on the page. */
+ * and scroll events don't bubble: listen on the document, in the capture phase. `ready`: the cards are on the page.
+ * A card clicked, or named by the URL's #hash, stays highlighted at the bottom of the page (where the last cards can't
+ * reach the top) until the user scrolls by hand. */
 function useCardInView(ready: boolean) {
   const [current, setCurrent] = useState<string>(SECTIONS[0][0]);
-  const pinned = useRef<string | null>(null);
+  // `top`: where the scroller was when a click pinned it; null for a #hash pin, which the page keeps scrolling to
+  // while the cards above it grow, so only the user's own input drops it.
+  const pinned = useRef<{ id: string; top: number | null } | null>(null);
+  const scroller = () => document.querySelector<HTMLElement>("[data-settings-scroll]");
   useEffect(() => {
     if (!ready) return;
+    const hash = window.location.hash.slice(1);
+    if (SECTIONS.some(([id]) => id === hash)) pinned.current = { id: hash, top: null };
     const update = () => {
-      const scroller = document.querySelector<HTMLElement>("[data-settings-scroll]");
-      if (!scroller) return;
-      const box = scroller.getBoundingClientRect();
+      const el = scroller();
+      if (!el) return;
       const tops: Record<string, number> = {};
       for (const [id] of SECTIONS) {
-        const el = document.getElementById(id);
-        if (el) tops[id] = el.getBoundingClientRect().top;
+        const card = document.getElementById(id);
+        if (card) tops[id] = card.getBoundingClientRect().top;
       }
-      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
-      if (!atBottom) pinned.current = null;
-      setCurrent(cardInView(SECTIONS.map(([id]) => id), tops, box.top + 96, atBottom, pinned.current));
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+      const pin = pinned.current;
+      if (pin && pin.top !== null && Math.abs(el.scrollTop - pin.top) > 2) pinned.current = null;
+      setCurrent(cardInView(SECTIONS.map(([id]) => id), tops, el.getBoundingClientRect().top + 96, atBottom, pinned.current?.id ?? null));
     };
+    const byHand = () => (pinned.current = null);
     document.addEventListener("scroll", update, { capture: true, passive: true });
+    for (const e of ["wheel", "touchmove", "keydown", "pointerdown"]) document.addEventListener(e, byHand, { passive: true });
     update();
-    return () => document.removeEventListener("scroll", update, { capture: true });
+    return () => {
+      document.removeEventListener("scroll", update, { capture: true });
+      for (const e of ["wheel", "touchmove", "keydown", "pointerdown"]) document.removeEventListener(e, byHand);
+    };
   }, [ready]);
-  return { current, pin: (id: string) => (pinned.current = id) };
+  /** Call after scrolling to the card: pins it at the scroller's new position. */
+  const pin = (id: string) => {
+    pinned.current = { id, top: scroller()?.scrollTop ?? null };
+    setCurrent(id);
+  };
+  return { current, pin };
 }
 
 export default function SettingsPage() {
@@ -662,7 +679,7 @@ export default function SettingsPage() {
                 key={id}
                 href={`#${id}`}
                 aria-current={inView === id ? "true" : undefined}
-                onClick={(e) => (e.preventDefault(), pin(id), goTo(id))}
+                onClick={(e) => (e.preventDefault(), goTo(id), pin(id))}
                 className={cx("block rounded-lg px-2.5 py-1 text-[13px] transition-colors", inView === id ? "bg-ink-800 text-fg" : "text-fg-2 hover:text-fg")}
               >
                 {title}
@@ -677,7 +694,7 @@ export default function SettingsPage() {
             aria-label="Jump to"
             className="input ml-auto w-auto max-w-[60%] py-1.5 text-[13px] lg:hidden"
             value=""
-            onChange={(e) => e.target.value && (pin(e.target.value), goTo(e.target.value))}
+            onChange={(e) => e.target.value && (goTo(e.target.value), pin(e.target.value))}
           >
             <option value="">Jump to…</option>
             {SECTIONS.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
