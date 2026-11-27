@@ -5,7 +5,7 @@
 import type { PullRequest, Task } from "./api";
 
 type Store = Pick<Storage, "getItem" | "setItem">;
-type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">;
+type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey"> & { repeat?: boolean };
 
 /** The shortcuts that can be rebound in Settings. `Mod` is ⌘ on a Mac and Ctrl elsewhere. */
 export const REBINDABLE = [
@@ -24,10 +24,17 @@ export const GO: Record<string, { path: string; label: string }> = {
   m: { path: "/simulator", label: "Simulator" },
 };
 
+/** The `g` shortcut that opens `path`, as its tooltip shows it ("G A"); undefined when it has none. */
+export function goKeys(path: string): string | undefined {
+  const k = Object.entries(GO).find(([, g]) => g.path === path)?.[0];
+  return k && `G ${k.toUpperCase()}`;
+}
+
 /** The fixed shortcuts, for the sheet and Settings. */
 export const FIXED: { keys: string; label: string }[] = [
   ...Object.entries(GO).map(([k, g]) => ({ keys: `g ${k}`, label: `Go to ${g.label}` })),
   { keys: "/", label: "Focus the chat box" },
+  { keys: "T", label: "Talk to an agent" },
   { keys: "?", label: "Show shortcuts" },
 ];
 
@@ -125,15 +132,17 @@ export type Action =
   | { type: "go"; path: string }
   | { type: "g" }
   | { type: "focus-chat" }
-  | { type: "sheet" };
+  | { type: "sheet" }
+  | { type: "talk" };
 
-/** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field.
- * `afterG` is true when the previous key was a lone `g`: the next letter picks the page, any other key cancels it. */
-export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; mac?: boolean }): Action | null {
+/** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field
+ * and any open dialog (`dialog`), and not again while held down. `afterG` is true when the previous key was a lone `g`: the next
+ * letter picks the page, any other key cancels it. */
+export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; dialog?: boolean; mac?: boolean }): Action | null {
   const mac = o.mac ?? isMac();
   if (matchesCombo(e, o.combos.switcher, mac)) return { type: "switcher" };
   if (matchesCombo(e, o.combos.next, mac)) return { type: "next" };
-  if (e.ctrlKey || e.metaKey || e.altKey || o.typing) return null;
+  if (e.ctrlKey || e.metaKey || e.altKey || o.typing || o.dialog || e.repeat) return null;
   if (o.afterG) {
     const go = GO[e.key.toLowerCase()];
     return go ? { type: "go", path: go.path } : null;
@@ -141,6 +150,7 @@ export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; a
   if (e.key === "g") return { type: "g" };
   if (e.key === "/") return { type: "focus-chat" };
   if (e.key === "?") return { type: "sheet" };
+  if (e.key.toLowerCase() === "t") return { type: "talk" };
   return null;
 }
 
