@@ -1,7 +1,7 @@
 import Foundation
 
 // "Needs you" (GET /api/needs-you, contract docs/needs-you-api.md): everything waiting on you, from all agents,
-// already ordered by the server (urgency, then oldest). All text is plain; credentials are redacted server-side.
+// already ordered by the server (urgency, then newest). All text is plain; credentials are redacted server-side.
 
 public struct NeedsYouList: Codable, Hashable {
     public var version: Int
@@ -181,7 +181,7 @@ public enum NeedsYouSection: Identifiable, Hashable {
             if case .project(let name, _) = e.section { return (.project(name: name, items: groups[name] ?? []), e.index) }
             return e
         }
-        // The server's order (urgency, then oldest) for items; within an urgency, projects after the items, the
+        // The server's order (urgency, then newest) for items; within an urgency, projects after the items, the
         // bigger first.
         return sections.sorted { a, b in
             if a.section.urgency != b.section.urgency { return a.section.urgency > b.section.urgency }

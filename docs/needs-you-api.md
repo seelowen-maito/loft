@@ -1,7 +1,7 @@
 # "Needs you" API (v1)
 
 Everything waiting on the user, from all agents, for the apps' inbox and badge. The server only gathers
-and orders it: by fixed urgency, then oldest first. Ranking and summarising with a model (the phone's
+and orders it: by fixed urgency, then newest first. Ranking and summarising with a model (the phone's
 on-device model, iOS P-2) happen on the client.
 
 Feature flag: `needs_you` in `GET /api/info` → `features`.
@@ -16,7 +16,7 @@ Feature flag: `needs_you` in `GET /api/info` → `features`.
   "new": 2,               // badge: items the user hasn't seen (on any client)
   "new_urgent": 1,        // of those, urgency >= 2
   "generated_at": "2026-10-23T14:37:36Z",
-  "items": [ Item, … ]    // most urgent first, then longest waiting first
+  "items": [ Item, … ]    // most urgent first, then newest first
 }
 ```
 
