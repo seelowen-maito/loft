@@ -560,7 +560,7 @@ public final class VoiceSession {
     public func send(_ text: String) async {
         guard phase == .review, let agentId else { return }
         // After the countdown, a message (not an interview answer) hands over to the chat once it's sent.
-        let handsOver = autoSendAt != nil && store.currentGrillQuestion(for: agentId) == nil
+        let handsOver = autoSendAt != nil && !store.voiceOnRound(agentId)
         autoSend?.cancel()
         autoSend = nil
         autoSendAt = nil
@@ -571,9 +571,11 @@ public final class VoiceSession {
         sentAt = Date()
         let before = store.conversation(agentId).last?.id ?? 0
         // While a round waits, what you say answers the question read last (same as typing it in the chat); the next
-        // question of the round is read straight away, and after the last one the round goes out.
-        if let q = store.currentGrillQuestion(for: agentId) {
-            VoiceLog.shared.add("talk: sent as the answer to question \(store.openGrill(for: agentId)?.number(of: q.id) ?? 0)")
+        // question of the round is read straight away, after the last one "Anything else?", and its answer sends the round.
+        if store.voiceOnRound(agentId) {
+            let q = store.currentGrillQuestion(for: agentId)
+            VoiceLog.shared.add(q.map { "talk: sent as the answer to question \(store.openGrill(for: agentId)?.number(of: $0.id) ?? 0)" }
+                                ?? "talk: sent as the answer to “Anything else?”")
             do {
                 try await store.answerCurrentGrill(text, agentId: agentId)
             } catch {
@@ -581,8 +583,11 @@ public final class VoiceSession {
                 phase = .failed(e.isRoundNotSent ? "\(e.title). \(e.suggestion)" : "Not sent: \(e.title). Say it again or answer on the card.")
                 return
             }
-            if let next = store.currentGrillQuestion(for: agentId), next.id != q.id {
+            if let next = store.currentGrillQuestion(for: agentId), next.id != q?.id {
                 return await afterSent(agentId: agentId, before: before, next: next)
+            }
+            if q != nil, store.grillAsksNote(for: agentId) {
+                return await afterSent(agentId: agentId, before: before, asksNote: true)
             }
         } else {
             await store.send(text, to: agentId)
@@ -624,14 +629,15 @@ public final class VoiceSession {
     }
 
     /// Sent: wait for the answer, read it (or the next interview question), and listen again when hands-free.
-    /// `next`: the next question of the same round, read without waiting for anything.
-    private func afterSent(agentId: String, before: Int64, next: GrillQuestion? = nil) async {
+    /// `next`: the next question of the same round, read without waiting for anything; `asksNote`: the round's questions
+    /// are done, so "Anything else?" is asked before it goes.
+    private func afterSent(agentId: String, before: Int64, next: GrillQuestion? = nil, asksNote: Bool = false) async {
         clearDraft()
         segments = []
         committed = ""
         var next = next
         var answer = ""
-        if next == nil {
+        if next == nil, !asksNote {
             VoiceLog.shared.add("talk: waiting for the reply")
             guard let r = await store.waitForReply(agentId: agentId, after: before, while: { phase == .sending }) else {
                 VoiceLog.shared.add("talk: stopped waiting for the reply")
@@ -645,16 +651,18 @@ public final class VoiceSession {
             next = store.grillRoundMessage(for: agentId).flatMap { $0.id > before ? store.currentGrillQuestion(for: agentId) : nil }
         }
         // A question is read in its short spoken form with its recommendation, like in the chat; its card shows it.
-        reply = next == nil ? answer : nil
+        let onRound = next != nil || asksNote
+        reply = onRound ? nil : answer
         let s = store.openGrill(for: agentId)
-        let spoken = next.map { $0.spoken(number: s?.number(of: $0.id) ?? 1, of: s?.questions?.count ?? 1, language: s?.language) } ?? answer
+        let spoken = asksNote ? RoundNote.prompt(language: s?.language)
+            : next.map { $0.spoken(number: s?.number(of: $0.id) ?? 1, of: s?.questions?.count ?? 1, language: s?.language) } ?? answer
         if readReplies {
             phase = .speaking
-            let id = next != nil ? store.grillRoundMessage(for: agentId)?.id : store.conversation(agentId).last { $0.role == "assistant" && $0.kind == "text" }?.id
-            VoiceLog.shared.add("talk: reading the \(next == nil ? "reply" : "next question")")
+            let id = onRound ? store.grillRoundMessage(for: agentId)?.id : store.conversation(agentId).last { $0.role == "assistant" && $0.kind == "text" }?.id
+            VoiceLog.shared.add("talk: reading \(asksNote ? "“Anything else?”" : next == nil ? "the reply" : "the next question")")
             let ended = await speaker.readReply(spoken, messageId: id, isActive: { self.phase == .speaking })
             VoiceLog.shared.add(speaker.lastFailure.map { "talk: not read: \($0)" } ?? "talk: read \(ended.map { "until “\($0)”" } ?? "through")")
-            if next == nil {
+            if !onRound {
                 // The reply stays on screen with Replay, Reply by voice, Open chat and Done.
                 if phase == .speaking { phase = .replied }
                 return
@@ -668,7 +676,7 @@ public final class VoiceSession {
             VoiceLog.shared.add("talk: not read, “Read replies aloud” is off")
         }
         guard phase == .speaking || phase == .sending else { return } // stopped meanwhile
-        if next == nil {
+        if !onRound {
             phase = .replied
             return
         }

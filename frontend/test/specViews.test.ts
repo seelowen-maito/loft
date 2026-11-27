@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { arrange, badgeText, boardIssues, deliveryOf, parseBoard, specMeta, specOfAgent, runningText, specRef, stageOf, ticketState, deliveryWaits, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
+import { arrange, badgeText, boardIssues, deliveryOf, needsMe, parseBoard, standaloneOnStages, specMeta, specOfAgent, runningText, specRef, stageOf, ticketState, deliveryWaits, ticketsOf, withBoard, withOpen, type DeliverySummary } from "../src/lib/specViews.ts";
 import type { Task } from "../src/lib/api.ts";
+import { specProgress } from "../src/lib/issueOrder.ts";
 
 const spec = (o: Partial<Task> & { gh?: [string, number] }): Task =>
   ({ id: "s1", state: "open", github: o.gh ? { repo: o.gh[0], number: o.gh[1] } : null, ...o }) as unknown as Task;
@@ -135,6 +136,41 @@ test("the Issues column holds the issues that are no spec and no spec's ticket, 
   assert.deepEqual(boardIssues(all.map((x) => (x.id === "a" ? { ...x, status: "blocked" } : x)), ds, true, { ...o, needsMe: true }, false).map((x) => x.id), ["a"]);
   assert.deepEqual(boardIssues(all, ds, false, o, true), [], "nothing is decided before the Deliveries load, so no ticket flickers in");
   assert.deepEqual(boardIssues(all, [], true, o, false).map((x) => x.id), ["b", "a", "e"], "loaded with no Deliveries: all stay");
+});
+
+test("a standalone ticket leaves the Issues column for the stages when its Delivery starts, on GitHub or kept in Loft", () => {
+  const t = (o: object) => ({ id: "x", state: "open", status: "inbox", labels: [], description: "", parent_id: null, updated_at: "2026-01-01", github: null, ...o }) as unknown as Task;
+  const gh = t({ id: "g", github: { repo: "o/r", number: 5 } }), loft = t({ id: "l", project: "web" });
+  const ghD = (o: Partial<DeliverySummary>) => del({ spec: 5, standalone: true, ...o });
+  const loftD = (o: Partial<DeliverySummary>) => del({ repo: "loft:web", spec: 1, local: true, spec_id: "l", standalone: true, ...o });
+  const o = parseBoard(new URLSearchParams());
+  for (const [issue, d] of [[gh, ghD], [loft, loftD]] as const) {
+    const planned = [d({ state: "planned", started: false })];
+    assert.ok(!standaloneOnStages(issue, planned), "not started: still an issue");
+    assert.deepEqual(boardIssues([issue], planned, true, o, false), [issue]);
+    const running = [d({ state: "running" })];
+    assert.ok(standaloneOnStages(issue, running));
+    assert.deepEqual(boardIssues([issue], running, true, o, false), [], "on the stages, so out of Issues in the same step");
+    assert.equal(stageOf(issue, running[0]), "delivery");
+    assert.equal(stageOf(issue, d({ state: "ready" })), "ready");
+    assert.equal(stageOf(issue, d({ state: "settled" })), "ready");
+    assert.equal(stageOf(issue, d({ state: "merged" })), "shipped");
+    assert.equal(stageOf({ ...issue, state: "closed", status: "done" }, d({ state: "merged" })), "shipped");
+    // Its card is a ticket's: no tickets of its own to list or count.
+    assert.deepEqual(ticketsOf(issue, running[0], [issue]), []);
+    assert.equal(specProgress(issue, [issue]), null);
+  }
+  assert.ok(!standaloneOnStages(gh, [del({ spec: 5, state: "running" })]), "a spec's Delivery numbered like it isn't its own");
+});
+
+test("a standalone ticket's badge reads the same suffixes as a spec's, Needs you from its Delivery", () => {
+  const one = (o: Partial<DeliverySummary>) => del({ spec: 5, standalone: true, ...o });
+  assert.equal(badgeText("delivery", one({ state_line: { tone: "ci", text: "Waiting for CI on #5" } })), "Waiting for CI");
+  assert.equal(badgeText("delivery", one({ needs_human: true, state_line: { tone: "needs_you", text: "Needs you: a ticket had too many rounds of changes." } })), "In Delivery · Needs you");
+  assert.equal(badgeText("delivery", one({ state: "final_fixes" })), "In Delivery · fixing");
+  assert.ok(needsMe("delivery", one({ needs_human: true })));
+  assert.ok(!needsMe("delivery", one({})));
+  assert.equal(badgeText("delivery", del({ needs_human: true })), "In Delivery", "a spec's ticket that needs you shows on the ticket, as before");
 });
 
 test("a ticket in review whose reviewers all passed reads waiting for CI", () => {

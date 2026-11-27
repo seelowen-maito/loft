@@ -70,6 +70,9 @@ export function saveAnswerDraft(session: string, round: number, question: string
   write(answerKey(session, round, question), empty ? null : JSON.stringify(d), storage);
 }
 
+/** The Round note's Draft is kept as one more answer draft of its round, under this key (question ids are UUIDs). */
+export const NOTE_DRAFT = "note";
+
 /** Deletes the answer drafts of these questions: one saved, or every question of a round that closed. */
 export function clearAnswerDrafts(session: string, round: number, questions: string[], storage?: Store) {
   for (const q of questions) write(answerKey(session, round, q), null, storage);

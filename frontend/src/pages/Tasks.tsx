@@ -24,7 +24,7 @@ import { ErrorLine } from "../components/Callout";
 import { useAction } from "../lib/useAction";
 import { TaskStatus } from "../components/TaskStatus";
 import { taskStatus, toneText } from "../lib/taskStatus";
-import { boardIssues, NEEDS_YOU, parseBoard, withOpen, type DeliverySummary } from "../lib/specViews";
+import { boardIssues, NEEDS_YOU, parseBoard, standaloneOnStages, withOpen, type DeliverySummary } from "../lib/specViews";
 import { agentInGroup, groupAgents, groupProjects, inGroup, projectsOf, teamOf } from "../lib/team";
 
 /** Open or closed, as on GitHub: the green dot, or the purple check (grey when cancelled, like "not planned"). */
@@ -131,10 +131,11 @@ export default function TasksPage() {
     <div className="p-10 text-center text-[13px] text-fg-3">This Loft issue no longer exists.</div>
   ) : null;
   const unread = filtered.filter((t) => NEEDS_YOU.includes(t.status)).length;
-  const specs = useMemo(() => anyAgent.filter(isSpec), [anyAgent]);
+  // The stage columns: the specs, and the standalone tickets whose Delivery started (which leave the Issues column, see boardIssues).
+  const specs = useMemo(() => anyAgent.filter((t) => isSpec(t) || standaloneOnStages(t, deliveries)), [anyAgent, deliveries]);
   const kept = useMemo(() => boardSpecs(specs, deliveries, tasks ?? [], parseBoard(params), agentId), [specs, deliveries, tasks, params, agentId]);
   const issues = useMemo(() => boardIssues(filtered, deliveries, deliveriesLoaded, parseBoard(params), showClosed), [filtered, deliveries, deliveriesLoaded, params, showClosed]);
-  const count = `${issues.length} issues · ${kept.length === specs.length ? specs.length : `${kept.length} of ${specs.length}`} specs`;
+  const count = `${issues.length} issues · ${kept.length === specs.length ? specs.length : `${kept.length} of ${specs.length}`} ${specs.some((t) => !isSpec(t)) ? "specs and tickets" : "specs"}`;
 
   // The header with the filters the Issues and the specs share.
   const header = (

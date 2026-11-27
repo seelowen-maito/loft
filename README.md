@@ -36,8 +36,8 @@ loft is built for engineers who already code with AI and want to try autonomous 
 
 ## Why loft
 
-- **Agents that run without you.** Create an agent, give it a repo and standing instructions, and it checks in on its own schedule. Quiet hours keep background runs out of your working day.
-- **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help.
+- **Agents that run without you.** Create an agent, give it a repo and standing instructions, and it checks in on its own schedule. The New agent dialog starts with its Role: pick one from the team (Lead, Dev, Code reviewer, QA, Security) or an agent that works on its own (a blank Custom one, or Deps, Docs, Triage and CI), with the arrow keys, Enter or a number, and its Agent template fills in the name, instructions (for the project you chose), schedule and model, all still editable. lofty sets agents up from the same templates. Quiet hours keep background runs out of your working day.
+- **Agents that work together.** Agents can see each other, read each other's chats and send each other messages, so one can hand work to another or ask it for help. A group, a label on each agent, makes a team: lofty, Loft's own agent, puts every agent it sets up in the group its plan shows, and moves agents into a group or renames a group when you ask.
 - **Memory that lasts.** Each agent keeps long-term memory across conversations and session resets. It remembers your preferences, past decisions and what it did and why.
 - **You stay in control.** Approve permission requests, review plans and pull requests, and follow every agent's activity from one dashboard, on your desktop or your phone. **Needs you** (the inbox icon in the top bar, with a live count of what you haven't seen yet on every page) lists everything waiting on you: questions, permissions, stalled Deliveries with the question the agent stopped on, tickets published into a spec whose Delivery is done (with Reopen delivery: the spec PR goes back to draft, the new tickets are built and reviewed, and the final review covers only the new commits), pull requests to merge, a nearly full disk, and push being off. Each item opens the agent's chat or the Delivery card with Resume. Close it with the icon, its X or Esc to get back to the page you were on. Opening it marks what it shows as seen, on the web and the iPhone alike: the counter only comes back for something new, and seen items stay listed, dimmed, until you tick Done. Items also leave by themselves once nothing waits on you: a finished issue's result when you open it (or after a day), an agent's question once you or its Lead answer it, a blocked issue once its GitHub issue closes, and a Delivery stalled on its Lead once the Lead hands the ticket out. A blocked or failed issue shows why it stopped, with Send to… to hand it to another agent, or the same one once the block is cleared: the agent gets the reason with the issue.
 - **Lean by design.** Every agent works in its own clone of your repos, never your checkout. Your setup is left alone, and all of loft's data lives in one folder, `.loft/`.
@@ -60,7 +60,7 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 curl -fsSL https://get-loft.com/install.sh | bash
 ```
 
-The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
+The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live (Tab completes the path, or type just the folder's name, like `projects`, and pick it from the folders with git repos found in your home folder), and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
 
 Already have a clone? Run `./setup.sh` from it instead.
 
@@ -68,7 +68,7 @@ To run loft in the foreground instead, use `./start.sh`.
 
 Then open http://localhost:7420 and check **Settings** (gear icon, top right). Settings are saved to `.loft/settings.json`:
 
-- **Projects folder**: where your git repos live. Takes effect after a restart, which loft offers once no agent is running.
+- **Projects folder**: where your git repos live. As you type, it suggests folders: the ones in the folder you've typed so far, and the ones with that name in your home (Library, node_modules, hidden folders and caches are skipped), each with how many git repos it holds; ↑↓ move, Tab or Enter fills one in. Takes effect after a restart, which loft offers once no agent is running.
 - **Claude command**: the command agents run.
 - **GitHub token**: needed for private repos and merging pull requests. Without one, loft uses `gh auth token`.
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.

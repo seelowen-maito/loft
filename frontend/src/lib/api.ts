@@ -1,5 +1,6 @@
 import type { NeedsYouAction, NeedsYouList } from "./needsYou";
 import { errorText } from "./useAction.ts";
+import type { AgentTemplate } from "./newAgent";
 
 export type Avatar = { svg: string };
 
@@ -708,6 +709,8 @@ export type SystemReading = {
   sampled_at: string | null;
 };
 
+/** A folder suggested for the Projects folder: `label` is `path` with `~` for home; `repos` counts the git repos in it. */
+export type FolderSuggestion = { path: string; label: string; repos: number };
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
 
 /** One of a project's settings: its choices, Loft's default, its value and, once changed, when and by which agent (none: the user).
@@ -834,6 +837,10 @@ export const api = {
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
+  /** Folders for what's typed in Settings → Projects folder: the typed parent's, then the ones found by name in home. */
+  suggestFolders: (q: string) => req<FolderSuggestion[]>("GET", `/folders/suggest?q=${encodeURIComponent(q)}`),
+  /** The Agent templates, their instructions filled in for `project` ("" before one is picked). */
+  agentTemplates: (project: string) => req<AgentTemplate[]>("GET", `/agent-templates?project=${encodeURIComponent(project)}`),
   projectSettings: (project: string) => req<ProjectSettingsView>("GET", `/project-settings?project=${encodeURIComponent(project)}`),
   setProjectSetting: (project: string, key: string, value: string | string[] | number) => req<ProjectSettingsView>("PUT", "/project-settings", { project, key, value }),
   /** Asks Loft's own agent `loft` to set up an agent in a reviewer role the project's team has no one in. */
@@ -953,8 +960,9 @@ export const api = {
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
-  grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>
-    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID() }),
+  /** `note`, with "send": the Round note that goes with the round. */
+  grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string, note?: { text: string; images: string[] }) =>
+    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID(), note }),
   /** Holds an answer to a round question (Loft doesn't run the agent until the round is sent). "Yes" accepts the recommendation. */
   /** Holds an answer to one question of the open round; with `discuss`, it is a comment for the agent instead of a decision. */
   grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false, images: string[] = []) =>

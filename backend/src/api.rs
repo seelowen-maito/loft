@@ -223,6 +223,15 @@ fn check_new_projects(state: &AppState, a: &Agent, ps: &[String]) -> Result<(), 
     Ok(())
 }
 
+/// A group name as typed, trimmed: at most 100 characters, with no control characters. "" is no group.
+pub fn group_name(v: &str) -> Result<String, String> {
+    let g = v.trim();
+    if g.chars().count() > 100 || g.chars().any(char::is_control) {
+        return Err("group must be at most 100 characters, with no control characters".into());
+    }
+    Ok(g.into())
+}
+
 /// Apply editable fields from a JSON patch onto an agent.
 fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiError> {
     let str_field = |k: &str| p.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -233,11 +242,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
         a.name = v.trim().into();
     }
     if let Some(v) = str_field("group") {
-        let g = v.trim();
-        if g.chars().count() > 100 || g.chars().any(char::is_control) {
-            return Err(bad("group must be at most 100 characters, with no control characters"));
-        }
-        a.group = g.into();
+        a.group = group_name(&v).map_err(bad)?;
     }
     if let Some(v) = p.get("projects") {
         let raw: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| bad("projects must be a list of strings"))?;
@@ -340,7 +345,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
 
 /// Makes `a` its group's only Lead (its team: `Agent::team`): any other Lead in the group becomes Custom.
 /// Returns the agent the role moved from.
-fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
+pub fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
     if a.role != "lead" {
         return Ok(None);
     }
@@ -1334,6 +1339,17 @@ pub(crate) mod tests {
             assert_eq!(p["previous"]["until"], p["since"], "the 7 days before end where the last 7 start");
             assert_eq!(s["agents"][0]["cost_usd"], 15.0, "the agent card still counts 14 days");
             assert_eq!(s["all_time"]["runs"], 5);
+        }
+    }
+
+    #[test]
+    fn an_agent_from_the_new_agent_dialog_starts_with_fresh_context_always() {
+        // The dialog sends no fresh_context (#495): every role, Lead included, starts Always.
+        let st = crate::tasks::tests::state();
+        for role in ["lead", "dev", "code_reviewer", "qa", "security", "custom"] {
+            let body = serde_json::json!({ "name": role, "group": "Acme", "projects": [], "role": role, "personality": "", "prompt": "Do it.", "model": "sonnet", "interval_minutes": 0 });
+            let (a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &body, None).unwrap();
+            assert_eq!((a.role.as_str(), a.fresh_context.as_str()), (role, "always"));
         }
     }
 

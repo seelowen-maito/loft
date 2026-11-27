@@ -3914,20 +3914,21 @@ pub async fn issue_delivery(State(state): State<AppState>, Path(id): Path<String
     Ok(Json(delivery_json(&state, &d)))
 }
 
-/// `GET /api/deliveries/summary`: every spec's Delivery in one read, for the Issues page's spec views:
-/// what `issue_delivery` shows, plus `repo` and `spec` (and `spec_id` for a plan kept in Loft) to tell
-/// which issue it belongs to, and each ticket's review verdicts (and whether it is waiting for CI, since when).
+/// `GET /api/deliveries/summary`: every Delivery in one read, a spec's or a standalone ticket's (`standalone`), for
+/// the Issues page's board: what `issue_delivery` shows, plus `repo` and `spec` (the ticket's number for a standalone
+/// one, and `spec_id` for one kept in Loft) to tell which issue it belongs to, and each ticket's review verdicts (and
+/// whether it is waiting for CI, since when). A standalone ticket's sends no tickets, like its own page: its card has none.
 pub async fn summary_route(State(state): State<AppState>) -> ApiResult<Value> {
     let ds = state.db.all_deliveries()?;
     let out: Vec<Value> = ds
         .iter()
-        .filter(|d| !d.standalone)
         .map(|d| {
             let mut v = delivery_json(&state, d);
             v["repo"] = json!(d.repo);
             v["spec"] = json!(d.spec);
             v["spec_id"] = json!(d.spec_id);
             v["local"] = json!(d.local);
+            v["standalone"] = json!(d.standalone);
             let tickets = v["tickets"].take();
             v["tickets"] = json!(d.tickets.iter().zip(tickets.as_array().into_iter().flatten()).map(|(t, j)| json!({ "number": t.number, "id": t.id, "title": t.title, "state": t.state, "skipped": t.skipped, "waiting_on": t.waiting_on, "agent_id": j["agent_id"], "agent_name": j["agent_name"], "waiting": j["waiting"], "waiting_for_ci": j["waiting_for_ci"], "ci_since": j["ci_since"], "verdicts": t.verdicts })).collect::<Vec<_>>());
             v
@@ -4675,7 +4676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_lists_every_spec_delivery_but_not_standalone_tickets() {
+    async fn summary_lists_every_delivery_standalone_tickets_marked() {
         let st = crate::planning::tests::state();
         let mut a: Delivery = serde_json::from_value(serde_json::json!({ "repo": "o/r", "spec": 9, "state": "running", "created_at": "" })).unwrap();
         a.tickets = vec![ticket(10, "", "review"), ticket(11, "", "open")];
@@ -4685,18 +4686,27 @@ mod tests {
         b.spec = 12;
         b.state = "merged".into();
         let mut one = a.clone();
-        one.spec = 20;
-        one.standalone = true;
+        (one.spec, one.standalone, one.current) = (20, true, Some(20));
+        one.tickets = vec![ticket(20, "", "review")];
         for d in [&a, &b, &one] {
             st.db.save_delivery(d).unwrap();
         }
+        let dev = crate::tasks::tests::agent(&st, "Dev");
+        let mut local = a.clone();
+        (local.repo, local.spec, local.local, local.standalone, local.spec_id, local.dev) = ("loft:web".into(), 1, true, true, "t1".into(), dev.id.clone());
+        local.tickets = vec![DeliveryTicket { agent: dev.id.clone(), ..ticket(1, "t1", "started") }];
+        local.current = Some(1);
+        st.db.save_delivery(&local).unwrap();
         let v = summary_route(State(st)).await.unwrap().0;
-        let specs: Vec<(i64, &str)> = v.as_array().unwrap().iter().map(|d| (d["spec"].as_i64().unwrap(), d["state"].as_str().unwrap())).collect();
-        assert_eq!(specs, vec![(12, "merged"), (9, "running")]);
-        assert_eq!(v[1]["repo"], "o/r");
-        assert_eq!(v[1]["current"]["number"], 10);
-        assert_eq!(v[1]["tickets"][0]["verdicts"]["qa"], "pending");
-        assert_eq!(v[1]["tickets"][0]["id"], "", "a ticket kept in Loft carries its issue id");
+        let all: Vec<(&str, i64, &str, bool)> = v.as_array().unwrap().iter().map(|d| (d["repo"].as_str().unwrap(), d["spec"].as_i64().unwrap(), d["state"].as_str().unwrap(), d["standalone"].as_bool().unwrap())).collect();
+        assert_eq!(all, vec![("o/r", 20, "running", true), ("o/r", 12, "merged", false), ("o/r", 9, "running", false), ("loft:web", 1, "running", true)]);
+        assert_eq!(v[2]["current"]["number"], 10);
+        assert_eq!(v[2]["tickets"][0]["verdicts"]["qa"], "pending");
+        assert_eq!(v[2]["tickets"][0]["id"], "", "a ticket kept in Loft carries its issue id");
+        // A standalone ticket's Delivery sends no tickets (its card has no progress), but who builds it.
+        assert_eq!((v[0]["tickets"].clone(), v[3]["tickets"].clone()), (serde_json::json!([]), serde_json::json!([])));
+        assert_eq!((v[3]["spec_id"].clone(), v[3]["local"].clone()), (serde_json::json!("t1"), serde_json::json!(true)));
+        assert_eq!(v[3]["agent_name"], "Dev");
     }
 
     /// The card's state line comes from the server, for every state and stall reason: none before it started.

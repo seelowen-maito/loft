@@ -2626,7 +2626,7 @@ pub(crate) mod tests {
             "missing_roles": ["dev"],
             "setup": {
                 "agent_id": "loft",
-                "message": format!("Set up the team for the card-team group: it has no Dev yet. {} just planned spec #40: https://github.com/octo/card-team/issues/40. Propose the agents it needs and create the ones I approve.", a.name),
+                "message": format!("Set up the team for the card-team group: it has no Dev yet. {} just planned spec #40: https://github.com/octo/card-team/issues/40. Propose the agents it needs and create the ones I approve in the card-team group.", a.name),
             },
         }));
     }
@@ -2730,7 +2730,7 @@ pub(crate) mod tests {
             assert_eq!(card["missing_roles"], roles, "{project}");
             assert_eq!(
                 card["setup"]["message"],
-                format!("Set up the team for the {project} group: it has {text}. {} just planned spec #{n}: https://github.com/octo/{project}/issues/{n}. Propose the agents it needs and create the ones I approve.", a.name),
+                format!("Set up the team for the {project} group: it has {text}. {} just planned spec #{n}: https://github.com/octo/{project}/issues/{n}. Propose the agents it needs and create the ones I approve in the {project} group.", a.name),
             );
         }
     }

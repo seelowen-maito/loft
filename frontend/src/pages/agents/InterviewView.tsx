@@ -6,10 +6,11 @@ import { interviewShows } from "../../lib/interview";
 import { useDialogKeys } from "../../components/Dialog";
 import { GrillBar } from "./GrillBar";
 import { QuestionCard } from "./GrillRound";
+import { RoundNote } from "./RoundNote";
 
 /**
  * The open interview on its own page, over everything: the round bar (progress, Send round, Pause, End) and the
- * round's question cards, the same cards the chat shows, so answer Drafts are shared with it. Esc or Back to chat
+ * round's question cards and Round note, the same ones the chat shows, so their Drafts are shared with it. Esc or Back to chat
  * returns; it returns by itself when the interview ends, like the app's. Not a `Dialog`: it's a page of its own (a
  * route, full screen, no backdrop), but it keeps a dialog's keys: Esc on the top dialog only, Tab inside, focus back.
  */
@@ -50,9 +51,13 @@ export function InterviewView({ agent, session }: { agent: Agent; session: Grill
 
       <div className="mx-auto max-w-3xl space-y-3 px-4 py-4">
         {shows === "round" && session ? (
-          (session.questions ?? []).map((q, i) => (
-            <QuestionCard key={q.id} n={i + 1} q={q} agentId={agent.id} sessionId={session.session_id} round={session.round!} />
-          ))
+          <>
+            {(session.questions ?? []).map((q, i) => (
+              <QuestionCard key={q.id} n={i + 1} q={q} agentId={agent.id} sessionId={session.session_id} round={session.round!} />
+            ))}
+            {/* After the questions, as on the chat's round; Send round in the bar above takes it along. */}
+            <RoundNote key={`${session.session_id}:${session.round}`} agentId={agent.id} sessionId={session.session_id} round={session.round!} card />
+          </>
         ) : shows === "waiting" ? (
           <div className="flex items-center gap-2 py-16 text-[15px] text-fg-3" role="status">
             <Hourglass className="size-4" /> {session?.round == null ? "Preparing questions…" : "Next round…"}
