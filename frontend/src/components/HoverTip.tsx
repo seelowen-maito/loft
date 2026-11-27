@@ -39,7 +39,7 @@ export function HoverTip({ tip, className, left, children }: { tip: ReactNode; c
 
 /** HoverTip's bubble on an icon button or link that already acts on click: its `name`, and its shortcut `keys` (as
  *  "G A", one `<kbd>` per key). Shown on mouse hover and keyboard focus, not on touch; the control keeps its own aria-label. */
-export function Tip({ name, keys, left, className, children }: { name: string; keys?: string; left?: boolean; className?: string; children: ReactNode }) {
+export function Tip({ name, keys, left, off, className, children }: { name: string; keys?: string; left?: boolean; off?: boolean; className?: string; children: ReactNode }) {
   return (
     <span className={cx("group/tip relative inline-flex", className)}>
       {children}
@@ -48,6 +48,8 @@ export function Tip({ name, keys, left, className, children }: { name: string; k
         className={cx(
           BUBBLE,
           left ? "left-0" : "right-0",
+          // `off` while the control's own menu is open, so the tooltip doesn't show behind it.
+          off && "hidden",
           "invisible items-center gap-2 py-1.5 font-sans text-[12px] text-fg opacity-0 transition-opacity group-hover/tip:visible group-hover/tip:opacity-100 group-has-[:focus-visible]/tip:visible group-has-[:focus-visible]/tip:opacity-100",
         )}
       >

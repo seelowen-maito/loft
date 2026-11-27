@@ -38,7 +38,7 @@ export function HelpMenu({ live }: { live: boolean }) {
   const kbd = (k: string) => <kbd className="ml-auto rounded border border-b-2 border-line-strong bg-ink-850 px-1.5 font-mono text-[10.5px] text-fg-2">{k}</kbd>;
   return (
     <div ref={box} className="relative">
-      <Tip name="Help">
+      <Tip name="Help" off={open}>
         <button
           type="button"
           aria-label="Help"

@@ -49,6 +49,7 @@ test("Help opens its six items, and the phone's connection line says whether it'
   assert.equal(help(div).getAttribute("aria-expanded"), "true");
   assert.deepEqual(items(div).map((t) => t!.replace(/ (T|\?|\/|.?K|terms Loft uses|↗)$/, "")), ["Talk to an agent", "Keyboard shortcuts", "Chat commands", "Search and jump", "Glossary", "Loft on GitHub"]);
   assert.match(div.querySelector('[role="menu"]')!.textContent!, /Connected/);
+  assert.ok(help(div).parentElement!.querySelector(':scope > [aria-hidden="true"]')!.classList.contains("hidden"), "no tooltip behind the open menu");
   assert.equal(div.querySelector<HTMLAnchorElement>('a[role="menuitem"]')!.href, "https://github.com/get-loft/loft");
   const off = render(h(HelpMenu as any, { live: false }));
   click(help(off));
