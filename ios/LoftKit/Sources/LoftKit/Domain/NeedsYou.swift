@@ -1,7 +1,7 @@
 import Foundation
 
 // "Needs you" (GET /api/needs-you, contract docs/needs-you-api.md): everything waiting on you, from all agents,
-// already ordered by the server (urgency, then oldest). All text is plain; credentials are redacted server-side.
+// already ordered by the server (urgency, then newest). All text is plain; credentials are redacted server-side.
 
 public struct NeedsYouList: Codable, Hashable {
     public var version: Int
@@ -57,6 +57,8 @@ public struct NeedsYouItem: Codable, Hashable, Identifiable {
     }
 
     public var isPullRequest: Bool { pr != nil || type.hasPrefix("pr_") }
+    /// A PR that changes CI workflows (`pr_workflows`): shown with the warning, never folded into its project.
+    public var changesWorkflows: Bool { type == "pr_workflows" }
 
     /// Answerable by typing (a reply, an interview answer, a task comment).
     public var answerAction: NeedsYouAction? { actions.first { $0.kind == "answer" } }
@@ -70,6 +72,27 @@ public struct NeedsYouItem: Codable, Hashable, Identifiable {
     public func asksQuestions(_ permissions: [PermissionRequest]) -> Bool {
         permissions.contains { "permission:\($0.id)" == id && $0.isQuestions }
     }
+}
+
+/// Clear all (POST /api/needs-you/dismiss-all with `ids`): the items shown that offer Done go, the asks without it
+/// stay. The web's `clearAll()` rule; the button is hidden when `clear` is 0. Taken when the confirm opens, so an item
+/// that arrives while it's up isn't cleared.
+public struct NeedsYouClearAll: Equatable {
+    public static let path = "/api/needs-you/dismiss-all"
+    /// The items to clear: those shown that offer Done.
+    public let ids: [String]
+    public let stay: Int
+
+    public init(_ items: [NeedsYouItem]) {
+        ids = items.filter(\.canDismiss).map(\.id)
+        stay = items.count - ids.count
+    }
+
+    public var clear: Int { ids.count }
+    /// "Clear 14", or "Clear 14 · 2 need an answer".
+    public var label: String { stay > 0 ? "Clear \(clear) · \(stay) \(stay == 1 ? "needs" : "need") an answer" : "Clear \(clear)" }
+    /// The confirm's question: "Clear 14 items?"
+    public var question: String { "Clear \(clear) \(clear == 1 ? "item" : "items")?" }
 }
 
 /// The seen mark (POST /api/needs-you/seen), shared with the web: opening the list marks what it shows.
@@ -140,7 +163,7 @@ public enum NeedsYouSection: Identifiable, Hashable {
 
     public static func build(_ items: [NeedsYouItem]) -> [NeedsYouSection] {
         func project(_ i: NeedsYouItem) -> String? {
-            guard i.isPullRequest else { return nil }
+            guard i.isPullRequest, !i.changesWorkflows else { return nil }
             let p = (i.pr?.project ?? i.pr?.repo.map { String($0.split(separator: "/").last ?? "") } ?? i.project)?.trimmingCharacters(in: .whitespaces)
             return p?.isEmpty == false ? p : nil
         }
@@ -158,7 +181,7 @@ public enum NeedsYouSection: Identifiable, Hashable {
             if case .project(let name, _) = e.section { return (.project(name: name, items: groups[name] ?? []), e.index) }
             return e
         }
-        // The server's order (urgency, then oldest) for items; within an urgency, projects after the items, the
+        // The server's order (urgency, then newest) for items; within an urgency, projects after the items, the
         // bigger first.
         return sections.sorted { a, b in
             if a.section.urgency != b.section.urgency { return a.section.urgency > b.section.urgency }

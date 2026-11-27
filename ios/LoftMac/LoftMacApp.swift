@@ -160,6 +160,8 @@ final class MacNav {
     var voiceDraft: (agentId: String, text: String)?
     /// The issue pages open in the Issues section, from the board's card on.
     var issuePath: [String] = []
+    /// The saved item open in Saved, if any.
+    var savedPath: [Int64] = []
 
     /// The Needs you item to scroll to and outline: the Needs you widget's Approve.
     var needsYouFocus: String?
@@ -170,9 +172,13 @@ final class MacNav {
         set { selection.chatNote = newValue }
     }
 
-    func openChat(_ agentId: String) {
+    /// The message to scroll to once its chat shows (a saved item's Open in chat).
+    var chatFocus: (agentId: String, message: Int64)?
+
+    func openChat(_ agentId: String, message: Int64? = nil) {
         selection.openChat()
         self.agentId = agentId
+        chatFocus = message.map { (agentId, $0) }
     }
 
     /// Opens the agent's chat with Talk listening.
@@ -373,6 +379,7 @@ struct MainWindow: View {
                 case .agents: AgentsSection()
                 case .issues: IssuesSection()
                 case .needsYou: NeedsYouScreen()
+                case .saved: SavedSection()
                 case .settings: SettingsSection()
                 }
             }
@@ -495,10 +502,22 @@ func renderWindow(store: LoftStore, nav: MacNav, focus: FocusController, to fold
         if let id = store.agents.first(where: { $0.name == name })?.id { nav.openChat(id) }
         try? await Task.sleep(for: .seconds(2))
         png("agents")
-        for section in [MacSection.issues, .overview, .needsYou, .settings] {
+        for section in [MacSection.issues, .overview, .needsYou, .saved, .settings] {
             nav.section = section
             try? await Task.sleep(for: .seconds(2))
             png("\(section)")
+        }
+        // Saved (spec #675): an item's page, its edit form and the Save form for a chat message.
+        nav.section = .saved
+        nav.savedPath = [1]
+        try? await Task.sleep(for: .seconds(2))
+        png("saved-item")
+        nav.savedPath = []
+        if let item = try? await store.savedItem(id: 1) {
+            png(SavedEditForm(item: item, saved: { _ in }, cancel: {}).frame(width: 720), "saved-edit")
+        }
+        if let reply = try? await store.api?.messages(agentId: "qa", limit: 50, before: nil).first(where: Saved.canSave) {
+            png(SaveMessageSheet(message: reply), "saved-save-sheet")
         }
         // Quick search's row while it records.
         HotKeyFailures.shared.recording = LoftShortcut.quickSearch.rawValue

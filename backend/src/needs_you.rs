@@ -1,7 +1,7 @@
 //! "Needs you": everything waiting on the user, gathered from permissions, tasks, chats, grills, pull
 //! requests and runs, for the apps' inbox and badge (`GET /api/needs-you`).
 //!
-//! The server only collects and orders, by fixed urgency and then age; any ranking or summarising with
+//! The server only collects and orders, by fixed urgency and then newest first; any ranking or summarising with
 //! a model happens on the phone. Item text is plain text (it may contain markdown characters; clients
 //! must not render it as HTML), clipped, with anything that looks like a secret redacted.
 
@@ -550,6 +550,12 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 format!("{}\n\n{}", crate::delivery::stalled_reason(state, &d), a.text),
                 format!("{who} asks you something"),
             ),
+            // A Billing block's (or an infrastructure failure's) reason is long: the item says what to do, and its text
+            // has where it stopped too.
+            None if crate::db::ci_stall(&d.stall_reason) => {
+                let all = crate::delivery::stalled_reason(state, &d);
+                (all.split(" Stopped at:").next().unwrap_or_default().to_string(), all, title.clone())
+            }
             None => (crate::delivery::stalled_reason(state, &d), String::new(), title.clone()),
         };
         let mut actions = vec![action("resume", "Resume", "POST", "/api/deliveries/resume".into(), json!({ "repo": d.repo, "spec": d.spec }))];
@@ -557,19 +563,39 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             actions.push(action("answer", "Reply", "POST", format!("/api/agents/{agent_id}/messages"), json!({ "text": "" })));
             actions.push(open_chat(agent_id));
         }
+        let mut links: Vec<Value> = issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default();
+        // A Billing block: the owner's billing page comes first, and tapping the push opens it.
+        let billing = d.billing.as_ref().filter(|_| d.stall_reason == "billing");
+        if let Some(b) = billing {
+            actions.push(json!({ "kind": "open", "label": "Open billing", "target": { "url": b.url } }));
+            links.push(json!({ "label": "Billing on GitHub", "url": b.url }));
+        }
+        // An infrastructure failure, or a CI queued too long: the CI checks on GitHub, where the user sees what failed or
+        // waits, and can re-run it too.
+        let infra = d.stall_reason == "infra";
+        let queued = d.stall_reason == "ci_queued";
+        if let Some(url) = crate::delivery::checks_url(&d).filter(|_| infra || queued) {
+            links.push(json!({ "label": "Checks on GitHub", "url": url }));
+        }
         actions.extend([open, dismiss(&id)]);
+        let (title, push) = match billing {
+            Some(_) => (format!("GitHub Actions blocked by billing: {title}"), ("GitHub Actions blocked by billing".to_string(), title)),
+            None if infra => (format!("CI failed for GitHub's infrastructure: {title}"), ("CI failed for GitHub's infrastructure".to_string(), title)),
+            None if queued => (format!("CI queued, not started: {title}"), ("CI queued, not started".to_string(), title)),
+            None => (format!("Delivery stalled: {title}"), ("Delivery stalled".to_string(), push)),
+        };
         items.push(Item {
             kind: "delivery_stalled",
             urgency: 2,
             agent: ask.as_ref().map(|(who, _)| who.clone()),
             task_id: issue.map(|t| t.id.clone()),
-            title: text(&format!("Delivery stalled: {title}"), MAX_TITLE),
+            title: text(&title, MAX_TITLE),
             reason: text(&reason, MAX_REASON),
             text: text(&body, MAX_TEXT),
             created_at: if d.stalled_at.is_empty() { d.created_at.clone() } else { d.stalled_at.clone() },
-            links: issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default(),
+            links,
             actions,
-            push: ("Delivery stalled".to_string(), push),
+            push,
             project: Some(d.project.clone()).filter(|p| !p.is_empty()),
             pr: None,
             id,
@@ -600,6 +626,10 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
                 action("merge", "Merge", "POST", "/api/deliveries/merge".into(), json!({ "repo": d.repo, "spec": d.spec })),
                 Value::Null,
             ),
+        };
+        let reason = match crate::delivery::minutes_line(&d) {
+            Some(m) => format!("{reason} {m}"),
+            None => reason,
         };
         let mut links: Vec<Value> = issue.map(|t| vec![json!({ "label": "Issue", "path": format!("/issues/{}", t.id) })]).unwrap_or_default();
         links.extend(Some(link).filter(|l| !l.is_null()));
@@ -684,7 +714,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
     // opened here (they can be merged from the app), then the user's other ready PRs and review
     // requests found on GitHub (github_inbox).
     let mut seen_prs: HashSet<(String, i64)> = HashSet::new();
-    for p in prs {
+    for p in &prs {
         let checks = &p.checks;
         let n = |k: &str| checks[k].as_i64().unwrap_or(0);
         let ready = p.state == "open" && !p.draft && p.mergeable == Some(true) && ["clean", "unstable", "has_hooks"].contains(&p.mergeable_state.as_str()) && n("failed") == 0 && n("pending") == 0;
@@ -694,7 +724,8 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
         seen_prs.insert((p.slug.to_lowercase(), p.number));
         let id = format!("pr:{}:{}", p.id, p.head_sha);
         let who = name(&p.agent_id);
-        let method = p.merge_methods.first().cloned().unwrap_or_else(|| "squash".into());
+        // The project's merge method (#468), as the PR's last read set it.
+        let method = Some(p.merge_method.clone()).filter(|m| !m.is_empty()).or_else(|| p.merge_methods.first().cloned()).unwrap_or_else(|| "squash".into());
         let repo_name = p.slug.rsplit('/').next().unwrap_or(&p.slug).to_string();
         items.push(Item {
             kind: "pr_ready",
@@ -708,12 +739,34 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             links: vec![json!({ "label": "Pull request", "url": p.url })],
             actions: vec![
                 action("merge", "Merge", "POST", format!("/api/pull-requests/{}/merge", p.id), json!({ "method": method })),
-                json!({ "kind": "open", "label": "Open on GitHub", "target": { "url": p.url } }),
+                json!({ "kind": "open", "label": "Open pull request", "target": { "url": p.url } }),
                 dismiss(&id),
             ],
             push: ("Ready to merge".to_string(), format!("{}#{}: {}", p.slug, p.number, p.title)),
             project: Some(repo_name.clone()),
             pr: Some(pr_fields(&p.slug, &repo_name, p.number, &p.title, &p.url, &p.author, if n("total") > 0 { "passing" } else { "none" }, false)),
+            id,
+        });
+    }
+    // Open PRs that changed a GitHub Actions workflow or action: pushed to a branch of the repo, it runs with the repo's
+    // secrets, so the user checks it (#701). One item per PR and change: a later revert doesn't hide it, and a dismissed
+    // one comes back when the workflows change again.
+    for p in prs.iter().filter(|p| p.state == "open" && !p.gone && p.changes_workflows == Some(true)) {
+        let id = format!("pr_workflows:{}:{}", p.id, p.workflows_key);
+        items.push(Item {
+            kind: "pr_workflows",
+            urgency: 2,
+            title: text(&format!("{}#{}: {}", p.slug, p.number, p.title), MAX_TITLE),
+            reason: text("It changed .github/workflows/ or .github/actions/: its CI may already have run with the repo's secrets.", MAX_REASON),
+            text: text("A workflow or action changed on a branch of the repo runs with the repo's secrets as soon as it's pushed. Read the change and its Actions runs on GitHub; if it shouldn't run, cancel the runs and close the PR.", MAX_TEXT),
+            agent: name(&p.agent_id),
+            task_id: None,
+            created_at: p.created_at.clone(),
+            links: vec![json!({ "label": "Pull request", "url": p.url })],
+            actions: vec![json!({ "kind": "open", "label": "See changed files", "target": { "url": format!("{}/files", p.url) } }), dismiss(&id)],
+            push: ("A PR changes workflows".to_string(), format!("{}#{}: {}", p.slug, p.number, p.title)),
+            project: Some(p.slug.rsplit('/').next().unwrap_or(&p.slug).to_string()),
+            pr: None,
             id,
         });
     }
@@ -732,7 +785,7 @@ pub(crate) fn collect(state: &AppState) -> Result<Vec<Item>, String> {
             task_id: None,
             created_at: g.created_at.clone(),
             links: vec![json!({ "label": "Pull request", "url": g.url })],
-            actions: vec![json!({ "kind": "open", "label": "Open on GitHub", "target": { "url": g.url } }), dismiss(&id)],
+            actions: vec![json!({ "kind": "open", "label": "Open pull request", "target": { "url": g.url } }), dismiss(&id)],
             push: (if g.review_requested { "Review requested" } else { "Ready to merge" }.to_string(), format!("{}#{}: {}", g.repo, g.number, g.title)),
             project: Some(repo_name.clone()),
             pr: Some(pr_fields(&g.repo, &repo_name, g.number, &g.title, &g.url, &g.author, checks, g.review_requested)),
@@ -845,6 +898,35 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
         });
     }
 
+    // An owner's GitHub Actions minutes reached 70% or 90% of the quota the user set: one item a line, a month. A
+    // higher line takes the lower one's place, and the item goes if the minutes fall under it (a higher quota).
+    for w in crate::actions::warnings(state, Utc::now()) {
+        let id = format!("actions_quota:{}:{}:{}", w.owner, w.month, w.line);
+        let pct = u64::from(w.minutes) * 100 / u64::from(w.quota.max(1));
+        let mut actions = vec![];
+        if let Some(web) = crate::tailnet::web_url(state.cfg.port) {
+            actions.push(json!({ "kind": "open", "label": "Open Settings", "target": { "url": format!("{web}/settings#github") } }));
+        }
+        actions.push(dismiss(&id));
+        let source = if w.billed { "as GitHub bills the org" } else { "summed over its private repos Loft knows" };
+        items.push(Item {
+            kind: "actions_quota",
+            urgency: 1,
+            agent: None,
+            task_id: None,
+            title: text(&format!("{} used {pct}% of its GitHub Actions minutes", w.owner), MAX_TITLE),
+            reason: text(&format!("{} of {} minutes this month, past {}% of the quota.", w.minutes, w.quota, w.line), MAX_REASON),
+            text: text(&format!("{} of {} minutes this month ({source}). When the quota runs out GitHub stops running its jobs. Settings → GitHub API shows each repo's minutes and changes the quota; a project's CI mode `at the end` (Project settings) runs the CI only when the spec PR is ready.", w.minutes, w.quota), MAX_TEXT),
+            created_at: w.at.clone(),
+            links: vec![json!({ "label": "Settings → GitHub API", "path": "/settings#github" })],
+            actions,
+            push: (format!("GitHub Actions: {} at {}% of its quota", w.owner, w.line), format!("{} of {} minutes this month", w.minutes, w.quota)),
+            project: None,
+            pr: None,
+            id,
+        });
+    }
+
     // Under 20 GB free on the disk agents' workspaces live on. One item while it stays low, and until 2 GB more are
     // free: near the line it would come and go, new each time.
     let free = crate::sweep::free_bytes(&state.cfg.storage_dir);
@@ -927,8 +1009,8 @@ Backups folder: {}", err.message, backup.dir.display()), MAX_TEXT),
 
     let dismissed: HashSet<String> = state.db.dismissed_needs_you().map_err(e)?.into_iter().collect();
     items.retain(|i| !dismissed.contains(&i.id));
-    // Most urgent first; within the same urgency, the longest waiting first.
-    items.sort_by(|a, b| b.urgency.cmp(&a.urgency).then_with(|| a.created_at.cmp(&b.created_at)));
+    // Most urgent first; within the same urgency, the newest first.
+    items.sort_by(|a, b| b.urgency.cmp(&a.urgency).then_with(|| b.created_at.cmp(&a.created_at)));
     Ok(items)
 }
 
@@ -980,8 +1062,13 @@ pub(crate) fn to_push(i: &Item) -> PushItem {
     let target = i.actions.iter().find(|a| a["kind"] == "open").map(|a| a["target"].clone()).unwrap_or(Value::Null);
     PushItem {
         id: i.id.clone(),
-        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck".
-        kind: if i.kind == "mac_access" { "stuck" } else { i.kind },
+        // Phones choose which kinds they get; macOS asking blocks an agent, so it goes with "stuck", and an owner's
+        // Actions quota running out stops its Deliveries' CI, so it goes with "delivery_stalled", like a PR changing workflows.
+        kind: match i.kind {
+            "mac_access" => "stuck",
+            "actions_quota" | "pr_workflows" => "delivery_stalled",
+            k => k,
+        },
         urgency: i.urgency,
         agent_id: i.agent.as_ref().map(|a| a.0.clone()),
         task_id: i.task_id.clone(),
@@ -1084,6 +1171,23 @@ pub async fn dismiss_item(State(state): State<AppState>, Path(id): Path<String>)
         emit_if_changed(&state, &v);
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// `POST /api/needs-you/dismiss-all` with `{ "ids": [...] }`: Done on those of the items the client showed that still
+/// offer it, in one call. An item that arrived since, or that is an ask without Done, stays. Returns how many it cleared.
+pub async fn dismiss_all(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let shown: HashSet<&str> = body["ids"].as_array().ok_or_else(|| crate::api::bad("ids is required."))?.iter().filter_map(Value::as_str).collect();
+    let mut items = collect(&state).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let clearable = |i: &Item| shown.contains(i.id.as_str()) && i.actions.iter().any(|a| a["kind"] == "dismiss");
+    let cleared = items.iter().filter(|i| clearable(i)).count();
+    for i in items.iter().filter(|i| clearable(i)) {
+        state.db.dismiss_needs_you(&i.id)?;
+    }
+    items.retain(|i| !clearable(i));
+    if let Ok(v) = look(&state, &items) {
+        emit_if_changed(&state, &v);
+    }
+    Ok(Json(json!({ "ok": true, "cleared": cleared })))
 }
 
 /// The `task_done` item of `t`, its id and when it finished: an issue the user created that finished in the last
@@ -1397,10 +1501,16 @@ mod tests {
             std::fs::write(path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
         }
         let types: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["type"].as_str().unwrap()).collect();
-        assert_eq!(types, ["permission", "task_blocked", "question", "grill_round", "task_failed", "pr_ready", "pr_ready", "pr_review", "task_done"], "{v:#}");
+        // Urgency decides; items made in the same instant may come either way round.
+        let urgencies: Vec<i64> = v["items"].as_array().unwrap().iter().map(|i| i["urgency"].as_i64().unwrap()).collect();
+        assert!(urgencies.windows(2).all(|w| w[0] >= w[1]), "{v:#}");
+        let mut sorted = types.clone();
+        sorted.sort();
+        assert_eq!(sorted, ["grill_round", "permission", "pr_ready", "pr_ready", "pr_review", "question", "task_blocked", "task_done", "task_failed"], "{v:#}");
         assert_eq!((v["count"].clone(), v["urgent"].clone(), v["version"].clone()), (json!(9), json!(4), json!(1)));
         // PRs carry their repo as separate fields, for grouping by project.
-        let prs: Vec<&Value> = v["items"].as_array().unwrap().iter().filter(|i| i["pr"].is_object()).collect();
+        let mut prs: Vec<&Value> = v["items"].as_array().unwrap().iter().filter(|i| i["pr"].is_object()).collect();
+        prs.sort_by_key(|i| i["pr"]["number"].as_i64());
         let keys: Vec<(String, String, i64, String, bool)> = prs.iter().map(|i| (i["pr"]["repo"].as_str().unwrap().into(), i["project"].as_str().unwrap().into(), i["pr"]["number"].as_i64().unwrap(), i["pr"]["checks"].as_str().unwrap().into(), i["pr"]["review_requested"].as_bool().unwrap())).collect();
         assert_eq!(keys, [
             ("o/r".to_string(), "r".to_string(), 7, "passing".to_string(), false),
@@ -1421,9 +1531,10 @@ mod tests {
         assert_eq!(item(&v, "task_failed")["reason"], json!("Failed: Xcode 27 missing"));
         assert_eq!(item(&v, "task_done")["reason"], json!("Done: 15 GB after cleanup."));
         assert_eq!((item(&v, "grill_round")["text"].clone(), item(&v, "grill_round")["reason"].clone()), (json!("• Who pays?"), json!("Round 1: 0 of 1 answered")));
-        let merge = &item(&v, "pr_ready")["actions"][0];
+        let merge = &prs[0]["actions"][0];
         assert_eq!((merge["path"].clone(), merge["body"]["method"].clone()), (json!("/api/pull-requests/pr1/merge"), json!("squash")));
-        assert_eq!(item(&v, "pr_ready")["links"][0]["url"], json!("https://github.com/o/r/pull/7"), "links are kept apart from the text");
+        assert_eq!((prs[0]["actions"][1]["label"].clone(), prs[2]["actions"][0]["label"].clone()), (json!("Open pull request"), json!("Open pull request")), "it opens the PR, so it says so");
+        assert_eq!(prs[0]["links"][0]["url"], json!("https://github.com/o/r/pull/7"), "links are kept apart from the text");
 
         // The watcher reads everything once per tick: its push items and snapshot match separate reads.
         let (push, once) = tick_lists(&st).unwrap();
@@ -1443,6 +1554,28 @@ mod tests {
         assert!(dismiss_item(State(st.clone()), Path("permission:p1".into())).await.is_err());
         assert!(dismiss_item(State(st.clone()), Path(item(&v, "grill_round")["id"].as_str().unwrap().into())).await.is_err(), "an open round can't be dismissed");
         assert!(dismiss_item(State(st.clone()), Path("question:999999".into())).await.is_err(), "unknown ids are refused");
+
+        // Clear all: the shown items with Done go, in one call; the asks without it stay, an item the client didn't show
+        // stays too, and what went stays cleared.
+        let before = ids(&snapshot(&st).unwrap());
+        let asks: Vec<String> = collect(&st).unwrap().iter().filter(|i| !i.actions.iter().any(|a| a["kind"] == "dismiss")).map(|i| i.id.clone()).collect();
+        assert!(asks.iter().any(|i| i.starts_with("permission:")) && asks.iter().any(|i| i.starts_with("grill:")), "{asks:?}");
+        assert!(dismiss_all(State(st.clone()), Json(json!({}))).await.is_err(), "ids are required");
+        let late = before.iter().find(|i| !asks.contains(i)).unwrap().clone();
+        let shown: Vec<&String> = before.iter().filter(|i| **i != late).collect();
+        let Json(r) = dismiss_all(State(st.clone()), Json(json!({ "ids": shown }))).await.unwrap();
+        let after = ids(&snapshot(&st).unwrap());
+        assert_eq!(r["cleared"], json!(before.len() - after.len()));
+        assert!(r["cleared"].as_u64().unwrap() > 0);
+        let mut left = after.clone();
+        left.sort();
+        let mut want = asks.clone();
+        want.push(late.clone());
+        want.sort();
+        assert_eq!(left, want, "only the asks without Done and the unshown item stay");
+        let Json(r) = dismiss_all(State(st.clone()), Json(json!({ "ids": [late] }))).await.unwrap();
+        assert_eq!(r["cleared"], json!(1));
+        assert_eq!(dismiss_all(State(st.clone()), Json(json!({ "ids": before }))).await.unwrap().0["cleared"], json!(0), "nothing left to clear");
     }
 
     #[test]
@@ -1516,6 +1649,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn items_of_the_same_urgency_come_newest_first() {
+        let st = state();
+        let gh = |n: i64, hours_ago: i64| crate::github_inbox::GhPr {
+            repo: "o/r".into(), number: n, title: format!("PR {n}"), url: format!("https://github.com/o/r/pull/{n}"), author: "octocat".into(),
+            head_sha: format!("sha{n}"), created_at: (Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339(), checks: "SUCCESS".into(), review_requested: false,
+        };
+        st.rt.lock().unwrap().github_inbox = vec![gh(1, 5), gh(2, 1), gh(3, 3)];
+        let numbers: Vec<i64> = snapshot(&st).unwrap()["items"].as_array().unwrap().iter().map(|i| i["pr"]["number"].as_i64().unwrap()).collect();
+        assert_eq!(numbers, [2, 3, 1]);
+    }
+
+    #[tokio::test]
     async fn a_finished_issues_result_leaves_when_the_issue_is_opened_or_after_24_hours() {
         let st = state();
         let done = |title: &str, hours_ago: i64| {
@@ -1527,7 +1672,7 @@ mod tests {
         };
         let results = |st: &AppState| collect(st).unwrap().into_iter().filter(|i| i.kind == "task_done").map(|i| i.title).collect::<Vec<_>>();
         let (fresh, day_old, other) = (done("Fresh", 1), done("Day old", 25), done("Other", 2));
-        assert_eq!(results(&st), ["Other", "Fresh"], "a day later it's gone");
+        assert_eq!(results(&st), ["Fresh", "Other"], "a day later it's gone; the newest first");
 
         let Json(r) = issue_opened(State(st.clone()), Path(fresh.id.clone())).await.unwrap();
         assert_eq!(r["cleared"], json!(1));

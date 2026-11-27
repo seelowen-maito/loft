@@ -20,6 +20,8 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private var grillState: GrillSession?
     /// Commands the app sent, for UI tests to check.
     public private(set) var grillCommandsSent: [GrillCommand] = []
+    /// The Round note each sent round carried (nil: none), for tests to check.
+    public private(set) var grillNotesSent: [String?] = []
     /// The next grill command fails with this, as when the network drops (tests).
     public var failNextGrillCommand: APIError?
     /// Team setup messages the server sent to `loft`, for tests to check it happens once.
@@ -240,6 +242,14 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
                             meta: ["duration_ms": .number(143_000)], createdAt: ago(93).addingTimeInterval(143)),
             ],
         ]
+        // `-fixture-queued`: two messages typed while the Orchestrator's run goes on, one still queued, one cancelled (#668).
+        if args.contains("-fixture-queued") {
+            msgs["orch", default: []] += [
+                m(14, "orch", "user", "text", "Skip the iPad layout for now.", 3, meta: ["cancelled": true]),
+                m(15, "orch", "user", "text", "Also add a dark mode toggle to the settings screen.", 1),
+            ]
+            agentList[0].queuedMessages = [15]
+        }
         perms = [
             PermissionRequest(id: "p1", agentId: "ios", source: "prompt", toolName: "Bash", input: ["command": "xcodebuild test -scheme Loft"],
                               reason: nil, rule: "Bash(xcodebuild *)", status: "pending", createdAt: ago(4)),
@@ -353,12 +363,14 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     /// The round was sent: the answers go in the chat and the next round follows at once, with what was
     /// left open carried first (lock held). Without `next`, the agent is still working on it.
-    private func sendGrillRound(next postNext: Bool = true) {
+    private func sendGrillRound(next postNext: Bool = true, note: String? = nil) {
         guard var s = grillState, let qs = s.questions, let n = s.round else { return }
         let lines = qs.enumerated().map { i, q in
             "\(i + 1). " + (q.accepted ? "Yes (\(q.recommendation))" : q.state == .open ? "(no answer)" : (q.answer ?? ""))
         }
-        grillMessage("Answers to round \(n):\n\n" + lines.joined(separator: "\n"), GrillMeta(sessionId: s.sessionId, role: .answers, round: n), role: "user")
+        // The Round note closes the echo, as the server writes it.
+        let anythingElse = note.map { "\n\nAnything else? \($0)" } ?? ""
+        grillMessage("Answers to round \(n):\n\n" + lines.joined(separator: "\n") + anythingElse, GrillMeta(sessionId: s.sessionId, role: .answers, round: n), role: "user")
         guard postNext else {
             s.questions = qs.map { var q = $0; if q.state == .open { q.state = .carried }; return q }
             s.waiting = true
@@ -495,7 +507,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     public func info() async throws -> ServerInfo {
         try check()
         return ServerInfo(version: "0.1.0", host: "fixture-mac.tailnet.ts.net",
-                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply"] + (grill ? ["grill"] : []))
+                          features: ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "run_watchdog", "needs_you", "push", "voice_brief", "plans", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply", "saved"] + (grill ? ["grill"] : []))
     }
 
     public func agents() async throws -> [Agent] { try check(); return locked { agentList } }
@@ -642,7 +654,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return locked { agentId == "orch" ? grillState : nil }
     }
 
-    public func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, clientId: String) async throws -> GrillSession? {
+    public func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, note: String?, clientId: String) async throws -> GrillSession? {
         try check()
         guard grill else { throw APIError.server(status: 404, message: "Not Found") }
         return try locked { () -> GrillSession? in
@@ -656,7 +668,8 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             if [.send, .decide].contains(command), s.waiting == true { throw APIError.server(status: 409, message: "round_closed") }
             switch command {
             case .send:
-                sendGrillRound(); s = grillState!
+                grillNotesSent.append(note)
+                sendGrillRound(note: note); s = grillState!
             case .decide:
                 guard var qs = s.questions, let i = qs.firstIndex(where: { $0.id == questionId }) else { break }
                 qs[i].state = .decided
@@ -712,6 +725,18 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         }
     }
     public func stopRun(agentId: String) async throws { try check(); sent("stop", agentId) }
+    public func cancelQueued(agentId: String, messageId: Int64) async throws -> Bool {
+        try check()
+        return locked {
+            guard let i = agentList.firstIndex(where: { $0.id == agentId }), agentList[i].queuedMessages?.contains(messageId) == true else { return false }
+            agentList[i].queuedMessages?.removeAll { $0 == messageId }
+            if let j = msgs[agentId]?.firstIndex(where: { $0.id == messageId }), case .object(var o)? = msgs[agentId]![j].meta ?? .object([:]) {
+                o["cancelled"] = true
+                msgs[agentId]![j].meta = .object(o)
+            }
+            return true
+        }
+    }
     public func workspaceSize(agentId: String) async throws -> Int64 { try check(); return 4_200_000_000 }
     /// `-fixture-slow-disk`: sizes take a while, as a real measure can, to show the loader.
     private func measure() async {
@@ -865,6 +890,9 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
                            make("pr:c", "acme/api", "api#1765: Scope menu discounts to the restaurant", urgency: 2),
                            make("pr:d", "Octo/loft", "loft#111: Make it a brief", urgency: 0)]
         }
+        if ProcessInfo.processInfo.arguments.contains("-fixture-pr-workflows") {
+            list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.prWorkflows.utf8)), at: 0)
+        }
         if ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") {
             list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.backupFailed.utf8)), at: 0)
         }
@@ -912,6 +940,13 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             guard case .array(let a)? = body?["ids"] else { return }
             let ids = a.compactMap(\.stringValue)
             _ = locked { needsYouSeen.formUnion(ids) }
+            return
+        }
+        if path == NeedsYouClearAll.path {
+            guard case .array(let a)? = body?["ids"] else { throw APIError.server(status: 400, message: "ids is required.") }
+            let shown = Set(a.compactMap(\.stringValue))
+            let ids = try await needsYou().items.filter { $0.canDismiss && shown.contains($0.id) }.map(\.id)
+            _ = locked { needsYouDone.formUnion(ids) }
             return
         }
         let list = try JSONCoding.decoder.decode(NeedsYouList.self, from: Data(FixtureNeedsYou.json.utf8))
@@ -998,6 +1033,69 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     }
     public func updateDevice(token: String, _ fields: [String: JSONValue]) async throws { try check() }
 
+    /// Saved: two items kept from the chats, newest first; the tutorial's message is gone from its chat.
+    private var savedItems: [SavedItem] = [
+        SavedItem(id: 2, title: "Which Simulator the suite runs on", tag: "Good to know",
+                  content: "The iPhone 17 Pro on iOS 26.5. I can switch if you need another one.",
+                  agentId: "orch", agentName: "Orchestrator", messageId: 11, createdAt: Date().addingTimeInterval(-30 * 60)),
+        SavedItem(id: 1, title: "How to run the backend locally", tag: "Tutorial",
+                  content: "# Run the backend\n\n1. Install Rust with `rustup`.\n2. Run `cargo run` in **backend/**.\n3. Open http://localhost:7420.\n\nThe database lives in `~/.local/share/loft`.",
+                  agentId: "be", agentName: "Backend Agent", messageId: 501, createdAt: Date().addingTimeInterval(-2 * 86_400)),
+    ]
+    private var nextSavedId: Int64 = 3
+
+    public func savedList(query: String, tag: String) async throws -> SavedList {
+        try check()
+        return locked {
+            let q = query.lowercased()
+            let items = savedItems.filter {
+                (q.isEmpty || "\($0.title)\n\($0.content)".lowercased().contains(q)) && (tag.isEmpty || $0.tag.lowercased() == tag.lowercased())
+            }
+            return SavedList(items: items, tags: Array(Set(savedItems.map(\.tag).filter { !$0.isEmpty })).sorted())
+        }
+    }
+
+    public func savedItem(id: Int64) async throws -> SavedItem {
+        try check()
+        return try locked {
+            guard var i = savedItems.first(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "not found") }
+            i.sourceExists = msgs[i.agentId]?.contains { $0.id == i.messageId } ?? false
+            return i
+        }
+    }
+
+    public func saveMessage(agentId: String, messageId: Int64, title: String, tag: String) async throws -> SavedItem {
+        try check()
+        return try locked {
+            guard let m = msgs[agentId]?.first(where: { $0.id == messageId }), Saved.canSave(m) else {
+                throw APIError.server(status: 400, message: "Only a chat message with text can be saved.")
+            }
+            let name = agentList.first { $0.id == agentId }?.name ?? agentId
+            let i = SavedItem(id: nextSavedId, title: title.isEmpty ? Saved.defaultTitle(m.content) : title, tag: tag, content: m.content,
+                              agentId: agentId, agentName: name, messageId: messageId, createdAt: Date())
+            nextSavedId += 1
+            savedItems.insert(i, at: 0)
+            return i
+        }
+    }
+
+    public func updateSaved(id: Int64, title: String, tag: String, content: String) async throws -> SavedItem {
+        try check()
+        return try locked {
+            guard let k = savedItems.firstIndex(where: { $0.id == id }) else { throw APIError.server(status: 404, message: "not found") }
+            savedItems[k].title = title
+            savedItems[k].tag = tag
+            savedItems[k].content = content
+            savedItems[k].updatedAt = Date()
+            return savedItems[k]
+        }
+    }
+
+    public func deleteSaved(id: Int64) async throws {
+        try check()
+        locked { savedItems.removeAll { $0.id == id } }
+    }
+
     public func resetSession(agentId: String) async throws {
         try check()
         sent("clear", agentId)
@@ -1070,8 +1168,11 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     public func pullRequests() async throws -> [PullRequest] {
         try check()
+        // `-fixture-pr-workflows`: it changed `.github/workflows/`.
+        let workflows = ProcessInfo.processInfo.arguments.contains("-fixture-pr-workflows")
         return [PullRequest(id: "pr1", agentId: "be", slug: "octo/loft", number: 214, url: "https://github.com/octo/loft/pull/214",
-                            title: "Settings endpoints", state: "open", draft: false, createdAt: Date().addingTimeInterval(-1500))]
+                            title: "Settings endpoints", state: "open", draft: false, createdAt: Date().addingTimeInterval(-1500),
+                            changesWorkflows: workflows ? true : nil)]
     }
     public func tasks() async throws -> [HBTask] { try check(); return locked { taskList } }
     public func deliverySummaries() async throws -> [DeliverySummary] { try check(); return locked { deliveryList } }

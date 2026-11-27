@@ -12,7 +12,8 @@ public struct IssueSettings: Equatable {
         self.autoPublish = autoPublish
     }
 
-    /// From `GET /api/settings`'s `settings` object; nil on a server without the GitHub issues settings.
+    /// From `GET /api/settings`'s `settings` object; nil on a server without the GitHub issues settings: an older
+    /// one, or one where they're each project's Project settings (#467), so the section hides.
     public init?(_ settings: JSONValue) {
         guard let mode = settings["comment_approval_default"]?.stringValue else { return nil }
         commentApproval = ["own", "all"].contains(mode) ? mode : "ask"

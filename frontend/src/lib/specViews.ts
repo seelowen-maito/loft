@@ -1,13 +1,15 @@
-/** The Issues page's spec views: which Delivery a spec has and where it stands. Pure, so the board, its URL options and a spec's own page agree. */
+/** The Issues page's spec views: which Delivery a spec (or a standalone ticket) has and where it stands. Pure, so the board, its URL options and a spec's own page agree. */
 import type { IssueDelivery, Task, TaskStatus } from "./api";
 import { NEEDS_YOU_LABEL } from "./taskStatus.ts";
 
-/** `GET /api/deliveries/summary`: a spec's Delivery, with the spec it belongs to. */
+/** `GET /api/deliveries/summary`: a spec's Delivery, with the spec it belongs to, or a standalone ticket's (`spec` is then the ticket's number, `spec_id` its Loft issue, and it has no `tickets`). */
 export type DeliverySummary = Omit<IssueDelivery, "tickets" | "spec"> & {
   repo: string;
   spec: number;
   spec_id: string;
   local: boolean;
+  /** A standalone ticket's Delivery. An older server sends none of those. */
+  standalone?: boolean;
   tickets: { number: number; id?: string; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; waiting_for_ci?: boolean; ci_since?: string | null; verdicts?: Record<string, string> }[];
 };
 
@@ -41,13 +43,22 @@ export function stageOf(spec: Task, d: DeliverySummary | null): Stage {
   return "delivery";
 }
 
+/** Whether issue `t` is a standalone ticket whose Delivery started: it leaves the Issues column for the stage columns, like a spec. */
+export const standaloneOnStages = (t: Task, all: DeliverySummary[]) => {
+  const d = deliveryOf(t, all);
+  return !!d?.standalone && d.state !== "planned";
+};
+
+/** The Delivery waits for the user: its final review, or a standalone ticket (which shows no tickets) after too many rounds of changes. */
+export const waitsForYou = (d: Pick<DeliverySummary, "state" | "standalone" | "needs_human"> | null) => d?.state === "needs_human" || (!!d?.standalone && !!d.needs_human);
+
 /** A spec card's badge: its stage, and while In Delivery what it's at: the final review, fixes, needs you, or
  *  "Waiting for CI" in place of the stage when no agent is at work and only CI is left (the server's `ci` tone). */
-export function badgeText(stage: Stage, d: Pick<DeliverySummary, "state" | "state_line"> | null): string {
+export function badgeText(stage: Stage, d: Pick<DeliverySummary, "state" | "state_line" | "standalone" | "needs_human"> | null): string {
   const label = [...STAGES, DROPPED].find((s) => s.key === stage)!.label;
   if (stage !== "delivery") return label;
   if (d?.state_line?.tone === "ci") return "Waiting for CI";
-  const sub = d?.state === "final_review" ? " · final review" : d?.state === "final_fixes" ? " · fixing" : d?.state === "needs_human" ? ` · ${NEEDS_YOU_LABEL}` : "";
+  const sub = d?.state === "final_review" ? " · final review" : d?.state === "final_fixes" ? " · fixing" : waitsForYou(d) ? ` · ${NEEDS_YOU_LABEL}` : "";
   return label + sub;
 }
 
@@ -139,7 +150,7 @@ export function withOpen(p: URLSearchParams, id: string | null, up?: string): UR
 }
 
 /** Something the user must do on this spec: merge it, or a Delivery or ticket that needs a human. */
-export const needsMe = (stage: Stage, d: DeliverySummary | null) => stage === "ready" || d?.state === "needs_human" || !!d?.tickets.some((t) => t.state === "needs_human");
+export const needsMe = (stage: Stage, d: DeliverySummary | null) => stage === "ready" || waitsForYou(d) || !!d?.tickets.some((t) => t.state === "needs_human");
 
 /** Whether a spec is the agent's on the board: it owns the spec, or builds its Delivery. Any spec without an agent. */
 export const specOfAgent = (spec: Task, deliveries: DeliverySummary[], agent: string) =>
@@ -162,16 +173,16 @@ export function arrange(specs: Task[], deliveries: DeliverySummary[], tasks: Tas
 /** Statuses that wait for the user. */
 export const NEEDS_YOU: TaskStatus[] = ["waiting_approval", "blocked", "failed"];
 
-/** A spec's ticket: it has a parent, names its spec in the template's `## Parent` section, or is in a Delivery's tickets. */
+/** A spec's ticket: it has a parent, names its spec in the template's `## Parent` section, or is in a spec's Delivery's tickets (a standalone ticket's has none). */
 export const isSpecTicket = (t: Task, deliveries: DeliverySummary[]) =>
   !!t.parent_id || /^## Parent\s+#\d+/m.test(t.description) || deliveries.some((d) => d.tickets.some((x) => (x.id ? x.id === t.id : !!t.github && d.repo === t.github.repo && x.number === t.github.number)));
 
-/** The Issues column: the issues (of `tasks`, already through the shared filters) that are no spec and no spec's ticket. Closed ones only when asked for, open ones first, then the most recently updated.
+/** The Issues column: the issues (of `tasks`, already through the shared filters) that are no spec, no spec's ticket and no standalone ticket in Delivery (that one is in the stage columns). Closed ones only when asked for, open ones first, then the most recently updated.
  * Whether an issue is a spec's ticket is only known once the Deliveries have loaded, so until then the column is empty. */
 export function boardIssues(tasks: Task[], deliveries: DeliverySummary[], loaded: boolean, o: BoardOptions, showClosed: boolean): Task[] {
   if (!loaded) return [];
   const closed = (t: Task) => t.state === "closed";
   return tasks
-    .filter((t) => !t.labels.some((l) => l.toLowerCase() === "spec") && !isSpecTicket(t, deliveries) && (showClosed || !closed(t)) && (!o.needsMe || NEEDS_YOU.includes(t.status)))
+    .filter((t) => !t.labels.some((l) => l.toLowerCase() === "spec") && !isSpecTicket(t, deliveries) && !standaloneOnStages(t, deliveries) && (showClosed || !closed(t)) && (!o.needsMe || NEEDS_YOU.includes(t.status)))
     .sort((a, b) => Number(closed(a)) - Number(closed(b)) || b.updated_at.localeCompare(a.updated_at));
 }

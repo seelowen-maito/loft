@@ -137,8 +137,8 @@ final class LoftMacLegacyUITests: MacUITestCase {
     func testNewMessageShortcut() {
         launch(["-ui-testing"])
         XCTAssertTrue(app.scrollViews["agentsList"].waitForExistence(timeout: 10))
-        app.typeKey("5", modifierFlags: .command)
-        XCTAssertTrue(app.textFields["serverAddressField"].waitForExistence(timeout: 5), "⌘5 opens Settings")
+        app.typeKey("6", modifierFlags: .command)
+        XCTAssertTrue(app.textFields["serverAddressField"].waitForExistence(timeout: 5), "⌘6 opens Settings")
         app.typeKey("n", modifierFlags: .command)
         let search = app.textFields["recipientSearch"]
         XCTAssertTrue(search.waitForExistence(timeout: 5))

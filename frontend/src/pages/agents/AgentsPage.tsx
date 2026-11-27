@@ -18,6 +18,7 @@ import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
 import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
 import { saveRecent } from "../../lib/shortcuts";
+import { Tip } from "../../components/HoverTip";
 import { groupUnread, shouldMarkRead, showsUnreadDot } from "../../lib/unread";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
@@ -261,6 +262,11 @@ export default function AgentsPage() {
                               {a.queued_messages.length} queued
                             </span>
                           )}
+                          {a.goal && (
+                            <span className="shrink-0 rounded-full border border-accent/40 px-1.5 font-mono text-[10px] text-accent" title={`Goal active: ${a.goal}`}>
+                              goal
+                            </span>
+                          )}
                           {(a.running || listedContext(a) != null) && (
                             <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10.5px] tabular-nums text-fg-3">
                               {listedContext(a) != null && (
@@ -307,16 +313,17 @@ export default function AgentsPage() {
             prs={prs}
             grill={grill}
             headerActions={
-              <button
-                className="btn-ghost"
-                onClick={toggleInspector}
-                aria-expanded={inspectorOpen}
-                aria-controls="inspector"
-                aria-label={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
-                title={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
-              >
-                {inspectorOpen ? <PanelRightClose className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
-              </button>
+              <Tip name={inspectorOpen ? "Hide agent settings" : "Show agent settings"}>
+                <button
+                  className="btn-ghost"
+                  onClick={toggleInspector}
+                  aria-expanded={inspectorOpen}
+                  aria-controls="inspector"
+                  aria-label={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
+                >
+                  {inspectorOpen ? <PanelRightClose className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
+                </button>
+              </Tip>
             }
           />
         ) : (
@@ -352,7 +359,6 @@ export default function AgentsPage() {
         <NewAgentDialog
           groups={teams}
           projects={projects}
-          agents={agents ?? []}
           onClose={() => setCreating(false)}
           onCreated={(a) => {
             setCreating(false);

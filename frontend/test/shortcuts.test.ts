@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   comboFromEvent, formatCombo, isReserved, isTyping, loadCombo, normalizeCombo, loadCombos, loadRecent, matchesCombo, nextNeedsYou, saveCombo, saveRecent,
-  OPEN_SHORTCUT, openShortcut, searchRows, shortcutAction, switcherAgents,
+  fixedShortcuts, OPEN_SHORTCUT, openShortcut, searchRows, shortcutAction, switcherAgents,
 } from "../src/lib/shortcuts.ts";
 import { roleLabel } from "../src/lib/api.ts";
 
@@ -119,6 +119,26 @@ test("g then a letter opens a page; / focuses the chat box and ? opens the sheet
   assert.deepEqual(at(key("Slash", {}, "/")), { type: "focus-chat" });
   assert.deepEqual(at(key("Slash", { shiftKey: true }, "?")), { type: "sheet" });
   assert.equal(at(key("KeyG", { metaKey: true })), null, "⌘G stays the browser's");
+});
+
+test("T opens Talk outside a text field or dialog only, once per press, and the sheet lists it (#712)", () => {
+  const at = (e: ReturnType<typeof key>, typing = false, afterG = false) => shortcutAction(e, { combos: defaults, typing, afterG, mac: true });
+  assert.deepEqual(at(key("KeyT")), { type: "talk" });
+  assert.deepEqual(at(key("KeyT", { shiftKey: true }, "T")), { type: "talk" });
+  assert.equal(at(key("KeyT"), true), null, "typing a t in a field types it");
+  assert.equal(at(key("KeyT", { metaKey: true })), null, "⌘T stays the browser's");
+  assert.equal(at(key("KeyT"), false, true), null, "g then t isn't a page");
+  assert.ok(fixedShortcuts({ simulator: true, voice: true }).some((f) => f.keys === "T" && f.label === "Talk to an agent"));
+  // Talk is a Mac-only feature: where the server doesn't offer it, T does nothing and the sheet leaves it out.
+  assert.equal(shortcutAction(key("KeyT"), { combos: defaults, typing: false, afterG: false, mac: true, voice: false }), null);
+  assert.ok(!fixedShortcuts({ simulator: true, voice: false }).some((f) => f.keys === "T"));
+  // Any open dialog (Glossary, a confirm, Talk itself) keeps the plain keys from acting behind it; ⌘K still works.
+  const behind = (e: ReturnType<typeof key>) => shortcutAction(e, { combos: defaults, typing: false, afterG: false, dialog: true, mac: true });
+  assert.equal(behind(key("KeyT")), null);
+  assert.equal(behind(key("Slash", { shiftKey: true }, "?")), null);
+  assert.equal(behind(key("KeyG")), null);
+  assert.deepEqual(behind(key("KeyK", { metaKey: true })), { type: "switcher" });
+  assert.equal(at({ ...key("KeyT"), repeat: true }), null, "holding T doesn't open Talk again");
 });
 
 test("⌘J goes through the agents in Needs you, in its order, and wraps", () => {

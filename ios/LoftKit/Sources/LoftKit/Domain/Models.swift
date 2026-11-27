@@ -91,6 +91,8 @@ public struct Agent: Codable, Identifiable, Hashable {
     /// Background tasks the agent is waiting on after it already replied (e.g. "Run the QA suite").
     public var waitingOn: [String]? = nil
     public var waitingSince: Date? = nil
+    /// Typed messages waiting for its current run to end, which Cancel can take back (nil from older servers).
+    public var queuedMessages: [Int64]? = nil
     /// The Claude Code Session its next run resumes; nil after Clear (and from older servers).
     public var sessionId: String? = nil
     /// Fresh context for each Delivery ticket: "off", "above_80k" … "above_200k" or "always" (nil from older servers).
@@ -406,6 +408,17 @@ public struct PullRequest: Codable, Identifiable, Hashable {
     public var createdAt: Date?
     /// Label names; the verdicts are tests:green, qa:passed, security:passed and their failures.
     public var labels: [String]?
+    /// Some head of it changed `.github/workflows/` or `.github/actions/`, which run with the repo's secrets; it stays
+    /// set once true. Nil until its files are read, or from an older server.
+    public var changesWorkflows: Bool? = nil
+
+    /// The web card's rule: an open PR that changed workflows.
+    public var showsWorkflowWarning: Bool { state == "open" && changesWorkflows == true }
+}
+
+/// The workflow-change warning (`pr_workflows` items, and PRs with `changes_workflows`).
+public enum WorkflowWarning {
+    public static let text = "This PR changes CI workflows or actions, which run with your repo's secrets."
 }
 
 public struct ServerInfo: Codable, Hashable {
@@ -437,6 +450,8 @@ public enum ServerFeature: String {
     case leftProcesses = "left_processes"
     /// A message can reply to an earlier one in the chat (spec #572).
     case reply
+    /// Chat messages kept in Saved, with a title and a tag (spec #675).
+    case saved
 }
 
 /// The Mac's CPU temperature (`GET /api/system`), sampled every 30 s on the Mac.

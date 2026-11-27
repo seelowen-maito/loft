@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { RotateCw, TriangleAlert } from "lucide-react";
-import { api, type AgentDevice, type AgentsSummary, type ApprovalMode, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { api, type ActionsOwner, type ActionsOwners, type AgentDevice, type AgentsSummary, type BackupStatus, type CleanLog, type CleanSkip, type GithubBudget, type WorkspaceSizes, type Settings, type SettingsView } from "../lib/api";
+import { monthName, parseQuota, quotaPercent, quotaTone } from "../lib/actionsQuota";
 import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
+import { FolderField } from "./FolderField";
 import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { SettingsCard } from "../components/SettingsCard";
+import { SettingsField as Field } from "../components/SettingsField";
+import { cardInView, keepPin, type Pin } from "../lib/settingsSpy";
 import { Callout, ErrorLine } from "../components/Callout";
 import { ActionButton } from "../components/ActionButton";
 import { errorText, useAction } from "../lib/useAction";
@@ -22,24 +26,12 @@ import { comboFromEvent, fixedShortcuts, formatCombo, isReserved, loadCombos, no
 import { Keys } from "../components/Shortcuts";
 import { usePoll } from "../hooks/usePoll";
 import { useOffered } from "../hooks/useOffered";
+import type { MacOnly } from "../lib/platform";
 
 const LABELS: Record<string, string> = { projects_dir: "Projects folder" };
 
 /** Window event fired after a save, with the saved Settings as detail, so the navbar can follow. */
 export const SETTINGS_SAVED = "loft:settings-saved";
-
-function Field({ label, hint, restart, children }: { label: string; hint?: string; restart?: boolean; children: React.ReactNode }) {
-  return (
-    <label className="block space-y-1.5">
-      <span className="flex items-center gap-2">
-        <span className="eyebrow">{label}</span>
-        {restart && <span className="chip text-[10px]">restart</span>}
-      </span>
-      {children}
-      {hint && <span className="block text-[11.5px] text-fg-3">{hint}</span>}
-    </label>
-  );
-}
 
 export function Toggle({ on, onChange, label, hint }: { on: boolean; onChange: (v: boolean) => void; label: string; hint?: string }) {
   return (
@@ -55,20 +47,6 @@ export function Toggle({ on, onChange, label, hint }: { on: boolean; onChange: (
   );
 }
 
-const MODES: { value: ApprovalMode; label: string }[] = [
-  { value: "ask", label: "Ask for every comment" },
-  { value: "own", label: "Auto-approve my own comments" },
-  { value: "all", label: "Auto-approve everything" },
-];
-
-function ModeSelect({ value, onChange }: { value: ApprovalMode; onChange: (m: ApprovalMode) => void }) {
-  return (
-    <select value={value} onChange={(e) => onChange(e.target.value as ApprovalMode)} className="input">
-      {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-    </select>
-  );
-}
-
 const SOURCE_LABELS: Record<string, string> = {
   prs: "Pull request cards",
   mirror: "Issue mirror",
@@ -76,17 +54,19 @@ const SOURCE_LABELS: Record<string, string> = {
   inbox: "GitHub inbox",
   user: "Your clicks",
   agent: "Agents' Loft tools",
+  actions: "Actions minutes",
   other: "Other",
 };
 
-/** What's left of GitHub's hourly limit (shared with the agents' own `gh`), and where Loft's requests went. */
+/** What's left of GitHub's hourly limit (shared with the agents' own `gh`), where Loft's requests went, and each
+ *  owner's Actions minutes this month against its quota. */
 function GithubUsage() {
   const [b, setB] = useState<GithubBudget | null>(null);
   usePoll(() => api.githubBudget().then(setB).catch(() => {}), 15_000);
   const at = (s: number) => fmtClock(s);
   const rows = Object.entries(b?.by_source ?? {}).sort((x, y) => y[1].requests - x[1].requests);
   return (
-    <SettingsCard title="GitHub API">
+    <SettingsCard id="github" title="GitHub API">
       {!b || Object.keys(b.resources).length === 0 ? (
         <p className="text-[12.5px] text-fg-3">No answer from GitHub yet since Loft started.</p>
       ) : (
@@ -103,6 +83,7 @@ function GithubUsage() {
             </div>
           ))}
           <p className="text-[11.5px] text-fg-3">The limit is per GitHub account, so the agents' own <code className="font-mono">gh</code> commands use it too.</p>
+          <WorkflowScope scopes={b.scopes} />
           {rows.length > 0 && (
             <table className="w-full text-[12.5px]">
               <thead>
@@ -125,7 +106,114 @@ function GithubUsage() {
           )}
         </div>
       )}
+      <ActionsQuotas />
     </SettingsCard>
+  );
+}
+
+/** Whether Loft's own GitHub token can push changes to `.github/workflows/` (the `workflow` scope), which run with a
+ *  repo's secrets once pushed to one of its branches. Git pushing over SSH or another credential isn't limited by it. */
+function WorkflowScope({ scopes }: { scopes?: string[] | null }) {
+  if (scopes === undefined) return null;
+  const code = (s: string) => <code className="font-mono">{s}</code>;
+  return (
+    <p className="text-[12.5px] text-fg-2">
+      {scopes === null ? (
+        <>Workflows: GitHub lists no scopes for Loft's token (fine-grained or app), so check its Workflows permission on GitHub.</>
+      ) : scopes.includes("workflow") ? (
+        <>Workflows: Loft's token has the {code("workflow")} scope, so it can push changes to {code(".github/workflows/")}.</>
+      ) : (
+        <>Workflows: Loft's token has no {code("workflow")} scope, so it can't push changes to {code(".github/workflows/")} itself.</>
+      )}{" "}
+      Git pushes over SSH or with another credential aren't limited by it. Loft flags a PR that changes workflows or actions.
+    </p>
+  );
+}
+
+/** Each owner's GitHub Actions minutes this month, with its quota to edit: Needs you warns at 70% and 90% of it. */
+function ActionsQuotas() {
+  const [v, setV] = useState<ActionsOwners | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  usePoll(
+    () =>
+      api
+        .actionsOwners()
+        .then((v) => (setV(v), setErr(null)))
+        .catch((e) => setErr(errorText(e))),
+    60_000,
+  );
+  return (
+    <div className="space-y-3 border-t border-line pt-4">
+      <div className="eyebrow">Actions minutes{v ? ` · ${monthName(v.month)}` : ""}</div>
+      {err && !v && <ErrorLine error={err} />}
+      {!v && !err && <div className="skeleton h-12 rounded-xl" />}
+      {v && v.owners.length === 0 && <p className="text-[12.5px] text-fg-3">No repo on GitHub read yet: Loft reads each project's repo every 15 minutes.</p>}
+      {v?.owners.map((o) => <OwnerQuota key={o.owner} o={o} onSaved={setV} />)}
+      <p className="text-[11.5px] text-fg-3">
+        Per org or account: the sum of its private repos Loft knows, each job rounded up to the minute (public repos are free) and weighted as GitHub uses up included minutes (macOS jobs 10×, Windows 2×), or the org's own billed minutes when the token has <code className="font-mono">admin:org</code>. At 70% and 90% of a quota,
+        Needs you tells you, once a month.
+      </p>
+    </div>
+  );
+}
+
+function OwnerQuota({ o, onSaved }: { o: ActionsOwner; onSaved: (v: ActionsOwners) => void }) {
+  const saved = o.quota === null ? "" : String(o.quota);
+  const [draft, setDraft] = useState(saved);
+  useEffect(() => setDraft(saved), [saved]);
+  const save = useAction();
+  const commit = () => {
+    const q = parseQuota(draft);
+    if (q === undefined) return setDraft(saved);
+    if (q === o.quota) return setDraft(saved);
+    save.run(async () => onSaved(await api.setActionsQuota(o.owner, q)));
+  };
+  const pct = quotaPercent(o.minutes, o.quota);
+  const priv = o.repos.filter((r) => r.private).sort((a, b) => b.minutes - a.minutes);
+  const where =
+    o.source === "billing"
+      ? "As GitHub bills the org"
+      : priv.length === 0
+        ? "No private repo Loft knows"
+        : `${priv.length} private repo${priv.length === 1 ? "" : "s"}: ${priv
+            .slice(0, 3)
+            .map((r) => `${r.repo.split("/")[1]} ${r.minutes.toLocaleString()} min`)
+            .join(", ")}${priv.length > 3 ? ", …" : ""}`;
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-[13px]">
+        <span className="min-w-0 [overflow-wrap:anywhere]">
+          <span className="text-fg">{o.owner}</span>
+          {o.kind && <span className="ml-1.5 text-[11.5px] text-fg-3">{o.kind === "Organization" ? "org" : "account"}</span>}
+        </span>
+        <span className="flex items-center gap-3">
+          <span className="font-mono text-[12.5px] tabular-nums">
+            {o.minutes.toLocaleString()} min{pct !== null && <span className="text-fg-3"> · {Math.round(pct)}%</span>}
+          </span>
+          <label className="flex items-center gap-1.5 text-[11.5px] text-fg-3">
+            quota
+            <input
+              className="input w-24 py-1 text-right font-mono text-[12px] tabular-nums"
+              inputMode="numeric"
+              placeholder="none"
+              aria-label={`Monthly Actions quota of ${o.owner}, in minutes`}
+              value={draft}
+              disabled={save.busy}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => e.key === "Enter" && commit()}
+            />
+          </label>
+        </span>
+      </div>
+      {pct !== null && (
+        <div className="h-1.5 overflow-hidden rounded-full bg-ink-700">
+          <div className={cx("h-full rounded-full", quotaTone(pct))} style={{ width: `${Math.min(100, pct)}%` }} />
+        </div>
+      )}
+      <p className="text-[11.5px] text-fg-3 [overflow-wrap:anywhere]">{where}</p>
+      {save.error && <ErrorLine error={save.error} />}
+    </div>
   );
 }
 
@@ -182,8 +270,8 @@ function Backups({ folder, onFolder, folderErr }: { folder: string; onFolder: (v
             Backups in iCloud Drive leave this Mac: all your chats and your GitHub token are then stored by Apple. Save to use it.
           </Callout>
         )}
-        <Field label="Backups folder" hint="Loft backs up its database and settings once a day, owner-only, and keeps 7 daily and 4 weekly backups. Point it at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
-          <input className="input font-mono" placeholder={s?.dir ?? ""} value={folder} onChange={(e) => onFolder(e.target.value)} />
+        <Field label="Backups folder" hint="Loft backs up its database and settings once a day." help="Backups are owner-only; Loft keeps 7 daily and 4 weekly ones. Point the folder at an external disk to survive this Mac's disk. A cloud folder like iCloud Drive sends your chats and GitHub token off this Mac. To restore, see docs/backups.md.">
+          {(id) => <input id={id} className="input font-mono" placeholder={s?.dir ?? ""} value={folder} onChange={(e) => onFolder(e.target.value)} />}
         </Field>
         {folderErr && <p className="text-[12.5px] text-bad [overflow-wrap:anywhere]">{folderErr}</p>}
     </SettingsCard>
@@ -253,14 +341,17 @@ function Workspaces({ idleHours, onIdleHours }: { idleHours: number; onIdleHours
             </ul>
           </div>
         )}
-        <Field label="Idle timeout (hours)" hint="After this long with no run, Loft stops the processes the agent left running (like a dev server) and shuts its Simulator device down. Devices left under an agent's old name, or of a deleted agent, are deleted. Your own devices are never touched.">
-          <input
-            className="input w-24"
-            type="number"
-            min={1}
-            value={idleHours}
-            onChange={(e) => onIdleHours(Math.max(1, Math.round(Number(e.target.value)) || 1))}
-          />
+        <Field label="Idle timeout (hours)" hint="After this long with no run, Loft stops what the agent left running." help="That means processes like a dev server, and the agent's Simulator device is shut down. Devices left under an agent's old name, or of a deleted agent, are deleted. Your own devices are never touched.">
+          {(id) => (
+            <input
+              id={id}
+              className="input w-24"
+              type="number"
+              min={1}
+              value={idleHours}
+              onChange={(e) => onIdleHours(Math.max(1, Math.round(Number(e.target.value)) || 1))}
+            />
+          )}
         </Field>
         <p className="text-[12px] text-fg-3">
           Check space lists what's in every agent's workspace; Delete selected removes what you tick. A clone, a main clone too, can be ticked once git says everything in it is pushed (the agent clones it again); notes and uploads stay unless you tick them. Loft also removes build output untouched for 3 days, daily, a ticket's scratch folder once the ticket is closed, and other scratch and test output in notes after 7 days.
@@ -366,7 +457,7 @@ function Spend() {
     api.agentsSummary().then((r) => setAll(r.all_time)).catch(() => {});
   }, []);
   return (
-    <SettingsCard title="Spend">
+    <SettingsCard id="spend" title="Spend">
       <p className="text-[13px] text-fg" title="Every run since Loft started counting, deleted agents and cleared chats included">
         {all ? `All time: ${all.runs.toLocaleString("en-US")} runs · est. ${exactDollars(all.cost_usd)}` : " "}
       </p>
@@ -432,7 +523,7 @@ function ShortcutSettings() {
         {hint ?? "These two work from any page, even while typing. Press Record, then the new keys; they need ⌘, Ctrl or Alt. Kept in this browser."}
       </span>
       <ul className="space-y-2 border-t border-line pt-3">
-        {fixedShortcuts(offers.simulator).map((f) => (
+        {fixedShortcuts(offers).map((f) => (
           <li key={f.keys} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0 text-fg-2">{f.label}</span>
             <Keys keys={f.keys} />
@@ -444,8 +535,71 @@ function ShortcutSettings() {
   );
 }
 
+/** The cards, in page order: what "On this page" and "Jump to…" list. Each id is its card's (`/settings#push`). */
+const SECTIONS = [
+  ["general", "General"], ["backups", "Backups"], ["workspaces", "Disk"], ["github", "GitHub API"], ["spend", "Spend"],
+  ["updates", "Updates"], ["agents", "Agents"], ["navigation", "Navigation"], ["shortcuts", "Keyboard shortcuts"],
+  ["herdr", "Herdr UI"], ["push", "Push notifications"], ["https", "Https on the tailnet"], ["voice", "Voice on this Mac"],
+  ["claude-login", "Claude login"], ["mac-access", "Mac access"],
+] as const;
+
+/** The cards that are Mac-only features: listed only where the server offers the feature, like the cards themselves. */
+const MAC_ONLY_CARDS: Partial<Record<(typeof SECTIONS)[number][0], MacOnly>> = { navigation: "simulator", herdr: "herdr", voice: "voice", "mac-access": "mac_access" };
+
+const goTo = (id: string) => {
+  document.getElementById(id)?.scrollIntoView({ block: "start" });
+  history.replaceState(null, "", `#${id}`);
+};
+
+/** The card "On this page" highlights, from the page's scroll. The page's scroller isn't there yet while Settings loads,
+ * and scroll events don't bubble: listen on the document, in the capture phase. `ready`: the cards are on the page.
+ * A card clicked, or named by the URL's #hash, stays highlighted at the bottom of the page (where the last cards can't
+ * reach the top) until the user scrolls by hand. */
+function useCardInView(ready: boolean) {
+  const [current, setCurrent] = useState<string>(SECTIONS[0][0]);
+  // `top`: where the scroller was when a click pinned it; null for a #hash pin, which the page keeps scrolling to
+  // while the cards above it grow, so only the user's own input drops it.
+  const pinned = useRef<Pin | null>(null);
+  const scroller = () => document.querySelector<HTMLElement>("[data-settings-scroll]");
+  useEffect(() => {
+    if (!ready) return;
+    const hash = window.location.hash.slice(1);
+    if (SECTIONS.some(([id]) => id === hash)) pinned.current = { id: hash, top: null };
+    const update = () => {
+      const el = scroller();
+      if (!el) return;
+      const tops: Record<string, number> = {};
+      for (const [id] of SECTIONS) {
+        const card = document.getElementById(id);
+        if (card) tops[id] = card.getBoundingClientRect().top;
+      }
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+      pinned.current = keepPin(pinned.current, el.scrollTop);
+      setCurrent(cardInView(SECTIONS.map(([id]) => id), tops, el.getBoundingClientRect().top + 96, atBottom, pinned.current?.id ?? null));
+    };
+    const byHand = () => (pinned.current = null);
+    document.addEventListener("scroll", update, { capture: true, passive: true });
+    for (const e of ["wheel", "touchmove", "keydown", "pointerdown"]) document.addEventListener(e, byHand, { passive: true });
+    update();
+    return () => {
+      document.removeEventListener("scroll", update, { capture: true });
+      for (const e of ["wheel", "touchmove", "keydown", "pointerdown"]) document.removeEventListener(e, byHand);
+    };
+  }, [ready]);
+  /** Call after scrolling to the card: pins it at the scroller's new position. */
+  const pin = (id: string) => {
+    pinned.current = { id, top: scroller()?.scrollTop ?? null };
+    setCurrent(id);
+  };
+  return { current, pin };
+}
+
 export default function SettingsPage() {
   const offers = useOffered();
+  const sections = SECTIONS.filter(([id]) => {
+    const feature = MAC_ONLY_CARDS[id];
+    return !feature || offers[feature];
+  });
   const [view, setView] = useState<SettingsView | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   // Write-only: undefined keeps the saved token, "" clears it.
@@ -470,6 +624,8 @@ export default function SettingsPage() {
       if (e.type === "agent_updated") load().catch(() => {});
     }, [load]),
   );
+
+  const { current: inView, pin } = useCardInView(!!view && !!draft);
 
   if (!view || !draft) {
     return <div className="mx-auto max-w-3xl px-5 py-8">{err ? <ErrorLine error={err} /> : <div className="skeleton h-96 rounded-2xl" />}</div>;
@@ -523,9 +679,37 @@ export default function SettingsPage() {
   const running = view.running_agents;
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-3xl space-y-5 px-5 py-8 pb-28">
-        <h1 className="text-[22px] font-medium tracking-tight">Settings</h1>
+    <div className="h-full overflow-y-auto" data-settings-scroll>
+      <div className="mx-auto max-w-3xl px-5 py-8 pb-28 lg:grid lg:max-w-5xl lg:grid-cols-[200px_minmax(0,1fr)] lg:gap-8">
+        <nav aria-label="On this page" className="hidden lg:block">
+          <div className="sticky top-6 space-y-0.5">
+            <span className="eyebrow block px-2.5 pb-2">On this page</span>
+            {sections.map(([id, title]) => (
+              <a
+                key={id}
+                href={`#${id}`}
+                aria-current={inView === id ? "true" : undefined}
+                onClick={(e) => (e.preventDefault(), goTo(id), pin(id))}
+                className={cx("block rounded-lg px-2.5 py-1 text-[13px] transition-colors", inView === id ? "bg-ink-800 text-fg" : "text-fg-2 hover:text-fg")}
+              >
+                {title}
+              </a>
+            ))}
+          </div>
+        </nav>
+        <div className="min-w-0 space-y-5">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-[22px] font-medium tracking-tight">Settings</h1>
+          <select
+            aria-label="Jump to"
+            className="input ml-auto w-auto max-w-[60%] py-1.5 text-[13px] lg:hidden"
+            value=""
+            onChange={(e) => e.target.value && (goTo(e.target.value), pin(e.target.value))}
+          >
+            <option value="">Jump to…</option>
+            {sections.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
+          </select>
+        </div>
 
         {(view.pending_restart.length > 0 || restarting) && (
           <Callout
@@ -548,32 +732,35 @@ export default function SettingsPage() {
           </Callout>
         )}
 
-        <SettingsCard title="General">
-          <Field label="Projects folder" hint="Where your git repos live." restart>
-            <input className="input font-mono" value={draft.projects_dir} onChange={(e) => set("projects_dir", e.target.value)} />
+        <SettingsCard id="general" title="General">
+          <Field label="Projects folder" hint="Where your git repos live. Type a path or a folder's name to see suggestions." restart>
+            {(id) => <FolderField id={id} value={draft.projects_dir} onChange={(v) => set("projects_dir", v)} />}
           </Field>
           <Field label="Claude command" hint="What agents run.">
-            <input className="input font-mono" value={draft.claude_bin} onChange={(e) => set("claude_bin", e.target.value)} />
+            {(id) => <input id={id} className="input font-mono" value={draft.claude_bin} onChange={(e) => set("claude_bin", e.target.value)} />}
           </Field>
-          <Field label="SSH host" hint="How other machines reach this one, e.g. loft. /code from them then opens VS Code over Remote-SSH (VS Code only). Leave empty if you only use loft on this machine.">
-            <input className="input font-mono" placeholder="none" value={draft.ssh_host} onChange={(e) => set("ssh_host", e.target.value)} />
+          <Field label="SSH host" hint="Leave empty if you only use Loft on this Mac." help="How other machines reach this one, e.g. loft. /code from them then opens VS Code over Remote-SSH (VS Code only).">
+            {(id) => <input id={id} className="input font-mono" placeholder="none" value={draft.ssh_host} onChange={(e) => set("ssh_host", e.target.value)} />}
           </Field>
-          <Field label="GitHub token" hint={view.github_token_set ? "A token is saved. Type a new one to replace it." : "Needed for private repos and merging PRs. Without one, loft uses gh auth token."}>
-            <div className="flex gap-2">
-              <input
-                className="input font-mono"
-                type="password"
-                autoComplete="off"
-                placeholder={view.github_token_set && token === undefined ? "•••••••• saved" : "ghp_…"}
-                value={token ?? ""}
-                onChange={(e) => setToken(e.target.value)}
-              />
-              {view.github_token_set && (
-                <button type="button" className="btn shrink-0" onClick={() => setToken("")}>
-                  Remove
-                </button>
-              )}
-            </div>
+          <Field label="GitHub token" hint={view.github_token_set ? "A token is saved. Type a new one to replace it." : "Needed for private repos and merging PRs."} help={view.github_token_set ? undefined : "Without one, Loft uses gh auth token."}>
+            {(id) => (
+              <div className="flex gap-2">
+                <input
+                  id={id}
+                  className="input font-mono"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={view.github_token_set && token === undefined ? "•••••••• saved" : "ghp_…"}
+                  value={token ?? ""}
+                  onChange={(e) => setToken(e.target.value)}
+                />
+                {view.github_token_set && (
+                  <button type="button" className="btn shrink-0" onClick={() => setToken("")}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            )}
           </Field>
         </SettingsCard>
 
@@ -584,7 +771,7 @@ export default function SettingsPage() {
         <GithubUsage />
         <Spend />
 
-        <SettingsCard title="Updates">
+        <SettingsCard id="updates" title="Updates">
           <Toggle
             on={draft.auto_update}
             onChange={(v) => set("auto_update", v)}
@@ -593,7 +780,7 @@ export default function SettingsPage() {
           />
         </SettingsCard>
 
-        <SettingsCard title="Agents">
+        <SettingsCard id="agents" title="Agents">
           <Toggle
             on={draft.messaging_rules}
             onChange={(v) => set("messaging_rules", v)}
@@ -602,20 +789,8 @@ export default function SettingsPage() {
           />
         </SettingsCard>
 
-        <SettingsCard title="GitHub issues">
-          <Field label="Comments going to GitHub" hint="Every comment on a GitHub issue waits for your approval unless this says otherwise.">
-            <ModeSelect value={draft.comment_approval_default} onChange={(m) => set("comment_approval_default", m)} />
-          </Field>
-          <Toggle
-            on={draft.auto_publish_all}
-            onChange={(v) => set("auto_publish_all", v)}
-            label="Publish new Loft issues to GitHub automatically"
-            hint="Each new Loft issue in a project with a GitHub repo becomes a GitHub issue right away. Off: it stays in Loft until you press Publish to GitHub."
-          />
-        </SettingsCard>
-
         {offers.simulator && (
-          <SettingsCard title="Navigation">
+          <SettingsCard id="navigation" title="Navigation">
             <Toggle
               on={draft.show_simulator}
               onChange={(v) => set("show_simulator", v)}
@@ -625,7 +800,7 @@ export default function SettingsPage() {
           </SettingsCard>
         )}
 
-        <SettingsCard title="Keyboard shortcuts">
+        <SettingsCard id="shortcuts" title="Keyboard shortcuts">
           <ShortcutSettings />
         </SettingsCard>
 
@@ -661,6 +836,7 @@ export default function SettingsPage() {
             )}
           </FloatingBar>
         )}
+        </div>
 
         {confirming && (
           <ConfirmDialog

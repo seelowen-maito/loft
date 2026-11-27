@@ -14,6 +14,17 @@ import { useAction } from "../../lib/useAction";
 
 const METHOD_LABEL: Record<string, string> = { squash: "Squash and merge", merge: "Create merge commit", rebase: "Rebase and merge" };
 
+/** The method a PR's Merge uses: its project's merge method, as Loft last read it, which the server merges with. */
+export function mergeMethod(pr: PullRequest): string {
+  return pr.merge_method || pr.merge_methods[0] || "squash";
+}
+
+/** What Merge does, for its tooltip. */
+export function mergeTitle(pr: PullRequest): string {
+  const m = mergeMethod(pr);
+  return `${METHOD_LABEL[m] ?? m}: the project's merge method, set in its Project settings`;
+}
+
 const TONE: Record<Tone, string> = {
   good: "text-good",
   warn: "text-warn",
@@ -79,8 +90,7 @@ export function useCatchUp(pr: PullRequest) {
 }
 
 export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number | null }) {
-  const methods = pr.merge_methods.length ? pr.merge_methods : ["squash", "merge", "rebase"];
-  const [method, setMethod] = useState(methods[0]);
+  const method = mergeMethod(pr);
   const [confirming, setConfirming] = useState(false);
   const refreshing = useAction();
   const merging = useAction();
@@ -101,7 +111,7 @@ export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number
   const merge = () => {
     refreshing.setError(null);
     return merging.run(async () => {
-      await api.mergePullRequest(pr.id, method);
+      await api.mergePullRequest(pr.id);
       setConfirming(false);
     });
   };
@@ -159,6 +169,12 @@ export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number
         </div>
       </div>
 
+      {pr.state === "open" && pr.changes_workflows && (
+        <Callout tone="warn" icon={<AlertTriangle />} className="mx-4 mb-3">
+          It changed <code className="font-mono">.github/workflows/</code> or <code className="font-mono">.github/actions/</code>: on a branch of the repo those run with its secrets as soon as they're pushed, so its CI may already have run. Read the change and its Actions runs.
+        </Callout>
+      )}
+
       {/* merge box */}
       <div className="flex flex-wrap items-center gap-3 border-t border-line bg-ink-950/50 px-4 py-3">
         <div className={cx("flex min-w-0 flex-1 basis-48 items-start gap-2", TONE[m.tone])}>
@@ -196,32 +212,14 @@ export function PullRequestCard({ pr, after }: { pr: PullRequest; after?: number
             </ActionButton>
           </div>
         ) : (
-          <div className="flex min-w-0 max-w-full items-center">
-            {methods.length > 1 && (
-              <select
-                className="h-[30px] min-w-0 rounded-l-full border border-r-0 border-line-strong bg-ink-800 pl-3 pr-1 text-[12px] text-fg-2 outline-none disabled:opacity-40"
-                value={method}
-                onChange={(e) => setMethod(e.target.value)}
-                disabled={!m.canMerge}
-                aria-label="Merge method"
-              >
-                {methods.map((mm) => (
-                  <option key={mm} value={mm}>{METHOD_LABEL[mm] ?? mm}</option>
-                ))}
-              </select>
-            )}
-            <button
-              className={cx(
-                "inline-flex h-[30px] shrink-0 items-center gap-1.5 bg-accent px-3.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3",
-                methods.length > 1 ? "rounded-r-full" : "rounded-full",
-              )}
-              onClick={() => setConfirming(true)}
-              disabled={!m.canMerge}
-              title={m.canMerge ? undefined : m.label}
-            >
-              <GitMerge className="size-3.5" /> Merge
-            </button>
-          </div>
+          <button
+            className="inline-flex h-[30px] shrink-0 items-center gap-1.5 rounded-full bg-accent px-3.5 text-[13px] font-medium text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-fg-3 disabled:opacity-50"
+            onClick={() => setConfirming(true)}
+            disabled={!m.canMerge}
+            title={m.canMerge ? mergeTitle(pr) : m.label}
+          >
+            <GitMerge className="size-3.5" /> Merge
+          </button>
         )}
       </div>
       {(err || pr.error) && (

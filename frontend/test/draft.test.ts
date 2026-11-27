@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  EMPTY_DRAFT, clearAnswerDrafts, loadAnswerDraft, loadDraft, saveAnswerDraft, saveDraft,
+  EMPTY_DRAFT, NOTE_DRAFT, clearAnswerDrafts, loadAnswerDraft, loadDraft, saveAnswerDraft, saveDraft,
 } from "../src/lib/draft.ts";
 
 /** An in-memory localStorage; a fresh `loadDraft` on it stands in for a reload. */
@@ -73,6 +73,11 @@ test("grill answer drafts are kept per question and round, with their images", (
   assert.deepEqual(loadDraft("g1", s), EMPTY_DRAFT, "answers aren't a composer draft");
   saveAnswerDraft("g1", 2, "q1", NO_ANSWER, s);
   assert.equal(s.m.has("loft:draft:grill:g1:2:q1"), false, "an emptied answer takes no storage");
+  // The round's note is one more draft of the round, cleared with it.
+  saveAnswerDraft("g1", 2, NOTE_DRAFT, { text: "what about refunds?", images: ["refund.png"] }, s);
+  assert.deepEqual(loadAnswerDraft("g1", 2, NOTE_DRAFT, s), { text: "what about refunds?", images: ["refund.png"] });
+  clearAnswerDrafts("g1", 2, ["q1", "q2", NOTE_DRAFT], s);
+  assert.deepEqual(loadAnswerDraft("g1", 2, NOTE_DRAFT, s), NO_ANSWER);
 });
 
 test("a saved answer or a closed round deletes its drafts", () => {

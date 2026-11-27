@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
-import { Check, ExternalLink, Inbox, Send, X } from "lucide-react";
+import { Check, ExternalLink, Inbox, Send } from "lucide-react";
 import { api } from "../lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "../lib/events";
 import { cx } from "../lib/format";
@@ -8,16 +8,20 @@ import { relTime } from "../lib/time";
 import { isTyping } from "../lib/shortcuts";
 import { ActionButton } from "../components/ActionButton";
 import { ErrorLine } from "../components/Callout";
+import { ConfirmDialog } from "../components/Dialog";
 import { errorText, useAction } from "../lib/useAction";
-import { answerBody, beingLookedAt, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
+import { answerBody, beingLookedAt, clearAll, clearTitle, closeTarget, escCloses, freshAfter, headline, idsChanged, itemView, kindTag, shortTitle, unseenIds, urgencyOf, type NeedsYouAction, type NeedsYouItem, type NeedsYouList } from "../lib/needsYou";
 
 const TONE = { bad: "bg-bad", warn: "bg-warn", accent: "bg-accent", muted: "bg-fg-3/40" } as const;
+const TAG = { bad: "border-bad/40 text-bad", warn: "border-warn/40 text-warn", info: "border-info/40 text-info", good: "border-good/40 text-good" } as const;
 
 /** One item: why it waits, its text, where to act and what can be sent from here. One seen before this visit is less
  * prominent; its Done check takes it out of the list. */
 function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean; onDone: () => void }) {
   const view = itemView(item, window.location.hostname);
   const urgency = urgencyOf(item.urgency);
+  const tag = kindTag(item.type);
+  const title = shortTitle(item.title, item.project);
   const act = useAction();
   // Which button is working, by kind and label: the list of calls is the item's.
   const [doing, setDoing] = useState<string | null>(null);
@@ -51,10 +55,13 @@ function ItemCard({ item, fresh, onDone }: { item: NeedsYouItem; fresh: boolean;
       <span className={cx("mt-1.5 size-2 shrink-0 rounded-full", TONE[urgency.tone])} title={urgency.label} />
       <div className="min-w-0 flex-1 space-y-2">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className={cx("chip self-center !text-[10px] uppercase tracking-wide", TAG[tag.tone])}>{tag.label}</span>
+          <h2 title={title.full} className={cx("min-w-0 text-[14px] [overflow-wrap:anywhere]", fresh ? "font-medium" : "font-normal text-fg-2")}>{title.text}</h2>
           {fresh && <span className="self-center rounded-full bg-accent/15 px-1.5 py-px font-mono text-[10px] font-medium uppercase tracking-wide text-accent">New</span>}
-          <h2 className={cx("min-w-0 text-[14px] [overflow-wrap:anywhere]", fresh ? "font-medium" : "font-normal text-fg-2")}>{item.title}</h2>
           <span className="font-mono text-[11px] text-fg-3">
-            {[item.agent?.name, item.project, relTime(item.created_at)].filter(Boolean).join(" · ")}
+            {[item.agent?.name, title.project].filter(Boolean).join(" · ")}
+            {(item.agent?.name || title.project) && " · "}
+            <span className="whitespace-nowrap">{relTime(item.created_at)}</span>
           </span>
         </div>
         <p className="text-[13px] text-fg-2 [overflow-wrap:anywhere]">{item.reason}</p>
@@ -163,6 +170,9 @@ export default function NeedsYouPage() {
   }, []);
   const [list, setList] = useState<NeedsYouList | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // The ids Clear all was opened with: what the confirm names and sends, whatever arrives while it is open.
+  const [confirming, setConfirming] = useState<string[] | null>(null);
+  const clearing = useAction();
   // Unseen when they appeared during this visit: shown as new until the page closes, though marked seen at once.
   const [fresh, setFresh] = useState<Set<string>>(new Set());
   const shown = useRef<string[]>([]);
@@ -212,17 +222,42 @@ export default function NeedsYouPage() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex w-full max-w-[900px] flex-col gap-4 px-4 py-5 sm:px-5">
-        <div className="flex items-baseline gap-3">
-          <h1 className="text-[20px] font-medium tracking-tight">Needs you</h1>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h1 className="whitespace-nowrap text-[20px] font-medium tracking-tight">Needs you</h1>
           {list && list.count > 0 && (
             <span className="font-mono text-[12px] text-fg-3" data-needs-you-headline>
               {headline(list.count, list.items.filter((i) => fresh.has(i.id)).length)}
             </span>
           )}
-          <button type="button" onClick={close} title="Close (Esc)" aria-label="Close Needs you" className="ml-auto self-center rounded-full p-1.5 text-fg-3 transition-colors hover:bg-white/[0.06] hover:text-fg">
-            <X className="size-4" />
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            {list && clearAll(list.items).clear > 0 && (
+              <button type="button" className="btn-ghost inline-flex items-center gap-1.5 self-center whitespace-nowrap text-[12.5px]" data-needs-you-clear-all onClick={() => setConfirming(clearAll(list.items).ids)}>
+                <Check className="size-3.5" /> Mark all done
+              </button>
+            )}
+            <button type="button" onClick={close} title="Close (Esc)" className="btn-ghost self-center text-[12.5px]">
+              Close
+            </button>
+          </div>
         </div>
+        {confirming && (
+          <ConfirmDialog
+            title={clearTitle(confirming.length)}
+            body="Each one is marked Done and leaves the list, on every device."
+            confirmLabel="Mark all done"
+            pendingLabel="Saving…"
+            pending={clearing.busy}
+            error={clearing.error}
+            onConfirm={() =>
+              clearing.run(async () => {
+                await api.needsYouClearAll(confirming);
+                setConfirming(null);
+                load();
+              })
+            }
+            onClose={() => setConfirming(null)}
+          />
+        )}
         {err && <p className="text-[12.5px] text-bad">Couldn't load Needs you: {err}</p>}
         {list && list.items.length === 0 && (
           <div className="panel flex flex-col items-center gap-2 px-5 py-12 text-center">

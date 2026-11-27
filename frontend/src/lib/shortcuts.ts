@@ -5,7 +5,7 @@
 import type { PullRequest, Task } from "./api";
 
 type Store = Pick<Storage, "getItem" | "setItem">;
-type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">;
+type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey"> & { repeat?: boolean };
 
 /** The shortcuts that can be rebound in Settings. `Mod` is ⌘ on a Mac and Ctrl elsewhere. */
 export const REBINDABLE = [
@@ -29,11 +29,19 @@ export function goPages(simulator: boolean): Record<string, { path: string; labe
   return Object.fromEntries(Object.entries(GO).filter(([, g]) => simulator || g.path !== "/simulator"));
 }
 
-/** The fixed shortcuts, for the sheet and Settings. */
-export function fixedShortcuts(simulator: boolean): { keys: string; label: string }[] {
+/** The `g` shortcut that opens `path`, as its tooltip shows it ("G A"); undefined when it has none. */
+export function goKeys(path: string): string | undefined {
+  const k = Object.entries(GO).find(([, g]) => g.path === path)?.[0];
+  return k && `G ${k.toUpperCase()}`;
+}
+
+/** The fixed shortcuts, for the sheet and Settings. The Simulator and Talk are Mac-only features: each is listed only where
+ * the server offers it. */
+export function fixedShortcuts(o: { simulator: boolean; voice: boolean }): { keys: string; label: string }[] {
   return [
-    ...Object.entries(goPages(simulator)).map(([k, g]) => ({ keys: `g ${k}`, label: `Go to ${g.label}` })),
+    ...Object.entries(goPages(o.simulator)).map(([k, g]) => ({ keys: `g ${k}`, label: `Go to ${g.label}` })),
     { keys: "/", label: "Focus the chat box" },
+    ...(o.voice ? [{ keys: "T", label: "Talk to an agent" }] : []),
     { keys: "?", label: "Show shortcuts" },
   ];
 }
@@ -132,16 +140,18 @@ export type Action =
   | { type: "go"; path: string }
   | { type: "g" }
   | { type: "focus-chat" }
-  | { type: "sheet" };
+  | { type: "sheet" }
+  | { type: "talk" };
 
-/** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field.
- * `afterG` is true when the previous key was a lone `g`: the next letter picks the page, any other key cancels it.
- * `simulator` is whether the server offers the Simulator (default: it does). */
-export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; mac?: boolean; simulator?: boolean }): Action | null {
+/** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field
+ * and any open dialog (`dialog`), and not again while held down. `afterG` is true when the previous key was a lone `g`: the next
+ * letter picks the page, any other key cancels it. `simulator` and `voice` are whether the server offers the Simulator and Talk
+ * (default: it does). */
+export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; dialog?: boolean; mac?: boolean; simulator?: boolean; voice?: boolean }): Action | null {
   const mac = o.mac ?? isMac();
   if (matchesCombo(e, o.combos.switcher, mac)) return { type: "switcher" };
   if (matchesCombo(e, o.combos.next, mac)) return { type: "next" };
-  if (e.ctrlKey || e.metaKey || e.altKey || o.typing) return null;
+  if (e.ctrlKey || e.metaKey || e.altKey || o.typing || o.dialog || e.repeat) return null;
   if (o.afterG) {
     const go = goPages(o.simulator ?? true)[e.key.toLowerCase()];
     return go ? { type: "go", path: go.path } : null;
@@ -149,6 +159,7 @@ export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; a
   if (e.key === "g") return { type: "g" };
   if (e.key === "/") return { type: "focus-chat" };
   if (e.key === "?") return { type: "sheet" };
+  if (e.key.toLowerCase() === "t") return (o.voice ?? true) ? { type: "talk" } : null;
   return null;
 }
 

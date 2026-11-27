@@ -1,3 +1,4 @@
+mod actions;
 mod agents;
 mod apns;
 mod api;
@@ -7,6 +8,7 @@ mod commands;
 mod db;
 mod delivery;
 mod file_search;
+mod folders;
 mod devices;
 mod git_check;
 mod github;
@@ -31,10 +33,12 @@ mod mentions;
 mod mirror;
 mod owner_only;
 mod processes;
+mod project_settings;
 mod prs;
 mod push;
 mod signin;
 mod reply;
+mod saved;
 mod sccache;
 mod repos;
 mod schedule;
@@ -56,6 +60,7 @@ mod testdir;
 mod updater;
 mod uploads;
 mod voice;
+mod workflows;
 mod usage;
 
 use std::path::PathBuf;
@@ -95,13 +100,20 @@ fn api_routes() -> Router<AppState> {
         .route("/system/mac-access", post(mac_access::check))
         .route("/system/https", get(tailnet::https))
         .route("/settings", get(api::get_settings).put(api::put_settings))
+        .route("/folders/suggest", get(folders::suggest_route))
         .route("/backups", get(backup::get).post(backup::now))
         .route("/restart", post(api::restart))
         .route("/events", get(api::events))
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
+        .route("/project-settings", get(project_settings::get).put(project_settings::put))
+        .route("/project-settings/branches", get(project_settings::branches))
+        .route("/project-settings/merge-methods", get(project_settings::merge_methods))
+        .route("/project-settings/reviewer", post(project_settings::create_reviewer))
+        .route("/project-settings/apply-team", post(project_settings::apply_team))
         .route("/agents", get(api::list_agents).post(api::create_agent))
+        .route("/agent-templates", get(setup::templates_route))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
         .route("/agents/{id}", get(api::get_agent).patch(api::update_agent).delete(api::delete_agent))
@@ -127,6 +139,8 @@ fn api_routes() -> Router<AppState> {
         .route("/agents/{id}/run", post(api::run_now))
         .route("/agents/{id}/stop", post(api::stop_agent))
         .route("/agents/{id}/messages/{message}/cancel", post(api::cancel_queued_message))
+        .route("/agents/{id}/messages/{message}/send-now", post(api::send_queued_now))
+        .route("/agents/{id}/goal/clear", post(api::clear_goal))
         .route("/agents/{id}/read", post(api::mark_read))
         .route("/agents/{id}/commands", get(commands::list))
         .route("/agents/{id}/restart", post(api::restart_agent))
@@ -160,6 +174,7 @@ fn api_routes() -> Router<AppState> {
         .route("/activity", get(tasks::activity))
         .route("/needs-you", get(needs_you::list))
         .route("/needs-you/seen", post(needs_you::mark_seen))
+        .route("/needs-you/dismiss-all", post(needs_you::dismiss_all))
         .route("/needs-you/{id}/dismiss", post(needs_you::dismiss_item))
         .route("/voice/clean", post(voice::clean))
         .route("/voice/brief", post(voice::brief))
@@ -170,12 +185,18 @@ fn api_routes() -> Router<AppState> {
         .route("/devices/{token}/test", post(devices::test))
         .route("/push", get(devices::status).put(devices::configure))
         .route("/push/signin", post(signin::start))
+        .route("/saved", get(saved::list).post(saved::create))
+        .route("/saved/{id}", get(saved::get).put(saved::update).delete(saved::delete))
+        .route("/saved/{id}/export", post(saved::export))
         .route("/permissions", get(api::list_permissions))
         .route("/permissions/{id}", post(api::decide_permission))
         .route("/pull-requests", get(api::list_pull_requests))
         .route("/pull-requests/{id}/refresh", post(api::refresh_pull_request))
         .route("/pull-requests/{id}/merge", post(api::merge_pull_request))
         .route("/github/budget", get(github::budget))
+        .route("/actions/owners", get(actions::owners_get))
+        .route("/actions/owners/{owner}", put(actions::set_quota))
+        .route("/actions/project", get(actions::project))
         // Herdr UI: Loft's agents in the Herdr terminal multiplexer (herdr.rs, herdr/ at the root).
         .route("/herdr", get(herdr::status))
         .route("/herdr/setup", post(herdr::setup_local))
@@ -265,8 +286,9 @@ async fn serve() -> anyhow::Result<()> {
     state.rt.lock().unwrap().workspaces_not_moved = not_moved;
     setup::ensure_loft(&state);
     {
-        let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();
-        if let Err(e) = state.settings.migrate_github_settings(&with_repo) {
+        // GitHub publishing moved from Settings to each project's Project settings: the projects there now inherit it.
+        let projects: Vec<String> = repos::list(&state, false).await.into_iter().map(|r| r.name).collect();
+        if let Err(e) = project_settings::migrate_github_settings(&state, &projects) {
             tracing::warn!("GitHub settings migration: {e}");
         }
     }
@@ -293,6 +315,7 @@ async fn serve() -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || tailnet::check_https(port));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(delivery::ci_poller(state.clone()));
+    tokio::spawn(actions::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
     if api::ON_MAC {

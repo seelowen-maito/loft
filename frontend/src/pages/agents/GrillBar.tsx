@@ -8,6 +8,7 @@ import { interviewPath, nextQuestion, questionAnchor } from "../../lib/interview
 import { ActionButton } from "../../components/ActionButton";
 import { ErrorLine } from "../../components/Callout";
 import { useAction } from "../../lib/useAction";
+import { sendRound, useNoteDraft } from "./RoundNote";
 
 /** The round bar above the composer: which round, how much of it is answered, and Send / Pause / Resume / End (the app's buttons, same endpoint).
  * In the chat it also opens the full-screen interview; `fullScreen` is the bar on that page. */
@@ -26,7 +27,8 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
     if (busy) return;
     setCommand(c);
     return commanding.run(async () => {
-      await api.grillCommand(session.session_id, c);
+      // Send round takes the round's note with it, from wherever it was written.
+      await (c === "send" ? sendRound(session) : api.grillCommand(session.session_id, c));
       setConfirming(false);
     });
   };
@@ -34,11 +36,12 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
   const answered = session.answered ?? 0;
   const total = session.total ?? 0;
   const next = nextQuestion(session);
+  const draft = useNoteDraft(session.session_id, session.waiting ? null : session.round);
+  const noted = !!draft.text.trim() || draft.images.length > 0;
   const where =
     session.round == null ? "Preparing the first round…"
     : session.waiting ? `Round ${session.round} sent · the agent is preparing the next one`
-    : next ? `Round ${session.round} · Question ${next.n} of ${next.total}`
-    : `Round ${session.round} · all ${total} answered`;
+    : (next ? `Round ${session.round} · Question ${next.n} of ${next.total}` : `Round ${session.round} · all ${total} answered`) + (noted ? " · with a note" : "");
 
   // Scrolls to the first unanswered question's card and flashes it, so a long chat never loses the round.
   const jump = () => {
@@ -84,7 +87,7 @@ export function GrillBar({ session, fullScreen = false }: { session: GrillSessio
             onClick={() => send("send")}
             disabled={busy}
             aria-label="Send round"
-            title="Send your answers to the agent"
+            title={noted ? "Send your answers and your note to the agent" : "Send your answers to the agent"}
           >
             <span className="max-md:hidden">Send round</span>
           </ActionButton>

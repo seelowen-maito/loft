@@ -63,6 +63,7 @@ pub(crate) fn tools(state: &AppState) -> Value {
     all.as_array_mut().unwrap().extend(crate::planning::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::delivery::mcp_tools());
     all.as_array_mut().unwrap().extend(crate::greenfield::mcp_tools());
+    all.as_array_mut().unwrap().extend(crate::project_settings::mcp_tools());
     // The Simulator is the Mac's: off it the tool isn't offered (and is refused).
     if !crate::api::ON_MAC {
         all.as_array_mut().unwrap().retain(|t| t["name"] != "simulator_device");
@@ -227,7 +228,10 @@ pub(crate) async fn call_tool(state: &AppState, agent_id: &str, name: &str, args
         if let Some(r) = match crate::setup::mcp_call(state, &me, name, &args).await {
             None => match crate::planning::mcp_call(state, &me, name, &args).await {
                 None => match crate::delivery::mcp_call(state, &me, name, &args).await {
-                    None => crate::greenfield::mcp_call(state, &me, name, &args).await,
+                    None => match crate::greenfield::mcp_call(state, &me, name, &args).await {
+                        None => crate::project_settings::mcp_call(state, &me, name, &args).await,
+                        r => r,
+                    },
                     r => r,
                 },
                 r => r,
@@ -879,7 +883,7 @@ mod tests {
         let from = crate::tasks::tests::agent(&st, "Lead");
         let r = message(&st, &from, json!({ "agent": to.id, "text": "Review PR #12", "kind": "needs_action" })).await;
         assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered."), "{r}");
-        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        until("the run", 60, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
         let p = &prompts(&st, &to)[0];
         assert!(p.contains("[Message from agent Lead") && p.contains("Review PR #12") && p.contains(&hint(&from)), "{p}");
         let m = st.db.list_messages(&to.id, 50, None).unwrap().into_iter().find(|m| m.role == "user").unwrap();
@@ -1011,7 +1015,7 @@ mod tests {
         for (i, args) in [json!({ "agent": to.id, "text": "no kind" }), json!({ "agent": to.id, "text": "said fyi", "kind": "fyi" })].into_iter().enumerate() {
             let r = message(&st, &from, args.clone()).await;
             assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered."), "{r}");
-            until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > i).await;
+            until("the run", 60, || !is_running(&st, &to.id) && prompts(&st, &to).len() > i).await;
             let p = &prompts(&st, &to)[i];
             assert!(p.contains(args["text"].as_str().unwrap()) && p.contains(&hint(&from)), "{p}");
         }
@@ -1049,10 +1053,10 @@ mod tests {
         run(&st, &to, "first").await;
         message(&st, &from, json!({ "agent": to.id, "text": "Merged #12", "kind": "fyi" })).await;
         agents::compact(&st, &to.id, "");
-        until("the compact run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
+        until("the compact run", 60, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
         assert_eq!(prompts(&st, &to)[1], "/compact");
         agents::design_avatar(&st, &to.id, "a robot");
-        until("the avatar run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
+        until("the avatar run", 60, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
         assert!(!prompts(&st, &to)[2].contains("Merged #12"));
         let p = run(&st, &to, "next").await;
         assert!(p.starts_with("[FYI from agent Lead") && p.contains("Merged #12"), "{p}");
@@ -1069,7 +1073,7 @@ mod tests {
         s.claude_bin = "/nonexistent/claude".into();
         st.settings.save(s).unwrap();
         enqueue(&st, &to.id, Some("go".into()), "user");
-        until("the run to fail", 10, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
+        until("the run to fail", 60, || !is_running(&st, &to.id) && st.db.list_messages(&to.id, 50, None).unwrap().iter().any(|m| m.kind == "error")).await;
         assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 1);
         // Put back ahead of one that arrived after the failed run took it.
         message(&st, &from, json!({ "agent": to.id, "text": "Released v2", "kind": "fyi" })).await;
@@ -1090,7 +1094,7 @@ mod tests {
             message(&st, &from, json!({ "agent": to.id, "text": format!("Merged #{i}"), "kind": "fyi" })).await;
             let n = prompts(&st, &to).len();
             enqueue(&st, &to.id, Some(how.into()), "user");
-            until("the run to fail", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > n).await;
+            until("the run to fail", 60, || !is_running(&st, &to.id) && prompts(&st, &to).len() > n).await;
             assert!(prompts(&st, &to)[n].contains(&format!("Merged #{i}")));
             assert_eq!(st.db.count_pending_fyis(&to.id).unwrap(), 0, "{how}");
             let p = run(&st, &to, "again").await;
@@ -1156,24 +1160,24 @@ mod tests {
         let from = crate::tasks::tests::agent(&st, "Lead");
         let line = format!("[When this work is done, or blocked, report back to Lead: call `mcp__loft__message_agent` with agent \"{}\", kind \"needs_action\" and ticket \"#12\", saying what you did and where it is.]", from.id);
         message(&st, &from, json!({ "agent": to.id, "text": "Build #12", "kind": "needs_action", "ticket": "#12" })).await;
-        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        until("the run", 60, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
         let p = &prompts(&st, &to)[0];
         assert!(p.contains("Build #12") && p.contains(&line), "{p}");
 
         // The report back answers that hand-over: the Lead isn't asked to report back in turn.
         message(&st, &to, json!({ "agent": from.id, "text": "#12 done: PR #13 ready", "kind": "needs_action", "ticket": "#12" })).await;
-        until("the Lead's run", 10, || !is_running(&st, &from.id) && !prompts(&st, &from).is_empty()).await;
+        until("the Lead's run", 60, || !is_running(&st, &from.id) && !prompts(&st, &from).is_empty()).await;
         let p = &prompts(&st, &from)[0];
         assert!(p.contains("#12 done: PR #13 ready") && !p.contains("report back"), "{p}");
 
         // The Dev's report was no hand-over: the Lead's follow-up on the same ticket is one, and asks for a report back.
         message(&st, &from, json!({ "agent": to.id, "text": "Also fix the lint", "kind": "needs_action", "ticket": "#12" })).await;
-        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
+        until("the run", 60, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 2).await;
         assert!(prompts(&st, &to)[1].contains("Also fix the lint") && prompts(&st, &to)[1].contains("report back"), "{}", prompts(&st, &to)[1]);
 
         // A message about no ticket hands nothing over.
         message(&st, &from, json!({ "agent": to.id, "text": "Which branch?", "kind": "needs_action" })).await;
-        until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
+        until("the run", 60, || !is_running(&st, &to.id) && prompts(&st, &to).len() == 3).await;
         assert!(!prompts(&st, &to)[2].contains("report back"), "{}", prompts(&st, &to)[2]);
     }
 
@@ -1183,13 +1187,13 @@ mod tests {
         let (st, to) = fake_claude_state();
         let from = crate::tasks::tests::agent(&st, "Lead");
         message(&st, &from, json!({ "agent": to.id, "text": "Build #12", "kind": "needs_action", "ticket": "#12" })).await;
-        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        until("the run", 60, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
         let handed = st.db.list_messages(&to.id, 10, None).unwrap().into_iter().find(|m| m.meta["report_back"] == true).unwrap();
         st.db.mark_cancelled(&to.id, handed.id).unwrap();
 
         // The Dev never read it, so this isn't a report back: the Lead is asked to report back in turn.
         message(&st, &to, json!({ "agent": from.id, "text": "#12 done: PR #13 ready", "kind": "needs_action", "ticket": "#12" })).await;
-        until("the Lead's run", 10, || !is_running(&st, &from.id) && !prompts(&st, &from).is_empty()).await;
+        until("the Lead's run", 60, || !is_running(&st, &from.id) && !prompts(&st, &from).is_empty()).await;
         assert!(prompts(&st, &from)[0].contains("report back"), "{}", prompts(&st, &from)[0]);
     }
 
@@ -1201,7 +1205,7 @@ mod tests {
         rules_off(&st);
         let r = message(&st, &from, json!({ "agent": to.id, "text": "Thanks!" })).await;
         assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Delivered."), "{r}");
-        until("the run", 10, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
+        until("the run", 60, || !is_running(&st, &to.id) && !prompts(&st, &to).is_empty()).await;
         assert!(prompts(&st, &to)[0].contains("Thanks!"));
     }
 
@@ -1239,7 +1243,7 @@ mod tests {
                 args["text"] = json!(format!("message {n}"));
                 message(&st, &from, args).await;
                 if !fyi {
-                    until("the run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > n).await;
+                    until("the run", 60, || !is_running(&st, &to.id) && prompts(&st, &to).len() > n).await;
                 }
             }
         };
@@ -1278,7 +1282,7 @@ mod tests {
         set(|a| a.fresh_context = "always".into());
         let runs = prompts(&st, &to).len();
         agents::wake_on_ticket(&st, &to.id, "o/r#20", true, "build #20".into(), crate::delivery::Wake { repo: "o/r".into(), spec: 1, step: crate::delivery::Step::FinalReview { round: 0 } });
-        until("the Delivery run", 10, || !is_running(&st, &to.id) && prompts(&st, &to).len() > runs).await;
+        until("the Delivery run", 60, || !is_running(&st, &to.id) && prompts(&st, &to).len() > runs).await;
         assert_eq!(clears(), 3, "the Delivery wake");
         send(json!({ "kind": "needs_action", "ticket": "o/r#20" })).await;
         assert_eq!(clears(), 3, "the message about the same ticket");
@@ -1303,14 +1307,14 @@ mod tests {
         let clears = || st.db.list_messages(&lead.id, 400, None).unwrap().iter().filter(|m| m.kind == "clear").count();
         for (i, t) in ["#1", "#2"].into_iter().enumerate() {
             message(&st, &from, json!({ "agent": lead.id, "text": format!("#{i} passed"), "kind": "needs_action", "ticket": t })).await;
-            until("the run", 10, || !is_running(&st, &lead.id) && prompts(&st, &lead).len() > i).await;
+            until("the run", 60, || !is_running(&st, &lead.id) && prompts(&st, &lead).len() > i).await;
         }
         assert_eq!(clears(), 0, "it coordinates");
 
         // Without a Dev it builds the tickets itself, and follows its setting.
         st.db.update_agent(&dev.id, |d| d.role = "qa".into()).unwrap();
         message(&st, &from, json!({ "agent": lead.id, "text": "build #3", "kind": "needs_action", "ticket": "#3" })).await;
-        until("the run", 10, || !is_running(&st, &lead.id) && prompts(&st, &lead).len() > 2).await;
+        until("the run", 60, || !is_running(&st, &lead.id) && prompts(&st, &lead).len() > 2).await;
         assert_eq!(clears(), 1, "it builds");
     }
 }

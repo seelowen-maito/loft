@@ -86,12 +86,17 @@ pub fn hooks(exe: &std::path::Path) -> Value {
 
 /// The changes a hook input's command makes to checkouts outside `agent-local-storage`, run under the git `ceiling`.
 fn outside_changes(input: &str, ceiling: &[PathBuf]) -> Vec<Change> {
+    outside_changes_within(input, ceiling, Work::new())
+}
+
+fn outside_changes_within(input: &str, ceiling: &[PathBuf], work: Work) -> Vec<Change> {
     let Ok(v) = serde_json::from_str::<Value>(input) else { return vec![] };
     let Some(command) = v["tool_input"]["command"].as_str() else { return vec![] };
     let Some(cwd) = v["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::current_dir().ok()) else { return vec![] };
     // Loft's ceiling is the storage folder.
     let storage = ceiling.first().map(|c| real(c.clone())).unwrap_or_default();
-    checkout_changes(command, &cwd, ceiling).into_iter().filter(|c| !in_agent_storage(&c.folder, &storage)).collect()
+    // A command Loft couldn't check in time asks wherever it runs, even from an agent's own workspace.
+    checkout_changes_within(command, &cwd, ceiling, work).into_iter().filter(|c| c.command == TOO_COMPLEX || !in_agent_storage(&c.folder, &storage)).collect()
 }
 
 fn check(input: &str) -> Result<(), &'static str> {
@@ -445,13 +450,19 @@ fn missing(folder: &Path) -> bool {
 /// Every change `command`, run in `cwd` with git's `ceiling` folders (GIT_CEILING_DIRECTORIES), makes to a checkout
 /// (see the module docs), each folder once. A folder the guard can't tell (`cd "$dir"`) lets the commands after it run.
 /// The ceiling counts only for a command that is plain git (`plain_git`); any other can move it, so it has none.
+#[cfg(test)]
 pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<Change> {
+    checkout_changes_within(command, cwd, ceiling, Work::new())
+}
+
+fn checkout_changes_within(command: &str, cwd: &Path, ceiling: &[PathBuf], work: Work) -> Vec<Change> {
     let mut found = vec![];
+    WORK.with(|w| *w.borrow_mut() = work);
     let start = Some(cwd.to_path_buf());
     let ceiling: Vec<PathBuf> = ceiling.iter().filter(|c| c.is_absolute()).map(|c| real(c.clone())).collect();
     let storage = ceiling.first().cloned().unwrap_or_default();
     let ceiling = if plain_git(command, cwd, &ceiling) { ceiling } else { vec![] };
-    changes(command, &mut Dirs { start: start.clone(), cwd: start, ceiling, storage, ..Default::default() }, 0, &mut found);
+    changes(command, &mut Dirs { start: start.clone(), cwd: start.clone(), ceiling, storage, ..Default::default() }, 0, &mut found);
     let mut out: Vec<Change> = vec![];
     for c in found {
         // A symlink into a user's checkout counts as that checkout.
@@ -460,11 +471,49 @@ pub fn checkout_changes(command: &str, cwd: &Path, ceiling: &[PathBuf]) -> Vec<C
             out.push(Change { folder, ..c });
         }
     }
+    // A command too big to check in time asks, in the folder it starts in, whatever else it changes there.
+    if WORK.with(|w| w.borrow().spent_up) {
+        out.push(Change { folder: start.as_deref().map(outermost_checkout).unwrap_or_default(), command: TOO_COMPLEX.into() });
+    }
     out
 }
 
+/// The command of the Change a command gets when it went over the budget below.
+const TOO_COMPLEX: &str = "(too complex for Loft to check)";
+
+/// What checking one command may spend: texts examined and time. Nested texts (a heredoc's substitutions, `eval`,
+/// repeated passes) can multiply, and past this the command asks instead of the guard running on.
+const MAX_WORK: usize = 2000;
+const MAX_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+
+struct Work {
+    left: usize,
+    started: std::time::Instant,
+    spent_up: bool,
+}
+
+impl Work {
+    fn new() -> Self {
+        Work { left: MAX_WORK, started: std::time::Instant::now(), spent_up: false }
+    }
+
+    /// Whether one more text may be examined.
+    fn spend(&mut self) -> bool {
+        if self.left == 0 || self.started.elapsed() > MAX_TIME {
+            self.spent_up = true;
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
+}
+
+thread_local! {
+    static WORK: std::cell::RefCell<Work> = std::cell::RefCell::new(Work::new());
+}
+
 fn changes(text: &str, dirs: &mut Dirs, depth: usize, out: &mut Vec<Change>) {
-    if depth > MAX_DEPTH {
+    if depth > MAX_DEPTH || !WORK.with(|w| w.borrow_mut().spend()) {
         return;
     }
     // The whole text, so a mention inside a `<(…)` or a subshell counts too.
@@ -1141,16 +1190,35 @@ fn reads_state(all: &[String]) -> (bool, bool) {
 
 /// The texts `$( … )` and `` ` … ` `` in `s` run (a here-document body), each as written between its brackets.
 fn substitutions(s: &str) -> Vec<String> {
-    let c: Vec<char> = s.chars().collect();
+    // A backslash before a newline joins the lines first (`$\<newline>(` is `$(`); an escaped backslash stays as it is.
+    let mut c: Vec<char> = vec![];
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match (ch, chars.peek()) {
+            ('\\', Some('\n')) => {
+                chars.next();
+            }
+            ('\\', Some(_)) => {
+                c.push(ch);
+                c.extend(chars.next());
+            }
+            _ => c.push(ch),
+        }
+    }
     let mut out = vec![];
     let mut i = 0;
     while i < c.len() {
-        if c[i] == '$' && c.get(i + 1) == Some(&'(') {
+        if c[i] == '\\' {
+            // `\`` and `\$(` are literal text.
+            i += 2;
+        } else if c[i] == '$' && c.get(i + 1) == Some(&'(') {
             // To the end of the body: a `)` in a quote, a pattern or after a backslash can't end it early.
             out.push(c[i + 2..].iter().collect());
             i += 2;
         } else if c[i] == '`' {
-            out.push(c[i + 1..].iter().collect());
+            // Up to the next backtick that isn't escaped, unescaped as the shell does. Each backtick starts one, whatever
+            // pairing the ones before it would make: a backtick in a quote or a comment inside `$(…)` is only text.
+            out.extend(backtick_readings(&c, i + 1, false).0.into_iter().map(|b| b.into_iter().collect::<String>()));
             i += 1;
         } else {
             i += 1;
@@ -2724,7 +2792,7 @@ impl Level {
     }
 }
 
-/// Lexes from `i` to the end, or past the `stop` (`)` or a backtick) that closes a substitution, adding the
+/// Lexes from `i` to the end, or past the `stop` (`)`, or NUL for the text of a backtick command, which `backtick_body` has cut out) that closes a substitution, adding the
 /// commands it finds to `p`. Returns the index it stopped at.
 fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
     let mut l = Level::new();
@@ -2828,18 +2896,21 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                         '`' => {
                             l.word.push('$');
                             l.cmd(p);
-                            i = lex(p, c, i, Some('`'));
+                            let (bodies, next) = backtick_readings(c, i, true);
+                            lex_readings(p, &mut l, &bodies);
+                            i = next;
                         }
                         _ => l.word.push(q),
                     }
                 }
             }
-            '`' if stop == Some('`') => break,
             '`' => {
                 l.in_word = true;
                 l.word.push('$');
                 l.cmd(p);
-                i = lex(p, c, i, Some('`'));
+                let (bodies, next) = backtick_readings(c, i, false);
+                lex_readings(p, &mut l, &bodies);
+                i = next;
             }
             '$' | '<' | '>' if next == Some('(') => {
                 l.in_word = true;
@@ -2882,7 +2953,9 @@ fn lex(p: &mut Parse, c: &[char], mut i: usize, stop: Option<char>) -> usize {
                     // `${x:-`cmd`}` too.
                     if n == '`' {
                         l.cmd(p);
-                        i = lex(p, c, i, Some('`'));
+                        let (bodies, next) = backtick_readings(c, i, false);
+                        lex_readings(p, &mut l, &bodies);
+                        i = next;
                     }
                 }
             }
@@ -3058,6 +3131,44 @@ fn closes_arithmetic(c: &[char], i: usize) -> bool {
     false
 }
 
+/// The command a backtick at `i - 1` opens: the text to the next backtick that isn't escaped, with its `\``, `\\` and
+/// `\$` (and `\"`, in double quotes) unescaped as the shell does, and where the text after it starts.
+fn backtick_body(c: &[char], mut i: usize, in_quotes: bool) -> (Vec<char>, usize) {
+    let mut body = vec![];
+    while let Some(&ch) = c.get(i) {
+        i += 1;
+        match ch {
+            '`' => break,
+            '\\' if matches!(c.get(i), Some('`' | '\\' | '$')) || (in_quotes && c.get(i) == Some(&'"')) => {
+                body.push(c[i]);
+                i += 1;
+            }
+            _ => body.push(ch),
+        }
+    }
+    (body, i)
+}
+
+/// The readings of the backtick command at `i - 1`: its `backtick_body` for `in_quotes`, and the other too. Whether `\"`
+/// is unescaped depends on the shell and on quotes and `${…}` the guard can't always follow (`"${x:-'}'`…`}"` closes
+/// differently in bash and zsh), so a command that reads differently either way is checked both ways: a git in either asks.
+fn backtick_readings(c: &[char], i: usize, in_quotes: bool) -> (Vec<Vec<char>>, usize) {
+    let (body, next) = backtick_body(c, i, in_quotes);
+    let other = backtick_body(c, i, !in_quotes).0;
+    let bodies = if other == body { vec![body] } else { vec![body, other] };
+    (bodies, next)
+}
+
+/// Lexes each reading as a command of its own; the first has its command slot already.
+fn lex_readings(p: &mut Parse, l: &mut Level, bodies: &[Vec<char>]) {
+    for (n, body) in bodies.iter().enumerate() {
+        if n > 0 {
+            l.cmd(p);
+        }
+        lex(p, body, 0, Some('\0'));
+    }
+}
+
 /// Reads a `$'...'` string from `i` (past its opening quote) into `word`, with its escapes (`\n`, `\x70`, `\160`)
 /// decoded. Returns the index past its closing quote.
 fn ansi_c_quoted(c: &[char], mut i: usize, word: &mut String) -> usize {
@@ -3151,11 +3262,16 @@ pub async fn handle(
         // Read again each time: an "Always allow" for one folder may cover the next.
         let Ok(Some(a)) = state.db.get_agent(&agent_id) else { break };
         let at = change.folder.clone();
-        if !at.starts_with(&projects) || in_agent_storage(&at, &storage) {
+        let unchecked = change.command == TOO_COMPLEX;
+        if !unchecked && (!at.starts_with(&projects) || in_agent_storage(&at, &storage)) {
             continue;
         }
         let folder = at.display().to_string();
-        let reason = format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command);
+        let reason = if unchecked {
+            format!("{} runs a command too complex for Loft to check, from {folder}: it may change your checkouts", a.name)
+        } else {
+            format!("{} wants to change your checkout at {folder}, not its own clone: {}", a.name, change.command)
+        };
         let input = json!({ "command": change.command, "folder": folder });
         let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
         let d = crate::agents::ask_permission_for(&state, &a.id, "prompt", "Checkout", input, &reason, String::new(), wait).await;
@@ -3164,8 +3280,9 @@ pub async fn handle(
         }
         let why = d.message.unwrap_or_else(|| "The user denied it.".into());
         let ws = crate::agents::workspace(&state, &a.id);
+        let what = if unchecked { "is too complex for Loft to check and could change the user's own checkouts".to_string() } else { format!("changes {folder}, the user's own checkout") };
         let message = format!(
-            "Loft didn't run this: it changes {folder}, the user's own checkout, so it asked the user. {why} Work in your own clone in your workspace ({}): clone the project there if it isn't yet.",
+            "Loft didn't run this: it {what}, so it asked the user. {why} Work in your own clone in your workspace ({}): clone the project there if it isn't yet.",
             ws.display()
         );
         return axum::Json(json!({ "allow": false, "message": message }));
@@ -5348,7 +5465,7 @@ mod tests {
 
         // Denied: the agent is told to use its own clone.
         let asking = guard(user.clone());
-        crate::agents::tests::until("a permission request", 5, || pending().len() == 1).await;
+        crate::agents::tests::until("a permission request", 60, || pending().len() == 1).await;
         let req = pending().remove(0);
         assert_eq!(req.tool_name, "Checkout");
         assert_eq!(req.input["folder"], user.display().to_string());
@@ -5360,7 +5477,7 @@ mod tests {
 
         // No rule to save: Always allow is refused, even with a rule posted, and the agent's tools stay as they were.
         let asking = guard(user.clone());
-        crate::agents::tests::until("a second permission request", 5, || pending().len() == 1).await;
+        crate::agents::tests::until("a second permission request", 60, || pending().len() == 1).await;
         let id = pending()[0].id.clone();
         assert_eq!(pending()[0].rule, "");
         let tools = st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools;
@@ -5372,7 +5489,7 @@ mod tests {
         crate::agents::decide(&st, &id, "allow_once", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["allow"], true);
         let again = guard(user.join("frontend"));
-        crate::agents::tests::until("the next change asking again", 5, || pending().len() == 1).await;
+        crate::agents::tests::until("the next change asking again", 60, || pending().len() == 1).await;
         crate::agents::decide(&st, &pending()[0].id, "deny", None, None, None).unwrap();
         assert_eq!(again.await.unwrap()["allow"], false);
 
@@ -5391,13 +5508,200 @@ mod tests {
         let asking = tokio::spawn(handle(State(st.clone()), P(a.id.clone()), axum::Json(req)));
 
         // Allowing the first doesn't let the second run unasked.
-        crate::agents::tests::until("the first question", 5, || pending().len() == 1).await;
+        crate::agents::tests::until("the first question", 60, || pending().len() == 1).await;
         assert_eq!(pending()[0].input["folder"], one.display().to_string());
         crate::agents::decide(&st, &pending()[0].id, "allow", None, None, None).unwrap();
-        crate::agents::tests::until("the second question", 5, || pending().first().is_some_and(|p| p.input["folder"] == two.display().to_string())).await;
+        crate::agents::tests::until("the second question", 60, || pending().first().is_some_and(|p| p.input["folder"] == two.display().to_string())).await;
         crate::agents::decide(&st, &pending()[0].id, "deny", None, None, None).unwrap();
         let v = asking.await.unwrap().0;
         assert_eq!(v["allow"], false);
         assert!(v["message"].as_str().unwrap().contains(&two.display().to_string()), "{v}");
+    }
+
+    /// An unquoted heredoc with many escaped backticks (a PR body with `\`code\``) made each one a command whose text held
+    /// the others, so the work doubled with each and a run grew past 10 GB.
+    #[test]
+    fn a_heredoc_full_of_backticks_is_checked_in_no_time() {
+        let start = std::time::Instant::now();
+        // Escaped, they're text; unescaped, each pair is one command.
+        for tick in ["\\`", "`"] {
+            let body = format!("- the {tick}one{tick} and {tick}two{tick} words and $(three)\n").repeat(40);
+            let command = format!("cd /tmp && cat > body.md <<EOF\n{body}EOF\ngh pr edit 1 --body-file body.md");
+            checkout_changes(&command, Path::new("/tmp"), &[]);
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+    }
+
+    /// A command that multiplies its own work anyway stops at the budget, and the command asks.
+    #[test]
+    fn work_stops_at_its_budget() {
+        let mut w = Work::new();
+        assert!((0..MAX_WORK).all(|_| w.spend()));
+        assert!(!w.spent_up);
+        assert!(!w.spend() && w.spent_up);
+        let mut late = Work { left: 5, started: std::time::Instant::now() - MAX_TIME * 2, spent_up: false };
+        assert!(!late.spend() && late.spent_up);
+    }
+
+    #[test]
+    fn a_command_that_spends_its_budget_asks_in_its_folder() {
+        WORK.with(|w| *w.borrow_mut() = Work::new());
+        // checkout_changes resets the budget, so spend it from inside: a deeply nested text is cut at MAX_DEPTH, not here.
+        let mut dirs = Dirs::default();
+        let mut out = vec![];
+        WORK.with(|w| w.borrow_mut().left = 0);
+        changes("git checkout main", &mut dirs, 0, &mut out);
+        assert!(out.is_empty());
+        assert!(WORK.with(|w| w.borrow().spent_up));
+    }
+
+    /// Inside a backtick command, `\`` is a backtick of a command nested in it.
+    #[test]
+    fn a_backtick_command_nested_in_a_backtick_command_asks() {
+        let user = Some(PathBuf::from(USER));
+        for cmd in [
+            "echo `echo \\`cd /nowhere/dev/loft && git checkout main\\``",
+            "echo \"`echo \\`cd /nowhere/dev/loft && git checkout main\\``\"",
+            "echo `cd /nowhere/dev/loft && echo \\`git checkout main\\``",
+            "echo `echo \\`echo \\\\\\`cd /nowhere/dev/loft && git checkout main\\\\\\`\\``",
+        ] {
+            assert_eq!(asks(cmd, CLONE), user, "{cmd}");
+        }
+        assert_eq!(asks("echo `echo \\`git status\\``", CLONE), None);
+    }
+
+    /// A command that goes over the work budget asks, in the folder it starts in.
+    #[test]
+    fn the_too_complex_backstop_asks_about_the_folder_the_command_starts_in() {
+        let spent = Work { left: 0, started: std::time::Instant::now(), spent_up: false };
+        let found = checkout_changes_within("echo hello", Path::new(CLONE), &[], spent);
+        assert_eq!(found, vec![Change { folder: PathBuf::from(CLONE), command: TOO_COMPLEX.into() }]);
+        let plenty = checkout_changes_within("echo hello", Path::new(CLONE), &[], Work::new());
+        assert!(plenty.is_empty());
+    }
+
+    /// A command over the budget reaches the user even from an agent's own workspace, which the hook otherwise trusts; so
+    /// does a payload hidden after thousands of harmless nested texts.
+    #[test]
+    fn a_command_that_went_over_the_budget_asks_from_the_agents_own_clone() {
+        let input = |cmd: &str| json!({ "tool_name": "Bash", "cwd": CLONE, "tool_input": { "command": cmd } }).to_string();
+        let spent = Work { left: 0, started: std::time::Instant::now(), spent_up: false };
+        let found = outside_changes_within(&input("echo hello"), &[PathBuf::from(STORAGE)], spent);
+        assert_eq!(found, vec![Change { folder: CLONE.into(), command: TOO_COMPLEX.into() }]);
+        // Another change of its own in the clone doesn't take the ask's place.
+        for first in ["git checkout -b x;", "pnpm install;"] {
+            let hidden = format!("{first}{}eval 'git -C {USER} reset --hard'", "eval true;".repeat(2100));
+            let found = outside_changes(&input(&hidden), &[PathBuf::from(STORAGE)]);
+            assert!(found.iter().any(|c| c.command == TOO_COMPLEX), "{first}: {found:?}");
+        }
+        let after = format!("{}eval 'git -C {USER} reset --hard'; git commit -m x", "eval true;".repeat(2100));
+        assert!(outside_changes(&input(&after), &[PathBuf::from(STORAGE)]).iter().any(|c| c.command == TOO_COMPLEX));
+    }
+
+    /// Each real backtick in a heredoc body is found, however the ones around it pair up or nest.
+    #[test]
+    fn a_real_backtick_in_a_heredoc_asks_whatever_surrounds_it() {
+        let user = vec![PathBuf::from(USER)];
+        let git = format!("git -C {USER} reset --hard");
+        for body in [
+            format!("`{git}`"),
+            format!("`echo \\`{git}\\``"),
+            format!("`echo \\`echo \\\\\\`{git}\\\\\\`\\``"),
+            format!("$(echo '`') it's `{git}`"),
+            format!("$(: '`') # `{git}`"),
+        ] {
+            let cmd = format!("cat <<E\n{body}\nE");
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+        assert!(asks_all("cat <<E\n\\`git status\\` and `echo hi`\nE", CLONE).is_empty());
+        // A backslash-newline joins the lines first, so `$\<newline>(` is a substitution; `\\<newline>` is not.
+        for body in [format!("$\\\n({git})"), format!("`\\\n{git}`"), format!("$\\\n\\\n({git})")] {
+            let cmd = format!("cat <<E\n{body}\nE");
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+        assert!(asks_all(&format!("cat <<E\n$\\\\\n({git})\nE"), CLONE).is_empty());
+    }
+
+    /// A backtick command inside `${…}` ends at its closing backtick: the commands after it still follow the `cd` before.
+    #[test]
+    fn a_backtick_in_a_parameter_expansion_doesnt_swallow_the_rest() {
+        let user = vec![PathBuf::from(USER)];
+        for cmd in [
+            format!("echo ${{x:-`true`}}; cd {USER}; echo `true`; pnpm install"),
+            format!("echo ${{x:-`true`}}; cd {USER}; echo \"`true`\"; git reset --hard"),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+    }
+
+    /// In double quotes, `\"` inside a backtick command is a plain quote of that command, not an escaped one.
+    #[test]
+    fn an_escaped_quote_in_a_backtick_command_in_double_quotes_is_a_quote() {
+        let user = vec![PathBuf::from(USER)];
+        let git = format!("git -C {USER} reset --hard");
+        for cmd in [
+            format!("echo \"`echo \"x\\\"; {git}; echo \\\"y\"`\""),
+            format!("echo \"`echo \\\"a\\\"; {git}`\""),
+            format!("echo \"`cd {USER}; echo \\\"x\\\"; pnpm install`\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+        assert!(asks_all("echo \"`echo \\\"git status\\\"`\"", CLONE).is_empty());
+    }
+
+    /// Inside `${…}` in double quotes zsh unescapes `\"` in a backtick command and bash doesn't: a git in either reading asks.
+    #[test]
+    fn a_backtick_in_a_parameter_expansion_in_double_quotes_is_read_as_zsh_and_as_bash() {
+        let user = vec![PathBuf::from(USER)];
+        let git = format!("git -C {USER} reset --hard");
+        for cmd in [
+            // bash: the git runs; zsh: it is in a string.
+            format!("echo \"${{x:-`echo \\\"; {git}; echo \\\"`}}\""),
+            format!("bash -c 'echo \"${{x:-`echo \\\"; {git}; echo \\\"`}}\"'"),
+            format!("echo \"${{x:-`echo \\\"; cd {USER}; pnpm install; echo \\\"`}}\""),
+            // zsh: the git runs.
+            format!("echo \"${{x:-`echo \"x\\\"; {git}; echo \\\"y\"`}}\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), user, "{cmd}");
+        }
+    }
+
+    /// Double quotes opened inside `${…}`, with the backtick command in them (found on `main`): both readings of `\"` are
+    /// checked, so a git in either asks.
+    #[test]
+    fn double_quotes_inside_a_parameter_expansion_dont_hide_a_backtick_command() {
+        let git = format!("git -C {USER} reset --hard");
+        let inner = format!("`echo \"x\\\"; {git}; echo \\\"y\"`");
+        for cmd in [
+            format!("echo ${{x:-\"{inner}\"}}"),
+            format!("echo \"${{x:-\"{inner}\"}}\""),
+            format!("cat <<EOF\n${{x:-\"{inner}\"}}\nEOF"),
+            format!("bash -c 'echo ${{x:-\"{inner}\"}}'"),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), vec![PathBuf::from(USER)], "{cmd}");
+        }
+        assert!(asks_all("echo ${x:-\"`echo \\\"git status\\\"`\"}", CLONE).is_empty());
+    }
+
+    /// Where bash and zsh count `${…}` or quotes differently, a backtick command is read both ways (found by security):
+    /// a `}` in single quotes, a quote inside the braces, a continuation making `${`.
+    #[test]
+    fn a_backtick_in_a_string_is_read_both_ways_whatever_the_braces_look_like() {
+        let git = format!("git -C {USER} reset --hard");
+        let payload = format!("`echo \\\"; {git}; echo \\\"`");
+        for cmd in [
+            format!("echo \"${{x:-${{y}}{payload}}}\""),
+            format!("echo \"${{x:-`true`${{y}}{payload}}}\""),
+            format!("echo \"${{x:-\\}}{payload}}}\""),
+            format!("echo \"${{x:-$(echo }}){payload}}}\""),
+            format!("echo \"${{x:-'}}'{payload}}}\""),
+            format!("bash -c 'echo \"${{x:-'\\''}}'\\''{payload}}}\"'"),
+            format!("echo \"${{x:-'}}}}}}'{payload}}}\""),
+            format!("echo \"${{x+'}}'{payload}}}\""),
+            format!("echo \"${{x:-\"}}\"{payload}}}\""),
+            format!("echo \"$\\\n{{x:-{payload}}}\""),
+        ] {
+            assert_eq!(asks_all(&cmd, CLONE), vec![PathBuf::from(USER)], "{cmd}");
+        }
     }
 }

@@ -8,6 +8,7 @@ import { ErrorLine } from "../../components/Callout";
 import { startDeliveryLabel } from "../../lib/startDelivery";
 import { errorText, useAction } from "../../lib/useAction";
 import { StartWarning } from "../../components/StartWarning";
+import { WorkflowWarnings } from "../../components/WorkflowWarnings";
 import { api, type WaitsOn, type DeliveryStarted, type EndCard as Card, type CardSpec, type PlannedIssue } from "../../lib/api";
 
 /** A published spec or ticket: a GitHub issue, or (no repo) a Loft issue, which opens here and has no number. */
@@ -95,6 +96,7 @@ function SpecBlock({ agentId, messageId, item, busy, run, starting, merging, out
         </div>
       )}
       {declined && !askGit && !startedOn && <div className="mt-3 text-[12px] text-fg-3">Nothing was set up: the plan stays as Loft issues.</div>}
+      {item.workflows && <WorkflowWarnings check={item.workflows} className="mt-3" />}
       {note}
       {warn && !startedOn && waits.length > 0 && <StartWarning waits={waits} onStart={() => start(false)} startPending={starting.busy} onCancel={() => setWarn(false)} onStarted={reloadWaits} />}
       <div className="mt-3 flex flex-wrap items-center gap-2">

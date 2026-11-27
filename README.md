@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://seelowen-maito.github.io/loft/">Website</a> ·
+  <a href="https://get-loft.com">Website</a> ·
   <a href="#install">Install</a> ·
   <a href="#why-loft">Why loft</a>
 </p>
@@ -23,7 +23,7 @@
 **One-line installer**
 
 ```sh
-curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
+curl -fsSL https://get-loft.com/install.sh | bash
 ```
 
 ---
@@ -65,7 +65,7 @@ loft runs on macOS, Linux and Windows (x64, Windows 10 22H2 or 11). On Windows i
 **One-line installer**
 
 ```sh
-curl -fsSL https://seelowen-maito.github.io/loft/install.sh | bash
+curl -fsSL https://get-loft.com/install.sh | bash
 ```
 
 The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On Windows, run it in Git Bash: it saves the projects folder as `C:/…`, the form loft reads. It can also run loft in the background from login: on macOS as a launchd service (logs in `~/Library/Logs/loft.log`), on Windows as a logon task that runs it without a window (logs in `%LOCALAPPDATA%\Loft\loft.log`). Either one starts loft again after an update or a crash; run setup again to update it. The installer and setup are safe to run again at any time, for example after you move Node or Claude Code.
@@ -100,7 +100,7 @@ The `ios/` folder has a native iPhone app for agent status, approvals, tasks and
 
 ## How agents run
 
-Each agent runs headless Claude Code in its own folder under `~/.local/share/loft/<checkout>-<hash>/agent-local-storage/` (`$XDG_DATA_HOME` when set), outside any repo; an older install moves its workspaces there from the checkout on start ([ADR 0005](docs/adr/0005-workspaces-outside-the-checkout.md)). Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
+Each agent runs headless Claude Code in its own folder under `~/.local/share/loft/<checkout>-<hash>/agent-local-storage/` (`$XDG_DATA_HOME` when set), outside any repo. Agents clone your repos instead of editing them in place, and your personal Claude Code settings, hooks and MCP servers aren't passed to them. loft gives each agent a small set of tools of its own (memory, status, permission requests, messaging other agents, sharing pull requests) through a local MCP server.
 
 ## Development
 

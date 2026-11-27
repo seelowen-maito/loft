@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router";
-import { Bot, GitBranch, Inbox, ListTodo, Mic, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
+import { Bookmark, Bot, GitBranch, Inbox, ListTodo, Settings as SettingsIcon, ShieldAlert, Smartphone } from "lucide-react";
 import { api, type Settings } from "./lib/api";
 import { useLiveConnection, useServerEvents, type ServerEvent } from "./lib/events";
 import { cx } from "./lib/format";
@@ -10,11 +10,13 @@ import { pendingItems } from "./lib/pending";
 import { useAgents, usePermissions } from "./hooks/lists";
 import { badgeText, badgeTitle, badgeTone, countAfter, countsOf, iconAction, type Counts } from "./lib/needsYou";
 import ReposPage from "./pages/Repos";
+import ProjectSettingsPage from "./pages/ProjectSettings";
 import AgentsPage from "./pages/agents/AgentsPage";
 import SettingsPage, { SETTINGS_SAVED } from "./pages/Settings";
 import CleanPage from "./pages/Clean";
 import SimulatorPage from "./pages/Simulator";
 import TasksPage from "./pages/Tasks";
+import SavedPage from "./pages/Saved";
 import NeedsYouPage, { useCloseNeedsYou } from "./pages/NeedsYou";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { UpdateStatus } from "./components/UpdateStatus";
@@ -23,7 +25,9 @@ import { TempMeter } from "./components/TempMeter";
 import { Shortcuts } from "./components/Shortcuts";
 import { Toaster } from "./components/FloatingBar";
 import { Talk } from "./components/Talk";
-import { openTalk } from "./lib/talk";
+import { HelpMenu } from "./components/HelpMenu";
+import { Tip } from "./components/HoverTip";
+import { goKeys } from "./lib/shortcuts";
 import { useOffered } from "./hooks/useOffered";
 import { fmtClock } from "./lib/time";
 import { useNow } from "./lib/useNow";
@@ -66,30 +70,35 @@ function PendingBadge() {
   }, [open]);
   const count = items.length;
   if (!count) return null;
-  const pill = "flex items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2.5 py-1 font-mono text-[11px] text-warn";
+  // Below 2xl it is just the icon with the count on its corner, like the Needs you badge, so the top bar still fits.
+  const pill = "relative flex items-center gap-1.5 rounded-full border border-warn/30 bg-warn/10 px-2.5 py-1 font-mono text-[11px] text-warn max-2xl:size-7 max-2xl:justify-center max-2xl:p-0";
+  const ariaLabel = `${count} permission${count > 1 ? "s" : ""} pending`;
   const label = (
     <>
       <ShieldAlert className="size-3.5" />
-      {count}<span className="max-md:hidden"> permission{count > 1 ? "s" : ""} pending</span>
+      <span className="max-2xl:hidden">{count} permission{count > 1 ? "s" : ""} pending</span>
+      <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-warn px-1 text-[9.5px] font-medium leading-none text-ink-950 2xl:hidden">{count}</span>
     </>
   );
   if (count === 1) {
-    return <Link to={items[0].href} className={pill} title={items[0].title}>{label}</Link>;
+    return <Tip name={ariaLabel}><Link to={items[0].href} className={pill} aria-label={ariaLabel}>{label}</Link></Tip>;
   }
   return (
     <div ref={box} className="relative">
-      <button
-        type="button"
-        className={pill}
-        title={`Oldest: ${items[0].title}`}
-        aria-expanded={open}
-        onClick={() => {
-          if (!open) navigate(items[0].href);
-          setOpen(!open);
-        }}
-      >
-        {label}
-      </button>
+      <Tip name={ariaLabel}>
+        <button
+          type="button"
+          className={pill}
+          aria-label={ariaLabel}
+          aria-expanded={open}
+          onClick={() => {
+            if (!open) navigate(items[0].href);
+            setOpen(!open);
+          }}
+        >
+          {label}
+        </button>
+      </Tip>
       {open && (
         <div role="menu" className="absolute right-0 top-full z-50 mt-2 flex w-72 flex-col rounded-lg border border-line-strong bg-ink-800/95 p-1 shadow-xl backdrop-blur">
           {items.map((i) => (
@@ -117,25 +126,26 @@ function NeedsYouBadge({ live }: { live: boolean }) {
   useServerEvents(useCallback((e: ServerEvent) => setC((c) => countAfter(c, e)), []));
   const n = badgeText(c.count);
   return (
-    <NavLink
-      to="/needs-you"
-      title={badgeTitle(c)}
-      aria-label={`Needs you: ${badgeTitle(c)}`}
-      data-needs-you-count={c.count}
-      onClick={(e) => {
-        if (iconAction(pathname) !== "close") return;
-        e.preventDefault();
-        close();
-      }}
-      className={({ isActive }) => cx("relative rounded-full p-1.5 transition-colors", isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}
-    >
-      <Inbox className="size-4" />
-      {n && (
-        <span className={cx("absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 font-mono text-[9.5px] font-medium leading-none text-ink-950", badgeTone(c) === "warn" ? "bg-warn" : "bg-accent")}>
-          {n}
-        </span>
-      )}
-    </NavLink>
+    <Tip name={`Needs you: ${badgeTitle(c)}`}>
+      <NavLink
+        to="/needs-you"
+        aria-label={`Needs you: ${badgeTitle(c)}`}
+        data-needs-you-count={c.count}
+        onClick={(e) => {
+          if (iconAction(pathname) !== "close") return;
+          e.preventDefault();
+          close();
+        }}
+        className={({ isActive }) => cx("relative rounded-full p-1.5 transition-colors", isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}
+      >
+        <Inbox className="size-4" />
+        {n && (
+          <span className={cx("absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 font-mono text-[9.5px] font-medium leading-none text-ink-950", badgeTone(c) === "warn" ? "bg-warn" : "bg-accent")}>
+            {n}
+          </span>
+        )}
+      </NavLink>
+    </Tip>
   );
 }
 
@@ -195,7 +205,7 @@ export default function App() {
   const showSimulator = useShowSimulator() && offers.simulator;
   const tab = ({ isActive }: { isActive: boolean }) =>
     cx(
-      "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors",
+      "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] transition-colors max-lg:px-2 max-[24rem]:px-1.5",
       isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg",
     );
   return (
@@ -206,51 +216,62 @@ export default function App() {
             <Logo />
             <span className="text-[15px] font-medium tracking-tight max-sm:hidden">loft</span>
           </NavLink>
-          <nav className="flex items-center gap-1 rounded-full border border-line bg-ink-900 p-1">
-            <NavLink to="/repos" className={tab} aria-label="Repos">
-              <GitBranch className="size-3.5" /> <span className="max-md:hidden">Repos</span>
-            </NavLink>
-            <NavLink to="/agents" className={tab} aria-label="Agents">
-              {/* The dot sits on the icon so it still shows on phones, where the label hides. */}
-              <span className="relative">
-                <Bot className="size-3.5" />
-                <UnreadDot />
-              </span>{" "}
-              <span className="max-md:hidden">Agents</span>
-            </NavLink>
-            <NavLink to={issuesLink(location.pathname)} className={tab} aria-label="Issues">
-              <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>
-            </NavLink>
-            {showSimulator && (
-              <NavLink to="/simulator" className={tab} aria-label="Simulator">
-                <Smartphone className="size-3.5" /> <span className="max-md:hidden">Simulator</span>
+          <nav className="flex items-center gap-1 rounded-full border border-line bg-ink-900 p-1 max-[24rem]:gap-0 max-[24rem]:p-0.5">
+            <Tip left name="Repos" keys={goKeys("/repos")}>
+              <NavLink to="/repos" className={tab} aria-label="Repos">
+                <GitBranch className="size-3.5" /> <span className="max-md:hidden">Repos</span>
               </NavLink>
+            </Tip>
+            <Tip left name="Agents" keys={goKeys("/agents")}>
+              <NavLink to="/agents" className={tab} aria-label="Agents">
+                {/* The dot sits on the icon so it still shows on phones, where the label hides. */}
+                <span className="relative">
+                  <Bot className="size-3.5" />
+                  <UnreadDot />
+                </span>{" "}
+                <span className="max-md:hidden">Agents</span>
+              </NavLink>
+            </Tip>
+            <Tip left name="Issues" keys={goKeys("/issues")}>
+              <NavLink to={issuesLink(location.pathname)} className={tab} aria-label="Issues">
+                <ListTodo className="size-3.5" /> <span className="max-md:hidden">Issues</span>
+              </NavLink>
+            </Tip>
+            <Tip left name="Saved">
+              <NavLink to="/saved" className={tab} aria-label="Saved">
+                <Bookmark className="size-3.5" /> <span className="max-md:hidden">Saved</span>
+              </NavLink>
+            </Tip>
+            {showSimulator && (
+              <Tip left name="Simulator" keys={goKeys("/simulator")}>
+                <NavLink to="/simulator" className={tab} aria-label="Simulator">
+                  <Smartphone className="size-3.5" /> <span className="max-md:hidden">Simulator</span>
+                </NavLink>
+              </Tip>
             )}
           </nav>
-          <div className="ml-auto flex items-center gap-4 max-md:gap-3 max-[21rem]:gap-2">
-            {offers.voice && (
-              <button className="rounded-full p-1.5 text-fg-3 transition-colors hover:text-fg" title="Talk to an agent" aria-label="Talk" onClick={() => openTalk()}>
-                <Mic className="size-4" />
-              </button>
-            )}
+          <div className="ml-auto flex items-center gap-4 max-lg:gap-2 max-[21rem]:gap-1">
             <PendingBadge />
             <NeedsYouBadge live={live} />
-            {/* The meters and the clock don't fit on a phone; the live dot and settings do. */}
-            <div className="flex items-center gap-4 max-lg:hidden">
+            {/* The meters and the clock don't fit on a phone, nor the live dot: Help takes its place and says it. */}
+            <div className="flex items-center gap-4 max-xl:hidden">
               <UpdateStatus live={live} />
               <UsageMeter live={live} />
               <TempMeter live={live} />
             </div>
-            <span className="flex items-center gap-1.5 font-mono text-[11px] text-fg-3" title={live ? "Live event stream connected" : "Reconnecting to backend…"}>
+            <span className="flex items-center gap-1.5 font-mono text-[11px] text-fg-3 max-sm:hidden" title={live ? "Live event stream connected" : "Reconnecting to backend…"}>
               <span className={cx("size-1.5 rounded-full", live ? "bg-good animate-pulse-soft" : "bg-bad")} />
-              <span className="max-sm:hidden">{live ? "live" : "offline"}</span>
+              <span>{live ? "live" : "offline"}</span>
             </span>
-            <span className="max-lg:hidden">
+            <span className="max-xl:hidden">
               <Clock />
             </span>
-            <NavLink to="/settings" title="Settings" className={({ isActive }) => cx("rounded-full p-1.5 transition-colors", isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
-              <SettingsIcon className="size-4" />
-            </NavLink>
+            <HelpMenu live={live} />
+            <Tip name="Settings" keys={goKeys("/settings")}>
+              <NavLink to="/settings" aria-label="Settings" className={({ isActive }) => cx("rounded-full p-1.5 transition-colors", isActive ? "bg-white/[0.08] text-fg" : "text-fg-3 hover:text-fg")}>
+                <SettingsIcon className="size-4" />
+              </NavLink>
+            </Tip>
           </div>
         </div>
       </header>
@@ -262,6 +283,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/repos" replace />} />
           <Route path="/repos" element={<ReposPage />} />
+          <Route path="/repos/:name/settings" element={<ProjectSettingsPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentsPage />} />
           <Route path="/agents/:id/interview" element={<AgentsPage />} />
@@ -273,6 +295,8 @@ export default function App() {
           <Route path="/tasks" element={<OldTask />} />
           <Route path="/tasks/:id" element={<OldTask />} />
           <Route path="/needs-you" element={<NeedsYouPage />} />
+          <Route path="/saved" element={<SavedPage />} />
+          <Route path="/saved/:id" element={<SavedPage />} />
           {offers.simulator && <Route path="/simulator" element={<SimulatorPage />} />}
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/clean" element={<CleanPage />} />

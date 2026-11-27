@@ -6,8 +6,12 @@ import SwiftUI
 struct NeedsYouScreen: View {
     @Environment(LoftStore.self) private var store
     @Environment(MacNav.self) private var nav
+    /// Clear all's items, taken when its confirm opens: one that arrives while it's up stays.
+    @State private var clearing: NeedsYouClearAll?
+    @State private var clearError: String?
 
     var body: some View {
+        let clearAll = NeedsYouClearAll(store.needsYou?.items ?? [])
         ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
@@ -46,9 +50,29 @@ struct NeedsYouScreen: View {
         .overlay(alignment: .top) { NeedsYouNotice().padding(.top, 8) }
         .navigationTitle("Needs you")
         .toolbar {
+            // Clear all: every item shown with Done, after a confirm; hidden when there's nothing to clear.
+            if clearAll.clear > 0 {
+                Button(clearAll.label) { clearing = clearAll }
+                    .accessibilityIdentifier("needsYouClearAll")
+            }
             Button { Task { await store.refreshNeedsYou() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                 .keyboardShortcut("r")
         }
+        // Nothing left to clear (the button went) while the confirm was up: drop it.
+        .onChange(of: clearAll.clear) { _, n in if n == 0 { clearing = nil } }
+        .confirmationDialog(clearing?.question ?? "", isPresented: Binding(get: { clearing != nil }, set: { if !$0 { clearing = nil } }),
+                            presenting: clearing) { taken in
+            Button("Clear all", role: .destructive) {
+                Task {
+                    do { try await store.clearAllNeedsYou(taken) } catch { clearError = error.localizedDescription }
+                }
+            }
+        } message: { _ in
+            Text("Each one is marked Done and leaves the list, on every device.")
+        }
+        .alert("Couldn't clear", isPresented: Binding(get: { clearError != nil }, set: { if !$0 { clearError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(clearError ?? "") }
         .task { await store.refreshNeedsYou() }
     }
 }
@@ -92,6 +116,12 @@ struct NeedsYouRow: View {
                 .lineLimit(showsText ? nil : 4)
                 .font(showsText ? .body.monospaced() : nil)
                 .textSelection(.enabled)
+            if item.changesWorkflows {
+                Label(WorkflowWarning.text, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Theme.attentionInk)
+                    .accessibilityIdentifier("workflowWarning")
+            }
             if item.type == "permission", let request = store.permissions.first(where: { "permission:\($0.id)" == item.id }) {
                 PermissionExplainerRow(request: request)
             }

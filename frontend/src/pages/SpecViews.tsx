@@ -3,7 +3,7 @@ import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { specProgress } from "../lib/issueOrder";
-import { badgeText, deliveryWaits, deliveryOf, stageOf, ticketState, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
+import { badgeText, deliveryWaits, deliveryOf, stageOf, ticketState, ticketsOf, waitsForYou, type DeliverySummary, type Stage } from "../lib/specViews";
 import { DeliveryLine } from "../components/DeliveryLine";
 
 /* Pieces shared by the Issues page's Specs board (./SpecBoard) and a spec's own page, which opens with its Delivery timeline (`SpecPanel`). */
@@ -16,12 +16,14 @@ export type Ctx = { tasks: Task[]; deliveries: DeliverySummary[]; agentById: Map
 
 /** Tickets done of all: the Delivery's own tickets when it has them (live), else the issue list's count. */
 export function progressOf(spec: Task, d: DeliverySummary | null, tasks: Task[]) {
+  // A standalone ticket's card is a ticket's: no progress bar.
+  if (d?.standalone) return null;
   const ts = d?.tickets ?? [];
   return ts.length ? { done: ts.filter((t) => t.state === "closed").length, total: ts.length } : specProgress(spec, tasks);
 }
 
 export function Badge({ stage, d }: { stage: Stage; d: DeliverySummary | null }) {
-  return <span className={cx("chip shrink-0 text-[11px]", STAGE_TONE[stage], stage === "delivery" && d?.state === "needs_human" && "text-warn")}>{badgeText(stage, d)}</span>;
+  return <span className={cx("chip shrink-0 text-[11px]", STAGE_TONE[stage], stage === "delivery" && waitsForYou(d) && "text-warn")}>{badgeText(stage, d)}</span>;
 }
 
 export function Bar({ done, total, stage }: { done: number; total: number; stage: Stage }) {
@@ -41,6 +43,17 @@ export function DeliveryWaits({ d, className }: { d: { waiting_on_you?: number[]
 }
 
 export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Map<string, Agent> }) {
+  // A standalone ticket's Delivery has no tickets: its Dev, while the Delivery runs and doesn't wait for the user.
+  if (d?.standalone) {
+    if (!d.agent_id || d.needs_human || !["running", "final_review", "final_fixes"].includes(d.state)) return null;
+    const a = agentById.get(d.agent_id);
+    return (
+      <div className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-fg-2">
+        {a && <Sticker avatar={a.avatar} lead={a.role === "lead"} size={16} />}
+        <span className="truncate"><span className="text-fg">{d.agent_name ?? "An agent"}</span> is on it</span>
+      </div>
+    );
+  }
   const running = d?.tickets.filter((t) => t.agent_id) ?? [];
   // Waiting for CI: no agent is on it, Loft follows its CI on GitHub.
   const onCi = d?.tickets.filter((t) => t.waiting_for_ci) ?? [];

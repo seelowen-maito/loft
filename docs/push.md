@@ -99,6 +99,7 @@ uses the right host per device. The same auth key works for both.
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,
 `grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`, `delivery_stalled`, `delivery_done`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
 `grill_question`, the name before rounds, is still accepted and stored as `grill_round`.
+Three item types go out under another kind: `mac_access` under `stuck`, `actions_quota` (an owner's GitHub Actions minutes past 70% or 90% of its quota) and `pr_workflows` (a PR changing `.github/workflows/`) under `delivery_stalled`: that is the push's `type` too. Tapping an `actions_quota` push opens Settings, a `pr_workflows` one the PR's files on GitHub.
 `quiet_hours`: `{start: "22:00", end: "07:00", tz: "Europe/Lisbon", utc_offset_minutes: 60}`.
 
 When Apple answers **410**, or **400 BadDeviceToken / DeviceTokenNotForTopic**, the device is removed.
@@ -150,6 +151,7 @@ Every 5 seconds the "needs you" watcher hands the current list to the pusher (`p
 | pr_review | "Review requested" | "<repo>#<n>: <title>" |
 | delivery_stalled | "Delivery stalled" | the spec's (or standalone ticket's) title |
 | delivery_done | "Delivery done" | the spec's (or standalone ticket's) title |
+| actions_quota | "GitHub Actions: <owner> at <70\|90>% of its quota" | "<minutes> of <quota> minutes this month" |
 
 Push text is built from names and titles only, never from the item's `reason` or `text`: no tool input, no message content, no errors.
 It's still run through the same credential redaction. Send errors are logged with the device name and status, never the payload.

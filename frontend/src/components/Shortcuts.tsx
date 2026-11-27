@@ -11,6 +11,7 @@ import {
   searchRows, SHORTCUTS_CHANGED, switcherAgents, type Combos, type Openable,
 } from "../lib/shortcuts";
 import { statusOf } from "../pages/agents/Status";
+import { openTalk } from "../lib/talk";
 import { Dialog } from "./Dialog";
 import { toast } from "./FloatingBar";
 import { Sticker } from "./Sticker";
@@ -23,8 +24,8 @@ export function Shortcuts() {
   const navigate = useNavigate();
   const [open, setOpen] = useState<"switcher" | "sheet" | null>(null);
   const combos = useRef<Combos>(loadCombos());
-  const simulator = useRef(false);
-  simulator.current = useOffered().simulator;
+  const offers = useRef(useOffered());
+  offers.current = useOffered();
   const gAt = useRef(0);
   const close = useCallback(() => setOpen(null), []);
 
@@ -38,11 +39,10 @@ export function Shortcuts() {
       if (recording.on || e.isComposing) return;
       const afterG = Date.now() - gAt.current < G_WINDOW_MS;
       gAt.current = 0;
-      const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG, simulator: simulator.current });
+      // Plain keys don't act on the page behind any open dialog (Glossary, a confirm, Talk itself).
+      const a = shortcutAction(e, { combos: combos.current, typing: isTyping(e.target), afterG, dialog: !!document.querySelector('[role="dialog"]'), simulator: offers.current.simulator, voice: offers.current.voice });
       if (!a) return;
       const shown = document.querySelector<HTMLElement>('[role="dialog"][data-shortcuts]');
-      // Plain keys don't act on the page behind an open dialog.
-      if (shown && (a.type === "g" || a.type === "go" || a.type === "focus-chat" || a.type === "sheet")) return;
       e.preventDefault();
       if (a.type === "switcher" || a.type === "sheet") {
         if (a.type === "switcher" && shown?.getAttribute("aria-label") === SWITCHER) close();
@@ -50,6 +50,7 @@ export function Shortcuts() {
       }
       else if (a.type === "g") gAt.current = Date.now();
       else if (a.type === "go") navigate(a.path);
+      else if (a.type === "talk") openTalk();
       else if (a.type === "focus-chat") document.querySelector<HTMLTextAreaElement>("[data-chat-input]")?.focus();
       else if (a.type === "next") {
         const current = window.location.pathname.match(/^\/agents\/([^/]+)/)?.[1] ?? null;
@@ -84,8 +85,8 @@ export function Shortcuts() {
 }
 
 /** Every shortcut with its current keys, for the sheet and Settings. */
-export function shortcutRows(combos: Combos, simulator: boolean): { keys: string; label: string }[] {
-  return [...REBINDABLE.map((r) => ({ keys: formatCombo(combos[r.id]), label: r.label })), ...fixedShortcuts(simulator)];
+export function shortcutRows(combos: Combos, offers: { simulator: boolean; voice: boolean }): { keys: string; label: string }[] {
+  return [...REBINDABLE.map((r) => ({ keys: formatCombo(combos[r.id]), label: r.label })), ...fixedShortcuts(offers)];
 }
 
 export function Keys({ keys }: { keys: string }) {
@@ -99,7 +100,7 @@ export function Keys({ keys }: { keys: string }) {
 }
 
 function Sheet({ combos, onClose }: { combos: Combos; onClose: () => void }) {
-  const { simulator } = useOffered();
+  const offers = useOffered();
   return (
     <Dialog title="Keyboard shortcuts" data-shortcuts="" top onClose={onClose} className="p-5">
       <div className="mb-3 flex items-center justify-between">
@@ -107,7 +108,7 @@ function Sheet({ combos, onClose }: { combos: Combos; onClose: () => void }) {
         <button autoFocus className="btn-ghost" onClick={onClose} aria-label="Close"><X className="size-4" /></button>
       </div>
       <ul className="space-y-2">
-        {shortcutRows(combos, simulator).map((r) => (
+        {shortcutRows(combos, offers).map((r) => (
           <li key={r.label} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0 text-fg-2">{r.label}</span>
             <Keys keys={r.keys} />

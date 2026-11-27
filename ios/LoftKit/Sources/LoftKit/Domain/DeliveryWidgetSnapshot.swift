@@ -129,9 +129,9 @@ public struct DeliveryWidgetSnapshot: Equatable {
     static func title(_ d: DeliverySummary, _ spec: HBTask) -> String { d.local ? spec.title : "#\(d.spec) \(spec.title)" }
 
     /// The Deliveries the picker offers, with their titles: the started ones, those still going first, then the most
-    /// recently updated spec first.
+    /// recently updated spec first. Not a standalone ticket's: it has no tickets for the widget to count.
     public static func choices(_ deliveries: [DeliverySummary], tasks: [HBTask]) -> [(key: String, title: String, repo: String)] {
-        deliveries.filter { $0.state != "planned" }
+        deliveries.filter { $0.state != "planned" && !$0.isStandalone }
             .map { d in (d, specTask(d, in: tasks)) }
             .sorted { a, b in
                 let (fa, fb) = (Status(a.0).finished, Status(b.0).finished)

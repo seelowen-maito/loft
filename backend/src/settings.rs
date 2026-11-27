@@ -26,15 +26,20 @@ pub struct Settings {
     pub show_simulator: bool,
     /// Give every agent Loft's messaging rules (see `agents::MESSAGING_RULES`). On by default.
     pub messaging_rules: bool,
-    /// Publish new Loft issues to GitHub as they're made (only projects with a GitHub repo can). Off by default.
-    /// `None` until `migrate_github_settings` has turned the old per-project `auto_publish` list into this.
+    /// GitHub publishing as Settings kept it before it moved to each project's Project settings (#467): read from
+    /// `settings.json` and from older clients, but never written back, so it goes once
+    /// `project_settings::migrate_github_settings` has handed it to the projects. The global switch for new Loft
+    /// issues (`None`: never set, the older per-project `auto_publish` list then says).
+    #[serde(skip_serializing)]
     pub auto_publish_all: Option<bool>,
-    /// Old per-project list, no longer read. Kept so clients that still send it keep working.
+    /// The per-project list from before the global switch.
+    #[serde(skip_serializing)]
     pub auto_publish: Vec<String>,
-    /// Old per-project modes: folded into `comment_approval_default` by the migration, then empty and no longer read.
+    /// The per-project comment approval modes from before the global one.
+    #[serde(skip_serializing)]
     pub comment_approval: std::collections::HashMap<String, String>,
-    /// When comments on mirrored issues go to GitHub, for every project: `ask` (every one waits for approval),
-    /// `own` (yours go straight, agents' wait) or `all` (everything goes straight). Was the per-project fallback.
+    /// The comment approval mode for every project: `ask`, `own` or `all`; empty when never set.
+    #[serde(skip_serializing)]
     pub comment_approval_default: String,
     pub push: Push,
     /// Where the daily backups go (see backup.rs). Empty: `Loft/backups` in the system's data folder
@@ -42,14 +47,6 @@ pub struct Settings {
     pub backup_dir: String,
     /// Hours with no run after which an agent counts as idle: Loft then shuts its Simulator device down.
     pub idle_timeout_hours: u32,
-}
-
-impl Settings {
-    /// The comment approval mode; anything unknown asks.
-    pub fn approval_mode(&self) -> &str {
-        let m = &self.comment_approval_default;
-        if matches!(m.as_str(), "own" | "all") { m } else { "ask" }
-    }
 }
 
 /// APNs push. Not secret: the key itself is a file only the user can read (see apns.rs).
@@ -88,7 +85,7 @@ impl Default for Settings {
             messaging_rules: true,
             auto_publish: vec![],
             comment_approval: Default::default(),
-            comment_approval_default: "ask".into(),
+            comment_approval_default: String::new(),
             push: Push::default(),
             backup_dir: String::new(),
             idle_timeout_hours: 4,
@@ -172,23 +169,6 @@ impl Store {
         Ok(())
     }
 
-    /// Turns the old per-project settings into the global ones, once (while `auto_publish_all` is unset).
-    /// Auto-publish is on only if it was on for every project in `with_repo` (those with a GitHub repo).
-    /// The comment mode becomes the strictest of the old default and every per-project override
-    /// (ask < own < all), and the overrides are cleared. So nothing goes public that didn't before.
-    pub fn migrate_github_settings(&self, with_repo: &[String]) -> Result<()> {
-        let mut s = self.get();
-        if s.auto_publish_all.is_some() {
-            return Ok(());
-        }
-        s.auto_publish_all = Some(!with_repo.is_empty() && with_repo.iter().all(|p| s.auto_publish.contains(p)));
-        let rank = |m: &str| ["ask", "own", "all"].iter().position(|x| *x == m).unwrap_or(0);
-        let strictest = s.comment_approval.values().chain([&s.comment_approval_default]).min_by_key(|m| rank(m)).unwrap();
-        s.comment_approval_default = ["ask", "own", "all"][rank(strictest)].into();
-        s.comment_approval.clear();
-        self.save(s)
-    }
-
     /// Restart-only fields whose saved value differs from the running one.
     pub fn pending_restart(&self) -> Vec<&'static str> {
         let s = self.current.read().unwrap();
@@ -225,12 +205,6 @@ mod tests {
         let json = json.replace("PROJECTS", &dir.join("projects").to_string_lossy().replace('\\', "\\\\"));
         std::fs::write(dir.join("settings.json"), json).unwrap();
         Store::load(&dir).unwrap()
-    }
-
-    fn migrated(old: &str, with_repo: &[&str]) -> Option<bool> {
-        let s = store(&format!(r#"{{ "projects_dir": "PROJECTS", {old} }}"#));
-        s.migrate_github_settings(&with_repo.iter().map(|p| p.to_string()).collect::<Vec<_>>()).unwrap();
-        s.get().auto_publish_all
     }
 
     #[cfg(unix)]
@@ -311,42 +285,17 @@ mod tests {
     }
 
     #[test]
-    fn auto_publish_migrates_on_only_if_it_was_on_for_every_project_with_a_repo() {
-        let all = r#""auto_publish": ["a", "b", "no-repo"]"#;
-        assert_eq!(migrated(all, &["a", "b"]), Some(true));
-        assert_eq!(migrated(r#""auto_publish": ["a"]"#, &["a", "b"]), Some(false), "off for one: stays off");
-        assert_eq!(migrated(r#""auto_publish": ["no-repo"]"#, &["a"]), Some(false), "no-repo projects don't count");
-        assert_eq!(migrated(all, &[]), Some(false), "nothing to publish to");
-        assert_eq!(migrated(r#""x": 1"#, &["a"]), Some(false), "never set");
-    }
-
-    #[test]
-    fn the_migration_runs_once_and_the_old_mode_becomes_the_global_one() {
-        let s = store(r#"{ "projects_dir": "PROJECTS", "auto_publish": ["a"], "comment_approval_default": "own", "comment_approval": { "a": "all" } }"#);
-        s.migrate_github_settings(&["a".into()]).unwrap();
-        assert_eq!((s.get().auto_publish_all, s.get().approval_mode()), (Some(true), "own"));
-        let mut now = s.get();
-        now.auto_publish_all = Some(false);
-        s.save(now).unwrap();
-        s.migrate_github_settings(&["a".into()]).unwrap();
-        assert_eq!(s.get().auto_publish_all, Some(false), "a later choice isn't overwritten");
-    }
-
-    #[test]
-    fn the_comment_mode_becomes_the_strictest_of_the_old_default_and_every_override() {
-        let mode = |default: &str, overrides: &str| {
-            let s = store(&format!(r#"{{ "projects_dir": "PROJECTS", "comment_approval_default": "{default}", "comment_approval": {{ {overrides} }} }}"#));
-            s.migrate_github_settings(&[]).unwrap();
-            assert!(s.get().comment_approval.is_empty(), "the old overrides are cleared");
-            s.get().approval_mode().to_string()
-        };
-        assert_eq!(mode("all", r#""sensitive": "ask""#), "ask", "an ask override can't be widened by an all default");
-        assert_eq!(mode("own", r#""sensitive": "ask""#), "ask");
-        assert_eq!(mode("all", r#""a": "own", "b": "all""#), "own");
-        assert_eq!(mode("ask", r#""a": "all""#), "ask", "an all override doesn't widen an ask default");
-        assert_eq!(mode("own", ""), "own", "no overrides: unchanged");
-        assert_eq!(mode("all", ""), "all");
-        assert_eq!(mode("ask", ""), "ask");
-        assert_eq!(mode("all", r#""odd": "sometimes""#), "ask", "an unknown value asks");
+    fn the_github_publishing_settings_had_is_read_but_never_written_back() {
+        let s = store(r#"{ "projects_dir": "PROJECTS", "auto_publish_all": true, "auto_publish": ["a"], "comment_approval": { "a": "all" }, "comment_approval_default": "own" }"#);
+        let got = s.get();
+        assert_eq!((got.auto_publish_all, got.comment_approval_default.as_str(), got.comment_approval.len()), (Some(true), "own", 1), "read for the migration");
+        s.save(got).unwrap();
+        let file = std::fs::read_to_string(&s.path).unwrap();
+        for key in ["auto_publish", "comment_approval"] {
+            assert!(!file.contains(key), "{key} isn't written back: {file}");
+        }
+        let fresh = s.get();
+        assert_eq!(fresh.auto_publish_all, Some(true), "the running settings keep it until the migration clears it");
     }
 }
+

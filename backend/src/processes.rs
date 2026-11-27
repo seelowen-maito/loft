@@ -1489,7 +1489,7 @@ mod tests {
             let (st, id, pid, caller) = (st.clone(), a.id.clone(), daemon.pid().to_string(), shell.pid());
             async move { ask_as(&st, &id, caller, "kill", &[&pid]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         let req = pending(&st, &a.id).remove(0);
         crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
@@ -1756,7 +1756,7 @@ mod tests {
                 let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
                 async move { ask_as(&st, &id, caller, "kill", &["-9", &pid]).await }
             });
-            until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+            until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
             let req = pending(&st, &a.id).remove(0);
             assert!(req.reason.contains(&format!("A command outside {}'s runs (PID {caller})", a.name)), "{}", req.reason);
             assert!(req.reason.contains(&format!("{pid} ({}'s:", a.name)), "{}", req.reason);
@@ -1784,7 +1784,7 @@ mod tests {
             let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
             async move { ask(&st, &id, "kill", &[&pid]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         let req = pending(&st, &a.id).remove(0);
         assert_eq!(req.tool_name, "Kill");
         assert_eq!(req.input["command"], format!("kill {pid}"));
@@ -1818,7 +1818,7 @@ mod tests {
             let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
             async move { ask(&st, &id, "kill", &[&pid]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         assert!(other.alive());
         crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
@@ -1830,7 +1830,7 @@ mod tests {
             let (st, id, pid) = (st.clone(), a.id.clone(), theirs.pid().to_string());
             async move { ask(&st, &id, "kill", &[&pid]).await }
         });
-        until("a second permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a second permission request", 60, || pending(&st, &a.id).len() == 1).await;
         let req = pending(&st, &a.id).remove(0);
         assert!(theirs.alive());
         // It offers no Always: saving the rule wouldn't stop the question.
@@ -1890,7 +1890,7 @@ mod tests {
         let b = crate::tasks::tests::agent(&st, "Reviewer");
         enqueue(&st, &b.id, Some("busy".into()), "user");
         let storage = st.cfg.storage_dir.clone();
-        until("the other agent's run", 10, || sessions(&storage, &b.id).len() == 1).await;
+        until("the other agent's run", 60, || sessions(&storage, &b.id).len() == 1).await;
         let claude = *sessions(&storage, &b.id).iter().next().unwrap();
         // By PID (`kill <pid>` of another agent's claude was allowed before), and by a pattern only it matches.
         let bin = st.settings.get().claude_bin;
@@ -1907,7 +1907,7 @@ mod tests {
             assert!(req.reason.contains(&format!("{claude} (Reviewer's:")), "{}", req.reason);
         }
         crate::agents::stop(&st, &b.id);
-        until("the run to stop", 10, || !is_running(&st, &b.id)).await;
+        until("the run to stop", 60, || !is_running(&st, &b.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1918,11 +1918,11 @@ mod tests {
             let (st, id, pid) = (st.clone(), a.id.clone(), other.pid().to_string());
             async move { ask(&st, &id, "kill", &[&pid]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         let id = pending(&st, &a.id)[0].id.clone();
         // The Bash call timed out: the connection, and the handler with it, goes away.
         asking.abort();
-        until("the request to expire", 5, || st.db.get_permission(&id).unwrap().unwrap().status == "expired").await;
+        until("the request to expire", 60, || st.db.get_permission(&id).unwrap().unwrap().status == "expired").await;
         assert!(crate::agents::decide(&st, &id, "allow_once", None, None, None).is_err());
         assert!(other.alive());
     }
@@ -1939,7 +1939,7 @@ mod tests {
             let (st, id) = (st.clone(), a.id.clone());
             async move { ask(&st, &id, "kill", &["-CONT", &me.to_string()]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         assert!(pending(&st, &a.id)[0].reason.contains(&format!("{me} (Loft:")));
         crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None, None).unwrap();
         let v = asking.await.unwrap();

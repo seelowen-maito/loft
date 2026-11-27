@@ -4,10 +4,10 @@ import remarkGfm from "remark-gfm";
 import { Link, useLocation } from "react-router";
 import { permCard } from "../../lib/pending";
 import {
-  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Copy, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, Square, Wrench, X,
+  AlertCircle, ArrowUp, Brain, ChevronRight, Clock, Copy, Hourglass, ImagePlus, Info, ListTodo, Loader2, Mic, Play, Plus, RefreshCw, RotateCcw, SendHorizontal, Square, Wrench, X,
 } from "lucide-react";
 import { api, roleLabel, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
-import { cx, fmtInterval, fmtQuiet, fmtSchedule } from "../../lib/format";
+import { cx, fmtInterval, fmtQuiet, fmtSchedule, shortToolName } from "../../lib/format";
 import { Callout, ErrorLine, ResultLine } from "../../components/Callout";
 import { ActionButton } from "../../components/ActionButton";
 import { errorText, useAction } from "../../lib/useAction";
@@ -46,11 +46,14 @@ import { useMention } from "../../components/MentionMenu";
 import { useTagMenu } from "../../components/TagMenu";
 import { commandAt, completeCommand, highlightParts, splitCommand, enterOnMenu, stillPicked, type CommandWord } from "../../lib/commandHighlight";
 import { FyiMark } from "./FyiMark";
-import { CANCELLED_MARK, QUEUED_MARK, sendState, taskText } from "../../lib/agentMessage";
+import { GoalChip } from "./GoalChip";
+import { CANCELLED_MARK, QUEUED_MARK, SENT_NOW_MARK, sendState, taskText } from "../../lib/agentMessage";
 import { teamBadge, teamOf } from "../../lib/team";
 import { CHAT_LOADING_LINES, chatLoadingLine } from "../../lib/chatLoading";
-import { HoverTip } from "../../components/HoverTip";
+import { HoverTip, Tip } from "../../components/HoverTip";
 import { QuoteBlock, QuoteChip, ReplyButton, useLongPress } from "./Quote";
+import { SaveButton } from "./SaveMessage";
+import { linkedMessage } from "../../lib/saved";
 import { AnswerCard } from "./AnswerCard";
 import { answerCard } from "../../lib/answerCard";
 import { useOffered } from "../../hooks/useOffered";
@@ -95,7 +98,8 @@ function reachable(href: string | undefined) {
   return href.replace(LOOPBACK, `$1${host}`);
 }
 
-const MD_COMPONENTS: Components = {
+/** How chat Markdown renders links: issue links as chips, others reachable from the phone, external ones in a new tab. */
+export const MD_COMPONENTS: Components = {
   a: ({ node: _node, href: raw, children, ...rest }) => {
     const task = raw && TASK_LINK.exec(raw);
     if (task) return <TaskChip id={task[1]} />;
@@ -492,6 +496,14 @@ export function Chat({
     jumpTo.current = null;
     if (!flash(id)) setCmdNote(QUOTE_GONE_NOTE);
   }, [showEarlier]);
+  // A link to a message (a saved item's back-link, `#msg-<id>`): jump to it once the chat has loaded.
+  const linked = useRef<string | null>(null);
+  useEffect(() => {
+    const id = linkedMessage(location.hash);
+    if (id == null || loading || linked.current === location.hash) return;
+    linked.current = location.hash;
+    onJump(id);
+  }, [location.hash, loading, onJump]);
 
   const running = !!agent.running;
   // Re-render every 30 s so the "for N min" counts move while nothing else does.
@@ -529,8 +541,10 @@ export function Chat({
               </HoverTip>
             )}
           </div>
-          <div className="mt-1 flex min-w-0 items-center gap-3">
+          {/* Wraps on a phone when the Goal active chip leaves no room for the context size. */}
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
             <StatusPill agent={agent} elapsed />
+            <GoalChip agent={agent} />
             {/* The schedule and run time are details: on a phone the context size gets the room, to warn. */}
             <span
               className="flex shrink-0 items-center gap-1 font-mono text-[11px] text-fg-3 max-md:hidden"
@@ -544,37 +558,42 @@ export function Chat({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {running ? (
-            <ActionButton
-              variant="secondary"
-              title="Stop"
-              icon={<Square className="size-3 fill-current" />}
-              pending={stop.busy}
-              pendingLabel={<span className="max-sm:hidden">Stopping…</span>}
-              onClick={() => act(stop, () => api.stop(agent.id))}
-            >
-              <span className="max-sm:hidden">Stop</span>
-            </ActionButton>
+            <Tip name="Stop the run">
+              <ActionButton
+                variant="secondary"
+                aria-label="Stop"
+                icon={<Square className="size-3 fill-current" />}
+                pending={stop.busy}
+                pendingLabel={<span className="max-sm:hidden">Stopping…</span>}
+                onClick={() => act(stop, () => api.stop(agent.id))}
+              >
+                <span className="max-sm:hidden">Stop</span>
+              </ActionButton>
+            </Tip>
           ) : (
-            <ActionButton
-              variant="secondary"
-              title="Wake: run an autonomous check-in now"
-              icon={<Play className="size-3 fill-current" />}
-              pending={wake.busy}
-              pendingLabel={<span className="max-sm:hidden">Waking…</span>}
-              onClick={() => act(wake, () => api.run(agent.id))}
-            >
-              <span className="max-sm:hidden">Wake</span>
-            </ActionButton>
+            <Tip name="Wake: run a check-in now">
+              <ActionButton
+                variant="secondary"
+                aria-label="Wake"
+                icon={<Play className="size-3 fill-current" />}
+                pending={wake.busy}
+                pendingLabel={<span className="max-sm:hidden">Waking…</span>}
+                onClick={() => act(wake, () => api.run(agent.id))}
+              >
+                <span className="max-sm:hidden">Wake</span>
+              </ActionButton>
+            </Tip>
           )}
-          <ActionButton
-            variant="ghost"
-            title="Clear context (/clear). Memory is kept."
-            icon={<RotateCcw className="size-3.5" />}
-            pending={clear.busy}
-            aria-label={clear.busy ? "Clearing context…" : "Clear context"}
-            onClick={() => clearContext()}
-            disabled={running}
-          />
+          <Tip name="Clear context (/clear): memory is kept">
+            <ActionButton
+              variant="ghost"
+              icon={<RotateCcw className="size-3.5" />}
+              pending={clear.busy}
+              aria-label={clear.busy ? "Clearing context…" : "Clear context"}
+              onClick={() => clearContext()}
+              disabled={running}
+            />
+          </Tip>
           {headerActions}
         </div>
       </div>
@@ -902,7 +921,7 @@ function MessageTasks({ m }: { m: Message }) {
 
 /** Chips for the specs and issues a message tags with `#`: kind and title, opening the item. Its PRs get cards (MessagePrs). */
 function MessageTags({ m }: { m: Message }) {
-  const tags: { tag: string; kind: "spec" | "issue"; title: string; url?: string | null; task_id?: string }[] = (m.meta?.tags ?? []).filter((t: { kind: string }) => t.kind !== "pr");
+  const tags: { tag: string; kind: "spec" | "issue" | "saved"; title: string; url?: string | null; task_id?: string; saved_id?: number }[] = (m.meta?.tags ?? []).filter((t: { kind: string }) => t.kind !== "pr");
   if (!tags.length) return null;
   const cls = "chip max-w-full gap-1.5 text-[12px] hover:bg-white/[0.08]";
   return (
@@ -914,7 +933,9 @@ function MessageTags({ m }: { m: Message }) {
             <span className="truncate">{t.title}</span>
           </>
         );
-        return t.task_id ? (
+        return t.kind === "saved" ? (
+          <Link key={t.tag} to={`/saved/${t.saved_id}`} title={t.tag} className={cls}>{inner}</Link>
+        ) : t.task_id ? (
           <Link key={t.tag} to={`/issues/${t.task_id}`} title={t.tag} className={cls}>{inner}</Link>
         ) : (
           <a key={t.tag} href={t.url ?? undefined} target="_blank" rel="noopener noreferrer" title={t.tag} className={cls}>{inner}</a>
@@ -963,9 +984,12 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
   const canReply = quotable(m) && !m.meta?.cancelled;
   const longPress = useLongPress(() => onReply(m));
   const press = canReply ? longPress : {};
-  const replyButton = canReply && <ReplyButton onReply={() => onReply(m)} label={replyLabel(m, agent.name)} />;
+  const reply = canReply && <ReplyButton onReply={() => onReply(m)} label={replyLabel(m, agent.name)} />;
+  const save = canReply && !!m.content?.trim() && <SaveButton agentId={agent.id} m={m} />;
   const cancel = useAction();
+  const sendNow = useAction();
   // The footer's status on a message waiting in the queue, yours or another agent's: Cancel, or Copy to box once cancelled.
+  // Yours can also be sent now, into the run in progress; another agent's waits for the run to end.
   const sender = m.meta?.from_agent ? (findAgent(agents, m.meta.from_agent.id)?.name ?? m.meta.from_agent.name) : null;
   const status =
     agent.queued_messages?.includes(m.id) ? (
@@ -976,8 +1000,17 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
         <button type="button" className="msg-act text-warn hover:bg-warn/[0.12] hover:text-warn" aria-label={sender ? `Cancel this queued message from ${sender}` : "Cancel this queued message"} disabled={cancel.busy} onClick={() => void cancel.run(() => api.cancelQueued(agent.id, m.id)).then((r) => r && !r.ok && cancel.setError("The agent already took this message"))}>
           <X className="size-3.5" aria-hidden /> Cancel
         </button>
-        {cancel.error && <span className="px-1 text-bad">{cancel.error}</span>}
+        {!sender && (
+          <button type="button" className="msg-act text-accent hover:bg-accent/[0.12] hover:text-accent" title="Deliver it into the run in progress now, instead of when it ends" disabled={sendNow.busy || cancel.busy} onClick={() => void sendNow.run(() => api.sendNow(agent.id, m.id)).then((r) => r && !r.ok && sendNow.setError("This run takes no more messages: it waits for the next one"))}>
+            <SendHorizontal className="size-3.5" aria-hidden /> Send now
+          </button>
+        )}
+        {(cancel.error || sendNow.error) && <span className="px-1 text-bad">{cancel.error || sendNow.error}</span>}
       </>
+    ) : m.meta?.sent_now ? (
+      <span className="flex items-center gap-1 px-1 text-accent">
+        <SendHorizontal className="size-3" aria-hidden /> {SENT_NOW_MARK}
+      </span>
     ) : m.meta?.cancelled ? (
       <>
         <span className="px-1">{CANCELLED_MARK}</span>
@@ -1075,7 +1108,7 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
           <div className="mt-1.5">
             <MessageTasks m={m} />
           </div>
-          <MessageFooter m={m} side="right" reply={replyButton} status={status} />
+          <MessageFooter m={m} side="right" reply={<>{save}{reply}</>} status={status} />
         </div>
         {from && <Sticker avatar={from.avatar} lead={from.role === "lead"} size={26} className="mt-5" />}
       </div>
@@ -1111,7 +1144,7 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
           <div className="font-mono text-[10.5px] text-fg-3">→ {m.meta.mentions_only ? "sent to" : "also sent to"} {m.meta.mentions.map((x: { name: string }) => x.name).join(", ")}</div>
         )}
         {m.meta?.mentioned_in && <div className="font-mono text-[10.5px] text-fg-3">mentioned in {m.meta.mentioned_in.name}'s chat</div>}
-        <MessageFooter m={m} side="right" reply={replyButton} status={status} />
+        <MessageFooter m={m} side="right" reply={<>{save}{reply}</>} status={status} />
       </div>
     );
   }
@@ -1136,13 +1169,13 @@ export const MessageRow = memo(function MessageRow({ m, agent, agents, grill, on
         <Markdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{m.content}</Markdown>
       </div>
       <MessagePrs text={m.content ?? ""} project={agent.project} className="mt-2" />
-      <MessageFooter m={m} side="left" reply={replyButton} />
+      <MessageFooter m={m} side="left" reply={<>{reply}{save}</>} />
       </div>
     </div>
   );
 });
 
-/** A message's footer, its last line: its status with an action, the time, and Reply. Yours (right) end with Reply,
+/** A message's footer, its last line: its status with an action, the time, Save and Reply. Yours (right) end with Reply,
  * so it stays on the last line when the footer wraps; the agent's (left) start with it. */
 function MessageFooter({ m, side, reply, status }: { m: Message; side: "left" | "right"; reply: React.ReactNode; status?: React.ReactNode }) {
   const time = <time dateTime={m.created_at} title={fmtDateTime(m.created_at)} className="px-1 tabular-nums">{fmtClock(m.created_at)}</time>;
@@ -1195,7 +1228,7 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
   const name: string = use.meta?.name ?? "tool";
   const isErr = result?.meta?.is_error;
   const pending = !result;
-  const shortName = name.startsWith("mcp__loft__") ? name.slice(15) : name.replace(/^mcp__/, "").replace("__", " › ");
+  const shortName = shortToolName(name);
   return (
     <div className="pl-9">
       <button
@@ -1206,7 +1239,7 @@ function ToolRow({ use, result }: { use: Message; result?: Message }) {
         )}
       >
         <Wrench className={cx("size-3.5 shrink-0", pending ? "animate-pulse-soft text-accent" : isErr ? "text-bad" : "text-fg-3")} />
-        <span className="shrink-0 font-mono text-[11.5px] text-fg-2">{shortName}</span>
+        <span className="max-w-[60%] shrink-0 truncate font-mono text-[11.5px] text-fg-2" title={name}>{shortName}</span>
         <span className="truncate text-[12.5px] text-fg-3">{use.content}</span>
         {use.meta?.subagent && <span className="chip ml-1 shrink-0 py-0 text-[10px]">subagent</span>}
         <ChevronRight className={cx("ml-auto size-3 shrink-0 text-fg-3 transition", open && "rotate-90")} />

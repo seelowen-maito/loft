@@ -20,6 +20,10 @@ _Avoid_: Squad, crew
 One folder under the user's projects directory that is, or will become, one git repo: its `origin` is the project's repo, and Loft can create the repo for a project that has none. A folder holding several repos is allowed on an agent, but issues and Deliveries need one repo, so Loft only hints at it.
 _Avoid_: Workspace (that is the agent's private folder), group
 
+**Project settings**:
+The settings one project keeps in Loft, on its own page opened from the repo panel: CI mode, per-ticket reviewers, rounds of changes, base branch, the team's default model and effort, GitHub publishing, merge method, CI grace and sccache. Each starts at Loft's default; the user changes it by hand, or the project's Lead does after the user says yes, and the page shows who changed it and when.
+_Avoid_: Repo config, project preferences
+
 **Lead**:
 The agent with the Lead role: it plans with the user (grill, spec, tickets) and answers questions. A team has at most one.
 _Avoid_: Orchestrator, manager, planner
@@ -28,8 +32,12 @@ _Avoid_: Orchestrator, manager, planner
 What an agent does in its team: Lead, Dev, Code reviewer, QA, Security or Custom. Loft wakes an agent when its role's step in the work comes up and sends it that role's brief with the wake; a Custom agent has no step and follows only its own instructions. An agent has exactly one role, and its role is the label Loft shows for it: agents have no separate title.
 _Avoid_: Job, type, flag, title
 
+**Agent template**:
+The starting point for a new agent: a role with ready-made instructions, schedule and model. The New agent dialog and lofty pick from the same list; Deps, Docs, Triage and CI are templates of the Custom role.
+_Avoid_: Preset, start from, blueprint
+
 **Delivery**:
-Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers while it follows their CI on GitHub and the Dev starts the next unblocked ticket (with at most one of its tickets in review; a fix waits for the ticket being built and comes before any new one), closes it when they pass and the CI is green, and tells the user when the spec PR is ready or a ticket needs them. No agent coordinates it.
+Loft running a spec's tickets, or one standalone ticket, from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers while it follows their CI on GitHub and the Dev starts the next unblocked ticket (with at most one of its tickets in review; a fix waits for the ticket being built and comes before any new one), closes it when they pass and the CI is green, and tells the user when a ticket needs them or the spec PR is ready and its CI green: Loft keeps following the CI after it marks the PR ready, and a red one sends the Dev a final round, like the final Code Review's. No agent coordinates it.
 _Avoid_: Build, run, pipeline
 
 **Stalled**:
@@ -43,6 +51,18 @@ _Avoid_: Blocked (a ticket's blockers are set when it's published), parked
 **Waiting for CI** (ticket):
 A ticket in review whose reviewers have all passed, so only its CI on GitHub is left. Loft follows the CI itself and closes the ticket when it is green, or sends the Dev a fix round when it fails. No agent works on it meanwhile: the Delivery shows it as waiting for CI, not as running or stalled.
 _Avoid_: Waiting (that is a Dev's `wait_ticket`), pending, CI running
+
+**Base branch**:
+A project setting: the branch the next spec branches and standalone ticket branches start from and their PRs merge into. Empty, it's the repo's default branch on GitHub. A Delivery already under way keeps the base its PR has.
+_Avoid_: Target branch, trunk
+
+**CI mode**:
+A project setting for when a Delivery waits for CI: `per ticket` (each ticket closes only with its CI green, the default) or `at the end` (tickets close on their reviewers, and the CI is checked once the spec PR is ready). It changes only what Loft waits for, never which workflows GitHub runs.
+_Avoid_: CI policy, CI level, light CI
+
+**Billing block**:
+GitHub refused to start a Delivery's CI jobs because the account's payments failed or its Actions spending limit was reached. Loft stalls the Delivery with a Needs you item linking the billing page, never sends the Dev a fix round for it, and reruns the failed jobs when the user resumes.
+_Avoid_: CI failure, quota error
 
 **Paused**:
 A Delivery the user paused: Loft stopped the run in flight and sends no more wakes until the user resumes it. Unlike a stalled one, it sends no push and adds nothing to Needs you.
@@ -59,6 +79,10 @@ _Avoid_: Role prompt, template
 **Run**:
 One stretch of an agent working, from what woke it (a message, an issue, a schedule) until it replies. The chat shows how long it has been running and, at the end, how long it took.
 _Avoid_: Session, turn, job
+
+**Send now**:
+Delivering one of the user's queued messages into the agent's run in progress, as Claude Code's Ctrl+Enter does in the terminal, instead of waiting for the run to end. Once sent it can't be cancelled. Loft does it by itself when a goal or Stop hook keeps the run going while it waits for the user; agents' messages and Delivery steps always wait in the queue.
+_Avoid_: Interrupt, inject, steer
 
 **Session**:
 The conversation an agent carries from run to run until the user clears it; Compact summarises it in place. Every model call in a run resends the whole session, mostly from the prompt cache.
@@ -130,6 +154,10 @@ _Avoid_: Batch, queue
 The agent's proposed answer to a question in a round, which the user can accept as-is.
 _Avoid_: Default, suggestion
 
+**Round note**:
+Free text the user sends with a round, for ideas or questions the round doesn't cover. The agent turns it into questions in the next round.
+_Avoid_: Extra answer, comment (that is a question's discuss answer)
+
 **Spec**:
 An issue labelled `spec` that describes a feature from the user's perspective, written from a grill: on GitHub, or a Loft issue when the project has no GitHub repo.
 _Avoid_: PRD, plan, design doc
@@ -138,12 +166,16 @@ _Avoid_: PRD, plan, design doc
 An issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of the spec, with blocking links to the tickets it waits on. On GitHub (native sub-issue and blocking links), or a Loft issue under the spec when the project has no GitHub repo.
 _Avoid_: Task, story, sub-task
 
+**Standalone ticket**:
+A ticket with no spec, labelled `ready-for-agent`. Its Delivery builds it on its own branch, `ticket/<N>-<slug>`, and its own PR, and it closes when that PR merges. Once its Delivery starts it moves through the board's stages like a spec.
+_Avoid_: Loose issue, orphan ticket, single ticket
+
 **Spec branch**:
-The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates when it publishes the spec on GitHub: from the grill's docs commits when there are any, otherwise from the default branch. Every ticket of the spec is one or more commits on it.
+The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates when it publishes the spec on GitHub: from the grill's docs commits when there are any, otherwise from the base branch. Every ticket of the spec is one or more commits on it.
 _Avoid_: Feature branch, shared branch
 
 **Spec PR**:
-The one pull request from a spec branch to the default branch, opened as a draft with `Closes #<spec>` when the spec is published. The spec ships when it merges.
+The one pull request from a spec branch to the base branch, opened as a draft with `Closes #<spec>` when the spec is published. The spec ships when it merges.
 _Avoid_: Feature PR, epic PR
 
 **Owner**:

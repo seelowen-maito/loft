@@ -86,6 +86,12 @@ pub struct RunInfo {
     pub for_user: bool,
     /// Tool calls (ids) whose result hasn't come back yet.
     pub tools_open: Vec<String>,
+    /// Send now: the way into the run's claude (message id, prompt) while its stdin is open and takes the user's
+    /// queued messages. None once Loft closed it, and in runs that take no input (quiet or throwaway ones).
+    pub send_now: Option<tokio::sync::mpsc::UnboundedSender<(i64, String)>>,
+    /// The user's messages sent now that claude hasn't taken yet (no replay of them): if the run ends first,
+    /// they go back to the queue.
+    pub sent: Vec<(i64, String)>,
 }
 
 /// A running subagent, as clients show it above the composer.
@@ -112,6 +118,10 @@ pub struct Subagent {
 pub struct Runtime {
     /// agent id -> kill switch for the currently running claude process
     pub running: HashMap<String, Arc<Notify>>,
+    /// `repo#spec` -> when Loft last read the Actions minutes of that Delivery's branch
+    pub actions_read: HashMap<String, std::time::Instant>,
+    /// GitHub repo, or `org:<owner>` for an org's billing -> when Loft last read its Actions minutes this month
+    pub actions_month_read: HashMap<String, std::time::Instant>,
     /// agent id -> user messages that arrived while a run was in progress
     pub queued: HashMap<String, Vec<String>>,
     /// agent id -> the agent messages (their ids in its chat, with the prompt each added to `queued`) waiting

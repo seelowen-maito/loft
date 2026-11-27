@@ -39,7 +39,7 @@ test("g m goes to the Simulator only where the server offers it", () => {
 });
 
 test("the shortcut list names the Simulator only where it's offered", () => {
-  assert.ok(fixedShortcuts(offered(mac).simulator).some((s) => s.label === "Go to Simulator"));
-  assert.ok(!fixedShortcuts(offered(linux).simulator).some((s) => s.label === "Go to Simulator"));
-  assert.ok(fixedShortcuts(false).some((s) => s.label === "Go to Settings"));
+  assert.ok(fixedShortcuts(offered(mac)).some((s) => s.label === "Go to Simulator"));
+  assert.ok(!fixedShortcuts(offered(linux)).some((s) => s.label === "Go to Simulator"));
+  assert.ok(fixedShortcuts(offered(linux)).some((s) => s.label === "Go to Settings"));
 });

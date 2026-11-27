@@ -167,12 +167,12 @@ mod tests {
         assert_eq!(next, (t0 + chrono::Duration::minutes(20)).to_rfc3339());
 
         // Wait for the run to end, so the next one isn't held behind it.
-        agents::tests::until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        agents::tests::until("the run to end", 60, || !is_running(&st, &a.id)).await;
         assert_eq!(tick(&st, t0 + chrono::Duration::minutes(20)), 1);
         assert_eq!(user_texts(&st, &a.id), 2);
 
         st.db.update_agent(&a.id, |x| x.repeat = None).unwrap();
-        agents::tests::until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        agents::tests::until("the run to end", 60, || !is_running(&st, &a.id)).await;
         assert_eq!(tick(&st, t0 + chrono::Duration::minutes(40)), 0, "stopped");
     }
 

@@ -34,6 +34,13 @@ final class DeliveryWidgetTests: XCTestCase {
         XCTAssertEqual(offered[1].repo, "loft:garden", "the picker names each one's repo")
     }
 
+    func testThePickerLeavesOutStandaloneTickets() {
+        var standalone = delivery(77, "running")
+        standalone.standalone = true
+        let offered = DeliveryWidgetSnapshot.choices([standalone, delivery(20, "running")], tasks: [spec("b", "Running", 20)])
+        XCTAssertEqual(offered.map(\.key), ["o/loft#20"], "a started standalone ticket has no tickets to count")
+    }
+
     func testARunningDeliveryShowsProgressTheTicketBeingBuiltItsDevAndTheTicketInReviewsVerdicts() {
         let d = delivery(462, "running", tickets: [ticket(464, "closed", verdicts: ["qa": "pass", "security": "pass"]),
                                                   ticket(465, "review", agent: "Loft Dev", verdicts: ["qa": "pending", "security": "pass"]),

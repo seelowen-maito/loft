@@ -33,6 +33,14 @@ pub fn apply(cmd: &mut tokio::process::Command, data_dir: &Path) {
     apply_with(cmd, installed(), data_dir)
 }
 
+/// Keeps a command off sccache, also when Loft's own environment points Rust builds at it.
+pub fn remove(cmd: &mut tokio::process::Command) {
+    if std::env::var_os("RUSTC_WRAPPER").is_some_and(|w| Path::new(&w).file_stem().is_some_and(|n| n == "sccache")) {
+        cmd.env_remove("RUSTC_WRAPPER");
+    }
+    cmd.env_remove("SCCACHE_DIR").env_remove("SCCACHE_CACHE_SIZE");
+}
+
 fn apply_with(cmd: &mut tokio::process::Command, bin: Option<PathBuf>, data_dir: &Path) {
     if let Some(bin) = bin {
         cmd.env("RUSTC_WRAPPER", bin).env("SCCACHE_DIR", cache_dir(data_dir)).env("SCCACHE_CACHE_SIZE", LIMIT);

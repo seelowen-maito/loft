@@ -36,6 +36,9 @@ struct NeedsYouListView: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @State private var fresh: Set<String> = []
+    /// Clear all's items, taken when its confirm opens: one that arrives while it's up stays.
+    @State private var clearing: NeedsYouClearAll?
+    @State private var clearError: String?
     var focus: String?
 
     var body: some View {
@@ -68,6 +71,10 @@ struct NeedsYouListView: View {
         .overlay(alignment: .top) { NeedsYouNotice() }
         .environment(\.needsYouFresh, fresh)
         .navigationTitle("Needs you")
+        .toolbar { clearAllButton }
+        // The button went (nothing left to clear) while its confirm was up: drop the confirm, or it would open again with
+        // the button.
+        .onChange(of: NeedsYouClearAll(store.needsYou?.items ?? []).clear) { _, n in if n == 0 { clearing = nil } }
         .refreshable { await store.refreshNeedsYou() }
         .task {
             await store.refreshNeedsYou()
@@ -75,6 +82,30 @@ struct NeedsYouListView: View {
         }
         .onChange(of: store.needsYou?.items.map(\.id)) { Task { await markSeen() } }
         .onChange(of: scenePhase) { Task { await markSeen() } }
+    }
+
+    /// Clear all: every item shown with Done, after a confirm; hidden when there's nothing to clear.
+    @ToolbarContentBuilder private var clearAllButton: some ToolbarContent {
+        let c = NeedsYouClearAll(store.needsYou?.items ?? [])
+        if c.clear > 0 {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(c.label) { clearing = c }
+                    .accessibilityIdentifier("needsYouClearAll")
+                    .confirmationDialog(clearing?.question ?? "", isPresented: Binding(get: { clearing != nil }, set: { if !$0 { clearing = nil } }),
+                                        titleVisibility: .visible, presenting: clearing) { taken in
+                        Button("Clear all", role: .destructive) {
+                            Task {
+                                do { try await store.clearAllNeedsYou(taken) } catch { clearError = error.localizedDescription }
+                            }
+                        }
+                    } message: { _ in
+                        Text("Each one is marked Done and leaves the list, on every device.")
+                    }
+                    .alert("Couldn't clear", isPresented: Binding(get: { clearError != nil }, set: { if !$0 { clearError = nil } })) {
+                        Button("OK", role: .cancel) {}
+                    } message: { Text(clearError ?? "") }
+            }
+        }
     }
 
     /// What's on screen counts as seen everywhere, but not while the app is in the background.
@@ -169,6 +200,7 @@ struct NeedsYouRow: View {
             } else if !item.asksQuestions(store.permissions) {
                 Text(item.reason).font(.footnote).foregroundStyle(.secondary)
             }
+            if item.changesWorkflows { WorkflowWarningLabel() }
             if showsText, !item.text.isEmpty {
                 Text(item.text).font(.footnote.monospaced()).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -357,4 +389,14 @@ struct AnyButtonStyle: PrimitiveButtonStyle {
     private let make: (Configuration) -> AnyView
     init(_ style: some PrimitiveButtonStyle) { make = { AnyView(style.makeBody(configuration: $0)) } }
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
+}
+
+/// A PR that changes CI workflows: on its Needs you item and its PR row.
+struct WorkflowWarningLabel: View {
+    var body: some View {
+        Label(WorkflowWarning.text, systemImage: "exclamationmark.triangle.fill")
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(Theme.attentionInk)
+            .accessibilityIdentifier("workflowWarning")
+    }
 }
