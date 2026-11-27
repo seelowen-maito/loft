@@ -45,7 +45,7 @@ const LOFT_PROMPT: &str = r#"You are Loft's own agent. You come with Loft and th
 ## What Loft is
 Loft is a small layer on top of the coding agent the user already uses (Claude Code). It runs agents for them, keeps them working on a schedule, lets them talk to each other and gives them memory that lasts. The user watches and steers from the web dashboard or the iPhone app.
 - Every agent has a name, a role, a project, standing instructions and a personality. It runs headless Claude Code in its own workspace folder and clones repos there; it never edits the user's checkout.
-- A schedule (`interval_minutes`) wakes an agent on its own. Quiet hours hold those wake-ups during the user's working day so background runs don't eat the usage they need while they work. The user can always message an agent directly.
+- A schedule (`interval_minutes`) wakes an agent on its own. Working hours limit those wake-ups to the times the agent may work, so background runs stay out of the hours the user needs their usage. The user can always message an agent directly.
 - Agents ask for permissions in the chat; the user approves once or always. They keep long-term memory, share a task list, message each other, and open pull requests that show up as live cards.
 - Agents in the same project are grouped together and can @-mention each other.
 
@@ -126,7 +126,7 @@ Before writing any code:
 4. Show the user the roadmap and ask them to confirm or reorder it.
 
 ## 2. Agree on a rhythm
-Once the roadmap is confirmed, propose how often to work on your own (for example every 6 hours). When they agree, call `mcp__loft__set_schedule` with that interval, and quiet hours only if they ask for them. Until then, don't start work on your own.
+Once the roadmap is confirmed, propose how often to work on your own (for example every 6 hours). When they agree, call `mcp__loft__set_schedule` with that interval, and working hours only if they ask for them. Until then, don't start work on your own.
 
 ## 3. Build
 On each check-in, and whenever the user asks:
@@ -346,7 +346,8 @@ pub fn template(key: &str) -> Option<&'static Template> {
 /// The quiet hours agents a setup created used to get unless the user gave theirs: weekdays 09:00–18:00.
 /// Agents now run around the clock unless the user asks for quiet hours.
 fn old_default_quiet_hours() -> Vec<QuietWindow> {
-    vec![QuietWindow { days: vec![0, 1, 2, 3, 4], start: "09:00".into(), end: "18:00".into() }]
+    // Stored as the working hours the pause became (see schedule::pauses_to_working).
+    crate::schedule::pauses_to_working(&[QuietWindow { days: vec![0, 1, 2, 3, 4], start: "09:00".into(), end: "18:00".into() }])
 }
 
 /// `loft`'s display name. Its id stays `LOFT_ID`.
@@ -446,10 +447,10 @@ pub fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "set_schedule",
-            "description": "Change your own schedule: how often you wake up on your own, and the quiet hours when you don't. The user approves it with a card unless they allowed it for good. Only call it after the user agreed to the rhythm in the chat.",
+            "description": "Change your own schedule: how often you wake up on your own, and the working hours when you may (outside them you wait). The user approves it with a card unless they allowed it for good. Only call it after the user agreed to the rhythm in the chat.",
             "inputSchema": { "type": "object", "properties": {
                 "interval_minutes": { "type": "integer", "description": "Minutes between check-ins: 0 to stop, otherwise at least 60." },
-                "quiet_hours": { "type": "array", "description": "When check-ins pause, only if the user asked for them. Omit to keep the current ones; [] runs around the clock.", "items": { "type": "object", "properties": {
+                "quiet_hours": { "type": "array", "description": "Your working hours: when you may check in on your own; outside them you wait. Only if the user asked for them. Omit to keep the current ones; [] runs around the clock.", "items": { "type": "object", "properties": {
                     "days": { "type": "array", "items": { "type": "integer" }, "description": "0 = Monday … 6 = Sunday" },
                     "start": { "type": "string", "description": "HH:MM" },
                     "end": { "type": "string", "description": "HH:MM" }
@@ -471,7 +472,7 @@ pub fn mcp_tools() -> Vec<Value> {
                 "personality": { "type": "string" },
                 "model": { "type": "string", "enum": ["haiku", "sonnet", "opus", "fable"] },
                 "interval_minutes": { "type": "integer", "description": "Minutes between scheduled check-ins (0 = only when messaged, otherwise at least 60). Defaults to the template's." },
-                "quiet_hours": { "type": "array", "description": "When scheduled check-ins pause, Defaults to none: the agent runs around the clock. Only set it when the user asks.", "items": { "type": "object", "properties": {
+                "quiet_hours": { "type": "array", "description": "The agent's working hours: when it may check in on its own; outside them it waits. Defaults to none: it runs around the clock. Only set it when the user asks.", "items": { "type": "object", "properties": {
                     "days": { "type": "array", "items": { "type": "integer" }, "description": "0 = Monday … 6 = Sunday" },
                     "start": { "type": "string", "description": "HH:MM" },
                     "end": { "type": "string", "description": "HH:MM" }
@@ -676,7 +677,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         _ => String::new(),
     };
     let schedule = if a.interval_minutes > 0 {
-        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(" (paused {})", crate::schedule::describe(&a.quiet_hours)) };
+        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(" (works {})", crate::schedule::describe(&a.quiet_hours)) };
         format!("checks in every {}{quiet}", every(a.interval_minutes))
     } else {
         "runs only when messaged".into()
@@ -761,7 +762,7 @@ async fn set_schedule(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     Ok(if a.interval_minutes == 0 {
         "Schedule off: you only run when messaged.".into()
     } else {
-        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(", paused {}", crate::schedule::describe(&a.quiet_hours)) };
+        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(", works {}", crate::schedule::describe(&a.quiet_hours)) };
         format!("You now check in every {}{quiet}.", every(a.interval_minutes))
     })
 }
@@ -1048,7 +1049,7 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         };
         assert_eq!((req.tool_name.as_str(), req.reason.as_str()), (SCHEDULE_RULE, "Agreed: every 6h"));
         crate::agents::decide(&st, &req.id, "allow_once", None, None, None).unwrap();
-        assert_eq!(call.await.unwrap().unwrap(), "You now check in every 6 hour(s), paused Mon–Fri 09:00–18:00.");
+        assert_eq!(call.await.unwrap().unwrap(), "You now check in every 6 hour(s), works Mon–Fri 09:00–18:00.");
         let a = st.db.get_agent(&me.id).unwrap().unwrap();
         assert_eq!((a.interval_minutes, a.quiet_hours.len()), (360, 1));
     }

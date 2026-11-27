@@ -517,7 +517,7 @@ public struct AgentSummary: Codable, Hashable, Identifiable {
     }
 }
 
-/// A weekly window with no autonomous wake-ups, in the Mac's local time (backend `QuietWindow`).
+/// A weekly window when the agent may wake up on its own (its working hours), in the Mac's local time (backend `QuietWindow`).
 public struct QuietWindow: Codable, Hashable, Sendable {
     /// Days the window starts on, 0 = Monday … 6 = Sunday.
     public var days: [Int]

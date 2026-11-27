@@ -26,10 +26,10 @@ final class AgentHeaderTests: XCTestCase {
         XCTAssertEqual(AgentHeader.schedule(agent(interval: nil), now: now), "manual")
     }
 
-    func testQuietHoursMarkTheScheduleCustomAndSayWhenItsPaused() {
+    func testWorkingHoursMarkTheScheduleCustomAndSayWhenItWorks() {
         let a = agent(quiet: [QuietWindow(days: [0, 1, 2, 3, 4], start: "22:00", end: "07:00"), QuietWindow(days: [5, 6], start: "00:00", end: "00:00")])
         XCTAssertEqual(AgentHeader.schedule(a, now: now), "every 30m · custom · next in 12m")
-        XCTAssertEqual(AgentHeader.quietHours(a), "Paused Mon–Fri 22:00–07:00; Sat, Sun all day")
+        XCTAssertEqual(AgentHeader.quietHours(a), "Works Mon–Fri 22:00–07:00; Sat, Sun all day")
         XCTAssertNil(AgentHeader.quietHours(agent()))
         XCTAssertEqual(AgentHeader.days([0, 2, 3, 4]), "Mon, Wed–Fri")
     }

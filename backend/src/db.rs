@@ -350,7 +350,8 @@ pub struct Agent {
     pub effort: String,
     /// Minutes between autonomous runs. 0 disables the heartbeat.
     pub interval_minutes: i64,
-    /// Windows when autonomous wake-ups are held (e.g. working hours). Empty runs around the clock.
+    /// Working hours: the windows when it may wake up on its own, and outside them it waits. Empty runs around the clock.
+    /// (Named for when they meant the pauses.)
     #[serde(default)]
     pub quiet_hours: Vec<QuietWindow>,
     /// `/loop`: a prompt Loft sends again every interval until it's stopped.
@@ -458,12 +459,12 @@ impl Agent {
     }
 }
 
-/// A weekly window with no autonomous wake-ups, in this Mac's local time.
+/// A weekly window when an agent may wake up on its own, in this Mac's local time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuietWindow {
     /// Days the window starts on, 0 = Monday … 6 = Sunday.
     pub days: Vec<u8>,
-    /// "HH:MM". An end at or before the start runs past midnight; equal times cover the whole day.
+    /// "HH:MM". An end before the start runs past midnight; equal times cover the whole day.
     pub start: String,
     pub end: String,
 }
@@ -1133,6 +1134,21 @@ impl Db {
              WHERE json_type(data, '$.projects') IS NULL",
             [],
         )?;
+        // Schedule windows used to say when an agent pauses; now they say when it works. Each agent's pause
+        // windows become the matching working windows, once (the database's user_version marks it).
+        if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? < 1 {
+            let rows: Vec<(String, String)> = {
+                let mut st = conn.prepare("SELECT id, data FROM agents WHERE json_array_length(data, '$.quiet_hours') > 0")?;
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (id, data) in rows {
+                let Ok(mut v) = serde_json::from_str::<Value>(&data) else { continue };
+                let Ok(paused) = serde_json::from_value::<Vec<QuietWindow>>(v["quiet_hours"].clone()) else { continue };
+                v["quiet_hours"] = serde_json::to_value(crate::schedule::pauses_to_working(&paused))?;
+                conn.execute("UPDATE agents SET data = ?1 WHERE id = ?2", params![v.to_string(), id])?;
+            }
+            conn.pragma_update(None, "user_version", 1)?;
+        }
         // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
         // from their old role, name and title. The user can change it.
         let unroled: Vec<(Value, &str)> = {
@@ -2536,6 +2552,27 @@ mod tests {
         db.update_agent("a", |a| a.group = "Acme".into()).unwrap();
         drop(db);
         assert_eq!(Db::open(&path).unwrap().get_agent("a").unwrap().unwrap().group, "Acme", "migrated once");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pause_windows_become_working_windows_once() {
+        let path = crate::testdir::for_this_test("working-hours").join("working-hours.db");
+        let paused = vec![QuietWindow { days: vec![0, 1, 2, 3, 4], start: "09:00".into(), end: "17:00".into() }];
+        {
+            let db = Db::open(&path).unwrap();
+            let mut a = agent("a");
+            a.quiet_hours = paused.clone();
+            db.save_agent(&a).unwrap();
+            db.save_agent(&agent("b")).unwrap();
+            db.0.lock().unwrap().pragma_update(None, "user_version", 0).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let working = db.get_agent("a").unwrap().unwrap().quiet_hours;
+        assert_eq!(working, crate::schedule::pauses_to_working(&paused));
+        assert!(db.get_agent("b").unwrap().unwrap().quiet_hours.is_empty(), "no windows still means any time");
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().get_agent("a").unwrap().unwrap().quiet_hours, working, "migrated once");
         let _ = std::fs::remove_file(&path);
     }
 

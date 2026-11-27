@@ -40,15 +40,15 @@ export function fmtQuiet(windows: QuietWindow[]): string {
   return windows.map((w) => `${fmtDays(w.days)} ${w.start === w.end ? "all day" : `${w.start}–${w.end}`}`).join("; ");
 }
 
-/** The interval, marked custom when quiet hours shape it. */
+/** The interval, marked custom when working hours shape it. */
 export function fmtSchedule(a: Pick<Agent, "interval_minutes" | "quiet_hours">): string {
   return a.interval_minutes && a.quiet_hours?.length ? `${fmtInterval(a.interval_minutes)} · custom` : fmtInterval(a.interval_minutes);
 }
 
 const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
-/** Whether `minute` (since midnight) on `day` falls in a window. Mirrors backend/src/schedule.rs. */
-export function isQuiet(windows: QuietWindow[], day: number, minute: number): boolean {
+/** Whether `minute` (since midnight) on `day` falls in a working window. Mirrors backend/src/schedule.rs. */
+export function inWindow(windows: QuietWindow[], day: number, minute: number): boolean {
   return windows.some((w) => {
     const s = toMin(w.start), e = toMin(w.end);
     if (e > s) return w.days.includes(day) && minute >= s && minute < e;

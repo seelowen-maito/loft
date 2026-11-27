@@ -1,7 +1,8 @@
-//! Quiet hours: weekly windows when an agent's autonomous wake-ups are held, so
-//! background runs stay out of the user's working hours. Times are this Mac's local time.
+//! Working hours: weekly windows when an agent may wake up on its own; outside them it waits.
+//! No windows means any time. Times are this Mac's local time. (Stored as `quiet_hours`, which used to be
+//! the windows when it paused.)
 
-use chrono::{DateTime, Datelike, Duration, Local, LocalResult, NaiveDate, NaiveTime, TimeZone};
+use chrono::{DateTime, Datelike, Duration, Local, LocalResult, NaiveDate, NaiveTime, TimeZone, Timelike};
 
 use crate::db::QuietWindow;
 
@@ -16,11 +17,11 @@ pub fn validate(windows: Vec<QuietWindow>) -> Result<Vec<QuietWindow>, String> {
     let mut out = Vec::new();
     for mut w in windows {
         if let Some(d) = w.days.iter().find(|d| **d > 6) {
-            return Err(format!("quiet_hours: day {d} is out of range (0 = Monday … 6 = Sunday)"));
+            return Err(format!("working hours: day {d} is out of range (0 = Monday … 6 = Sunday)"));
         }
         for t in [&w.start, &w.end] {
             if parse(t).is_none() {
-                return Err(format!("quiet_hours: \"{t}\" isn't a time (use HH:MM)"));
+                return Err(format!("working hours: \"{t}\" isn't a time (use HH:MM)"));
             }
         }
         w.days.sort_unstable();
@@ -44,43 +45,100 @@ fn at(d: NaiveDate, t: NaiveTime) -> DateTime<Local> {
     }
 }
 
-/// The latest end among the windows covering `t`.
-fn covering_end(windows: &[QuietWindow], t: DateTime<Local>) -> Option<DateTime<Local>> {
-    let mut end = None;
-    for w in windows {
-        let (Some(s), Some(e)) = (parse(&w.start), parse(&w.end)) else { continue };
+/// Whether `t` falls in one of the windows.
+fn covered(windows: &[QuietWindow], t: DateTime<Local>) -> bool {
+    windows.iter().any(|w| {
+        let (Some(s), Some(e)) = (parse(&w.start), parse(&w.end)) else { return false };
         // A window that runs past midnight started the day before.
-        for back in 0..2 {
+        (0..2).any(|back| {
             let d = t.date_naive() - Duration::days(back);
+            if !w.days.contains(&(d.weekday().num_days_from_monday() as u8)) {
+                return false;
+            }
+            let stop = if e > s { at(d, e) } else { at(d + Duration::days(1), e) };
+            at(d, s) <= t && t < stop
+        })
+    })
+}
+
+/// The first window start after `t`, within the next week.
+fn next_start(windows: &[QuietWindow], t: DateTime<Local>) -> Option<DateTime<Local>> {
+    let mut best: Option<DateTime<Local>> = None;
+    for w in windows {
+        let Some(s) = parse(&w.start) else { continue };
+        for ahead in 0..=7 {
+            let d = t.date_naive() + Duration::days(ahead);
             if !w.days.contains(&(d.weekday().num_days_from_monday() as u8)) {
                 continue;
             }
             let start = at(d, s);
-            let stop = if e > s { at(d, e) } else { at(d + Duration::days(1), e) };
-            if start <= t && t < stop {
-                end = end.max(Some(stop));
+            if start > t {
+                best = Some(best.map_or(start, |b| b.min(start)));
             }
         }
     }
-    end
+    best
 }
 
-/// When the quiet hours covering `t` end, or None if `t` is outside them.
+/// When the agent may next wake up if `t` is outside its working hours, or None if it may wake at `t`
+/// (inside them, or it has none).
 pub fn quiet_until(windows: &[QuietWindow], t: DateTime<Local>) -> Option<DateTime<Local>> {
-    let mut until = covering_end(windows, t)?;
-    // Windows can touch (Mon 09:00–17:00, then 17:00–23:00); follow them to the first free moment.
-    for _ in 0..16 {
-        match covering_end(windows, until) {
-            Some(e) => until = e,
-            None => break,
-        }
+    if windows.is_empty() || covered(windows, t) {
+        return None;
     }
-    Some(until)
+    // Windows with no days never start: look again in a week.
+    Some(next_start(windows, t).unwrap_or(t + Duration::days(7)))
 }
 
-/// `t`, or the end of the quiet hours it falls in.
+/// `t`, or the start of the next working hours if `t` is outside them.
 pub fn next_wake(windows: &[QuietWindow], t: DateTime<Local>) -> DateTime<Local> {
     quiet_until(windows, t).unwrap_or(t)
+}
+
+/// One-off migration: windows that used to say when an agent is paused, as the windows when it works.
+/// Each day's working minutes become windows, and days with the same hours share one.
+pub fn pauses_to_working(paused: &[QuietWindow]) -> Vec<QuietWindow> {
+    let mut quiet = [[false; 1440]; 7];
+    for w in paused {
+        let (Some(s), Some(e)) = (parse(&w.start), parse(&w.end)) else { continue };
+        let (s, e) = (s.num_seconds_from_midnight() as usize / 60, e.num_seconds_from_midnight() as usize / 60);
+        for &d in w.days.iter().filter(|d| **d < 7) {
+            let (d, next) = (d as usize, (d as usize + 1) % 7);
+            if e > s {
+                quiet[d][s..e].iter_mut().for_each(|m| *m = true);
+            } else {
+                // Past midnight, or all day when equal.
+                quiet[d][s..].iter_mut().for_each(|m| *m = true);
+                quiet[next][..e].iter_mut().for_each(|m| *m = true);
+            }
+        }
+    }
+    let hhmm = |m: usize| format!("{:02}:{:02}", m / 60 % 24, m % 60);
+    let mut runs: Vec<(String, String, Vec<u8>)> = Vec::new();
+    for (d, day) in quiet.iter().enumerate() {
+        let mut m = 0;
+        while m < 1440 {
+            if day[m] {
+                m += 1;
+                continue;
+            }
+            let start = m;
+            while m < 1440 && !day[m] {
+                m += 1;
+            }
+            // An end at midnight reads "00:00", which runs to the end of the day.
+            let (s, e) = (hhmm(start), hhmm(m));
+            match runs.iter_mut().find(|r| r.0 == s && r.1 == e) {
+                Some(r) => r.2.push(d as u8),
+                None => runs.push((s, e, vec![d as u8])),
+            }
+        }
+    }
+    if runs.is_empty() {
+        // Paused all week: a window with no days keeps it from waking at any time.
+        return vec![QuietWindow { days: vec![], start: "00:00".into(), end: "00:00".into() }];
+    }
+    runs.into_iter().map(|(start, end, days)| QuietWindow { days, start, end }).collect()
 }
 
 /// "Mon–Fri", "Sat, Sun", "Mon, Wed–Fri".
@@ -131,26 +189,54 @@ mod tests {
     #[test]
     fn work_hours() {
         let q = [w(&[0, 1, 2, 3, 4], "09:00", "17:00")];
-        assert_eq!(quiet_until(&q, t(12, 8, 59)), None);
-        assert_eq!(quiet_until(&q, t(12, 9, 0)), Some(t(12, 17, 0)));
-        assert_eq!(quiet_until(&q, t(16, 16, 30)), Some(t(16, 17, 0)));
-        assert_eq!(quiet_until(&q, t(12, 17, 0)), None);
-        assert_eq!(quiet_until(&q, t(17, 12, 0)), None); // Saturday
+        assert_eq!(quiet_until(&q, t(12, 9, 0)), None);
+        assert_eq!(quiet_until(&q, t(16, 16, 59)), None);
+        // Outside the hours it waits for the next start.
+        assert_eq!(quiet_until(&q, t(12, 8, 59)), Some(t(12, 9, 0)));
+        assert_eq!(quiet_until(&q, t(12, 17, 0)), Some(t(13, 9, 0)));
+        assert_eq!(quiet_until(&q, t(16, 18, 0)), Some(t(19, 9, 0))); // Friday evening: Monday
+        assert_eq!(quiet_until(&q, t(17, 12, 0)), Some(t(19, 9, 0))); // Saturday
+        assert_eq!(next_wake(&q, t(12, 8, 0)), t(12, 9, 0));
+        assert_eq!(next_wake(&q, t(12, 10, 0)), t(12, 10, 0));
+    }
+
+    #[test]
+    fn no_windows_means_any_time() {
+        assert_eq!(quiet_until(&[], t(12, 3, 0)), None);
     }
 
     #[test]
     fn overnight_and_whole_days() {
         let q = [w(&[4], "22:00", "06:00"), w(&[5, 6], "00:00", "00:00")];
-        // Friday night runs into the weekend, which runs into Monday morning.
-        assert_eq!(quiet_until(&q, t(16, 23, 0)), Some(t(19, 0, 0)));
-        assert_eq!(quiet_until(&q, t(18, 12, 0)), Some(t(19, 0, 0)));
-        assert_eq!(quiet_until(&q, t(16, 21, 0)), None);
+        // Friday night runs into Saturday, which is a whole day.
+        assert_eq!(quiet_until(&q, t(16, 23, 0)), None);
+        assert_eq!(quiet_until(&q, t(17, 5, 0)), None);
+        assert_eq!(quiet_until(&q, t(18, 12, 0)), None);
+        // Monday morning waits for Friday night.
+        assert_eq!(quiet_until(&q, t(19, 0, 0)), Some(t(23, 22, 0)));
+        assert_eq!(quiet_until(&q, t(16, 21, 0)), Some(t(16, 22, 0)));
     }
 
     #[test]
-    fn touching_windows() {
-        let q = [w(&[0], "09:00", "17:00"), w(&[0], "17:00", "23:00")];
-        assert_eq!(quiet_until(&q, t(12, 10, 0)), Some(t(12, 23, 0)));
+    fn pause_windows_become_the_same_working_hours() {
+        let cases = [
+            vec![w(&[0, 1, 2, 3, 4], "09:00", "17:00")],
+            vec![w(&[4], "22:00", "06:00"), w(&[5, 6], "00:00", "00:00")],
+            vec![w(&[0], "09:00", "17:00"), w(&[0], "17:00", "23:00")],
+            vec![w(&[0, 1, 2, 3, 4, 5, 6], "00:00", "00:00")],
+            vec![w(&[6], "20:00", "02:00")],
+        ];
+        for paused in cases {
+            let working = pauses_to_working(&paused);
+            // Every half hour of the week 2026-10-12 …: it wakes exactly when it used to.
+            for day in 0..7 {
+                for slot in 0..48 {
+                    let at_t = t(12 + day, slot / 2, slot % 2 * 30) + Duration::minutes(7);
+                    // The old rule: paused inside a window.
+                    assert_eq!(quiet_until(&working, at_t).is_some(), covered(&paused, at_t), "{paused:?} at day {day} slot {slot}");
+                }
+            }
+        }
     }
 
     #[test]
