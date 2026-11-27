@@ -129,6 +129,18 @@ pub struct Round {
     /// When the user sent it; None while it waits for answers.
     #[serde(default)]
     pub sent_at: Option<String>,
+    /// The Round note sent with it: the user's own ideas or questions that its questions don't cover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<RoundNote>,
+}
+
+/// A Round note: text, uploads (the agent's `uploads/` folder) or both.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoundNote {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -464,6 +476,16 @@ fn answer_line(q: &Question) -> String {
     format!("{line}, with images: {}", paths.join(", "))
 }
 
+/// A Round note, as the agent reads it.
+fn note_line(n: &RoundNote) -> String {
+    let line = format!("\"{}\"", n.text);
+    if n.images.is_empty() {
+        return line;
+    }
+    let paths: Vec<String> = n.images.iter().map(|f| format!("uploads/{f}")).collect();
+    format!("{line}, with images: {}", paths.join(", "))
+}
+
 /// The user's answers to a round, posted in chat when it is sent. Plain text: clients show user messages as typed.
 fn answers_text(s: &Session, r: &Round) -> String {
     let mut out = format!("{} {}:\n", say(s, "Answers to round", "Respostas da rodada"), r.index);
@@ -480,6 +502,14 @@ fn answers_text(s: &Session, r: &Round) -> String {
             n => format!("{} [{n} {}]", a.trim_end(), if n == 1 { say(s, "image", "imagem") } else { say(s, "images", "imagens") }),
         };
         out += &format!("\n{}. {}", i + 1, a.trim_start());
+    }
+    if let Some(n) = &r.note {
+        let images = match n.images.len() {
+            0 => String::new(),
+            1 => format!(" [1 {}]", say(s, "image", "imagem")),
+            k => format!(" [{k} {}]", say(s, "images", "imagens")),
+        };
+        out += &format!("\n\n{} {}{images}", say(s, "Anything else?", "Algo a mais?"), n.text.trim());
     }
     out
 }
@@ -592,6 +622,9 @@ fn transcript(s: &Session) -> String {
         for q in &r.questions {
             block += &format!("\n- [{}] {}\n  Recommendation: {}\n  Answer: {}", q.id, q.text, q.recommendation, answer_line(q));
         }
+        if let Some(n) = &r.note {
+            block += &format!("\n- Round note (the user's own ideas or questions, beyond this round's questions): {}", note_line(n));
+        }
         out.push(block);
     }
     if out.is_empty() { "(no rounds yet)".into() } else { out.join("\n\n") }
@@ -609,8 +642,13 @@ fn round_prompt(s: &Session, r: &Round, context: Option<u64>) -> String {
         _ => String::new(),
     };
     let ci = if s.private_repos.is_empty() { "" } else { ", and the user's CI mode as `ci_mode` (see Planning: CI mode)" };
+    let note = if r.note.is_some() {
+        format!(" The user also sent a Round note: it answers no question, it opens new branches. Add its ideas and questions to your design tree and ask about them in round {}, as questions with recommendations like the others (look up the facts they need first).", r.index + 1)
+    } else {
+        String::new()
+    };
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first (in the foreground, or wait for their reports: a text-only reply ends the run), then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`{ci}), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps.{note} Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first (in the foreground, or wait for their reports: a text-only reply ends the run), then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`{ci}), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -755,6 +793,18 @@ fn resume_if_paused(state: &AppState, s: &mut Session, extra: Option<Value>) {
     }
 }
 
+/// Holds `note` on the open round, to go with it when it is sent: its images must be the agent's uploads, as an
+/// answer's are. An empty note is none.
+fn set_note(state: &AppState, s: &mut Session, note: Option<&RoundNote>) -> Result<(), ApiError> {
+    let note = note.map(|n| RoundNote { text: clip(&n.text, MAX_ANSWER), images: n.images.clone() }).filter(|n| !n.text.is_empty() || !n.images.is_empty());
+    if let Some(n) = &note {
+        crate::uploads::validate(state, &s.agent_id, &n.images)?;
+    }
+    let r = open_round_mut(s).ok_or_else(|| ApiError(StatusCode::CONFLICT, "round_closed".into()))?;
+    r.note = note;
+    Ok(())
+}
+
 /// Applies a command to the running session and saves it. Returns a prompt to wake the agent with, if any.
 /// `question_id` picks the question for `decide` (default: the first open one).
 fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Option<&str>, tagged_message_id: Option<i64>) -> Result<Option<String>, ApiError> {
@@ -785,7 +835,8 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
             add_msg(state, &s.agent_id, None, "user", "text", &text, meta);
             let context = state.db.get_agent(&s.agent_id).ok().flatten().and_then(|a| a.context_tokens);
             // The answers' images reach the agent as chat images do: image blocks after the prompt.
-            let images: Vec<String> = r.questions.iter().filter(|q| matches!(q.state.as_str(), "answered" | "discuss")).flat_map(|q| q.images.clone()).collect();
+            let mut images: Vec<String> = r.questions.iter().filter(|q| matches!(q.state.as_str(), "answered" | "discuss")).flat_map(|q| q.images.clone()).collect();
+            images.extend(r.note.iter().flat_map(|n| n.images.clone()));
             wake = Some(round_prompt(s, &r, context) + &crate::uploads::markers(state, &s.agent_id, &images));
         }
         "decide" => {
@@ -877,10 +928,13 @@ pub struct CommandBody {
     command: String,
     question_id: Option<String>,
     client_id: Option<String>,
+    /// With `send`: the Round note to send with the round.
+    #[serde(default)]
+    note: Option<RoundNote>,
 }
 
 /// `POST /api/grill/{id}/command`: a button or a spoken command (send the round, decide for me, pause,
-/// resume, end, summarize). A retry with the same `client_id` isn't applied twice.
+/// resume, end, summarize). `send` may carry the Round note. A retry with the same `client_id` isn't applied twice.
 pub async fn command(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<CommandBody>) -> Result<Json<Value>, ApiError> {
     if uuid::Uuid::parse_str(&id).is_err() {
         return Err(not_found());
@@ -897,6 +951,9 @@ pub async fn command(State(state): State<AppState>, Path(id): Path<String>, Json
             return Err(ApiError(StatusCode::CONFLICT, "grill_closed".into()));
         }
         let cmd = commands::COMMANDS.iter().find(|c| **c == b.command).copied().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown command {}", b.command)))?;
+        if cmd == "send" {
+            set_note(&state, &mut s, b.note.as_ref())?;
+        }
         if let Some(c) = client_id {
             s.seen_commands.push(c);
             let n = s.seen_commands.len();
@@ -954,6 +1011,9 @@ fn write_notes(state: &AppState, s: &Session, summary: &str) -> Option<String> {
                 _ => format!("_{}_ ({} {})", say(s, "Not answered", "Sem resposta"), say(s, "recommended:", "recomendado:"), q.recommendation),
             };
             out += &format!("\n### {}. {}\n\n{a}\n", i + 1, q.text);
+        }
+        if let Some(n) = r.note.as_ref().filter(|n| !n.text.is_empty()) {
+            out += &format!("\n### {}\n\n{}\n", say(s, "Anything else?", "Algo a mais?"), n.text);
         }
     }
     std::fs::write(dir.join(&name), out).ok()?;
@@ -1135,7 +1195,7 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
                 s.started_at = Some(now());
                 status_row(state, &s, &say(&s, &format!("Grill started: {}", s.topic), &format!("Entrevista iniciada: {}", s.topic)), json!({ "state": "started" }));
             }
-            let r = Round { index: s.rounds.len() as u32 + 1, questions: qs, posted_at: now(), sent_at: None };
+            let r = Round { index: s.rounds.len() as u32 + 1, questions: qs, posted_at: now(), sent_at: None, note: None };
             post_round(state, &s, &r);
             let (n, k) = (r.index, r.questions.len());
             s.rounds.push(r);
@@ -1237,7 +1297,7 @@ The user asked to be grilled on an idea: interview them relentlessly until you s
 - Sub-agents finish inside the run: start them in the foreground (the `Agent` tool without `run_in_background`; several in one message run in parallel), or wait for each one's report before your turn ends. The report is the notification: there is no other to wait for. Don't wait with `sleep`: Claude Code blocks it. A reply with only text ends the run, and nothing wakes you again: while you prepare a round, end your turn only with `mcp__loft__grill_round`.
 - Decisions are the user's: ask for preferences, priorities and trade-offs, grounded in the facts you found.
 - Ask in the language the user used (pass it as `language` in the first round), and write the summary in it too.
-- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered (with a project repo, offer a spec first: see Planning: spec).
+- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. The user may also send a Round note with the round ("Anything else?"): ideas or questions the round didn't cover. It answers nothing; it opens new branches of the tree, which you ask about in the next round. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered (with a project repo, offer a spec first: see Planning: spec).
 - What the user types in chat while a round is open is ordinary chat, not an answer: reply briefly. The round stays open; don't post another one or repeat its questions.
 - Never mention, list or repeat questions in your own replies: rounds and the summary appear in the chat by themselves. After a grill tool, end your turn with no text.
 - The user can pause, resume, stop or ask for a summary so far; Loft handles that. You only hear about it when you have something to do: a summary so far (`mcp__loft__grill_summary`) or a stopped grill (`mcp__loft__grill_end`).
@@ -1727,6 +1787,70 @@ pub(crate) mod tests {
         answer_with(&st, &o, &ids[0], "this", &[f], false).await.unwrap();
         answer(&st, &o, &ids[0], "yes");
         assert!(active(&st, &o.id).unwrap().rounds[0].questions[0].images.is_empty());
+    }
+
+    /// `POST /api/grill/{id}/command`, as the Send round buttons call it.
+    async fn command_with(st: &AppState, a: &Agent, body: Value) -> Result<Value, (StatusCode, String)> {
+        let id = active(st, &a.id).unwrap().id;
+        command(axum::extract::State(st.clone()), axum::extract::Path(id), axum::Json(serde_json::from_value(body).unwrap())).await.map(|j| j.0).map_err(|e| (e.0, e.1))
+    }
+
+    #[tokio::test]
+    async fn a_round_note_goes_with_the_round_to_the_chat_the_agent_and_grill_state() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Charge monthly?", "Offer a trial?"]).unwrap();
+        let ids = qids(&st, &o);
+        answer(&st, &o, &ids[0], "yes");
+        // Its images must be this agent's uploads, as an answer's are; a refused note leaves the round open.
+        let other = planner(&st, "Dev");
+        for images in [vec!["../../etc/passwd".to_string()], vec![upload(&st, &other)]] {
+            let e = command_with(&st, &o, json!({ "command": "send", "note": { "text": "x", "images": images } })).await.unwrap_err();
+            assert_eq!(e.0, StatusCode::BAD_REQUEST, "{images:?}");
+        }
+        assert!(open_round(&active(&st, &o.id).unwrap()).is_some());
+
+        let shot = upload(&st, &o);
+        command_with(&st, &o, json!({ "command": "send", "note": { "text": "  What about refunds? See @docs/billing.md  ", "images": [shot] } })).await.unwrap();
+        let s = active(&st, &o.id).unwrap();
+        let note = RoundNote { text: "What about refunds? See @docs/billing.md".into(), images: vec![shot.clone()] };
+        assert_eq!(s.rounds[0].note.as_ref(), Some(&note));
+        // The chat's echo of the round ends with it.
+        let echo = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert!(echo.content.ends_with("2. (no answer)\n\nAnything else? What about refunds? See @docs/billing.md [1 image]"), "{}", echo.content);
+        // The agent reads it in the transcript, with the image, and is told to ask about it next round.
+        let wake = round_prompt(&s, &s.rounds[0], None);
+        let line = format!("- Round note (the user's own ideas or questions, beyond this round's questions): \"What about refunds? See @docs/billing.md\", with images: uploads/{shot}");
+        assert!(wake.contains(&line) && wake.contains("it opens new branches") && wake.contains("ask about them in round 2"), "{wake}");
+        assert!(BRIEF.contains("Round note") && BRIEF.contains("ask about in the next round"));
+        let state_text = mcp_call(&st, &o, "grill_state", &json!({})).unwrap().unwrap();
+        assert!(state_text.contains(&line), "{state_text}");
+    }
+
+    #[test]
+    fn the_round_note_s_images_reach_the_agent_and_a_round_without_one_is_unchanged() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Charge monthly?"]).unwrap();
+        let shot = upload(&st, &o);
+        let mut s = active(&st, &o.id).unwrap();
+        set_note(&st, &mut s, Some(&RoundNote { text: String::new(), images: vec![shot.clone()] })).unwrap();
+        let wake = apply_command(&st, &mut s, "send", None, None).unwrap().unwrap();
+        assert!(wake.contains(&format!("\"\", with images: uploads/{shot}")) && wake.contains(&format!("[loft-image:{shot}]")), "{wake}");
+
+        // An empty note is none: the round, its echo, prompt and saved form are as before.
+        round(&st, &o, &["Offer a trial?"]).unwrap();
+        let mut s = active(&st, &o.id).unwrap();
+        set_note(&st, &mut s, Some(&RoundNote { text: "   ".into(), images: vec![] })).unwrap();
+        let wake = apply_command(&st, &mut s, "send", None, None).unwrap().unwrap();
+        let s = active(&st, &o.id).unwrap();
+        assert!(s.rounds[1].note.is_none());
+        // Earlier rounds keep theirs in the transcript; this one adds none, and no instruction about one.
+        assert_eq!(wake.matches("- Round note").count(), 1, "{wake}");
+        assert!(!wake.contains("new branches"), "{wake}");
+        assert!(serde_json::to_value(&s.rounds[1]).unwrap().get("note").is_none());
+        let echo = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().rfind(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert_eq!(echo.content, "Answers to round 2:\n\n1. (no answer)\n2. (no answer)");
     }
 
     #[test]

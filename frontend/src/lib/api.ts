@@ -944,8 +944,9 @@ export const api = {
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
-  grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>
-    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID() }),
+  /** `note`, with "send": the Round note that goes with the round. */
+  grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string, note?: { text: string; images: string[] }) =>
+    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID(), note }),
   /** Holds an answer to a round question (Loft doesn't run the agent until the round is sent). "Yes" accepts the recommendation. */
   /** Holds an answer to one question of the open round; with `discuss`, it is a comment for the agent instead of a decision. */
   grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false, images: string[] = []) =>

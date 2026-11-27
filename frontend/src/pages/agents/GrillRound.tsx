@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Check, CornerDownLeft, MessageCircle, Send, Sparkles, Wand2 } from "lucide-react";
 import { api, grillError, type GrillQuestion, type GrillSession, type Message } from "../../lib/api";
 import { cx } from "../../lib/format";
-import { clearAnswerDrafts, loadAnswerDraft, saveAnswerDraft } from "../../lib/draft";
+import { NOTE_DRAFT, clearAnswerDrafts, loadAnswerDraft, saveAnswerDraft } from "../../lib/draft";
 import { draftImages, type Attachment } from "../../lib/useDraft";
 import { attachImages, pastedImages, useFileDrop } from "../../lib/attach";
 import { AttachmentTile } from "../../components/AttachmentTile";
@@ -14,6 +14,7 @@ import { questionAnchor } from "../../lib/interview";
 import { ActionButton } from "../../components/ActionButton";
 import { ErrorLine } from "../../components/Callout";
 import { useAction } from "../../lib/useAction";
+import { RoundNote, sendRound } from "./RoundNote";
 
 type Posted = Pick<GrillQuestion, "id" | "text" | "recommendation" | "from_round">;
 
@@ -31,12 +32,12 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
   const closed = !!session && !open;
   const postedIds = posted.map((q) => q.id).join("\n");
   useEffect(() => {
-    if (closed && g.session_id && g.round != null) clearAnswerDrafts(g.session_id, g.round, postedIds.split("\n"));
+    if (closed && g.session_id && g.round != null) clearAnswerDrafts(g.session_id, g.round, [...postedIds.split("\n"), NOTE_DRAFT]);
   }, [closed, g.session_id, g.round, postedIds]);
 
-  const sendRound = () => {
+  const send = () => {
     if (!session) return;
-    return sending.run(() => api.grillCommand(session.session_id, "send"));
+    return sending.run(() => sendRound(session));
   };
 
   const answered = live.filter((q) => q.state !== "open").length;
@@ -60,11 +61,16 @@ export function GrillRound({ m, agentId, session }: { m: Message; agentId: strin
               ))}
         </div>
         {open && (
-          <div className="mt-4 flex items-center gap-3 border-t border-line pt-3">
+          <div className="mt-4 border-t border-line pt-3">
+            <RoundNote agentId={agentId} sessionId={session!.session_id} round={g.round} />
+          </div>
+        )}
+        {open && (
+          <div className="mt-3 flex items-center gap-3">
             <span className="flex-1 font-mono text-[11px] text-fg-3">
               {answered} of {live.length} answered{answered < live.length ? " · unanswered ones come back next round" : ""}
             </span>
-            <ActionButton icon={<Send className="size-3.5" />} pending={sending.busy} pendingLabel="Sending…" onClick={sendRound}>
+            <ActionButton icon={<Send className="size-3.5" />} pending={sending.busy} pendingLabel="Sending…" onClick={send}>
               Send round
             </ActionButton>
           </div>
