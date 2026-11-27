@@ -60,7 +60,7 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 curl -fsSL https://get-loft.com/install.sh | bash
 ```
 
-The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live (Tab completes the path, or type just the folder's name, like `projects`, and pick it from the folders with git repos found in your home folder), and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
+The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
 
 Already have a clone? Run `./setup.sh` from it instead.
 
@@ -68,7 +68,7 @@ To run loft in the foreground instead, use `./start.sh`.
 
 Then open http://localhost:7420 and check **Settings** (gear icon, top right). Settings are saved to `.loft/settings.json`:
 
-- **Projects folder**: where your git repos live. As you type, it suggests folders: the ones in the folder you've typed so far, and the ones with that name in your home (Library, node_modules, hidden folders and caches are skipped), each with how many git repos it holds; ↑↓ move, Tab or Enter fills one in. Takes effect after a restart, which loft offers once no agent is running.
+- **Projects folder**: where your git repos live. Takes effect after a restart, which loft offers once no agent is running.
 - **Claude command**: the command agents run.
 - **GitHub token**: needed for private repos and merging pull requests. Without one, loft uses `gh auth token`.
 - **SSH host**: when loft runs on another machine, `/code` opens an agent's workspace in your local VS Code over Remote-SSH to this host.
