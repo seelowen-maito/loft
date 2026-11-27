@@ -8,7 +8,7 @@ import { folderKey, repoCount, stillMatching } from "../lib/folderSuggest";
  * The Projects folder field: while the user types, the folders in the parent of what's typed and the ones found by
  * that name in their home, each with its repo count. ↑↓ move, Tab or Enter fill in the highlighted path, Esc closes.
  */
-export function FolderField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+export function FolderField({ id, value, onChange }: { id?: string; value: string; onChange: (v: string) => void }) {
   // Only once the user types: not for the saved value on load, nor right after a pick.
   const [typing, setTyping] = useState(false);
   const [found, setFound] = useState<{ q: string; list: FolderSuggestion[] }>();
@@ -40,6 +40,7 @@ export function FolderField({ value, onChange }: { value: string; onChange: (v: 
   return (
     <div className="relative">
       <input
+        id={id}
         className="input font-mono"
         value={value}
         role="combobox"

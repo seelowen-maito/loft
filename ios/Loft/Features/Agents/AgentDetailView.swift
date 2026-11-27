@@ -109,6 +109,7 @@ struct AgentDetailView: View {
                                     VStack(alignment: .leading) {
                                         Text(pr.title).lineLimit(2)
                                         Text("\(pr.slug) #\(pr.number) · \(pr.state)").font(.caption).foregroundStyle(.secondary)
+                                        if pr.showsWorkflowWarning { WorkflowWarningLabel() }
                                     }
                                 }
                             }

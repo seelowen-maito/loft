@@ -194,14 +194,19 @@ public struct LiveLoftAPI: LoftAPI {
         return url
     }
 
-    private func url(_ path: String, query: [URLQueryItem] = []) -> URL {
-        var c = URLComponents(url: baseURL.appendingPathComponent("api" + path), resolvingAgainstBaseURL: false)!
+    /// `encoded` paths come from the server already percent-encoded ("/needs-you/task%3Ax/dismiss") and are sent as they are;
+    /// `appendingPathComponent` would encode their `%` again.
+    static func url(_ baseURL: URL, _ path: String, query: [URLQueryItem] = [], encoded: Bool = false) -> URL {
+        var base = baseURL.absoluteString
+        while base.hasSuffix("/") { base.removeLast() }
+        let full = encoded ? URL(string: base + "/api" + path) : nil
+        var c = URLComponents(url: full ?? baseURL.appendingPathComponent("api" + path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty { c.queryItems = query }
         return c.url!
     }
 
-    private func send(_ method: String, _ path: String, query: [URLQueryItem] = [], body: JSONValue? = nil, timeout: TimeInterval? = nil) async throws -> Data {
-        var req = URLRequest(url: url(path, query: query))
+    private func send(_ method: String, _ path: String, query: [URLQueryItem] = [], body: JSONValue? = nil, timeout: TimeInterval? = nil, encoded: Bool = false) async throws -> Data {
+        var req = URLRequest(url: Self.url(baseURL, path, query: query, encoded: encoded))
         if let timeout { req.timeoutInterval = timeout }
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -250,7 +255,7 @@ public struct LiveLoftAPI: LoftAPI {
     public func needsYouRequest(method: String, path: String, body: JSONValue?) async throws {
         // Actions name the full path ("/api/permissions/p1"); `send` adds the /api prefix itself.
         let p = path.hasPrefix("/api/") ? String(path.dropFirst(4)) : path
-        _ = try await send(method, p, body: body)
+        _ = try await send(method, p, body: body, encoded: true)
     }
     public func registerDevice(_ d: DeviceRegistration) async throws { _ = try await send("POST", "/devices", body: d.json) }
     public func unregisterDevice(token: String) async throws { _ = try await send("DELETE", "/devices/\(token)") }
@@ -283,7 +288,7 @@ public struct LiveLoftAPI: LoftAPI {
 
     public func upload(agentId: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
         let path = "/agents/\(agentId)/uploads"
-        var req = URLRequest(url: url(path))
+        var req = URLRequest(url: Self.url(baseURL, path))
         req.httpMethod = "POST"
         req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         // Up to 200 MB over the tailnet: give the server time to answer once it has it all.
@@ -301,7 +306,7 @@ public struct LiveLoftAPI: LoftAPI {
         return name
     }
 
-    public func uploadURL(agentId: String, file: String) -> URL { url("/agents/\(agentId)/uploads/\(file)") }
+    public func uploadURL(agentId: String, file: String) -> URL { Self.url(baseURL, "/agents/\(agentId)/uploads/\(file)") }
 
     public func grillSession(agentId: String) async throws -> GrillSession? {
         do {
@@ -529,7 +534,7 @@ public struct LiveLoftAPI: LoftAPI {
     public func deleteSaved(id: Int64) async throws { _ = try await send("DELETE", "/saved/\(id)") }
 
     public func eventLines() async throws -> AsyncThrowingStream<String, Error> {
-        var req = URLRequest(url: url("/events"))
+        var req = URLRequest(url: Self.url(baseURL, "/events"))
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         let bytes: URLSession.AsyncBytes, resp: URLResponse
         do {

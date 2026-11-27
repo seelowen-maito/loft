@@ -1,7 +1,7 @@
 import Foundation
 
 // "Needs you" (GET /api/needs-you, contract docs/needs-you-api.md): everything waiting on you, from all agents,
-// already ordered by the server (urgency, then oldest). All text is plain; credentials are redacted server-side.
+// already ordered by the server (urgency, then newest). All text is plain; credentials are redacted server-side.
 
 public struct NeedsYouList: Codable, Hashable {
     public var version: Int
@@ -57,6 +57,8 @@ public struct NeedsYouItem: Codable, Hashable, Identifiable {
     }
 
     public var isPullRequest: Bool { pr != nil || type.hasPrefix("pr_") }
+    /// A PR that changes CI workflows (`pr_workflows`): shown with the warning, never folded into its project.
+    public var changesWorkflows: Bool { type == "pr_workflows" }
 
     /// Answerable by typing (a reply, an interview answer, a task comment).
     public var answerAction: NeedsYouAction? { actions.first { $0.kind == "answer" } }
@@ -161,7 +163,7 @@ public enum NeedsYouSection: Identifiable, Hashable {
 
     public static func build(_ items: [NeedsYouItem]) -> [NeedsYouSection] {
         func project(_ i: NeedsYouItem) -> String? {
-            guard i.isPullRequest else { return nil }
+            guard i.isPullRequest, !i.changesWorkflows else { return nil }
             let p = (i.pr?.project ?? i.pr?.repo.map { String($0.split(separator: "/").last ?? "") } ?? i.project)?.trimmingCharacters(in: .whitespaces)
             return p?.isEmpty == false ? p : nil
         }
@@ -179,7 +181,7 @@ public enum NeedsYouSection: Identifiable, Hashable {
             if case .project(let name, _) = e.section { return (.project(name: name, items: groups[name] ?? []), e.index) }
             return e
         }
-        // The server's order (urgency, then oldest) for items; within an urgency, projects after the items, the
+        // The server's order (urgency, then newest) for items; within an urgency, projects after the items, the
         // bigger first.
         return sections.sorted { a, b in
             if a.section.urgency != b.section.urgency { return a.section.urgency > b.section.urgency }

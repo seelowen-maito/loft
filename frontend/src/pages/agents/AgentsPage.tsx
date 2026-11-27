@@ -18,6 +18,7 @@ import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
 import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
 import { saveRecent } from "../../lib/shortcuts";
+import { Tip } from "../../components/HoverTip";
 import { groupUnread, shouldMarkRead, showsUnreadDot } from "../../lib/unread";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
@@ -312,16 +313,17 @@ export default function AgentsPage() {
             prs={prs}
             grill={grill}
             headerActions={
-              <button
-                className="btn-ghost"
-                onClick={toggleInspector}
-                aria-expanded={inspectorOpen}
-                aria-controls="inspector"
-                aria-label={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
-                title={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
-              >
-                {inspectorOpen ? <PanelRightClose className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
-              </button>
+              <Tip name={inspectorOpen ? "Hide agent settings" : "Show agent settings"}>
+                <button
+                  className="btn-ghost"
+                  onClick={toggleInspector}
+                  aria-expanded={inspectorOpen}
+                  aria-controls="inspector"
+                  aria-label={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
+                >
+                  {inspectorOpen ? <PanelRightClose className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
+                </button>
+              </Tip>
             }
           />
         ) : (

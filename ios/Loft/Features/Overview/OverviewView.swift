@@ -5,10 +5,6 @@ struct OverviewView: View {
     @Environment(LoftStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(VoiceSession.self) private var voice
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// The Talk button steps aside while you scroll down through the cards, so it doesn't
-    /// sit on top of rows you're reading; it comes back when you scroll up or reach either end.
-    @State private var talkVisible = true
 
     private var working: [Agent] {
         store.sortedAgents.filter { [.working, .waitingApproval].contains(store.state(of: $0)) }
@@ -28,19 +24,9 @@ struct OverviewView: View {
                 recentActivity
             }
             .padding(.horizontal, Theme.gutter)
-            .padding(.bottom, store.agents.isEmpty ? 24 : 96)
+            .padding(.bottom, 24)
         }
         .background(Theme.background)
-        .hidesOnScrollDown($talkVisible)
-        .overlay(alignment: .bottomTrailing) {
-            if !store.agents.isEmpty && talkVisible {
-                TalkButton { agentId in Task { await voice.start(agentId: agentId) } }
-                    .padding(.trailing, Theme.gutter)
-                    .padding(.bottom, 16)
-                    .transition(reduceMotion ? .opacity : .scale(scale: 0.6).combined(with: .opacity))
-            }
-        }
-        .animation(.snappy(duration: 0.2), value: talkVisible)
         .refreshable {
             async let stats: Void = store.refreshStats()
             try? await store.refresh()
@@ -48,6 +34,12 @@ struct OverviewView: View {
         }
         .navigationTitle("Loft")
         .toolbar {
+            // In the top bar, not floating over the cards: there it hid Needs you's buttons (#710).
+            if !store.agents.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    TalkButton { agentId in Task { await voice.start(agentId: agentId) } }
+                }
+            }
             ToolbarItem(placement: .topBarLeading) {
                 NavigationLink(value: SettingsRoute()) {
                     Image(systemName: "gearshape")
@@ -145,66 +137,34 @@ struct OverviewView: View {
     }
 }
 
-/// Floating shortcut to a voice conversation: with the orchestrator, or with an agent you pick
-/// when none is set. Nothing is sent until you review it and tap Send.
-private extension View {
-    /// Sets `visible` to false while the scroll view moves down through its middle, and back to
-    /// true on scrolling up or near the top or bottom (the bottom padding keeps the last rows clear).
-    /// iOS 17 has no scroll geometry API, so there the button just stays put.
-    @ViewBuilder func hidesOnScrollDown(_ visible: Binding<Bool>) -> some View {
-        if #available(iOS 18, *) {
-            onScrollGeometryChange(for: ScrollSpot.self) { g in
-                ScrollSpot(offset: g.contentOffset.y + g.contentInsets.top,
-                           remaining: g.contentSize.height + g.contentInsets.bottom - g.contentOffset.y - g.containerSize.height)
-            } action: { old, new in
-                let delta = new.offset - old.offset
-                if new.offset < 40 || new.remaining < 40 { visible.wrappedValue = true }
-                else if delta > 6 { visible.wrappedValue = false }
-                else if delta < -6 { visible.wrappedValue = true }
-            }
-        } else {
-            self
-        }
-    }
-}
-
-private struct ScrollSpot: Equatable {
-    var offset: CGFloat
-    var remaining: CGFloat
-}
-
+/// Shortcut to a voice conversation: with whoever you talked to last, or with an agent you pick
+/// when there's no one yet. Nothing is sent until you review it and tap Send.
 private struct TalkButton: View {
     @Environment(LoftStore.self) private var store
     @Environment(Router.self) private var router
-    @ScaledMetric(relativeTo: .title2) private var size: CGFloat = 60
     @State private var picking = false
     /// Opens the full-screen voice conversation with this agent.
     let startVoice: (String) -> Void
 
     var body: some View {
-        Button {
-            // Talk starts with whoever you talked to last.
-            if let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
-                                               orchestratorId: store.orchestratorId, agents: store.agents) {
-                startVoice(id)
-            } else { picking = true }
-        } label: {
-            Image(systemName: "mic.fill")
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(Theme.onAccent)
-                .frame(width: min(size, 88), height: min(size, 88))
-                .background(Theme.accent, in: Circle())
-                .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
+        // A tap talks; a long press opens the menu.
+        Menu {
             if let o = store.orchestrator {
                 Button { startVoice(o.id) } label: { Label("Voice conversation", systemImage: "waveform") }
                 Button { router.openChat(o.id, dictate: true) } label: { Label("Dictate in chat", systemImage: "mic") }
             }
             Button { picking = true } label: { Label("Talk to another agent…", systemImage: "person.wave.2") }
             Button { router.composer = .pickRecipient } label: { Label("Message an agent", systemImage: "bubble.left") }
+        } label: {
+            Image(systemName: "mic.fill")
+        } primaryAction: {
+            // Talk starts with whoever you talked to last.
+            if let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                               orchestratorId: store.orchestratorId, agents: store.agents) {
+                startVoice(id)
+            } else { picking = true }
         }
+        .tint(Theme.accent)
         .onChange(of: router.picksTalk, initial: true) { _, asks in
             guard asks else { return }
             router.picksTalk = false

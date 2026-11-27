@@ -386,6 +386,24 @@ fn clip(s: &str, max: usize) -> String {
     s.trim().chars().take(max).collect()
 }
 
+/// Whether `agent_id`'s running grill asked `project`'s CI mode (a private repo) and the user's sent answer to that
+/// question, the one whose options are the two modes, is `mode` exactly: chosen or typed, or the recommendation
+/// accepted or left to the agent. `at_the_end`, `At the end` and `` `at-the-end` `` are the same answer.
+pub fn answered_ci_mode(state: &AppState, agent_id: &str, project: &str, mode: &str) -> bool {
+    let Some(s) = active(state, agent_id) else { return false };
+    let words = |t: &str| t.trim().trim_matches('`').trim().to_lowercase().replace(['_', '-'], " ");
+    let modes = [words(crate::project_settings::AT_THE_END), words(crate::project_settings::PER_TICKET)];
+    let mode = words(mode);
+    s.private_repos.iter().any(|p| p == project)
+        && s.rounds.iter().filter(|r| r.sent_at.is_some()).flat_map(|r| &r.questions).any(|q| {
+            let mut options: Vec<String> = q.options.iter().map(|o| words(o)).collect();
+            options.sort();
+            // A `discuss` answer is the user's comment, not a choice.
+            let said = if q.accepted || q.state == "decided" { Some(&q.recommendation) } else { q.answer.as_ref().filter(|_| q.state != "discuss") };
+            options == modes && said.is_some_and(|a| words(a) == mode)
+        })
+}
+
 /// The round waiting for the user's answers, if any.
 pub fn open_round(s: &Session) -> Option<&Round> {
     s.rounds.last().filter(|r| r.sent_at.is_none())
@@ -1466,7 +1484,7 @@ Once the spec is published, split it into tickets the team can pick up.
 const CI_MODE: &str = r#"
 # Planning: CI mode
 {WHICH} private, so GitHub bills every Actions minute its workflows spend, and each ticket's pushes run them on the draft spec PR.
-- Right after the Test seams question, ask the project's CI mode as a round question with your recommendation: `per_ticket` (each ticket closes only once its CI is green, Loft's default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once, when the spec PR is ready). First read the repo's `.github/workflows` and the project's `ci_mode` Project setting (`mcp__loft__project_settings`): recommend `at_the_end` when the workflows are heavy (jobs of several minutes, a matrix, mobile builds) and `per_ticket` when they're light, and when the setting was already changed, ask whether to keep it.
+- Right after the Test seams question, ask the project's CI mode as a `single_choice` round question whose options are exactly `per_ticket` and `at_the_end`, with one of them as your recommendation: `per_ticket` (each ticket closes only once its CI is green, Loft's default) or `at_the_end` (tickets close on their reviewers, and the CI is checked once, when the spec PR is ready). First read the repo's `.github/workflows` and the project's `ci_mode` Project setting (`mcp__loft__project_settings`): recommend `at_the_end` when the workflows are heavy (jobs of several minutes, a matrix, mobile builds) and `per_ticket` when they're light, and when the setting was already changed, ask whether to keep it.
 - In the same question, suggest the draft pattern for the workflows: heavy jobs skip a draft PR (`if: github.event.pull_request.draft == false`, with `ready_for_review` among the `pull_request` types), so each ticket's pushes only run the light jobs (Loft counts a skipped job as green). Loft never changes the workflows: the user does, if they want to.
 - Pass the answer as `ci_mode` to `mcp__loft__publish_spec`: Loft saves it in the project's Project settings with `set_project_setting`, as changed by you. When the user left it unanswered, leave `ci_mode` out.
 "#;
@@ -1549,7 +1567,56 @@ pub(crate) mod tests {
         mcp_call(st, a, "grill_round", &json!({ "topic": "Pricing", "questions": qs.iter().map(|t| q(t)).collect::<Vec<_>>() })).unwrap()
     }
 
-    fn answer(st: &AppState, a: &Agent, qid: &str, text: &str) -> Routed {
+    /// The CI-mode question as the grill's instructions ask it: a single choice between the two modes.
+    fn ci_question() -> Value {
+        json!({ "text": "CI mode?", "speak": "CI mode?", "kind": "single_choice", "options": ["`per_ticket`", "`at_the_end`"], "recommendation": "per_ticket" })
+    }
+
+    /// A round asking only the CI-mode question.
+    pub(crate) fn ci_round(st: &AppState, a: &Agent) {
+        mcp_call(st, a, "grill_round", &json!({ "topic": "CI", "questions": [ci_question()] })).unwrap().unwrap();
+    }
+
+    /// #701: only the CI-mode question (its options are the two modes) counts, and only its exact answer.
+    #[test]
+    fn the_ci_mode_is_the_exact_answer_to_the_ci_mode_question_only() {
+        let st = state();
+        let a = planner(&st, "Dev");
+        on_user_message_with(&st, &a, "grill me", Some(&json!({ "role": "start_request" })), json!({}), &["ci-x".into()]).unwrap();
+        mcp_call(&st, &a, "grill_round", &json!({ "topic": "CI", "questions": [q("When does it ship?"), ci_question()] })).unwrap().unwrap();
+        let ids = qids(&st, &a);
+        answer(&st, &a, &ids[0], "At the end of the week");
+        answer(&st, &a, &ids[1], "at-the-end");
+        let said = |mode: &str| answered_ci_mode(&st, &a.id, "ci-x", mode);
+        assert!(!said("at_the_end"), "nothing counts before the round is sent");
+        send(&st, &a);
+        assert!(said("at_the_end") && said("At the end"));
+        assert!(!said("per_ticket"), "the recommendation wasn't taken");
+        assert!(!answered_ci_mode(&st, &a.id, "other", "at_the_end"), "another project's CI mode wasn't asked");
+
+        // An answer that only mentions a mode, to a question that isn't the CI mode's, counts for nothing.
+        let b = planner(&st, "Dev2");
+        on_user_message_with(&st, &b, "grill me", Some(&json!({ "role": "start_request" })), json!({}), &["ci-x".into()]).unwrap();
+        round(&st, &b, &["When does it ship?", "CI mode?"]).unwrap();
+        let ids = qids(&st, &b);
+        answer(&st, &b, &ids[0], "At the end of the week");
+        answer(&st, &b, &ids[1], "at the end, I guess");
+        send(&st, &b);
+        assert!(!answered_ci_mode(&st, &b.id, "ci-x", "at_the_end"));
+
+        // A comment to discuss the CI-mode question isn't a choice, even when it's a mode's exact words.
+        let c = planner(&st, "Dev3");
+        on_user_message_with(&st, &c, "grill me", Some(&json!({ "role": "start_request" })), json!({}), &["ci-x".into()]).unwrap();
+        ci_round(&st, &c);
+        let s = active(&st, &c.id).unwrap();
+        let qid = s.rounds[0].questions[0].id.clone();
+        on_user_message(&st, &c, "at_the_end", Some(&json!({ "role": "answer", "session_id": s.id, "question_id": qid, "discuss": true })), json!({})).unwrap();
+        send(&st, &c);
+        assert_eq!(active(&st, &c.id).unwrap().rounds[0].questions[0].state, "discuss");
+        assert!(!answered_ci_mode(&st, &c.id, "ci-x", "at_the_end"));
+    }
+
+    pub(crate) fn answer(st: &AppState, a: &Agent, qid: &str, text: &str) -> Routed {
         let s = active(st, &a.id).unwrap();
         on_user_message(st, a, text, Some(&json!({ "role": "answer", "session_id": s.id, "question_id": qid })), json!({})).unwrap()
     }

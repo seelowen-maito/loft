@@ -200,6 +200,7 @@ struct NeedsYouRow: View {
             } else if !item.asksQuestions(store.permissions) {
                 Text(item.reason).font(.footnote).foregroundStyle(.secondary)
             }
+            if item.changesWorkflows { WorkflowWarningLabel() }
             if showsText, !item.text.isEmpty {
                 Text(item.text).font(.footnote.monospaced()).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -388,4 +389,14 @@ struct AnyButtonStyle: PrimitiveButtonStyle {
     private let make: (Configuration) -> AnyView
     init(_ style: some PrimitiveButtonStyle) { make = { AnyView(style.makeBody(configuration: $0)) } }
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
+}
+
+/// A PR that changes CI workflows: on its Needs you item and its PR row.
+struct WorkflowWarningLabel: View {
+    var body: some View {
+        Label(WorkflowWarning.text, systemImage: "exclamationmark.triangle.fill")
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(Theme.attentionInk)
+            .accessibilityIdentifier("workflowWarning")
+    }
 }

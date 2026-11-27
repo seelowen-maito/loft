@@ -890,6 +890,9 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
                            make("pr:c", "acme/api", "api#1765: Scope menu discounts to the restaurant", urgency: 2),
                            make("pr:d", "Octo/loft", "loft#111: Make it a brief", urgency: 0)]
         }
+        if ProcessInfo.processInfo.arguments.contains("-fixture-pr-workflows") {
+            list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.prWorkflows.utf8)), at: 0)
+        }
         if ProcessInfo.processInfo.arguments.contains("-fixture-backup-failed") {
             list.items.insert(try JSONCoding.decoder.decode(NeedsYouItem.self, from: Data(FixtureNeedsYou.backupFailed.utf8)), at: 0)
         }
@@ -1165,8 +1168,11 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     public func pullRequests() async throws -> [PullRequest] {
         try check()
+        // `-fixture-pr-workflows`: it changed `.github/workflows/`.
+        let workflows = ProcessInfo.processInfo.arguments.contains("-fixture-pr-workflows")
         return [PullRequest(id: "pr1", agentId: "be", slug: "octo/loft", number: 214, url: "https://github.com/octo/loft/pull/214",
-                            title: "Settings endpoints", state: "open", draft: false, createdAt: Date().addingTimeInterval(-1500))]
+                            title: "Settings endpoints", state: "open", draft: false, createdAt: Date().addingTimeInterval(-1500),
+                            changesWorkflows: workflows ? true : nil)]
     }
     public func tasks() async throws -> [HBTask] { try check(); return locked { taskList } }
     public func deliverySummaries() async throws -> [DeliverySummary] { try check(); return locked { deliveryList } }

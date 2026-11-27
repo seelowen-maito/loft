@@ -99,7 +99,7 @@ uses the right host per device. The same auth key works for both.
 `kinds` are "needs you" item types (see `docs/needs-you-api.md`): `permission`, `task_approval`, `task_blocked`, `question`,
 `grill_round`, `stuck`, `task_failed`, `pr_ready`, `pr_review`, `delivery_stalled`, `delivery_done`. The default is all but `task_failed`, `pr_ready` and `pr_review`.
 `grill_question`, the name before rounds, is still accepted and stored as `grill_round`.
-Two item types go out under another kind: `mac_access` under `stuck`, and `actions_quota` (an owner's GitHub Actions minutes past 70% or 90% of its quota) under `delivery_stalled`: that is the push's `type` too, and tapping it opens Settings.
+Three item types go out under another kind: `mac_access` under `stuck`, `actions_quota` (an owner's GitHub Actions minutes past 70% or 90% of its quota) and `pr_workflows` (a PR changing `.github/workflows/`) under `delivery_stalled`: that is the push's `type` too. Tapping an `actions_quota` push opens Settings, a `pr_workflows` one the PR's files on GitHub.
 `quiet_hours`: `{start: "22:00", end: "07:00", tz: "Europe/Lisbon", utc_offset_minutes: 60}`.
 
 When Apple answers **410**, or **400 BadDeviceToken / DeviceTokenNotForTopic**, the device is removed.
