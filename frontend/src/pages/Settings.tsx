@@ -11,7 +11,7 @@ import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { SettingsCard } from "../components/SettingsCard";
 import { SettingsField as Field } from "../components/SettingsField";
-import { cardInView } from "../lib/settingsSpy";
+import { cardInView, keepPin, type Pin } from "../lib/settingsSpy";
 import { Callout, ErrorLine } from "../components/Callout";
 import { ActionButton } from "../components/ActionButton";
 import { errorText, useAction } from "../lib/useAction";
@@ -552,7 +552,7 @@ function useCardInView(ready: boolean) {
   const [current, setCurrent] = useState<string>(SECTIONS[0][0]);
   // `top`: where the scroller was when a click pinned it; null for a #hash pin, which the page keeps scrolling to
   // while the cards above it grow, so only the user's own input drops it.
-  const pinned = useRef<{ id: string; top: number | null } | null>(null);
+  const pinned = useRef<Pin | null>(null);
   const scroller = () => document.querySelector<HTMLElement>("[data-settings-scroll]");
   useEffect(() => {
     if (!ready) return;
@@ -567,8 +567,7 @@ function useCardInView(ready: boolean) {
         if (card) tops[id] = card.getBoundingClientRect().top;
       }
       const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
-      const pin = pinned.current;
-      if (pin && pin.top !== null && Math.abs(el.scrollTop - pin.top) > 2) pinned.current = null;
+      pinned.current = keepPin(pinned.current, el.scrollTop);
       setCurrent(cardInView(SECTIONS.map(([id]) => id), tops, el.getBoundingClientRect().top + 96, atBottom, pinned.current?.id ?? null));
     };
     const byHand = () => (pinned.current = null);

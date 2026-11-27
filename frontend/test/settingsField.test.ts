@@ -12,11 +12,12 @@ for (const k of ["HTMLElement", "Node", "Event", "MouseEvent", "KeyboardEvent", 
 
 let vite: ViteDevServer;
 let SettingsField: any;
+let keepPin: (pin: { id: string; top: number | null } | null, scrollTop: number) => { id: string; top: number | null } | null;
 let cardInView: (ids: string[], tops: Record<string, number | undefined>, line: number, atBottom: boolean, pinned: string | null) => string;
 before(async () => {
   vite = await createServer({ logLevel: "silent", appType: "custom", server: { middlewareMode: true, hmr: false } });
   ({ SettingsField } = await vite.ssrLoadModule("/src/components/SettingsField.tsx"));
-  ({ cardInView } = await vite.ssrLoadModule("/src/lib/settingsSpy.ts"));
+  ({ cardInView, keepPin } = await vite.ssrLoadModule("/src/lib/settingsSpy.ts"));
 });
 after(() => vite.close());
 
@@ -69,4 +70,19 @@ test("On this page highlights the last card passed, the last one at the bottom, 
   assert.equal(cardInView(ids, tops, 96, true, null), "claude", "at the bottom, the last card");
   assert.equal(cardInView(ids, tops, 96, true, "push"), "push", "at the bottom, the card clicked");
   assert.equal(cardInView(ids, { backups: 500 }, 96, false, null), "general", "cards not on the page yet are skipped, and none passed leaves the first");
+});
+
+test("at the bottom: a click stays, scrolling by hand picks the last card, and a #hash card shows", () => {
+  const ids = ["voice", "claude-login", "mac-access"];
+  const tops = { voice: -400, "claude-login": 300, "mac-access": 560 }; // none of the last cards reaches the top
+  // Clicked "Claude login" then "Mac access" with the page already at the bottom: nothing scrolls, the click's pin shows.
+  const clicked = { id: "mac-access", top: 4465 };
+  assert.equal(cardInView(ids, tops, 96, true, keepPin(clicked, 4465)?.id ?? null), "mac-access");
+  // Scrolling by hand moves the scroller: the click's pin goes, and the bottom picks the last card.
+  assert.equal(keepPin({ id: "voice", top: 4000 }, 4465), null);
+  assert.equal(cardInView(ids, tops, 96, true, keepPin({ id: "voice", top: 4000 }, 4465)?.id ?? null), "mac-access");
+  // Loading /settings#claude-login: the pin has no position, so the page growing doesn't drop it.
+  const hash = { id: "claude-login", top: null };
+  assert.deepEqual(keepPin(hash, 4431), hash);
+  assert.equal(cardInView(ids, tops, 96, true, keepPin(hash, 4465)?.id ?? null), "claude-login");
 });
