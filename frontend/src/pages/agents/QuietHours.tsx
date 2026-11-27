@@ -40,6 +40,7 @@ export function QuietHours({ value, onChange, interval }: { value: QuietWindow[]
                   </button>
                 ))}
               </div>
+              {w.days.length === 0 && <span className="text-[11px] text-fg-3">Never wakes on its own</span>}
               <div className="flex items-center gap-1.5">
                 <input type="time" className="input w-[6.5rem] py-1" value={w.start} onChange={(e) => e.target.value && update(i, { start: e.target.value })} />
                 <span className="text-fg-3">–</span>
