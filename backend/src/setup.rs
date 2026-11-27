@@ -361,8 +361,9 @@ If CI is green, say so in one line."#,
     },
 ];
 
-/// A template's instructions for `project`, whose folder is `path`: no project reads as the user's projects.
+/// A template's instructions for `project`, whose folder is `path`: no project reads as the user's projects, with no folder.
 fn fill(prompt: &str, project: &str, path: &str) -> String {
+    let prompt = if path.is_empty() { prompt.replace(" (`{path}`)", "") } else { prompt.to_string() };
     prompt.replace("{project}", if project.is_empty() { "the user's projects" } else { project }).replace("{path}", path)
 }
 
@@ -1178,6 +1179,9 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         // No project yet: the instructions read as the user's projects, as create_agent writes them.
         let none = get("").await;
         assert!(none[0]["prompt"].as_str().unwrap().contains("**the user's projects**"), "{}", none[0]["prompt"]);
+        for t in none.as_array().unwrap() {
+            assert!(!t["prompt"].as_str().unwrap().contains("``"), "no empty folder in {}", t["key"]);
+        }
     }
 
     #[tokio::test]
