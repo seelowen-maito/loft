@@ -9,6 +9,11 @@ final class RequestURLTests: XCTestCase {
         XCTAssertEqual(url.absoluteString, "http://h:1/api/needs-you/task%3At-old%3Ablocked/dismiss")
     }
 
+    func testATrailingSlashOnTheServerAddressIsDropped() {
+        let url = LiveLoftAPI.url(URL(string: "http://h:1/")!, "/needs-you/task%3Ax/dismiss", encoded: true)
+        XCTAssertEqual(url.absoluteString, "http://h:1/api/needs-you/task%3Ax/dismiss")
+    }
+
     func testPlainActionPathsStillWork() {
         XCTAssertEqual(LiveLoftAPI.url(base, "/permissions/p1", encoded: true).absoluteString, "http://h:1/api/permissions/p1")
         XCTAssertEqual(LiveLoftAPI.url(base, "/needs-you/dismiss-all", encoded: true).absoluteString, "http://h:1/api/needs-you/dismiss-all")

@@ -196,7 +196,9 @@ public struct LiveLoftAPI: LoftAPI {
     /// `encoded` paths come from the server already percent-encoded ("/needs-you/task%3Ax/dismiss") and are sent as they are;
     /// `appendingPathComponent` would encode their `%` again.
     static func url(_ baseURL: URL, _ path: String, query: [URLQueryItem] = [], encoded: Bool = false) -> URL {
-        let full = encoded ? URL(string: baseURL.absoluteString + "/api" + path) : nil
+        var base = baseURL.absoluteString
+        while base.hasSuffix("/") { base.removeLast() }
+        let full = encoded ? URL(string: base + "/api" + path) : nil
         var c = URLComponents(url: full ?? baseURL.appendingPathComponent("api" + path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty { c.queryItems = query }
         return c.url!
