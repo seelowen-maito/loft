@@ -1,7 +1,7 @@
 // Run with `pnpm test` (Node's own test runner; Node strips the types).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BLANK_CUSTOM, EMPTY_FORM, FRESH_CONTEXT, applyPick, createPayload, currentPick, offersFreshContext, pickLocked, refillTemplate, rolePicks, withTeam, type AgentTemplate } from "../src/lib/newAgent.ts";
+import { BLANK_CUSTOM, EMPTY_FORM, FRESH_CONTEXT, applyPick, createPayload, currentPick, pickLocked, refillTemplate, rolePicks, withTeam, type AgentTemplate } from "../src/lib/newAgent.ts";
 
 // What `GET /api/agent-templates` serves, in its order, cut down.
 const tpl = (key: string, name: string, role: string, model = "sonnet", interval_minutes = 0, project = "site"): AgentTemplate => ({
@@ -21,11 +21,11 @@ const served = (project = "site") => [
 const LABELS: Record<string, string> = { lead: "Lead", dev: "Dev", code_reviewer: "Code reviewer", qa: "QA", security: "Security" };
 const picks = (t = served()) => rolePicks(t, (r) => LABELS[r] ?? r);
 
-test("a new agent starts Custom with Fresh context always, from a template too", () => {
+test("a new agent starts Custom and sends no Fresh context, from a template too: the backend starts it Always (#495)", () => {
   assert.equal(EMPTY_FORM.role, "custom");
-  assert.equal(EMPTY_FORM.fresh_context, "always");
+  assert.ok(!("fresh_context" in EMPTY_FORM));
   const { team, solo } = picks();
-  for (const p of [...team, ...solo]) assert.equal(createPayload(applyPick(EMPTY_FORM, p, served())).fresh_context, "always", p.key);
+  for (const p of [...team, ...solo]) assert.ok(!("fresh_context" in createPayload(applyPick(EMPTY_FORM, p, served()))), p.key);
 });
 
 test("the picker shows the team in order, then blank Custom and the Custom templates", () => {
@@ -89,21 +89,10 @@ test("clearing the group drops a Lead to Custom, projects or not", () => {
   assert.equal(withTeam({ ...EMPTY_FORM, projects: ["loft"], role: "qa" }, { projects: [] }).role, "qa", "other roles stay");
 });
 
-test("Fresh context is hidden only for a Lead whose team has a Dev", () => {
-  const agents = [{ role: "dev", project: "api", group: "Acme" }, { role: "qa", project: "notes" }];
-  assert.equal(offersFreshContext({ ...EMPTY_FORM, group: "Acme", projects: ["web"], role: "lead" }, agents), false, "its group has a Dev, in another project");
-  assert.equal(offersFreshContext({ ...EMPTY_FORM, group: "Notes", projects: ["notes"], role: "lead" }, agents), true, "no Dev: builds the tickets");
-  assert.equal(offersFreshContext({ ...EMPTY_FORM, group: "Api", projects: ["api"], role: "lead" }, agents), true, "a Dev in its project but another group isn't its team's");
-  for (const role of ["dev", "code_reviewer", "qa", "security", "custom"]) {
-    assert.equal(offersFreshContext({ ...EMPTY_FORM, group: "Acme", role }, agents), true, role);
-  }
-});
-
-test("the create payload carries group, projects, role and Fresh context", () => {
-  const p = createPayload({ ...EMPTY_FORM, name: "  ", group: "Acme", projects: ["web", "api"], role: "lead", fresh_context: "always" });
+test("the create payload carries group, projects and role", () => {
+  const p = createPayload({ ...EMPTY_FORM, name: "  ", group: "Acme", projects: ["web", "api"], role: "lead" });
   assert.equal(p.name, "Unnamed");
   assert.equal(p.role, "lead");
-  assert.equal(p.fresh_context, "always");
   assert.deepEqual([p.group, p.projects], ["Acme", ["web", "api"]]);
 });
 

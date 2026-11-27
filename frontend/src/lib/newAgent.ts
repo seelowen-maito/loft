@@ -6,7 +6,6 @@ export type NewAgentForm = {
   group: string;
   projects: string[];
   role: string;
-  fresh_context: string;
   personality: string;
   prompt: string;
   model: string;
@@ -14,10 +13,10 @@ export type NewAgentForm = {
 };
 
 export const EMPTY_FORM: NewAgentForm = {
-  name: "", group: "", projects: [], role: "custom", fresh_context: "always", personality: "", prompt: "", model: "sonnet", interval_minutes: 0,
+  name: "", group: "", projects: [], role: "custom", personality: "", prompt: "", model: "sonnet", interval_minutes: 0,
 };
 
-/** Fresh context for each Delivery ticket, as the backend's `agents::FRESH_CONTEXT`. A new agent starts Always. */
+/** Fresh context for each Delivery ticket, as the backend's `agents::FRESH_CONTEXT`: set in the agent's settings, as a new agent starts Always (#495). */
 export const FRESH_CONTEXT = [
   { value: "always", label: "Always (default)" },
   { value: "above_80k", label: "Above 80k" },
@@ -106,9 +105,5 @@ export const withTeam = (f: NewAgentForm, change: { group?: string; projects?: s
   return { ...next, role: !formTeam(next) && next.role === "lead" ? "custom" : next.role };
 };
 
-/** Whether the dialog offers Fresh context: to every role but a Lead that only coordinates, i.e. whose team has a Dev. */
-export const offersFreshContext = (f: NewAgentForm, agents: { role?: string; project: string; group?: string }[]) =>
-  f.role !== "lead" || !agents.some((a) => a.role === "dev" && a.group?.trim() === formTeam(f));
-
-/** What Create agent sends: the whole form, role and Fresh context included, with a name even when left blank. */
+/** What Create agent sends: the whole form, with a name even when left blank. No Fresh context: a new agent starts Always. */
 export const createPayload = (f: NewAgentForm) => ({ ...f, name: f.name.trim() || "Unnamed" });

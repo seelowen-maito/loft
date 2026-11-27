@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { api, roleLabel, type Agent } from "../../lib/api";
-import { applyPick, createPayload, currentPick, EMPTY_FORM, FRESH_CONTEXT, offersFreshContext, refillTemplate, rolePicks, withTeam, type AgentTemplate } from "../../lib/newAgent";
+import { applyPick, createPayload, currentPick, EMPTY_FORM, refillTemplate, rolePicks, withTeam, type AgentTemplate } from "../../lib/newAgent";
 import { RoleField } from "./RolePicker";
-import { FRESH_CONTEXT_HINT, INTERVALS, MODELS, PROJECTS_SUB, roleHint } from "./Inspector";
+import { INTERVALS, MODELS, PROJECTS_SUB, roleHint } from "./Inspector";
 import { GroupInput, ProjectsField } from "./ProjectsField";
 import { teamOf, withTyped } from "../../lib/team";
 import { Dialog } from "../../components/Dialog";
@@ -11,7 +11,7 @@ import { ActionButton } from "../../components/ActionButton";
 import { ErrorLine } from "../../components/Callout";
 import { useAction } from "../../lib/useAction";
 
-export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }: { groups: string[]; projects: string[]; agents: Agent[]; onClose: () => void; onCreated: (a: Agent) => void }) {
+export function NewAgentDialog({ groups, projects, onClose, onCreated }: { groups: string[]; projects: string[]; onClose: () => void; onCreated: (a: Agent) => void }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [typed, setTyped] = useState("");
   const creating = useAction();
@@ -98,14 +98,6 @@ export function NewAgentDialog({ groups, projects, agents, onClose, onCreated }:
           </div>
           <p className="text-[11.5px] leading-snug text-fg-3">{roleHint(team)}</p>
         </div>
-        {offersFreshContext(form, agents) && (
-          <label className="flex items-center justify-between gap-3" title={FRESH_CONTEXT_HINT}>
-            <span className="eyebrow">Fresh context for each Delivery ticket</span>
-            <select className="input w-52" value={form.fresh_context} onChange={(e) => set("fresh_context", e.target.value)}>
-              {FRESH_CONTEXT.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
-          </label>
-        )}
         <label className="block space-y-1.5">
           <span className="eyebrow">Personality</span>
           <textarea className="input min-h-[64px] resize-none" placeholder="How should it sound and behave?" value={form.personality} onChange={(e) => set("personality", e.target.value)} />

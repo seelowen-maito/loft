@@ -1338,6 +1338,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_agent_from_the_new_agent_dialog_starts_with_fresh_context_always() {
+        // The dialog sends no fresh_context (#495): every role, Lead included, starts Always.
+        let st = crate::tasks::tests::state();
+        for role in ["lead", "dev", "code_reviewer", "qa", "security", "custom"] {
+            let body = serde_json::json!({ "name": role, "group": "Acme", "projects": [], "role": role, "personality": "", "prompt": "Do it.", "model": "sonnet", "interval_minutes": 0 });
+            let (a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &body, None).unwrap();
+            assert_eq!((a.role.as_str(), a.fresh_context.as_str()), (role, "always"));
+        }
+    }
+
+    #[test]
     fn every_fresh_context_option_stays_settable_on_a_new_agent() {
         let st = crate::tasks::tests::state();
         let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Dev", "role": "dev" }), None).unwrap();
