@@ -33,7 +33,7 @@ What an agent does in its team: Lead, Dev, Code reviewer, QA, Security or Custom
 _Avoid_: Job, type, flag, title
 
 **Delivery**:
-Loft running a spec's tickets from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers while it follows their CI on GitHub and the Dev starts the next unblocked ticket (with at most one of its tickets in review; a fix waits for the ticket being built and comes before any new one), closes it when they pass and the CI is green, and tells the user when a ticket needs them or the spec PR is ready and its CI green: Loft keeps following the CI after it marks the PR ready, and a red one sends the Dev a final round, like the final Code Review's. No agent coordinates it.
+Loft running a spec's tickets, or one standalone ticket, from published to merged: it starts each unblocked ticket on the Dev, hands its commits to the reviewers while it follows their CI on GitHub and the Dev starts the next unblocked ticket (with at most one of its tickets in review; a fix waits for the ticket being built and comes before any new one), closes it when they pass and the CI is green, and tells the user when a ticket needs them or the spec PR is ready and its CI green: Loft keeps following the CI after it marks the PR ready, and a red one sends the Dev a final round, like the final Code Review's. No agent coordinates it.
 _Avoid_: Build, run, pipeline
 
 **Stalled**:
@@ -157,6 +157,10 @@ _Avoid_: PRD, plan, design doc
 **Ticket**:
 An issue under a spec, labelled `ready-for-agent`: one tracer-bullet slice of the spec, with blocking links to the tickets it waits on. On GitHub (native sub-issue and blocking links), or a Loft issue under the spec when the project has no GitHub repo.
 _Avoid_: Task, story, sub-task
+
+**Standalone ticket**:
+A ticket with no spec, labelled `ready-for-agent`. Its Delivery builds it on its own branch, `ticket/<N>-<slug>`, and its own PR, and it closes when that PR merges. Once its Delivery starts it moves through the board's stages like a spec.
+_Avoid_: Loose issue, orphan ticket, single ticket
 
 **Spec branch**:
 The one branch a spec is built on, `spec/<N>-<slug>`, which Loft creates when it publishes the spec on GitHub: from the grill's docs commits when there are any, otherwise from the base branch. Every ticket of the spec is one or more commits on it.
