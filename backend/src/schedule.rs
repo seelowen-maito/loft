@@ -12,7 +12,7 @@ fn parse(s: &str) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(s, "%H:%M").ok()
 }
 
-/// Normalize windows from the API: sorted unique days, valid "HH:MM" times, no empty windows.
+/// Normalize windows from the API: sorted unique days, valid "HH:MM" times. Windows with no days stay.
 pub fn validate(windows: Vec<QuietWindow>) -> Result<Vec<QuietWindow>, String> {
     let mut out = Vec::new();
     for mut w in windows {
@@ -26,9 +26,8 @@ pub fn validate(windows: Vec<QuietWindow>) -> Result<Vec<QuietWindow>, String> {
         }
         w.days.sort_unstable();
         w.days.dedup();
-        if !w.days.is_empty() {
-            out.push(w);
-        }
+        // A window with no days is kept: it means the agent never wakes (an empty list means any time).
+        out.push(w);
     }
     Ok(out)
 }
@@ -243,8 +242,12 @@ mod tests {
     fn validation_and_labels() {
         assert!(validate(vec![w(&[7], "09:00", "17:00")]).is_err());
         assert!(validate(vec![w(&[0], "9am", "17:00")]).is_err());
-        let v = validate(vec![w(&[4, 0, 1, 1, 2, 3], "09:00", "17:00"), w(&[], "01:00", "02:00")]).unwrap();
+        let v = validate(vec![w(&[4, 0, 1, 1, 2, 3], "09:00", "17:00")]).unwrap();
         assert_eq!(v, vec![w(&[0, 1, 2, 3, 4], "09:00", "17:00")]);
+        // "Never wakes" survives a save, and the migration's all-week pause is exactly that.
+        let never = pauses_to_working(&[w(&[0, 1, 2, 3, 4, 5, 6], "00:00", "00:00")]);
+        assert_eq!(validate(never.clone()).unwrap(), never);
+        assert!(quiet_until(&never, t(12, 10, 0)).is_some());
         assert_eq!(describe(&[w(&[0, 1, 2, 3, 4], "09:00", "17:00"), w(&[5, 6], "00:00", "00:00")]), "Mon–Fri 09:00–17:00; Sat, Sun all day");
         assert_eq!(fmt_days(&[0, 2, 3, 4]), "Mon, Wed–Fri");
     }
