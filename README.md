@@ -60,7 +60,7 @@ loft aims to support any and every coding agent: Claude Code, Codex, and whateve
 curl -fsSL https://get-loft.com/install.sh | bash
 ```
 
-The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live, and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
+The installer downloads loft to `~/loft` (set `LOFT_DIR` to put it elsewhere), then runs `setup.sh`. Setup checks the requirements and tells you how to fix anything missing, asks where your git repos live (Tab completes the path, or type just the folder's name, like `projects`, and pick it from the folders with git repos found in your home folder), and builds loft. On macOS it can also install loft as a background service that starts at login. Both are safe to run again at any time, for example after you move Node or Claude Code.
 
 Already have a clone? Run `./setup.sh` from it instead.
 
