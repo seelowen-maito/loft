@@ -1,6 +1,7 @@
 import AVFoundation
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The callers of `AudioSessionOwner`: dictation and Talk let go when read-aloud takes the audio, and restart
 /// their mic when the route settles on another one. The permission prompts and the real recognizers aren't
@@ -90,6 +91,14 @@ final class VoiceHandOverTests: XCTestCase {
         session.prepareRecognizer = { SilentRecognizer() }
         addTeardownBlock { session.discard() }
         return session
+    }
+
+    /// Picking someone in "Talk to…" starts Talk with them: the Talk widget starts with them next time (#467).
+    func testStartingTalkRemembersTheAgentForTheWidget() async {
+        UserDefaults.standard.set("gone", forKey: Prefs.voiceLastAgent)
+        let session = talk()
+        await session.start(agentId: "a1")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: Prefs.voiceLastAgent), "a1")
     }
 
     func testReadAloudTakingTheAudioPausesTalk() async throws {

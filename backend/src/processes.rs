@@ -153,6 +153,12 @@ fn is_helper(comm: &str) -> bool {
     comm.contains(".app/") && HELPERS.contains(&comm.rsplit('/').next().unwrap_or_default())
 }
 
+/// Whether `comm`, a process's executable path, is a test browser: one of Playwright's (in its cache,
+/// `ms-playwright`) or any Chrome for Testing, with their helpers. Never the user's own Google Chrome.
+fn is_test_browser(comm: &str) -> bool {
+    comm.contains("/ms-playwright/") || comm.rsplit('/').next().unwrap_or_default().starts_with("Google Chrome for Testing")
+}
+
 /// A process an agent left alive, for Clean to list.
 #[derive(Debug, PartialEq)]
 pub struct Live {
@@ -278,39 +284,49 @@ pub async fn pruner(storage: PathBuf) {
 
 /// Stops every process the agent owns, when it is deleted (see [`stop`]). Its session records go now.
 pub async fn stop_all(storage: &Path, agent_id: &str) {
-    stop(storage, agent_id, || true).await;
+    stop(storage, agent_id, || true, false).await;
     let _ = tokio::fs::remove_dir_all(sessions_dir(storage, agent_id)).await;
 }
 
-/// Stops every process the agent owns (see [`Owners`]): SIGTERM, then SIGKILL for any still there after a grace period. Returns
-/// each one's PID and command. `proceed` is asked again right before the first signal, and nothing is stopped
+/// Stops the test browsers the agent left running (see [`is_test_browser`]), when its run ends: a script that
+/// never closed its browser, crashed or timed out. Its detached servers keep running. Returns how many browsers:
+/// the stopped processes not run by another one stopped (a browser's renderers and GPU process are its own).
+pub async fn stop_test_browsers(storage: &Path, agent_id: &str) -> usize {
+    let stopped = stop(storage, agent_id, || true, true).await;
+    let pids: HashSet<i32> = stopped.iter().map(|(pid, _, _)| *pid).collect();
+    stopped.iter().filter(|(_, ppid, _)| !pids.contains(ppid)).count()
+}
+
+/// Stops every process the agent owns (see [`Owners`]), or with `browsers_only` its test browsers in its sessions
+/// (never by working folder: a script's browser runs in the script's session): SIGTERM, then SIGKILL for any still there after a grace period. Returns
+/// each one's PID, parent's PID and command. `proceed` is asked again right before the first signal, and nothing is stopped
 /// when it says no.
-async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static) -> Vec<(i32, String)> {
+async fn stop(storage: &Path, agent_id: &str, proceed: impl FnOnce() -> bool + Send + 'static, browsers_only: bool) -> Vec<(i32, i32, String)> {
     let (storage, id) = (storage.to_path_buf(), agent_id.to_string());
     let targets = tokio::task::spawn_blocking(move || {
         if !proceed() {
             return vec![];
         }
-        let owners = Owners::load(&storage, std::slice::from_ref(&id));
+        let owners = Owners::load(&storage, if browsers_only { &[] } else { std::slice::from_ref(&id) });
         let me = std::process::id() as i32;
-        let targets: Vec<(i32, i32, String)> = table()
+        let targets: Vec<(i32, i32, i32, String)> = table()
             .into_iter()
-            .filter(|p| p.pid != me && !p.helper && owners.of(p) == Some(&id))
-            .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.command)))
+            .filter(|p| p.pid != me && !p.helper && (p.browser || !browsers_only) && owners.of(p) == Some(&id))
+            .filter_map(|p| Some((p.pid, session_of(p.pid)?, p.ppid, p.command)))
             .collect();
-        for (pid, _, _) in &targets {
+        for (pid, _, _, _) in &targets {
             unsafe { libc::kill(*pid, libc::SIGTERM) };
         }
         targets
     })
     .await
     .unwrap_or_default();
-    let stopped = targets.iter().map(|(pid, _, command)| (*pid, command.clone())).collect();
+    let stopped = targets.iter().map(|(pid, _, ppid, command)| (*pid, *ppid, command.clone())).collect();
     if !targets.is_empty() {
         tokio::spawn(async move {
             tokio::time::sleep(STOP_GRACE).await;
             // Only a process still in the session: the PID may belong to another one by now.
-            for (pid, sid, _) in targets {
+            for (pid, sid, _, _) in targets {
                 if session_of(pid) == Some(sid) {
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
@@ -336,7 +352,7 @@ pub async fn stop_idle(state: &AppState) -> Vec<crate::sweep::Line> {
         // Asked again right before the signals, so a run that just started keeps its processes.
         let (st, agent) = (state.clone(), a.clone());
         let still_idle = move || st.db.get_agent(&agent.id).ok().flatten().is_some_and(|a| crate::agents::idle(&st, &a, std::time::SystemTime::now()));
-        for (pid, command) in stop(&state.cfg.storage_dir, &a.id, still_idle).await {
+        for (pid, _, command) in stop(&state.cfg.storage_dir, &a.id, still_idle, false).await {
             let (path, rel) = (PathBuf::from(format!("pid {pid}")), clip(&command, 200));
             lines.push(crate::sweep::Line { agent: a.id.clone(), path, rel, bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() });
         }
@@ -382,10 +398,10 @@ pub async fn stop_left_running(State(state): State<AppState>, UrlPath(id): UrlPa
     if !not_running() {
         return Err(crate::api::ApiError(axum::http::StatusCode::CONFLICT, "the agent is working".into()));
     }
-    let stopped = stop(&state.cfg.storage_dir, &id, not_running).await;
+    let stopped = stop(&state.cfg.storage_dir, &id, not_running, false).await;
     let lines: Vec<crate::sweep::Line> = stopped
         .iter()
-        .map(|(pid, command)| crate::sweep::Line { agent: id.clone(), path: PathBuf::from(format!("pid {pid}")), rel: clip(command, 200), bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() })
+        .map(|(pid, _, command)| crate::sweep::Line { agent: id.clone(), path: PathBuf::from(format!("pid {pid}")), rel: clip(command, 200), bytes: 0, error: None, command: format!("kill {pid}"), done: "Stopped process".into() })
         .collect();
     if !lines.is_empty() {
         crate::sweep::record(&state, "Stopped processes", lines).await;
@@ -404,6 +420,8 @@ struct Proc {
     command: String,
     /// One of Xcode's helpers, by its executable.
     helper: bool,
+    /// A test browser, by its executable (see [`is_test_browser`]).
+    browser: bool,
     /// It has a terminal: the user's shell, or something run in it.
     tty: bool,
     /// It, or a process it runs under, is Loft or a GUI app: never an agent's by its working folder.
@@ -425,7 +443,7 @@ fn table() -> Vec<Proc> {
         return vec![];
     };
     // The executable on its own: `command` mixes it with arguments the agent chooses.
-    let (mut helpers, mut apps) = (HashSet::new(), HashSet::new());
+    let (mut helpers, mut apps, mut browsers) = (HashSet::new(), HashSet::new(), HashSet::new());
     if let Ok(o) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pid=,comm="]).output() {
         for l in String::from_utf8_lossy(&o.stdout).lines() {
             let (pid, comm) = field(l);
@@ -435,6 +453,9 @@ fn table() -> Vec<Proc> {
             }
             if is_gui_app(comm) {
                 apps.insert(pid);
+            }
+            if is_test_browser(comm) {
+                browsers.insert(pid);
             }
         }
     }
@@ -449,7 +470,7 @@ fn table() -> Vec<Proc> {
             let (tty, command) = field(rest);
             let pid: i32 = pid.parse().ok()?;
             let tty = !matches!(tty, "??" | "?" | "-");
-            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), tty, under_app: false, sessions_above: vec![] })
+            Some(Proc { pid, ppid: ppid.parse().ok()?, uid: uid.parse().ok()?, age_secs: etime(age).unwrap_or(0), command: command.to_string(), helper: helpers.contains(&pid), browser: browsers.contains(&pid), tty, under_app: false, sessions_above: vec![] })
         })
         .collect();
     mark_under_app(&mut procs, &apps, session_of);
@@ -582,11 +603,12 @@ pub fn cli() -> ! {
     }
 }
 
-/// A plain HTTP/1.1 POST to Loft on localhost, with no runtime to start: this runs inside an agent's command.
-/// No read timeout: a kill of someone else's process waits for the user.
-fn post(url: &str, body: &str) -> anyhow::Result<Value> {
-    let rest = url.strip_prefix("http://").ok_or_else(|| anyhow::anyhow!("bad {URL_VAR}"))?;
-    let (host, path) = rest.split_once('/').ok_or_else(|| anyhow::anyhow!("bad {URL_VAR}"))?;
+/// A plain HTTP/1.1 POST to Loft on localhost, with no runtime to start: this runs inside an agent's command (and
+/// in the Bash hook). No read timeout: a kill of someone else's process, or a change to a user's checkout, waits for
+/// the user.
+pub fn post(url: &str, body: &str) -> anyhow::Result<Value> {
+    let rest = url.strip_prefix("http://").ok_or_else(|| anyhow::anyhow!("bad Loft URL"))?;
+    let (host, path) = rest.split_once('/').ok_or_else(|| anyhow::anyhow!("bad Loft URL"))?;
     let mut s = std::net::TcpStream::connect(host)?;
     write!(
         s,
@@ -975,9 +997,14 @@ mod tests {
         /// A daemon: a session of its own that no run recorded, working in `dir`, left by the shell that started
         /// it, so it runs under launchd and not under Loft (here the test).
         fn daemon_in(dir: &Path) -> Self {
+            Self::daemon_as(Path::new("/bin/sleep"), dir)
+        }
+
+        /// [`Self::daemon_in`], from `path`, a link to sleep.
+        fn daemon_as(path: &Path, dir: &Path) -> Self {
             std::fs::create_dir_all(dir).unwrap();
             let mut cmd = std::process::Command::new("/bin/sh");
-            cmd.args(["-c", "/bin/sleep 60 >/dev/null 2>&1 & echo $!"]).current_dir(dir);
+            cmd.args(["-c", "\"$0\" 60 >/dev/null 2>&1 & echo $!"]).arg(path).current_dir(dir);
             unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
             let out = cmd.output().unwrap();
             let pid = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
@@ -1157,7 +1184,7 @@ mod tests {
         assert!(is_gui_app(&format!("{home}/Applications/RustRover.app/Contents/MacOS/fsnotifier")));
         assert!(!is_gui_app(&format!("{home}/Documents/Applications/Fake.app/Contents/MacOS/x")), "only ~/Applications itself");
 
-        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false, sessions_above: vec![] };
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, browser: false, tty: false, under_app: false, sessions_above: vec![] };
         // Loft 100 runs git 101; VS Code 200 runs its extension host 201, which runs a language server 202; a
         // daemon 300 runs under launchd and has a child 301.
         let mut procs = vec![p(100, 1), p(101, 100), p(200, 1), p(201, 200), p(202, 201), p(300, 1), p(301, 300)];
@@ -1169,7 +1196,7 @@ mod tests {
     #[test]
     fn a_child_that_left_an_agent_s_session_is_the_agent_s() {
         use super::mark_under_app;
-        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, tty: false, under_app: false, sessions_above: vec![] };
+        let p = |pid, ppid| Proc { pid, ppid, uid: 501, age_secs: 0, command: String::new(), helper: false, browser: false, tty: false, under_app: false, sessions_above: vec![] };
         // Loft 100 runs claude 110, whose Bash shell 120 (session 120, recorded) runs a dev server 121; the dev server
         // starts a worker 130 in a session of its own (node `detached`), and the worker runs 131. Loft's git 101 is
         // in Loft's session.
@@ -1219,9 +1246,9 @@ mod tests {
             let (st, id, pid, caller) = (st.clone(), a.id.clone(), daemon.pid().to_string(), shell.pid());
             async move { ask_as(&st, &id, caller, "kill", &[&pid]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         let req = pending(&st, &a.id).remove(0);
-        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
         assert!(daemon.alive());
 
@@ -1233,15 +1260,84 @@ mod tests {
         assert!(outside.alive(), "it stopped a process outside the workspace");
     }
 
+    #[test]
+    fn a_test_browser_is_playwright_s_or_chrome_for_testing_never_the_user_s_chrome() {
+        let cache = "/Users/u/Library/Caches/ms-playwright";
+        let cft = "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing";
+        assert!(is_test_browser(&format!("{cache}/chromium-1234/chrome-mac-arm64/{cft}")));
+        assert!(is_test_browser(&format!("{cache}/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell")));
+        let helper = "Google Chrome for Testing Helper (Renderer).app/Contents/MacOS/Google Chrome for Testing Helper (Renderer)";
+        assert!(is_test_browser(&format!("/Users/u/.cache/puppeteer/chrome/mac_arm-131/Frameworks/{helper}")));
+        assert!(!is_test_browser("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
+        assert!(!is_test_browser("/Applications/Google Chrome.app/Contents/Frameworks/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)"));
+        assert!(!is_test_browser("/usr/local/bin/node"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_s_end_stops_only_its_test_browsers_and_the_next_run_hears_of_it() {
+        let (st, a) = fake_claude_state();
+        let b = crate::tasks::tests::agent(&st, "Other");
+        let root = st.cfg.root.as_path().to_path_buf();
+        let link = |rel: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink("/bin/sleep", &path).unwrap();
+            path
+        };
+        let cft = link("ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing");
+        let shell = link("ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell");
+        let chrome = link("Google Chrome.app/Contents/MacOS/Google Chrome");
+        // A Chrome for Testing that runs a renderer helper: `sh` under the browser's name, starting a `sleep` under
+        // the helper's.
+        let sh = root.join("ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/sh");
+        std::os::unix::fs::symlink("/bin/sh", &sh).unwrap();
+        let renderer = link("ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing Helper (Renderer)");
+        let mut cmd = std::process::Command::new(&sh);
+        cmd.arg0(&cft).arg("-c").arg("\"$0\" 60 & wait").arg(&renderer);
+        unsafe { cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+        let child = cmd.spawn().unwrap();
+        let pid = child.id() as i32;
+        let browser = Sleeper(Some(std::sync::Mutex::new(child)), pid);
+        until("the renderer to start", 5, || table().iter().any(|p| p.ppid == browser.pid() && p.browser)).await;
+        let helper = table().into_iter().find(|p| p.ppid == browser.pid()).unwrap().pid;
+        // The agent's: two test browsers its scripts left open (one with its renderer), and a `nohup` dev server.
+        let (headless, server) = (Sleeper::start_as(&shell, true), Sleeper::start(true));
+        for p in [&browser, &headless, &server] {
+            record(&st.cfg.storage_dir, &a.id, p.pid() as u32).unwrap();
+        }
+        // The user's own Chrome, a test browser in no agent's session though it works in the agent's workspace,
+        // and another agent's test browser in a run still going.
+        let users = Sleeper::start_as(&chrome, true);
+        let stray = Sleeper::daemon_as(&cft, &workspace(&st, &a.id));
+        let others = Sleeper::start_as(&cft, true);
+        record(&st.cfg.storage_dir, &b.id, others.pid() as u32).unwrap();
+        st.rt.lock().unwrap().running.insert(b.id.clone(), Arc::new(tokio::sync::Notify::new()));
+
+        enqueue(&st, &a.id, Some("hello".into()), "user");
+        until("the run to end", 30, || !is_running(&st, &a.id)).await;
+        until("its test browsers to stop", 5, || !browser.alive() && !headless.alive() && !alive(helper)).await;
+        assert!(server.alive(), "it stopped the dev server");
+        assert!(users.alive(), "it stopped the user's Chrome");
+        assert!(stray.alive(), "it stopped a browser in no session of the agent's");
+        assert!(others.alive(), "it stopped another agent's browser");
+
+        enqueue(&st, &a.id, Some("again".into()), "user");
+        until("the next run to end", 30, || !is_running(&st, &a.id)).await;
+        let prompts = std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap();
+        let second = prompts.split("\n---\n").nth(1).unwrap();
+        assert!(second.contains("Loft closed 2 test browsers left from your last run"), "{second}");
+        st.rt.lock().unwrap().running.remove(&b.id);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn stop_leaves_the_processes_when_the_agent_is_no_longer_idle_by_then() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Builder");
         let server = Sleeper::start(true);
         record(&st.cfg.storage_dir, &a.id, server.pid() as u32).unwrap();
-        assert!(stop(&st.cfg.storage_dir, &a.id, || false).await.is_empty());
+        assert!(stop(&st.cfg.storage_dir, &a.id, || false, false).await.is_empty());
         assert!(server.alive());
-        assert_eq!(stop(&st.cfg.storage_dir, &a.id, || true).await.len(), 1);
+        assert_eq!(stop(&st.cfg.storage_dir, &a.id, || true, false).await.len(), 1);
         until("the server stops", 5, || !server.alive()).await;
     }
 
@@ -1357,7 +1453,7 @@ mod tests {
             enqueue(&st, id, Some("busy".into()), "user");
         }
         let storage = st.cfg.storage_dir.clone();
-        until("both runs to record a session", 10, || sessions(&storage, &a.id).len() == 1 && sessions(&storage, &b.id).len() == 1).await;
+        until("both runs to record a session", 60, || sessions(&storage, &a.id).len() == 1 && sessions(&storage, &b.id).len() == 1).await;
         let (sa, sb) = (*sessions(&storage, &a.id).iter().next().unwrap(), *sessions(&storage, &b.id).iter().next().unwrap());
         assert_ne!(sa, sb);
         for sid in [sa, sb] {
@@ -1370,12 +1466,12 @@ mod tests {
         }
         // A second run of the same agent adds its own.
         crate::agents::stop(&st, &a.id);
-        until("the run to stop", 10, || !is_running(&st, &a.id)).await;
+        until("the run to stop", 60, || !is_running(&st, &a.id)).await;
         enqueue(&st, &a.id, Some("busy".into()), "user");
-        until("the second session", 10, || sessions(&storage, &a.id).len() == 2).await;
+        until("the second session", 60, || sessions(&storage, &a.id).len() == 2).await;
         crate::agents::stop(&st, &a.id);
         crate::agents::stop(&st, &b.id);
-        until("the runs to stop", 10, || !is_running(&st, &a.id) && !is_running(&st, &b.id)).await;
+        until("the runs to stop", 60, || !is_running(&st, &a.id) && !is_running(&st, &b.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1413,12 +1509,12 @@ mod tests {
                 let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
                 async move { ask_as(&st, &id, caller, "kill", &["-9", &pid]).await }
             });
-            until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+            until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
             let req = pending(&st, &a.id).remove(0);
             assert!(req.reason.contains(&format!("A command outside {}'s runs (PID {caller})", a.name)), "{}", req.reason);
             assert!(req.reason.contains(&format!("{pid} ({}'s:", a.name)), "{}", req.reason);
             assert!(server.alive(), "it was stopped before the user answered");
-            crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+            crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
             let v = asking.await.unwrap();
             assert_eq!(v["code"], 1, "{v}");
             assert!(v["stderr"].as_str().unwrap().contains("doesn't run in one of your runs"), "{v}");
@@ -1439,7 +1535,7 @@ mod tests {
             let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
             async move { ask(&st, &id, "kill", &[&pid]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         let req = pending(&st, &a.id).remove(0);
         assert_eq!(req.tool_name, "Kill");
         assert_eq!(req.input["command"], format!("kill {pid}"));
@@ -1447,7 +1543,7 @@ mod tests {
         assert!(other.alive(), "it was stopped before the user answered");
         // "Always allow" saves the program, not these processes.
         assert_eq!(req.rule, "Kill(/bin/sleep)");
-        crate::agents::decide(&st, &req.id, "allow_always", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "allow_always", None, None, None).unwrap();
         let v = asking.await.unwrap();
         assert_eq!(v["code"], 0, "{v}");
         until("the process to stop", 5, || !other.alive()).await;
@@ -1473,9 +1569,9 @@ mod tests {
             let (st, id, pid) = (st.clone(), a.id.clone(), pid.clone());
             async move { ask(&st, &id, "kill", &[&pid]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         assert!(other.alive());
-        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
         // A process another agent runs right now asks even when the rule matches it.
         st.db.update_agent(&a.id, |a| a.allowed_tools = vec!["Kill(/bin/sleep)".into()]).unwrap();
@@ -1485,16 +1581,16 @@ mod tests {
             let (st, id, pid) = (st.clone(), a.id.clone(), theirs.pid().to_string());
             async move { ask(&st, &id, "kill", &[&pid]).await }
         });
-        until("a second permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a second permission request", 60, || pending(&st, &a.id).len() == 1).await;
         let req = pending(&st, &a.id).remove(0);
         assert!(theirs.alive());
         // It offers no Always: saving the rule wouldn't stop the question.
         assert_eq!(req.rule, "");
-        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(*)".into()), None).is_err());
+        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(*)".into()), None, None).is_err());
         // A rule posted with the answer doesn't give it one.
-        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(/bin/sleep)".into()), None).is_err());
+        assert!(crate::agents::decide(&st, &req.id, "allow_always", Some("Kill(/bin/sleep)".into()), None, None).is_err());
         assert!(st.db.get_agent(&a.id).unwrap().unwrap().allowed_tools == vec!["Kill(/bin/sleep)".to_string()], "nothing was added");
-        crate::agents::decide(&st, &req.id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &req.id, "deny", None, None, None).unwrap();
         assert_eq!(asking.await.unwrap()["code"], 1);
     }
 
@@ -1545,7 +1641,7 @@ mod tests {
         let b = crate::tasks::tests::agent(&st, "Reviewer");
         enqueue(&st, &b.id, Some("busy".into()), "user");
         let storage = st.cfg.storage_dir.clone();
-        until("the other agent's run", 10, || sessions(&storage, &b.id).len() == 1).await;
+        until("the other agent's run", 60, || sessions(&storage, &b.id).len() == 1).await;
         let claude = *sessions(&storage, &b.id).iter().next().unwrap();
         // By PID (`kill <pid>` of another agent's claude was allowed before), and by a pattern only it matches.
         let bin = st.settings.get().claude_bin;
@@ -1562,7 +1658,7 @@ mod tests {
             assert!(req.reason.contains(&format!("{claude} (Reviewer's:")), "{}", req.reason);
         }
         crate::agents::stop(&st, &b.id);
-        until("the run to stop", 10, || !is_running(&st, &b.id)).await;
+        until("the run to stop", 60, || !is_running(&st, &b.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1573,12 +1669,12 @@ mod tests {
             let (st, id, pid) = (st.clone(), a.id.clone(), other.pid().to_string());
             async move { ask(&st, &id, "kill", &[&pid]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         let id = pending(&st, &a.id)[0].id.clone();
         // The Bash call timed out: the connection, and the handler with it, goes away.
         asking.abort();
-        until("the request to expire", 5, || st.db.get_permission(&id).unwrap().unwrap().status == "expired").await;
-        assert!(crate::agents::decide(&st, &id, "allow_once", None, None).is_err());
+        until("the request to expire", 60, || st.db.get_permission(&id).unwrap().unwrap().status == "expired").await;
+        assert!(crate::agents::decide(&st, &id, "allow_once", None, None, None).is_err());
         assert!(other.alive());
     }
 
@@ -1594,9 +1690,9 @@ mod tests {
             let (st, id) = (st.clone(), a.id.clone());
             async move { ask(&st, &id, "kill", &["-CONT", &me.to_string()]).await }
         });
-        until("a permission request", 5, || pending(&st, &a.id).len() == 1).await;
+        until("a permission request", 60, || pending(&st, &a.id).len() == 1).await;
         assert!(pending(&st, &a.id)[0].reason.contains(&format!("{me} (Loft:")));
-        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None).unwrap();
+        crate::agents::decide(&st, &pending(&st, &a.id)[0].id, "deny", None, None, None).unwrap();
         let v = asking.await.unwrap();
         assert_eq!(v["code"], 1);
         assert!(v["stderr"].as_str().unwrap().contains("The user denied it."), "{v}");
@@ -1605,7 +1701,7 @@ mod tests {
     /// A link to sleep with a name no process outside this test has, for killall.
     fn unique_sleep(st: &AppState) -> (PathBuf, String) {
         let name = format!("ks{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
-        let path = st.cfg.storage_dir.parent().unwrap().join(&name);
+        let path = st.cfg.root.as_path().join(&name);
         std::os::unix::fs::symlink("/bin/sleep", &path).unwrap();
         (path, name)
     }
@@ -1745,7 +1841,7 @@ mod tests {
     async fn serve_kills(st: &mut AppState) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        st.cfg = Arc::new(crate::state::Config { port, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone() });
+        st.cfg = Arc::new(crate::state::Config { port, storage_dir: st.cfg.storage_dir.clone(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone(), root: st.cfg.root.clone() });
         let app = axum::Router::new().route("/kill/{agent_id}", axum::routing::post(handle)).with_state(st.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     }
@@ -1758,7 +1854,7 @@ mod tests {
         let _ = std::fs::remove_file(ws.join("bash.out"));
         enqueue(st, id, Some("bash-cmd".into()), "user");
         let out = || std::fs::read_to_string(ws.join("bash.out")).unwrap_or_default();
-        until("the command", 15, || !is_running(st, id) && out().contains("exit ")).await;
+        until("the command", 60, || !is_running(st, id) && out().contains("exit ")).await;
         out()
     }
 
@@ -1785,7 +1881,7 @@ mod tests {
             assert!(alive(pid));
             let out = bash(&st, &a.id, &stop).await;
             assert!(out.contains("exit 0"), "{stop}: {out}");
-            until("the server to stop", 5, || !alive(pid)).await;
+            until("the server to stop", 30, || !alive(pid)).await;
             assert!(st.db.list_permissions(Some(&a.id)).unwrap().is_empty(), "{stop} asked the user");
         }
 

@@ -1,31 +1,43 @@
-import { useEffect, useMemo, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
-import { CircleDot, FileText, GitPullRequest } from "lucide-react";
-import { api, type PullRequest } from "../lib/api";
+import { Fragment, useEffect, useMemo, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
+import { Bookmark, CircleDot, FileText, GitPullRequest } from "lucide-react";
+import { api, type Agent, type SavedItem } from "../lib/api";
+import { savedMatches, savedTag } from "../lib/saved";
 import { cx } from "../lib/format";
+import { relTime } from "../lib/time";
 import { hashToken, insertTag, tagMatches, tagRows, type TagRow } from "../lib/shortcuts";
-import { useTasks } from "./TaskChip";
+import { usePullRequests, useTasks } from "../hooks/lists";
+import { IssueRow } from "./IssueRow";
+import { taskStatus, toneText } from "../lib/taskStatus";
 
-const ICON = { spec: FileText, issue: CircleDot, pr: GitPullRequest };
+/** A row of the menu: a tag row, or a saved item. */
+type Row = TagRow | { kind: "saved"; tag: string; title: string; meta: string };
+
+const ICON = { saved: Bookmark, spec: FileText, issue: CircleDot, pr: GitPullRequest };
+const TITLE = { saved: "Saved", spec: "Specs", issue: "Issues", pr: "Pull requests" };
+/** A PR's icon in GitHub's colours. */
+const PR_TONE: Record<string, string> = { open: "text-good", draft: "text-fg-3", merged: "text-merged", closed: "text-bad" };
 
 /**
  * The `#` menu of a text field: while the text ends in `#…`, the specs, issues and pull requests that match, as the ⌘K
  * search finds them. `project` is the agent's: its items are tagged `#N`, the others `owner/repo#N`.
  * `onKeyDown` handles the arrows, Tab, Enter and Escape while the menu is open and returns true when it took the key.
  */
-export function useTagMenu(project: string, text: string, setText: Dispatch<SetStateAction<string>>) {
+export function useTagMenu(project: string, agents: Agent[], text: string, setText: Dispatch<SetStateAction<string>>) {
   const query = hashToken(text);
-  const tasks = useTasks();
-  const [prs, setPrs] = useState<PullRequest[]>([]);
-  const wants = query !== undefined;
-  useEffect(() => {
-    if (wants) api.pullRequests().then(setPrs, () => {});
-  }, [wants]);
-  const rows = useMemo(() => tagRows(tasks ?? [], prs, project), [tasks, prs, project]);
+  const tasks = useTasks().items;
+  const prs = usePullRequests().items;
+  const rows = useMemo(() => tagRows(tasks ?? [], prs ?? [], project), [tasks, prs, project]);
   const [closedAt, setClosedAt] = useState<string>();
   const [index, setIndex] = useState(0);
   useEffect(() => setIndex(0), [text]);
-  const matches = query === undefined || closedAt === text ? [] : tagMatches(rows, query);
-  const pick = (r: TagRow) => setText((t) => insertTag(t, r.tag));
+  // `#saved` lists the saved items, read when it is first typed.
+  const [saved, setSaved] = useState<SavedItem[]>([]);
+  const wantsSaved = query !== undefined && /^saved(-|$)/i.test(query);
+  useEffect(() => {
+    if (wantsSaved) api.savedList().then((r) => setSaved(r.items)).catch(() => {});
+  }, [wantsSaved]);
+  const matches: Row[] = query === undefined || closedAt === text ? [] : wantsSaved ? savedMatches(saved, query).map((i): Row => ({ kind: "saved", tag: savedTag(i), title: i.title, meta: i.tag })) : tagMatches(rows, query);
+  const pick = (r: Row) => setText((t) => insertTag(t, r.tag));
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (matches.length === 0) return false;
@@ -49,29 +61,28 @@ export function useTagMenu(project: string, text: string, setText: Dispatch<SetS
 
   const menu = matches.length > 0 && (
     <div className="max-h-80 overflow-y-auto rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="listbox" aria-label="Tag a spec, issue or pull request">
-      {matches.map((r, i) => {
-        const Icon = ICON[r.kind];
-        return (
-          <button
-            key={`${r.kind}:${r.tag}`}
-            role="option"
-            aria-selected={i === index}
-            ref={(el) => {
-              if (i === index) el?.scrollIntoView({ block: "nearest" });
-            }}
-            onMouseEnter={() => setIndex(i)}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              pick(r);
-            }}
-            className={cx("flex w-full items-center gap-2.5 px-3 py-1.5 text-left", i === index && "bg-white/[0.06]")}
-          >
-            <Icon className={cx("size-4 shrink-0", r.open ? "text-fg-2" : "text-fg-3")} />
-            <span className="min-w-0 flex-1 truncate text-[13px]">{r.title}</span>
-            <span className="shrink-0 font-mono text-[11px] text-fg-3">{r.number ? `#${r.number}` : r.kind} · {r.project || "no project"}</span>
-          </button>
-        );
-      })}
+      {matches.map((r, i) => r.kind === "saved" ? (
+        <Fragment key={r.tag}>
+          {i === 0 && <div className="px-3 pb-1 pt-1.5 font-mono text-[10.5px] text-fg-3">{TITLE.saved}</div>}
+          <IssueRow icon={Bookmark} tone="text-fg-3" github={false} title={r.title} meta={[r.meta]} selected={i === index} onHover={() => setIndex(i)} onPick={() => pick(r)} />
+        </Fragment>
+      ) : (
+        <Fragment key={`${r.kind}:${r.tag}`}>
+          {r.kind !== matches[i - 1]?.kind && (
+            <div className={cx("px-3 pb-1 pt-1.5 font-mono text-[10.5px] text-fg-3", i > 0 && "border-t border-line")}>{TITLE[r.kind]}</div>
+          )}
+          <IssueRow
+            icon={ICON[r.kind]}
+            tone={r.kind === "pr" ? PR_TONE[r.status] ?? "text-fg-3" : toneText(taskStatus(r.status).tone)}
+            github={r.github}
+            title={r.title}
+            meta={[r.number !== null && `#${r.number}`, r.kind === "pr" ? r.status : taskStatus(r.status).label, agents.find((a) => a.id === r.agent)?.name, r.project, relTime(r.at)]}
+            selected={i === index}
+            onHover={() => setIndex(i)}
+            onPick={() => pick(r)}
+          />
+        </Fragment>
+      ))}
     </div>
   );
 

@@ -1,6 +1,6 @@
 {
   "count": 9,
-  "generated_at": "2026-11-11T17:32:55.306116+00:00",
+  "generated_at": "2026-11-27T16:30:32.565996+00:00",
   "items": [
     {
       "actions": [
@@ -36,17 +36,17 @@
           "kind": "open",
           "label": "Open chat",
           "target": {
-            "agent_id": "98968f99-8828-4c3e-9db3-c60ac302589c",
+            "agent_id": "646b4fcb-82ba-480a-a912-324455df67ff",
             "screen": "chat"
           }
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "98968f99-8828-4c3e-9db3-c60ac302589c",
+        "id": "646b4fcb-82ba-480a-a912-324455df67ff",
         "name": "Dev"
       },
-      "created_at": "2026-11-11T17:32:55.301215+00:00",
+      "created_at": "2026-11-27T16:30:32.561549+00:00",
       "id": "permission:p1",
       "links": [],
       "pr": null,
@@ -63,119 +63,21 @@
     {
       "actions": [
         {
-          "body": {
-            "send": true,
-            "text": ""
-          },
-          "kind": "answer",
-          "label": "Reply on the issue",
-          "method": "POST",
-          "path": "/api/tasks/ff671a34-31f6-4042-9242-221c3912c3d1/comments"
-        },
-        {
-          "kind": "open",
-          "label": "Open issue",
-          "target": {
-            "screen": "task",
-            "task_id": "ff671a34-31f6-4042-9242-221c3912c3d1"
-          }
-        },
-        {
-          "body": {},
-          "kind": "dismiss",
-          "label": "Done",
-          "method": "POST",
-          "path": "/api/needs-you/task%3Aff671a34-31f6-4042-9242-221c3912c3d1%3Ablocked/dismiss"
-        }
-      ],
-      "age_seconds": 0,
-      "agent": {
-        "id": "7b353026-1db4-4785-9319-062c10e6454c",
-        "name": "QA"
-      },
-      "created_at": "2026-11-11T17:32:55.301401+00:00",
-      "id": "task:ff671a34-31f6-4042-9242-221c3912c3d1:blocked",
-      "links": [
-        {
-          "label": "Issue",
-          "path": "/issues/ff671a34-31f6-4042-9242-221c3912c3d1"
-        }
-      ],
-      "pr": null,
-      "project": null,
-      "reason": "Blocked: Which simulator should I use?",
-      "repo": null,
-      "seen": false,
-      "task_id": "ff671a34-31f6-4042-9242-221c3912c3d1",
-      "text": "Which simulator should I use?",
-      "title": "Run the suite",
-      "type": "task_blocked",
-      "urgency": 2
-    },
-    {
-      "actions": [
-        {
-          "body": {
-            "text": ""
-          },
-          "kind": "answer",
-          "label": "Reply",
-          "method": "POST",
-          "path": "/api/agents/98968f99-8828-4c3e-9db3-c60ac302589c/messages"
-        },
-        {
           "kind": "open",
           "label": "Open chat",
           "target": {
-            "agent_id": "98968f99-8828-4c3e-9db3-c60ac302589c",
-            "screen": "chat"
-          }
-        },
-        {
-          "body": {},
-          "kind": "dismiss",
-          "label": "Done",
-          "method": "POST",
-          "path": "/api/needs-you/question%3A2/dismiss"
-        }
-      ],
-      "age_seconds": 0,
-      "agent": {
-        "id": "98968f99-8828-4c3e-9db3-c60ac302589c",
-        "name": "Dev"
-      },
-      "created_at": "2026-11-11T17:32:55.302158+00:00",
-      "id": "question:2",
-      "links": [],
-      "pr": null,
-      "project": null,
-      "reason": "Should I use B2 or S3?",
-      "repo": null,
-      "seen": false,
-      "task_id": null,
-      "text": "I found two options.\n\nShould I use B2 or S3?",
-      "title": "Dev asked you something",
-      "type": "question",
-      "urgency": 2
-    },
-    {
-      "actions": [
-        {
-          "kind": "open",
-          "label": "Open chat",
-          "target": {
-            "agent_id": "394f4104-80d5-4f8a-be9c-90c933963d84",
+            "agent_id": "b712feb5-a284-4ec4-9e10-b703e22cabe2",
             "screen": "chat"
           }
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "394f4104-80d5-4f8a-be9c-90c933963d84",
+        "id": "b712feb5-a284-4ec4-9e10-b703e22cabe2",
         "name": "Orchestrator"
       },
-      "created_at": "2026-11-11T17:32:55.303242+00:00",
-      "id": "grill:04ee4b10-c113-49a7-abd3-51fba3fc3f6e:1",
+      "created_at": "2026-11-27T16:30:32.563953+00:00",
+      "id": "grill:b6a4360a-68bb-4444-9623-3ae94fd868c3:1",
       "links": [],
       "pr": null,
       "project": null,
@@ -192,31 +94,66 @@
       "actions": [
         {
           "body": {
+            "text": ""
+          },
+          "kind": "answer",
+          "label": "Reply",
+          "method": "POST",
+          "path": "/api/agents/646b4fcb-82ba-480a-a912-324455df67ff/messages"
+        },
+        {
+          "kind": "open",
+          "label": "Open chat",
+          "target": {
+            "agent_id": "646b4fcb-82ba-480a-a912-324455df67ff",
+            "screen": "chat"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Done",
+          "method": "POST",
+          "path": "/api/needs-you/question%3A2/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "646b4fcb-82ba-480a-a912-324455df67ff",
+        "name": "Dev"
+      },
+      "created_at": "2026-11-27T16:30:32.562918+00:00",
+      "id": "question:2",
+      "links": [],
+      "pr": null,
+      "project": null,
+      "reason": "Should I use B2 or S3?",
+      "repo": null,
+      "seen": false,
+      "task_id": null,
+      "text": "I found two options.\n\nShould I use B2 or S3?",
+      "title": "Dev asked you something",
+      "type": "question",
+      "urgency": 2
+    },
+    {
+      "actions": [
+        {
+          "body": {
             "send": true,
             "text": ""
           },
           "kind": "answer",
           "label": "Reply on the issue",
           "method": "POST",
-          "path": "/api/tasks/61073500-5274-472a-8e54-1aa71d0ed9d2/comments"
-        },
-        {
-          "body": {
-            "reopen": true,
-            "send": true,
-            "text": ""
-          },
-          "kind": "retry",
-          "label": "Reopen and send",
-          "method": "POST",
-          "path": "/api/tasks/61073500-5274-472a-8e54-1aa71d0ed9d2/comments"
+          "path": "/api/tasks/1157232e-1aa3-4df8-bdc4-f40bff4e4bfb/comments"
         },
         {
           "kind": "open",
           "label": "Open issue",
           "target": {
             "screen": "task",
-            "task_id": "61073500-5274-472a-8e54-1aa71d0ed9d2"
+            "task_id": "1157232e-1aa3-4df8-bdc4-f40bff4e4bfb"
           }
         },
         {
@@ -224,148 +161,38 @@
           "kind": "dismiss",
           "label": "Done",
           "method": "POST",
-          "path": "/api/needs-you/task%3A61073500-5274-472a-8e54-1aa71d0ed9d2%3Afailed/dismiss"
+          "path": "/api/needs-you/task%3A1157232e-1aa3-4df8-bdc4-f40bff4e4bfb%3Ablocked/dismiss"
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "7b353026-1db4-4785-9319-062c10e6454c",
+        "id": "f4cfbecf-1cab-4f59-a9b8-c35ef4de54a1",
         "name": "QA"
       },
-      "created_at": "2026-11-11T17:32:55.301596+00:00",
-      "id": "task:61073500-5274-472a-8e54-1aa71d0ed9d2:failed",
+      "created_at": "2026-11-27T16:30:32.561822+00:00",
+      "id": "task:1157232e-1aa3-4df8-bdc4-f40bff4e4bfb:blocked",
       "links": [
         {
           "label": "Issue",
-          "path": "/issues/61073500-5274-472a-8e54-1aa71d0ed9d2"
+          "path": "/issues/1157232e-1aa3-4df8-bdc4-f40bff4e4bfb"
         }
       ],
       "pr": null,
       "project": null,
-      "reason": "Failed: Xcode 27 missing",
+      "reason": "Blocked: Which simulator should I use?",
       "repo": null,
       "seen": false,
-      "task_id": "61073500-5274-472a-8e54-1aa71d0ed9d2",
-      "text": "Xcode 27 missing\nmore lines",
-      "title": "Fix the build",
-      "type": "task_failed",
-      "urgency": 1
-    },
-    {
-      "actions": [
-        {
-          "body": {
-            "method": "squash"
-          },
-          "kind": "merge",
-          "label": "Merge",
-          "method": "POST",
-          "path": "/api/pull-requests/pr1/merge"
-        },
-        {
-          "kind": "open",
-          "label": "Open on GitHub",
-          "target": {
-            "url": "https://github.com/o/r/pull/7"
-          }
-        },
-        {
-          "body": {},
-          "kind": "dismiss",
-          "label": "Done",
-          "method": "POST",
-          "path": "/api/needs-you/pr%3Apr1%3Aabc/dismiss"
-        }
-      ],
-      "age_seconds": 0,
-      "agent": {
-        "id": "98968f99-8828-4c3e-9db3-c60ac302589c",
-        "name": "Dev"
-      },
-      "created_at": "2026-11-11T17:32:55.303617+00:00",
-      "id": "pr:pr1:abc",
-      "links": [
-        {
-          "label": "Pull request",
-          "url": "https://github.com/o/r/pull/7"
-        }
-      ],
-      "pr": {
-        "author": "",
-        "checks": "passing",
-        "checks_green": true,
-        "draft": false,
-        "number": 7,
-        "project": "r",
-        "repo": "o/r",
-        "review_requested": false,
-        "title": "Fix it",
-        "url": "https://github.com/o/r/pull/7"
-      },
-      "project": "r",
-      "reason": "Ready to merge, 3 checks passed.",
-      "repo": "o/r",
-      "seen": false,
-      "task_id": null,
-      "text": "→  · +0 −0 in 0 files",
-      "title": "o/r#7: Fix it",
-      "type": "pr_ready",
-      "urgency": 1
+      "task_id": "1157232e-1aa3-4df8-bdc4-f40bff4e4bfb",
+      "text": "Which simulator should I use?",
+      "title": "Run the suite",
+      "type": "task_blocked",
+      "urgency": 2
     },
     {
       "actions": [
         {
           "kind": "open",
-          "label": "Open on GitHub",
-          "target": {
-            "url": "https://github.com/acme/shop/pull/41"
-          }
-        },
-        {
-          "body": {},
-          "kind": "dismiss",
-          "label": "Done",
-          "method": "POST",
-          "path": "/api/needs-you/ghpr%3Aacme%2Fshop%2341%3Asha41/dismiss"
-        }
-      ],
-      "age_seconds": 0,
-      "agent": null,
-      "created_at": "2026-11-11T17:32:55.303878+00:00",
-      "id": "ghpr:acme/shop#41:sha41",
-      "links": [
-        {
-          "label": "Pull request",
-          "url": "https://github.com/acme/shop/pull/41"
-        }
-      ],
-      "pr": {
-        "author": "octocat",
-        "checks": "none",
-        "checks_green": true,
-        "draft": false,
-        "number": 41,
-        "project": "shop",
-        "repo": "acme/shop",
-        "review_requested": false,
-        "title": "PR 41",
-        "url": "https://github.com/acme/shop/pull/41"
-      },
-      "project": "shop",
-      "reason": "Ready to merge.",
-      "repo": "acme/shop",
-      "seen": false,
-      "task_id": null,
-      "text": "by octocat",
-      "title": "acme/shop#41: PR 41",
-      "type": "pr_ready",
-      "urgency": 1
-    },
-    {
-      "actions": [
-        {
-          "kind": "open",
-          "label": "Open on GitHub",
+          "label": "Open pull request",
           "target": {
             "url": "https://github.com/acme/api/pull/1800"
           }
@@ -380,7 +207,7 @@
       ],
       "age_seconds": 0,
       "agent": null,
-      "created_at": "2026-11-11T17:32:55.303879+00:00",
+      "created_at": "2026-11-27T16:30:32.564839+00:00",
       "id": "review:acme/api#1800:sha1800",
       "links": [
         {
@@ -413,6 +240,179 @@
     {
       "actions": [
         {
+          "kind": "open",
+          "label": "Open pull request",
+          "target": {
+            "url": "https://github.com/acme/shop/pull/41"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Done",
+          "method": "POST",
+          "path": "/api/needs-you/ghpr%3Aacme%2Fshop%2341%3Asha41/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": null,
+      "created_at": "2026-11-27T16:30:32.564838+00:00",
+      "id": "ghpr:acme/shop#41:sha41",
+      "links": [
+        {
+          "label": "Pull request",
+          "url": "https://github.com/acme/shop/pull/41"
+        }
+      ],
+      "pr": {
+        "author": "octocat",
+        "checks": "none",
+        "checks_green": true,
+        "draft": false,
+        "number": 41,
+        "project": "shop",
+        "repo": "acme/shop",
+        "review_requested": false,
+        "title": "PR 41",
+        "url": "https://github.com/acme/shop/pull/41"
+      },
+      "project": "shop",
+      "reason": "Ready to merge.",
+      "repo": "acme/shop",
+      "seen": false,
+      "task_id": null,
+      "text": "by octocat",
+      "title": "acme/shop#41: PR 41",
+      "type": "pr_ready",
+      "urgency": 1
+    },
+    {
+      "actions": [
+        {
+          "body": {
+            "method": "squash"
+          },
+          "kind": "merge",
+          "label": "Merge",
+          "method": "POST",
+          "path": "/api/pull-requests/pr1/merge"
+        },
+        {
+          "kind": "open",
+          "label": "Open pull request",
+          "target": {
+            "url": "https://github.com/o/r/pull/7"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Done",
+          "method": "POST",
+          "path": "/api/needs-you/pr%3Apr1%3Aabc/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "646b4fcb-82ba-480a-a912-324455df67ff",
+        "name": "Dev"
+      },
+      "created_at": "2026-11-27T16:30:32.564480+00:00",
+      "id": "pr:pr1:abc",
+      "links": [
+        {
+          "label": "Pull request",
+          "url": "https://github.com/o/r/pull/7"
+        }
+      ],
+      "pr": {
+        "author": "",
+        "checks": "passing",
+        "checks_green": true,
+        "draft": false,
+        "number": 7,
+        "project": "r",
+        "repo": "o/r",
+        "review_requested": false,
+        "title": "Fix it",
+        "url": "https://github.com/o/r/pull/7"
+      },
+      "project": "r",
+      "reason": "Ready to merge, 3 checks passed.",
+      "repo": "o/r",
+      "seen": false,
+      "task_id": null,
+      "text": "→  · +0 −0 in 0 files",
+      "title": "o/r#7: Fix it",
+      "type": "pr_ready",
+      "urgency": 1
+    },
+    {
+      "actions": [
+        {
+          "body": {
+            "send": true,
+            "text": ""
+          },
+          "kind": "answer",
+          "label": "Reply on the issue",
+          "method": "POST",
+          "path": "/api/tasks/e8d6fa6d-8f80-43d4-a57d-964f42ec4ad9/comments"
+        },
+        {
+          "body": {
+            "reopen": true,
+            "send": true,
+            "text": ""
+          },
+          "kind": "retry",
+          "label": "Reopen and send",
+          "method": "POST",
+          "path": "/api/tasks/e8d6fa6d-8f80-43d4-a57d-964f42ec4ad9/comments"
+        },
+        {
+          "kind": "open",
+          "label": "Open issue",
+          "target": {
+            "screen": "task",
+            "task_id": "e8d6fa6d-8f80-43d4-a57d-964f42ec4ad9"
+          }
+        },
+        {
+          "body": {},
+          "kind": "dismiss",
+          "label": "Done",
+          "method": "POST",
+          "path": "/api/needs-you/task%3Ae8d6fa6d-8f80-43d4-a57d-964f42ec4ad9%3Afailed/dismiss"
+        }
+      ],
+      "age_seconds": 0,
+      "agent": {
+        "id": "f4cfbecf-1cab-4f59-a9b8-c35ef4de54a1",
+        "name": "QA"
+      },
+      "created_at": "2026-11-27T16:30:32.562115+00:00",
+      "id": "task:e8d6fa6d-8f80-43d4-a57d-964f42ec4ad9:failed",
+      "links": [
+        {
+          "label": "Issue",
+          "path": "/issues/e8d6fa6d-8f80-43d4-a57d-964f42ec4ad9"
+        }
+      ],
+      "pr": null,
+      "project": null,
+      "reason": "Failed: Xcode 27 missing",
+      "repo": null,
+      "seen": false,
+      "task_id": "e8d6fa6d-8f80-43d4-a57d-964f42ec4ad9",
+      "text": "Xcode 27 missing\nmore lines",
+      "title": "Fix the build",
+      "type": "task_failed",
+      "urgency": 1
+    },
+    {
+      "actions": [
+        {
           "body": {
             "reopen": true,
             "send": true,
@@ -421,14 +421,14 @@
           "kind": "answer",
           "label": "Follow up",
           "method": "POST",
-          "path": "/api/tasks/25d5f121-66f9-4732-9a35-d71ff15c412f/comments"
+          "path": "/api/tasks/b1948af9-3fa8-492a-b707-faa36c354317/comments"
         },
         {
           "kind": "open",
           "label": "Open issue",
           "target": {
             "screen": "task",
-            "task_id": "25d5f121-66f9-4732-9a35-d71ff15c412f"
+            "task_id": "b1948af9-3fa8-492a-b707-faa36c354317"
           }
         },
         {
@@ -436,20 +436,20 @@
           "kind": "dismiss",
           "label": "Done",
           "method": "POST",
-          "path": "/api/needs-you/done%3A25d5f121-66f9-4732-9a35-d71ff15c412f%3A2026-11-11T17%3A32%3A55.301746%2B00%3A00/dismiss"
+          "path": "/api/needs-you/done%3Ab1948af9-3fa8-492a-b707-faa36c354317%3A2026-11-27T16%3A30%3A32.562272%2B00%3A00/dismiss"
         }
       ],
       "age_seconds": 0,
       "agent": {
-        "id": "7b353026-1db4-4785-9319-062c10e6454c",
+        "id": "f4cfbecf-1cab-4f59-a9b8-c35ef4de54a1",
         "name": "QA"
       },
-      "created_at": "2026-11-11T17:32:55.301746+00:00",
-      "id": "done:25d5f121-66f9-4732-9a35-d71ff15c412f:2026-11-11T17:32:55.301746+00:00",
+      "created_at": "2026-11-27T16:30:32.562272+00:00",
+      "id": "done:b1948af9-3fa8-492a-b707-faa36c354317:2026-11-27T16:30:32.562272+00:00",
       "links": [
         {
           "label": "Issue",
-          "path": "/issues/25d5f121-66f9-4732-9a35-d71ff15c412f"
+          "path": "/issues/b1948af9-3fa8-492a-b707-faa36c354317"
         }
       ],
       "pr": null,
@@ -457,7 +457,7 @@
       "reason": "Done: 15 GB after cleanup.",
       "repo": null,
       "seen": false,
-      "task_id": "25d5f121-66f9-4732-9a35-d71ff15c412f",
+      "task_id": "b1948af9-3fa8-492a-b707-faa36c354317",
       "text": "**15 GB** after cleanup.",
       "title": "Measure sizes",
       "type": "task_done",

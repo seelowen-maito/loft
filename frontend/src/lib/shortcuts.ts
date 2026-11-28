@@ -5,7 +5,7 @@
 import type { PullRequest, Task } from "./api";
 
 type Store = Pick<Storage, "getItem" | "setItem">;
-type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">;
+type Keyed = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey"> & { repeat?: boolean };
 
 /** The shortcuts that can be rebound in Settings. `Mod` is ⌘ on a Mac and Ctrl elsewhere. */
 export const REBINDABLE = [
@@ -24,10 +24,17 @@ export const GO: Record<string, { path: string; label: string }> = {
   m: { path: "/simulator", label: "Simulator" },
 };
 
+/** The `g` shortcut that opens `path`, as its tooltip shows it ("G A"); undefined when it has none. */
+export function goKeys(path: string): string | undefined {
+  const k = Object.entries(GO).find(([, g]) => g.path === path)?.[0];
+  return k && `G ${k.toUpperCase()}`;
+}
+
 /** The fixed shortcuts, for the sheet and Settings. */
 export const FIXED: { keys: string; label: string }[] = [
   ...Object.entries(GO).map(([k, g]) => ({ keys: `g ${k}`, label: `Go to ${g.label}` })),
   { keys: "/", label: "Focus the chat box" },
+  { keys: "T", label: "Talk to an agent" },
   { keys: "?", label: "Show shortcuts" },
 ];
 
@@ -125,15 +132,17 @@ export type Action =
   | { type: "go"; path: string }
   | { type: "g" }
   | { type: "focus-chat" }
-  | { type: "sheet" };
+  | { type: "sheet" }
+  | { type: "talk" };
 
-/** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field.
- * `afterG` is true when the previous key was a lone `g`: the next letter picks the page, any other key cancels it. */
-export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; mac?: boolean }): Action | null {
+/** What a key press does. The rebindable combinations work everywhere, even while typing; the plain keys only outside a text field
+ * and any open dialog (`dialog`), and not again while held down. `afterG` is true when the previous key was a lone `g`: the next
+ * letter picks the page, any other key cancels it. */
+export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; afterG: boolean; dialog?: boolean; mac?: boolean }): Action | null {
   const mac = o.mac ?? isMac();
   if (matchesCombo(e, o.combos.switcher, mac)) return { type: "switcher" };
   if (matchesCombo(e, o.combos.next, mac)) return { type: "next" };
-  if (e.ctrlKey || e.metaKey || e.altKey || o.typing) return null;
+  if (e.ctrlKey || e.metaKey || e.altKey || o.typing || o.dialog || e.repeat) return null;
   if (o.afterG) {
     const go = GO[e.key.toLowerCase()];
     return go ? { type: "go", path: go.path } : null;
@@ -141,6 +150,7 @@ export function shortcutAction(e: Keyed, o: { combos: Combos; typing: boolean; a
   if (e.key === "g") return { type: "g" };
   if (e.key === "/") return { type: "focus-chat" };
   if (e.key === "?") return { type: "sheet" };
+  if (e.key.toLowerCase() === "t") return { type: "talk" };
   return null;
 }
 
@@ -171,11 +181,11 @@ export function saveRecent(id: string, storage?: Store) {
   }
 }
 
-type Searchable = { id: string; name: string; title: string; group?: string; project?: string; projects?: string[] };
+type Searchable = { id: string; name: string; group?: string; project?: string; projects?: string[] };
 
 /** The switcher's list. Empty query: the agents opened most recently first, then the rest in their order.
- * Otherwise every word must appear in the name, title, group or a project; names that start with the query come first, then names containing it. */
-export function switcherAgents<T extends Searchable>(agents: T[], query: string, recent: string[]): T[] {
+ * Otherwise every word must appear in the name, Role label (`label`), group or a project; names that start with the query come first, then names containing it. */
+export function switcherAgents<T extends Searchable>(agents: T[], query: string, recent: string[], label: (a: T) => string): T[] {
   const q = query.trim().toLowerCase();
   if (!q) {
     const rank = (a: T) => (recent.includes(a.id) ? recent.indexOf(a.id) : recent.length);
@@ -188,7 +198,7 @@ export function switcherAgents<T extends Searchable>(agents: T[], query: string,
   };
   return agents
     .filter((a) => {
-      const text = [a.name, a.title, a.group ?? "", a.project ?? "", ...(a.projects ?? [])].join(" ").toLowerCase();
+      const text = [a.name, label(a), a.group ?? "", a.project ?? "", ...(a.projects ?? [])].join(" ").toLowerCase();
       return words.every((w) => text.includes(w));
     })
     .map((a, i) => ({ a, i }))
@@ -223,7 +233,11 @@ export function searchRows<T extends FoundRow>(rows: T[], query: string, limit =
 /** The `#` token typed at the end of the text: `#18` or `#`. What's typed after the `#`, else undefined. */
 export const hashToken = (text: string) => /(?:^|[\s([{"'])#([^\s#]*)$/.exec(text)?.[1];
 
-export type TagRow = { kind: "spec" | "issue" | "pr"; title: string; tag: string; open: boolean; project: string; number: number | null };
+/** `status` is the issue's (in_progress, …) or the PR's (open, draft, merged, closed); `at` is when it last changed. */
+export type TagRow = {
+  kind: "spec" | "issue" | "pr"; title: string; tag: string; open: boolean; project: string; number: number | null;
+  status: string; github: boolean; agent: string | null; at: string;
+};
 
 /** The tag to insert for a pick, as the backend reads it: `#N` in the agent's own project, `owner/repo#N` in another,
  * the issue's id for a Loft-only issue. */
@@ -232,13 +246,18 @@ export function tagRows(tasks: Task[], prs: PullRequest[], project: string): Tag
   const fmt = (repo: string, number: number, name: string) => (mine && name === mine ? `#${number}` : `${repo}#${number}`);
   const issues = tasks.map((t): TagRow => ({
     kind: t.labels.some((l) => l.toLowerCase() === "spec") ? "spec" : "issue", title: t.title, project: t.project, number: t.github?.number ?? null, open: t.state === "open",
+    status: t.status, github: !!t.github, agent: t.agent_id, at: t.updated_at,
     tag: t.github ? fmt(t.github.repo, t.github.number, t.project) : `#${t.id}`,
   }));
   // The same PR can be registered by more than one agent.
   const unique = [...new Map(prs.map((p) => [p.url, p])).values()];
   const pulls = unique.map((p): TagRow => {
     const name = p.slug.split("/").pop() ?? p.slug;
-    return { kind: "pr", title: p.title, project: name, number: p.number, open: p.state === "open" || p.state === "", tag: fmt(p.slug, p.number, name) };
+    const open = p.state === "open" || p.state === "";
+    return {
+      kind: "pr", title: p.title, project: name, number: p.number, open, tag: fmt(p.slug, p.number, name),
+      status: open && p.draft ? "draft" : p.state || "open", github: true, agent: p.agent_id, at: p.merged_at ?? p.closed_at ?? p.created_at,
+    };
   });
   return [...issues, ...pulls];
 }

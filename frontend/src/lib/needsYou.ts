@@ -1,5 +1,6 @@
 /** Needs you on the web: the list `GET /api/needs-you` returns (docs/needs-you-api.md), where each item leads, and the
  * top bar's counter. Item text is plain text: render it as text, never as HTML. */
+import { NEEDS_YOU_LABEL } from "./taskStatus.ts";
 
 /** Where an `open` action goes. */
 export type NeedsYouTarget = { screen?: string; agent_id?: string; task_id?: string; url?: string };
@@ -97,7 +98,7 @@ export function answerBody(a: NeedsYouAction, text: string): Record<string, unkn
 /** How urgent an item is, in words and colour. */
 export function urgencyOf(u: number): { label: string; tone: "bad" | "warn" | "accent" | "muted" } {
   if (u >= 3) return { label: "Blocks an agent", tone: "bad" };
-  if (u === 2) return { label: "Waiting for you", tone: "warn" };
+  if (u === 2) return { label: NEEDS_YOU_LABEL, tone: "warn" };
   if (u === 1) return { label: "Worth a look", tone: "accent" };
   return { label: "To review", tone: "muted" };
 }
@@ -155,6 +156,54 @@ export function freshAfter(fresh: Set<string>, items: Pick<NeedsYouItem, "id" | 
 export function headline(total: number, fresh: number): string {
   if (total <= 0) return "";
   return fresh > 0 ? `${fresh} new · ${total} in all` : `${total} waiting, none new`;
+}
+
+/** What Mark all done does: the items that offer Done go (`ids`, what the call sends), the others stay. */
+export function clearAll(items: NeedsYouItem[]): { ids: string[]; clear: number; stay: number } {
+  const ids = items.filter((i) => i.actions.some((a) => a.kind === "dismiss")).map((i) => i.id);
+  return { ids, clear: ids.length, stay: items.length - ids.length };
+}
+
+/** The confirm's title for the items Mark all done was opened with. */
+export const clearTitle = (n: number) => `Mark ${n} ${n === 1 ? "item" : "items"} done?`;
+
+/** The tag that opens an item: what kind of thing waits, in the `.chip` look with a tone's colour. */
+export type KindTag = { label: string; tone: "bad" | "warn" | "info" | "good" };
+
+export function kindTag(type: string): KindTag {
+  switch (type) {
+    case "task_blocked":
+    case "task_failed":
+    case "stuck":
+    case "delivery_stalled":
+      return { label: "Blocked", tone: "bad" };
+    case "question":
+    case "grill_round":
+    case "comment_approval":
+      return { label: "Question", tone: "warn" };
+    case "permission":
+    case "mac_access":
+      return { label: "Permission", tone: "warn" };
+    case "pr_workflows":
+    case "actions_quota":
+      return { label: "CI warning", tone: "warn" };
+    case "pr_review":
+      return { label: "Review", tone: "info" };
+    case "pr_ready":
+    case "task_done":
+    case "delivery_done":
+    case "delivery_merge":
+      return { label: "Ready", tone: "good" };
+    default:
+      return { label: "Heads-up", tone: "warn" };
+  }
+}
+
+/** A title as "api#1865: Multi experiences" for "dineouticeland/api#1865: Multi experiences"; `full` is the tooltip. The
+ * project is left out of the meta line when the title already names it. */
+export function shortTitle(title: string, project: string | null): { text: string; full: string; project: string | null } {
+  const text = title.replace(/^[\w.-]+\/([\w.-]+#\d+)/, "$1");
+  return { text, full: title, project: project && text.startsWith(`${project}#`) ? null : project };
 }
 
 /** Whether a `needs_you` event's ids differ from the items shown, so the page reloads. */

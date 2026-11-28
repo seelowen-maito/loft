@@ -50,7 +50,7 @@ fn agent_json(state: &AppState, a: &Agent) -> Value {
     v["unread_reply"] = json!(a.unread_reply());
     v["fresh_context_applies"] = json!(crate::delivery::fresh_context_applies(state, a));
     v["workspace"] = json!(workspace(state, &a.id).display().to_string());
-    // Projects that aren't one folder of one repo any more (or never were): the user picks again.
+    // Projects whose folder is gone are problems; a folder of several repos is a hint.
     v["project_problems"] = crate::repos::project_problems(state, a);
     v
 }
@@ -65,7 +65,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "host": crate::tailnet::host(),
         // Lets clients (the iOS app) tell what this server supports.
-        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes"],
+        "features": ["tasks", "activity", "idempotent_messages", "voice_clean", "system", "grill", "run_watchdog", "task_comments", "push", "needs_you", "plans", "mentions", "voice_brief", "backups", "workspaces", "clean_picker", "agent_devices", "left_processes", "reply", "saved"],
     }))
 }
 
@@ -112,14 +112,13 @@ pub async fn put_settings(State(state): State<AppState>, Json(body): Json<Value>
     let mut s: crate::settings::Settings = serde_json::from_value(merged).map_err(|e| bad(e.to_string()))?;
     // Where relay keys and push text go is only changed through `PUT /api/push`, with its checks.
     s.push.relay_url = state.settings.get().push.relay_url;
-    // Older clients don't know the global auto-publish switch: they keep it.
-    if s.auto_publish_all.is_none() {
-        s.auto_publish_all = state.settings.get().auto_publish_all;
-    }
+    // Older clients still send the GitHub publishing Settings had: it's each project's own now (#467), so it's dropped.
+    let now = state.settings.get();
+    (s.auto_publish_all, s.auto_publish, s.comment_approval, s.comment_approval_default) = (now.auto_publish_all, now.auto_publish, now.comment_approval, now.comment_approval_default);
     // Backups hold every chat and the GitHub token: never where agents or a repo can reach them. Only a
     // new folder is checked, so one that went bad since (a backup reports that) never blocks the rest.
     if s.backup_dir != state.settings.get().backup_dir
-        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), state.cfg.storage_dir.parent())
+        && let Some(why) = crate::backup::refuse(&crate::backup::dir(&s), &[&state.cfg.root, &state.cfg.storage_dir])
     {
         return Err(bad(why));
     }
@@ -154,10 +153,15 @@ pub async fn restart(State(state): State<AppState>) -> ApiResult<Value> {
     Ok(Json(json!({ "ok": true })))
 }
 
+/// A lagged subscriber missed events: it gets a `Resync` to reload instead.
+fn lagged_to_resync(ev: Result<Event, tokio_stream::wrappers::errors::BroadcastStreamRecvError>) -> Option<Event> {
+    Some(ev.unwrap_or(Event::Resync))
+}
+
 pub async fn events(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let rx = state.events.subscribe();
-    let events = BroadcastStream::new(rx).filter_map(|ev: Result<Event, _>| {
-        let ev = ev.ok()?;
+    let events = BroadcastStream::new(rx).filter_map(|ev| {
+        let ev = lagged_to_resync(ev)?;
         Some(Ok(SseEvent::default().data(serde_json::to_string(&ev).ok()?)))
     });
     // An immediate first chunk makes proxies (e.g. Vite's) flush headers right away.
@@ -206,7 +210,7 @@ pub const DEFAULT_TOOLS: &[&str] = &[
     "Bash(git *)", "Bash(ls *)", "Bash(cat *)", "Bash(mkdir *)", "WebSearch",
 ];
 
-/// Refuses a project the agent doesn't have yet when it isn't one folder that is, or will become, one repo.
+/// Refuses a project the agent doesn't have yet when its folder is missing.
 /// Projects it already has stay, however they look: they are flagged instead (`project_problems`), from the
 /// disk as it is now, so a folder fixed before this save clears its flag in the reply.
 fn check_new_projects(state: &AppState, a: &Agent, ps: &[String]) -> Result<(), ApiError> {
@@ -219,6 +223,15 @@ fn check_new_projects(state: &AppState, a: &Agent, ps: &[String]) -> Result<(), 
     Ok(())
 }
 
+/// A group name as typed, trimmed: at most 100 characters, with no control characters. "" is no group.
+pub fn group_name(v: &str) -> Result<String, String> {
+    let g = v.trim();
+    if g.chars().count() > 100 || g.chars().any(char::is_control) {
+        return Err("group must be at most 100 characters, with no control characters".into());
+    }
+    Ok(g.into())
+}
+
 /// Apply editable fields from a JSON patch onto an agent.
 fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiError> {
     let str_field = |k: &str| p.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -228,13 +241,8 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
         }
         a.name = v.trim().into();
     }
-    if let Some(v) = str_field("title") { a.title = v; }
     if let Some(v) = str_field("group") {
-        let g = v.trim();
-        if g.chars().count() > 100 || g.chars().any(char::is_control) {
-            return Err(bad("group must be at most 100 characters, with no control characters"));
-        }
-        a.group = g.into();
+        a.group = group_name(&v).map_err(bad)?;
     }
     if let Some(v) = p.get("projects") {
         let raw: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| bad("projects must be a list of strings"))?;
@@ -337,7 +345,7 @@ fn apply_patch(state: &AppState, a: &mut Agent, p: &Value) -> Result<(), ApiErro
 
 /// Makes `a` its group's only Lead (its team: `Agent::team`): any other Lead in the group becomes Custom.
 /// Returns the agent the role moved from.
-fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
+pub fn take_lead(state: &AppState, a: &Agent) -> Result<Option<Agent>, ApiError> {
     if a.role != "lead" {
         return Ok(None);
     }
@@ -373,7 +381,6 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
     let mut a = Agent {
         id: id.clone(),
         name: "New agent".into(),
-        title: String::new(),
         project: String::new(),
         group: String::new(),
         projects: vec![],
@@ -401,9 +408,12 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         status_text: String::new(),
         session_id: None,
         context_tokens: None,
+        goal: None,
         last_run_at: None,
         last_run_ended_at: None,
         next_run_at: None,
+        repeat: None,
+        schedules: Vec::new(),
         total_cost_usd: 0.0,
         session_cost_usd: 0.0,
         created_at: now(),
@@ -413,6 +423,16 @@ pub fn new_agent(state: &AppState, id: String, p: &Value, created_by: Option<Str
         created_by,
     };
     apply_patch(state, &mut a, p)?;
+    // The project's team defaults, for what the patch leaves out.
+    for (field, v) in crate::project_settings::team_defaults(state, &a.project) {
+        if p.get(field).is_none() {
+            match field {
+                "model" => a.model = v,
+                "effort" => a.effort = v,
+                _ => a.subagent_model = v,
+            }
+        }
+    }
     std::fs::create_dir_all(workspace(state, &id)).map_err(anyhow::Error::from)?;
     std::fs::write(
         workspace(state, &id).join("README.md"),
@@ -507,14 +527,17 @@ pub struct SendMessage {
     /// Uploads (from `POST /agents/{id}/uploads`) to send with the text.
     #[serde(default)]
     images: Vec<String>,
+    /// The id of an earlier message in this chat the user replies to: the agent gets it quoted first.
+    reply_to: Option<i64>,
 }
 
 pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>, Json(m): Json<SendMessage>) -> ApiResult<Value> {
-    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let agent = state.db.get_agent(&id)?.ok_or_else(not_found)?;
     if m.text.trim().is_empty() && m.images.is_empty() {
         return Err(bad("empty message"));
     }
     crate::uploads::validate(&state, &id, &m.images)?;
+    let reply = m.reply_to.map(|r| crate::reply::reply_meta(&state, &agent, r)).transpose()?;
     let client_id = m.client_id.map(|c| c.trim().chars().take(64).collect::<String>()).filter(|c| !c.is_empty());
     if let Some(c) = &client_id
         && let Some(prev) = state.db.find_client_message(&id, c)? {
@@ -526,12 +549,22 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !m.images.is_empty() {
         meta["images"] = json!(m.images);
     }
-    let agent = state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    if let Some(r) = reply {
+        meta["reply_to"] = r;
+    }
     let grill = m.meta.as_ref().and_then(|v| v.get("grill")).filter(|g| g.is_object());
-    let meta = match crate::grill::on_user_message(&state, &agent, m.text.trim(), grill, meta)? {
+    // A grill on a private repo asks its CI mode: GitHub says which repos are, before the grill starts.
+    let private = if crate::grill::starts_grill(m.text.trim(), grill) { crate::grill::private_projects(&state, &agent).await } else { vec![] };
+    let meta = match crate::grill::on_user_message_with(&state, &agent, m.text.trim(), grill, meta, &private)? {
         crate::grill::Routed::Normal(meta) => meta,
         crate::grill::Routed::Handled { message, wake } => {
             if let Some(p) = wake {
+                // A reply that starts a grill or is a grill command: the agent gets the quote first, as in chat.
+                let quote = message.as_ref().and_then(|m| crate::reply::prompt_block(&state, &id, &m.meta));
+                let p = match quote {
+                    Some(q) => format!("{q}\n\n{p}"),
+                    None => p,
+                };
                 agents::wake(&state, &id, p, "grill");
             }
             return Ok(Json(json!({ "ok": true, "queued": queued, "message": message })));
@@ -551,7 +584,8 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     if !refs.is_empty() {
         meta["task_refs"] = json!(refs);
     }
-    let tags = crate::tags::resolve(&state, &agent, &text);
+    let mut tags = crate::tags::resolve(&state, &agent, &text);
+    tags.extend(crate::tags::resolve_saved(&state, &text));
     if !tags.is_empty() {
         meta["tags"] = json!(tags);
     }
@@ -567,7 +601,7 @@ pub async fn send_message(State(state): State<AppState>, Path(id): Path<String>,
     let msg = if leading {
         agents::add_msg(&state, &id, None, "user", "text", &text, meta)
     } else {
-        agents::enqueue_with(&state, &id, Some(text.clone()), meta, "user")
+        agents::enqueue_chat(&state, &id, text.clone(), meta)
     };
     crate::mentions::deliver(&state, &agent, &mentioned, &text, msg.as_ref().map(|m| m.id));
     Ok(Json(json!({ "ok": true, "queued": queued && !leading, "message": msg, "mentioned": crate::mentions::meta(&mentioned) })))
@@ -588,10 +622,30 @@ pub async fn mark_read(State(state): State<AppState>, Path(id): Path<String>) ->
     Ok(Json(agent_json(&state, &a)))
 }
 
+/// `POST /api/agents/{id}/messages/{message}/cancel`: takes an agent's message back out of the queue before a
+/// run takes it. `ok` is false when a run already took it.
+pub async fn cancel_queued_message(State(state): State<AppState>, Path((id, message)): Path<(String, i64)>) -> ApiResult<Value> {
+    Ok(Json(json!({ "ok": agents::cancel_queued(&state, &id, message)? })))
+}
+
+/// `POST /api/agents/{id}/messages/{message}/send-now`: Send now, the user's queued message into the agent's run in
+/// progress. `ok` is false when it stays queued: an agent's message, or a run that's ending.
+pub async fn send_queued_now(State(state): State<AppState>, Path((id, message)): Path<(String, i64)>) -> ApiResult<Value> {
+    Ok(Json(json!({ "ok": agents::send_now(&state, &id, message)? })))
+}
+
+/// `POST /api/agents/{id}/goal/clear`: the Goal active button. Sends `/goal clear` as the user's message, into the
+/// run in progress when there is one (Send now), or as the next run.
+pub async fn clear_goal(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    let message = agents::clear_goal(&state, &id);
+    Ok(Json(json!({ "ok": message.is_some(), "message": message })))
+}
+
 pub async fn stop_agent(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     // Deny any permission prompts that are blocking this agent so the process can exit.
     for p in state.db.list_permissions(Some(&id))?.into_iter().filter(|p| p.status == "pending") {
-        let _ = agents::decide(&state, &p.id, "deny", None, Some("Run stopped by user.".into()));
+        let _ = agents::decide(&state, &p.id, "deny", None, Some("Run stopped by user.".into()), None);
     }
     // Messages queued behind the run are kept: they run next (people press Stop to unstick an agent,
     // and what they sent while it looked stuck must not be lost).
@@ -717,6 +771,8 @@ pub(crate) async fn resume_from(state: &AppState, id: &str, dir: std::path::Path
         a.session_id = Some(s.id.clone());
         a.session_cost_usd = total;
         a.context_tokens = s.context_tokens;
+        // The goal of that Session isn't known until its next run shows it.
+        a.goal = None;
         a.grill_briefed = false;
         a.memory_index = None;
     })?.ok_or_else(not_found)?;
@@ -735,14 +791,11 @@ pub async fn clear_messages(State(state): State<AppState>, Path(id): Path<String
     Ok(Json(json!({ "ok": true })))
 }
 
-pub async fn randomize_avatar(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    let seed = format!("{id}-{}", now());
-    let a = state
-        .db
-        .update_agent(&id, |a| a.avatar = Avatar::generate(&seed))?
-        .ok_or_else(not_found)?;
-    emit_agent(&state, &a);
-    Ok(Json(agent_json(&state, &a)))
+/// Redraw: the agent draws itself a new sticker in a quiet run; the sticker arrives with the agent event.
+pub async fn redraw_avatar(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    state.db.get_agent(&id)?.ok_or_else(not_found)?;
+    agents::redraw_avatar(&state, &id);
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---- memories ---------------------------------------------------------
@@ -795,13 +848,15 @@ pub struct DecideBody {
     decision: String,
     rule: Option<String>,
     note: Option<String>,
+    /// For an `AskUserQuestion` prompt: the chosen answer per question text.
+    answers: Option<Value>,
 }
 
 pub async fn decide_permission(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<DecideBody>) -> ApiResult<Value> {
     if !["allow_once", "allow_always", "deny"].contains(&b.decision.as_str()) {
         return Err(bad("decision must be allow_once | allow_always | deny"));
     }
-    let r = agents::decide(&state, &id, &b.decision, b.rule, b.note).map_err(|e| bad(e.to_string()))?;
+    let r = agents::decide(&state, &id, &b.decision, b.rule, b.note, b.answers).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!(r)))
 }
 
@@ -921,15 +976,16 @@ pub async fn refresh_pull_request(State(state): State<AppState>, Path(id): Path<
 
 #[derive(Deserialize)]
 pub struct MergeBody {
+    /// None: the project's merge method (#468).
     method: Option<String>,
 }
 
 pub async fn merge_pull_request(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<MergeBody>) -> ApiResult<Value> {
-    let method = b.method.unwrap_or_else(|| "squash".into());
-    if !["squash", "merge", "rebase"].contains(&method.as_str()) {
+    let method = b.method.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    if method.as_deref().is_some_and(|m| !["squash", "merge", "rebase"].contains(&m)) {
         return Err(bad("method must be squash | merge | rebase"));
     }
-    let pr = crate::prs::merge(&state, &id, &method).await.map_err(|e| bad(e.to_string()))?;
+    let pr = crate::prs::merge(&state, &id, method.as_deref()).await.map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!(pr)))
 }
 
@@ -1069,6 +1125,19 @@ pub async fn open_editor(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[tokio::test]
+    async fn a_lagging_subscriber_gets_a_resync() {
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        let mut s = tokio_stream::wrappers::BroadcastStream::new(rx);
+        for i in 0..5 {
+            tx.send(crate::state::Event::AgentDeleted { agent_id: i.to_string() }).unwrap();
+        }
+        let first = tokio_stream::StreamExt::next(&mut s).await.unwrap();
+        assert!(matches!(super::lagged_to_resync(first), Some(crate::state::Event::Resync)));
+        let next = tokio_stream::StreamExt::next(&mut s).await.unwrap();
+        assert!(matches!(super::lagged_to_resync(next), Some(crate::state::Event::AgentDeleted { .. })), "then it goes on as normal");
+    }
+
     /// An agent PATCH of just its project, for other modules' tests.
     pub(crate) fn apply_project(st: &crate::state::AppState, a: &mut crate::db::Agent, project: &str) -> Result<(), super::ApiError> {
         apply_patch(st, a, &serde_json::json!({ "project": project }))
@@ -1088,6 +1157,23 @@ pub(crate) mod tests {
     async fn summary(st: &crate::state::AppState) -> serde_json::Value {
         use axum::extract::{Query, State};
         super::agents_summary(State(st.clone()), Query(super::SummaryQuery { totals: Some(true) })).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn agents_have_no_title_and_one_stored_with_a_title_still_loads() {
+        use axum::{Json, extract::{Path, State}};
+        let st = crate::tasks::tests::state();
+        let Json(v) = super::create_agent(State(st.clone()), Json(serde_json::json!({ "name": "Ana", "title": "Frontend", "role": "dev" }))).await.ok().unwrap();
+        assert!(v.get("title").is_none() && v["role"] == "dev", "{v}");
+        let id = v["id"].as_str().unwrap().to_string();
+        let Json(v) = super::update_agent(State(st.clone()), Path(id.clone()), Json(serde_json::json!({ "title": "Backend" }))).await.ok().unwrap();
+        assert!(v.get("title").is_none(), "a title sent is ignored: {v}");
+        // As stored before titles went away.
+        let mut raw = serde_json::to_value(st.db.get_agent(&id).unwrap().unwrap()).unwrap();
+        raw["title"] = serde_json::json!("Feature developer");
+        st.db.conn().execute("UPDATE agents SET data = ?1 WHERE id = ?2", rusqlite::params![raw.to_string(), id]).unwrap();
+        let Json(v) = super::get_agent(State(st.clone()), Path(id)).await.ok().unwrap();
+        assert!(v.get("title").is_none() && v["name"] == "Ana", "{v}");
     }
 
     #[tokio::test]
@@ -1257,6 +1343,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_agent_from_the_new_agent_dialog_starts_with_fresh_context_always() {
+        // The dialog sends no fresh_context (#495): every role, Lead included, starts Always.
+        let st = crate::tasks::tests::state();
+        for role in ["lead", "dev", "code_reviewer", "qa", "security", "custom"] {
+            let body = serde_json::json!({ "name": role, "group": "Acme", "projects": [], "role": role, "personality": "", "prompt": "Do it.", "model": "sonnet", "interval_minutes": 0 });
+            let (a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &body, None).unwrap();
+            assert_eq!((a.role.as_str(), a.fresh_context.as_str()), (role, "always"));
+        }
+    }
+
+    #[test]
     fn every_fresh_context_option_stays_settable_on_a_new_agent() {
         let st = crate::tasks::tests::state();
         let (mut a, _) = super::new_agent(&st, uuid::Uuid::new_v4().to_string(), &serde_json::json!({ "name": "Dev", "role": "dev" }), None).unwrap();
@@ -1285,6 +1382,17 @@ pub(crate) mod tests {
     async fn patch(st: &crate::state::AppState, id: &str, p: serde_json::Value) -> Result<serde_json::Value, super::ApiError> {
         use axum::extract::{Path, State};
         super::update_agent(State(st.clone()), Path(id.into()), axum::Json(p)).await.map(|j| j.0)
+    }
+
+    #[tokio::test]
+    async fn a_never_wakes_window_survives_a_save() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let never = serde_json::json!([{ "days": [], "start": "00:00", "end": "00:00" }]);
+        patch(&st, &a.id, serde_json::json!({ "quiet_hours": never })).await.unwrap();
+        // The Inspector sends it back unchanged with every save.
+        patch(&st, &a.id, serde_json::json!({ "quiet_hours": never, "name": "Dev 2" })).await.unwrap();
+        assert_eq!(serde_json::to_value(&st.db.get_agent(&a.id).unwrap().unwrap().quiet_hours).unwrap(), never);
     }
 
     #[tokio::test]
@@ -1393,7 +1501,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_folder_of_repos_or_a_missing_folder_is_refused_and_existing_ones_are_flagged() {
+    async fn a_missing_folder_is_refused_and_flagged_and_a_folder_of_repos_is_only_a_hint() {
         let st = crate::tasks::tests::state();
         let root = st.settings.boot().projects_dir.clone();
         std::fs::create_dir_all(root.join("Dineout/api/.git")).unwrap();
@@ -1401,23 +1509,27 @@ pub(crate) mod tests {
         std::fs::create_dir_all(root.join("fresh")).unwrap();
         std::fs::create_dir_all(root.join("solo/.git")).unwrap();
 
-        // A new agent and a patch: refused, naming the project.
-        for bad in [serde_json::json!({ "projects": ["Dineout"] }), serde_json::json!({ "project": "Passora" })] {
+        // A new agent and a patch: a missing folder is refused, naming the project.
+        for bad in [serde_json::json!({ "projects": ["Passora"] }), serde_json::json!({ "project": "Passora" })] {
             let e = super::new_agent(&st, "x".into(), &serde_json::json!({ "name": "A" }).as_object().unwrap().iter().chain(bad.as_object().unwrap()).map(|(k, v)| (k.clone(), v.clone())).collect::<serde_json::Value>(), None).unwrap_err();
-            assert!(e.1 == "Dineout holds several repos: pick one of them" || e.1 == "There's no folder Passora in the projects folder", "{}", e.1);
+            assert_eq!(e.1, "There's no folder Passora in the projects folder");
         }
+        // No project at all is fine, and so is a folder of several repos.
+        super::new_agent(&st, "a0".into(), &serde_json::json!({ "name": "None" }), None).unwrap();
+        super::new_agent(&st, "a2".into(), &serde_json::json!({ "name": "Many", "projects": ["Dineout"] }), None).unwrap();
         let (mut a, _) = super::new_agent(&st, "a1".into(), &serde_json::json!({ "name": "A", "projects": ["solo", "fresh"] }), None).unwrap();
-        assert!(apply_patch(&st, &mut a.clone(), &serde_json::json!({ "projects": ["solo", "Dineout"] })).is_err());
+        assert!(apply_patch(&st, &mut a.clone(), &serde_json::json!({ "projects": ["solo", "Passora"] })).is_err());
+        apply_patch(&st, &mut a.clone(), &serde_json::json!({ "projects": ["solo", "Dineout"] })).unwrap();
         assert_eq!(super::agent_json(&st, &a)["project_problems"], serde_json::json!([]));
 
         // An agent that already has them keeps them, flagged; saving its other fields still works.
         a.projects = vec!["Dineout".into(), "Passora".into(), "solo".into()];
         a.project = "Dineout".into();
-        apply_patch(&st, &mut a, &serde_json::json!({ "title": "Dev", "projects": ["Dineout", "Passora", "solo"] })).unwrap();
+        apply_patch(&st, &mut a, &serde_json::json!({ "name": "Dev", "projects": ["Dineout", "Passora", "solo"] })).unwrap();
         assert_eq!(a.projects, ["Dineout", "Passora", "solo"]);
         let flags = super::agent_json(&st, &a)["project_problems"].clone();
-        let flagged: Vec<_> = flags.as_array().unwrap().iter().map(|f| f["project"].as_str().unwrap()).collect();
-        assert_eq!(flagged, ["Dineout", "Passora"]);
+        let flagged: Vec<_> = flags.as_array().unwrap().iter().map(|f| (f["project"].as_str().unwrap(), f["hint"].as_bool().unwrap())).collect();
+        assert_eq!(flagged, [("Dineout", true), ("Passora", false)]);
     }
 
     #[tokio::test]
@@ -1433,8 +1545,8 @@ pub(crate) mod tests {
         st.db.save_agent(&a).unwrap();
         let problems = super::agent_json(&st, &a)["project_problems"].clone();
         assert_eq!(problems, serde_json::json!([
-            { "project": "dine", "problem": "dine holds several repos: pick one of them" },
-            { "project": "gone", "problem": "There's no folder gone in the projects folder" },
+            { "project": "dine", "problem": "dine holds several repos, so its issues stay in Loft", "hint": true },
+            { "project": "gone", "problem": "There's no folder gone in the projects folder", "hint": false },
         ]), "short, without the Mac's paths");
 
         // The settings panel takes the saved agent from the live event: fixing the projects clears the flag there.
@@ -1578,7 +1690,7 @@ mod find_tests {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Dev");
         // Like agent-local-storage/ in the Loft checkout: the workspaces live in a repo that ignores them.
-        let checkout = st.cfg.storage_dir.parent().unwrap();
+        let checkout = st.cfg.root.as_path();
         std::fs::write(checkout.join(".gitignore"), "agents/\n").unwrap();
         git(checkout, &["init", "-q"]);
         let ws = crate::agents::workspace(&st, &a.id);

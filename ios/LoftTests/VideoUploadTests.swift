@@ -2,6 +2,7 @@ import ImageIO
 import UniformTypeIdentifiers
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// Spec #203: videos from the iPhone chat, checked, uploaded with progress and sent with the message.
 @MainActor

@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 @main
@@ -15,7 +16,10 @@ struct LoftApp: App {
         OldPairing.clear()
         let store = LoftStore(api: Self.makeAPI())
         _store = State(initialValue: store)
-        _voice = State(initialValue: VoiceSession(store: store))
+        let voice = VoiceSession(store: store)
+        // On the Talk screen, an agent named in what you say is who it goes to (#343).
+        voice.picksRecipient = true
+        _voice = State(initialValue: voice)
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-fixture-digest") {
             UserDefaults.standard.set(Date().addingTimeInterval(-2 * 3600).timeIntervalSince1970, forKey: Prefs.digestLastLooked)
@@ -34,8 +38,9 @@ struct LoftApp: App {
         }
         if ProcessInfo.processInfo.arguments.contains("-ui-onboarding") { return nil }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing") {
-            // Each UI test starts from nothing, not from the last test's cached state.
-            SnapshotStore.standard.clear()
+            // Each UI test starts from nothing, not from the last test's cached state (`-keep-cache`: a relaunch
+            // that opens on what the last launch cached, as a cold start does).
+            if !args.contains("-keep-cache") { SnapshotStore.standard.clear() }
             return FixtureAPI.fromLaunchArguments()
         }
         #endif
@@ -57,7 +62,20 @@ struct LoftApp: App {
                 .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
                 .onAppear { AppDelegate.open = { router.open($0) } }
                 // `loft://task/<id>`: from a message, a note or another app.
-                .onOpenURL { url in if let id = TaskLink.id(from: url) { router.open(.task(taskId: id)) } }
+                .onOpenURL { url in
+                    if let id = TaskLink.id(from: url) { router.open(.task(taskId: id)) }
+                    // A tap on a widget. The Talk widget or control: start listening with whoever you talked to last;
+                    // no one yet, or a link they didn't sign: the Overview asking who, mic off.
+                    else {
+                        switch TalkLink.route(url, key: TalkKey.current, lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                              orchestratorId: store.orchestratorId, agents: store.agents) {
+                        case .start(let id): Task { await voice.start(agentId: id) }
+                        case .pick: router.openLink(.talk)
+                        case .open(let link): router.openLink(link)
+                        case nil: break
+                        }
+                    }
+                }
                 // Once the server says it can push, register this phone (and again when the server changes).
                 .task(id: store.info?.supports(.push) == true) { await PushRegistrar.shared.start() }
         }
@@ -95,6 +113,8 @@ final class Router {
     var tasksPath = NavigationPath()
     var chatPath = NavigationPath()
     var composer: Composer?
+    /// The Overview's Talk button asks who to talk to (a Talk link with no one to start with).
+    var picksTalk = false
 
     enum Composer: Identifiable {
         case newTask(agentId: String?, parentId: String?)
@@ -107,6 +127,33 @@ final class Router {
             case .editTask(let t): "edit-\(t.id)"
             case .pickRecipient: "recipient"
             }
+        }
+    }
+
+    /// A tapped widget.
+    func openLink(_ link: DeepLink) {
+        switch link {
+        case .needsYou: open(.needsYou)
+        case .needsYouItem(let id):
+            composer = nil
+            tab = .overview
+            overviewPath = NavigationPath()
+            overviewPath.append(NeedsYouRoute(focus: id))
+        case .agent(let id): open(.chat(agentId: id))
+        case .issue(let id): open(.task(taskId: id))
+        case .agents:
+            composer = nil
+            tab = .agents
+            agentsPath = NavigationPath()
+        case .talk:
+            composer = nil
+            tab = .overview
+            overviewPath = NavigationPath()
+            picksTalk = true
+        case .overview:
+            composer = nil
+            tab = .overview
+            overviewPath = NavigationPath()
         }
     }
 
@@ -140,6 +187,8 @@ struct ChatRoute: Hashable {
     var draft: String?
     /// Start dictation as soon as the chat opens (the Overview's Talk button).
     var dictate = false
+    /// The message to scroll to once the chat opens (a saved item's Open in chat).
+    var message: Int64?
 }
 
 struct AgentRoute: Hashable { let id: String }
@@ -170,7 +219,7 @@ struct RootView: View {
                         OverviewView().withRoutes()
                     }
                     .tabItem { Label("Overview", systemImage: "square.grid.2x2") }
-                    .badge(attentionCount)
+                    .badge(store.attentionBadge)
                     .tag(Router.Tab.overview)
 
                     NavigationStack(path: $router.agentsPath) {
@@ -206,12 +255,6 @@ struct RootView: View {
             }
         }
     }
-
-    private var attentionCount: Int {
-        store.pendingApprovals().count
-            + store.tasks.filter { $0.state == .failed || $0.state == .blocked }.count
-            + store.agents.filter { store.state(of: $0) == .failed }.count
-    }
 }
 
 extension View {
@@ -219,10 +262,12 @@ extension View {
     func withRoutes() -> some View {
         navigationDestination(for: AgentRoute.self) { AgentDetailView(agentId: $0.id) }
             .navigationDestination(for: TaskRoute.self) { TaskDetailView(taskId: $0.id) }
-            .navigationDestination(for: ChatRoute.self) { ChatView(agentId: $0.agentId, draft: $0.draft, dictate: $0.dictate) }
+            .navigationDestination(for: ChatRoute.self) { ChatView(agentId: $0.agentId, draft: $0.draft, dictate: $0.dictate, message: $0.message) }
             .navigationDestination(for: ActivityRoute.self) { _ in ActivityListView() }
             .navigationDestination(for: SettingsRoute.self) { _ in SettingsView() }
-            .navigationDestination(for: NeedsYouRoute.self) { _ in NeedsYouListView() }
+            .navigationDestination(for: SavedRoute.self) { _ in SavedListView() }
+            .navigationDestination(for: SavedItemRoute.self) { SavedItemView(id: $0.id) }
+            .navigationDestination(for: NeedsYouRoute.self) { NeedsYouListView(focus: $0.focus) }
     }
 
     /// The global create button, in every tab's navigation bar.

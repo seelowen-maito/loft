@@ -43,6 +43,8 @@ pub struct Mirror {
     skipped: std::sync::Mutex<HashMap<String, String>>,
     /// ETag of each issue of another repo last read by number (`repo#n`), so an unchanged one answers 304.
     etags: std::sync::Mutex<HashMap<String, String>>,
+    /// The same for the blockers a Delivery waits on (`repo#n`, lower case), kept apart: reading one here must not make the other poll see 304.
+    pub(crate) wait_etags: std::sync::Mutex<HashMap<String, String>>,
     /// Other repos already logged as unreadable this run, so the log says it once.
     unreadable: std::sync::Mutex<HashSet<String>>,
 }
@@ -603,7 +605,10 @@ pub async fn publish(state: &AppState, id: &str, by: &str) -> Result<Task, Strin
     if t.project.trim().is_empty() {
         return Err("Pick a project first: this Loft issue has no project, so there's no GitHub repo to publish it to.".into());
     }
-    let repo = crate::repos::github_repo(state, &t.project).await.map_err(|e| format!("{e}, so there's no GitHub repo to publish it to."))?;
+    let repo = crate::repos::github_repo(state, &t.project).await.map_err(|e| match crate::repos::project_hint(state, &t.project) {
+        Some(hint) => format!("{hint}, so this issue stays in Loft. Pick one of its repos to publish it on GitHub."),
+        None => format!("{e}, so there's no GitHub repo to publish it to."),
+    })?;
     if crate::github::token(state).is_none() {
         return Err("GitHub isn't connected: add a GitHub token in Settings or run `gh auth login`.".into());
     }
@@ -670,9 +675,9 @@ pub async fn publish_route(State(state): State<AppState>, axum::extract::Path(id
     publish(&state, &id, "user").await.map(|t| Json(json!(t))).map_err(crate::api::bad)
 }
 
-/// Publishes a new Loft issue in the background when auto-publish is on.
+/// Publishes a new Loft issue in the background when its project's auto-publish is on.
 pub fn auto_publish(state: &AppState, t: &Task) {
-    if t.github.is_some() || state.settings.get().auto_publish_all != Some(true) {
+    if t.github.is_some() || !crate::project_settings::auto_publish(state, &t.project) {
         return;
     }
     let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
@@ -1054,7 +1059,7 @@ pub(crate) mod tests {
     /// A test state with a GitHub token whose projects folder is its own temp dir, read at boot like Loft does.
     pub(crate) fn state() -> AppState {
         let st = state_with_token();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let projects = dir.join("projects");
         std::fs::create_dir_all(&projects).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects, "github_token": "test-token" }).to_string()).unwrap();
@@ -1717,15 +1722,16 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn auto_publish_publishes_new_loft_issues_and_projects_without_a_repo_cant_publish() {
+    async fn auto_publish_publishes_new_loft_issues_of_its_project_and_projects_without_a_repo_cant_publish() {
         let st = state();
         let fake = own_fake(&st);
         let repo = "octo/pub-auto";
         project(&st, "pub-auto", Some("https://github.com/octo/pub-auto"));
+        project(&st, "pub-off", Some("https://github.com/octo/pub-off"));
         project(&st, "pub-plain", None);
-        let mut s = st.settings.get();
-        s.auto_publish_all = Some(true);
-        st.settings.save(s).unwrap();
+        let v = set_project(&st, "pub-auto", "auto_publish", json!("on")).await;
+        assert_eq!(v["settings"].as_array().unwrap().iter().find(|s| s["key"] == "auto_publish").unwrap()["value"], "on");
+        crate::project_settings::set(&st, "pub-plain", "auto_publish", &json!("on"), None).unwrap();
         fake.route("POST", "/repos/octo/pub-auto/issues", 201, gh(repo, 3, "Auto", "open", "2026-10-28T10:00:00Z"));
 
         let (t, _) = crate::tasks::create(&st, &json!({ "title": "Auto", "project": "pub-auto" }), "user").unwrap();
@@ -1736,13 +1742,21 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(st.db.get_task(&t.id).unwrap().unwrap().github.map(|g| g.number), Some(3));
+        // A project left at Loft's default (off): its new issue stays in Loft.
+        let (off, _) = crate::tasks::create(&st, &json!({ "title": "Stays", "project": "pub-off" }), "user").unwrap();
 
         // No repo: nothing is published, by hand or automatically, and GitHub isn't asked.
         let (plain, _) = crate::tasks::create(&st, &json!({ "title": "Plain", "project": "pub-plain" }), "user").unwrap();
         let err = publish_route(State(st.clone()), axum::extract::Path(plain.id.clone())).await.unwrap_err();
         assert!(err.1.contains("isn't a git repo, so there's no GitHub repo to publish it to"), "{}", err.1);
+        // A folder of several repos says why, in the words of the hint.
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("pub-many/a/.git")).unwrap();
+        let (many, _) = crate::tasks::create(&st, &json!({ "title": "Many", "project": "pub-many" }), "user").unwrap();
+        let err = publish_route(State(st.clone()), axum::extract::Path(many.id.clone())).await.unwrap_err();
+        assert_eq!(err.1, "pub-many holds several repos, so this issue stays in Loft. Pick one of its repos to publish it on GitHub.");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(st.db.get_task(&plain.id).unwrap().unwrap().github.is_none());
+        assert!(st.db.get_task(&off.id).unwrap().unwrap().github.is_none());
         assert_eq!(fake.seen("/repos/").len(), 1, "only the one auto-published issue");
     }
 
@@ -1814,6 +1828,12 @@ pub(crate) mod tests {
         st.db.list_task_comments(id, 100, None).unwrap().into_iter().find(|c| c.text == text).unwrap()
     }
 
+    /// Sets `project`'s setting `key` to `value` as the user does on its Project settings page.
+    async fn set_project(st: &AppState, project: &str, key: &str, value: Value) -> Value {
+        let c = serde_json::from_value(json!({ "project": project, "key": key, "value": value })).unwrap();
+        crate::project_settings::put(State(st.clone()), Json(c)).await.unwrap().0
+    }
+
     async fn settled(st: &AppState, cid: i64) -> Value {
         for _ in 0..50 {
             let c = st.db.get_task_comment(cid).unwrap().unwrap();
@@ -1826,7 +1846,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_global_approval_mode_decides_which_comments_go_straight_to_github() {
+    async fn each_projects_approval_mode_decides_which_of_its_comments_go_straight_to_github() {
         let st = state();
         let fake = own_fake(&st);
         let a = crate::tasks::tests::agent(&st, "Builder");
@@ -1838,45 +1858,45 @@ pub(crate) mod tests {
             ids.insert(p, id);
         }
         let posts = |repo: &str| fake.seen(&format!("/repos/{repo}/issues/1/comments")).into_iter().filter(|r| r.method == "POST").map(|r| r.body).collect::<Vec<_>>();
-        let set_mode = |m: &str| {
-            let mut s = st.settings.get();
-            s.comment_approval_default = m.into();
-            // Old per-project choices are ignored.
-            s.comment_approval = [("ap-one".to_string(), "all".to_string())].into();
-            st.settings.save(s).unwrap();
+        // A project's comment by the user and by the agent, once settled: their GitHub states.
+        let both = async |p: &str, text: &str| {
+            let u = comment_by(&st, &ids[p], &a, true, &format!("{text}: mine")).await;
+            let g = comment_by(&st, &ids[p], &a, false, &format!("{text}: agent's")).await;
+            (settled(&st, u.id).await["state"].clone(), settled(&st, g.id).await["state"].clone())
         };
+        let (pending, posted) = (json!("pending"), json!("posted"));
 
-        // Ask (the default): every comment in every project waits.
-        assert_eq!(st.settings.get().approval_mode(), "ask");
+        // Ask (Loft's default): every comment in every project waits. Settings no longer decides it.
+        let mut s = st.settings.get();
+        s.comment_approval_default = "all".into();
+        st.settings.save(s).unwrap();
         for p in ["ap-one", "ap-two"] {
-            let u = comment_by(&st, &ids[p], &a, true, "ask: mine").await;
-            let g = comment_by(&st, &ids[p], &a, false, "ask: agent's").await;
-            assert_eq!((settled(&st, u.id).await["state"].clone(), settled(&st, g.id).await["state"].clone()), (json!("pending"), json!("pending")));
+            assert_eq!(both(p, "ask").await, (pending.clone(), pending.clone()));
         }
         assert!(posts("octo/ap-one").is_empty() && posts("octo/ap-two").is_empty());
 
-        // Own: yours goes, the agent's waits, in both projects.
-        set_mode("own");
-        for p in ["ap-one", "ap-two"] {
-            let u = comment_by(&st, &ids[p], &a, true, "own: mine").await;
-            let g = comment_by(&st, &ids[p], &a, false, "own: agent's").await;
-            assert_eq!(settled(&st, u.id).await, json!({ "state": "posted", "comment_id": 700, "auto": true }));
-            assert_eq!(settled(&st, g.id).await, json!({ "state": "pending" }));
-        }
-        assert_eq!(posts("octo/ap-two"), [json!({ "body": "own: mine" })]);
+        // Own on ap-one: yours goes there, the agent's waits; ap-two still asks.
+        set_project(&st, "ap-one", "comment_approval", json!("own")).await;
+        assert_eq!(both("ap-one", "own").await, (posted.clone(), pending.clone()));
+        assert_eq!(both("ap-two", "own").await, (pending.clone(), pending.clone()));
+        assert_eq!(posts("octo/ap-one"), [json!({ "body": "own: mine" })]);
+        assert!(posts("octo/ap-two").is_empty());
 
-        // All: both go, labelled auto-approved, in both projects.
-        set_mode("all");
-        for p in ["ap-one", "ap-two"] {
-            let u = comment_by(&st, &ids[p], &a, true, "all: mine").await;
-            let g = comment_by(&st, &ids[p], &a, false, "all: agent's").await;
-            assert_eq!((settled(&st, u.id).await["auto"].clone(), settled(&st, g.id).await["state"].clone()), (json!(true), json!("posted")));
-        }
-        assert_eq!(posts("octo/ap-two"), [json!({ "body": "own: mine" }), json!({ "body": "all: mine" }), json!({ "body": "**Builder**\n\nall: agent's" })]);
+        // All on ap-two: both go there, labelled auto-approved; ap-one keeps its own.
+        let v = set_project(&st, "ap-two", "comment_approval", json!("all")).await;
+        let setting = v["settings"].as_array().unwrap().iter().find(|s| s["key"] == "comment_approval").unwrap().clone();
+        assert_eq!((&setting["value"], &setting["default"], setting["changed"]["agent"].is_null()), (&json!("all"), &json!("ask"), true), "recorded as the user's");
+        let u = comment_by(&st, &ids["ap-two"], &a, true, "all: mine").await;
+        assert_eq!(settled(&st, u.id).await, json!({ "state": "posted", "comment_id": 700, "auto": true }));
+        let g = comment_by(&st, &ids["ap-two"], &a, false, "all: agent's").await;
+        assert_eq!(settled(&st, g.id).await["state"], "posted");
+        assert_eq!(both("ap-one", "still own").await, (posted.clone(), pending.clone()));
+        assert_eq!(posts("octo/ap-two"), [json!({ "body": "all: mine" }), json!({ "body": "**Builder**\n\nall: agent's" })]);
 
-        // Anything unknown asks.
-        set_mode("sometimes");
-        assert_eq!(st.settings.get().approval_mode(), "ask");
+        // A mode it doesn't take is refused.
+        let c = serde_json::from_value(json!({ "project": "ap-one", "key": "comment_approval", "value": "sometimes" })).unwrap();
+        let err = crate::project_settings::put(State(st.clone()), Json(c)).await.unwrap_err();
+        assert!(err.1.contains("`ask` or `own` or `all`"), "{}", err.1);
     }
 
 
@@ -2186,9 +2206,7 @@ pub(crate) mod tests {
         let repo = "octo/priv";
         let id = one_mirrored(&st, &fake, "priv", repo, "2026-10-02T00:00:00Z").await;
         fake.route("POST", "/repos/octo/priv/issues/1/comments", 201, json!({ "id": 800 }));
-        let mut s = st.settings.get();
-        s.comment_approval_default = "all".into();
-        st.settings.save(s).unwrap();
+        set_project(&st, "priv", "comment_approval", json!("all")).await;
         let a = crate::tasks::tests::agent(&st, "Builder");
         crate::tasks::tests::busy(&st, &a);
 
@@ -2217,9 +2235,7 @@ pub(crate) mod tests {
         let fake = own_fake(&st);
         let id = one_mirrored(&st, &fake, "gh-flag", "octo/gh-flag", "2026-10-02T00:00:00Z").await;
         fake.route("POST", "/repos/octo/gh-flag/issues/1/comments", 201, json!({ "id": 801 }));
-        let mut s = st.settings.get();
-        s.comment_approval_default = "all".into();
-        st.settings.save(s).unwrap();
+        set_project(&st, "gh-flag", "comment_approval", json!("all")).await;
         assert!(st.db.get_task(&id).unwrap().unwrap().agent_id.is_none());
         let post = |b: Value| {
             let st = st.clone();

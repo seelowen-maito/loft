@@ -1,13 +1,10 @@
+import LoftKit
 import SwiftUI
 
 struct OverviewView: View {
     @Environment(LoftStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(VoiceSession.self) private var voice
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// The Talk button steps aside while you scroll down through the cards, so it doesn't
-    /// sit on top of rows you're reading; it comes back when you scroll up or reach either end.
-    @State private var talkVisible = true
 
     private var working: [Agent] {
         store.sortedAgents.filter { [.working, .waitingApproval].contains(store.state(of: $0)) }
@@ -27,19 +24,9 @@ struct OverviewView: View {
                 recentActivity
             }
             .padding(.horizontal, Theme.gutter)
-            .padding(.bottom, store.agents.isEmpty ? 24 : 96)
+            .padding(.bottom, 24)
         }
         .background(Theme.background)
-        .hidesOnScrollDown($talkVisible)
-        .overlay(alignment: .bottomTrailing) {
-            if !store.agents.isEmpty && talkVisible {
-                TalkButton { agentId in Task { await voice.start(agentId: agentId) } }
-                    .padding(.trailing, Theme.gutter)
-                    .padding(.bottom, 16)
-                    .transition(reduceMotion ? .opacity : .scale(scale: 0.6).combined(with: .opacity))
-            }
-        }
-        .animation(.snappy(duration: 0.2), value: talkVisible)
         .refreshable {
             async let stats: Void = store.refreshStats()
             try? await store.refresh()
@@ -47,12 +34,27 @@ struct OverviewView: View {
         }
         .navigationTitle("Loft")
         .toolbar {
+            // In the top bar, not floating over the cards: there it hid Needs you's buttons (#710).
+            if !store.agents.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    TalkButton { agentId in Task { await voice.start(agentId: agentId) } }
+                }
+            }
             ToolbarItem(placement: .topBarLeading) {
                 NavigationLink(value: SettingsRoute()) {
                     Image(systemName: "gearshape")
                 }
                 .accessibilityLabel("Settings")
                 .accessibilityIdentifier("settingsButton")
+            }
+            if store.info?.supports(.saved) == true {
+                ToolbarItem(placement: .topBarLeading) {
+                    NavigationLink(value: SavedRoute()) {
+                        Image(systemName: "bookmark")
+                    }
+                    .accessibilityLabel("Saved")
+                    .accessibilityIdentifier("savedButton")
+                }
             }
         }
         .createMenu()
@@ -135,64 +137,38 @@ struct OverviewView: View {
     }
 }
 
-/// Floating shortcut to a voice conversation: with the orchestrator, or with an agent you pick
-/// when none is set. Nothing is sent until you review it and tap Send.
-private extension View {
-    /// Sets `visible` to false while the scroll view moves down through its middle, and back to
-    /// true on scrolling up or near the top or bottom (the bottom padding keeps the last rows clear).
-    /// iOS 17 has no scroll geometry API, so there the button just stays put.
-    @ViewBuilder func hidesOnScrollDown(_ visible: Binding<Bool>) -> some View {
-        if #available(iOS 18, *) {
-            onScrollGeometryChange(for: ScrollSpot.self) { g in
-                ScrollSpot(offset: g.contentOffset.y + g.contentInsets.top,
-                           remaining: g.contentSize.height + g.contentInsets.bottom - g.contentOffset.y - g.containerSize.height)
-            } action: { old, new in
-                let delta = new.offset - old.offset
-                if new.offset < 40 || new.remaining < 40 { visible.wrappedValue = true }
-                else if delta > 6 { visible.wrappedValue = false }
-                else if delta < -6 { visible.wrappedValue = true }
-            }
-        } else {
-            self
-        }
-    }
-}
-
-private struct ScrollSpot: Equatable {
-    var offset: CGFloat
-    var remaining: CGFloat
-}
-
+/// Shortcut to a voice conversation: with whoever you talked to last, or with an agent you pick
+/// when there's no one yet. Nothing is sent until you review it and tap Send.
 private struct TalkButton: View {
     @Environment(LoftStore.self) private var store
     @Environment(Router.self) private var router
-    @ScaledMetric(relativeTo: .title2) private var size: CGFloat = 60
     @State private var picking = false
     /// Opens the full-screen voice conversation with this agent.
     let startVoice: (String) -> Void
 
     var body: some View {
-        Button {
-            // Talk starts with whoever you talked to last.
-            if let id = UserDefaults.standard.string(forKey: "voiceLastAgent"), store.agent(id) != nil {
-                startVoice(id)
-            } else if let o = store.orchestrator { startVoice(o.id) } else { picking = true }
-        } label: {
-            Image(systemName: "mic.fill")
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(Theme.onAccent)
-                .frame(width: min(size, 88), height: min(size, 88))
-                .background(Theme.accent, in: Circle())
-                .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
+        // A tap talks; a long press opens the menu.
+        Menu {
             if let o = store.orchestrator {
                 Button { startVoice(o.id) } label: { Label("Voice conversation", systemImage: "waveform") }
                 Button { router.openChat(o.id, dictate: true) } label: { Label("Dictate in chat", systemImage: "mic") }
             }
             Button { picking = true } label: { Label("Talk to another agent…", systemImage: "person.wave.2") }
             Button { router.composer = .pickRecipient } label: { Label("Message an agent", systemImage: "bubble.left") }
+        } label: {
+            Image(systemName: "mic.fill")
+        } primaryAction: {
+            // Talk starts with whoever you talked to last.
+            if let id = TalkRecipients.starter(lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                               orchestratorId: store.orchestratorId, agents: store.agents) {
+                startVoice(id)
+            } else { picking = true }
+        }
+        .tint(Theme.accent)
+        .onChange(of: router.picksTalk, initial: true) { _, asks in
+            guard asks else { return }
+            router.picksTalk = false
+            picking = true
         }
         .sheet(isPresented: $picking) {
             NavigationStack {
@@ -473,23 +449,27 @@ struct ApprovalCard: View {
     /// The on-device model's plain sentence, once asked for; "" when it had none.
     @State private var explanation: String?
     @State private var explaining = false
+    /// A `questions` request's picks, by question index.
+    @State private var picks: [Int: AskQuestion.Pick] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Image(systemName: "hand.raised.fill").foregroundStyle(Theme.attention)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(store.agent(request.agentId)?.name ?? "An agent") needs approval")
+                    Text("\(store.agent(request.agentId)?.name ?? "An agent") \(request.isQuestions ? "has questions for you" : "needs approval")")
                         .font(.subheadline.weight(.semibold))
                     RelativeTime(date: request.createdAt).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Text(request.summary)
-                .font(.footnote.monospaced())
-                .lineLimit(4)
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            if !request.isQuestions {
+                Text(request.summary)
+                    .font(.footnote.monospaced())
+                    .lineLimit(4)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
             if let reason = request.reason, !reason.isEmpty {
                 Text(reason).font(.footnote).foregroundStyle(.secondary)
             }
@@ -510,40 +490,96 @@ struct ApprovalCard: View {
                 .accessibilityLabel("Warnings: " + risks.map(\.label).joined(separator: ", "))
                 .accessibilityIdentifier("permissionRisks")
             }
-            explainer
-            AdaptiveStack {
-                Button(role: .destructive) { decide("deny") } label: { Text("Deny").frame(maxWidth: .infinity) }
-                    .buttonStyle(.bordered)
-                Button { decide("allow_once") } label: { Text("Allow once").frame(maxWidth: .infinity) }
-                    .buttonStyle(.accent)
-                // A kill with no program to name has no rule to save.
-                if request.canAlwaysAllow {
-                    Menu {
-                        Button("Always allow \(request.rule ?? request.toolName)") { confirmAlways = true }
-                    } label: {
-                        Image(systemName: "ellipsis").frame(height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("More options")
+            if request.isQuestions {
+                let qs = AskQuestion.of(request.input)
+                ForEach(Array(qs.enumerated()), id: \.offset) { i, q in questionView(i, q) }
+                let answers = AskQuestion.answers(qs, picks: picks)
+                AdaptiveStack {
+                    Button(role: .destructive) { decide("deny") } label: { Text("Skip").frame(maxWidth: .infinity) }
+                        .buttonStyle(.bordered)
+                    Button { decide("allow_once", answers: answers) } label: { Text("Send answers").frame(maxWidth: .infinity) }
+                        .buttonStyle(.accent)
+                        .disabled(answers == nil)
+                        .accessibilityIdentifier("sendAnswers")
                 }
+                .disabled(busy || !store.canWrite)
+                .controlSize(.small)
+            } else {
+                explainer
+                AdaptiveStack {
+                    Button(role: .destructive) { decide("deny") } label: { Text("Deny").frame(maxWidth: .infinity) }
+                        .buttonStyle(.bordered)
+                    Button { decide("allow_once") } label: { Text("Allow once").frame(maxWidth: .infinity) }
+                        .buttonStyle(.accent)
+                    // A kill with no program to name has no rule to save.
+                    if request.canAlwaysAllow {
+                        Menu {
+                            Button("Always allow \(request.rule ?? request.toolName)") { confirmAlways = true }
+                        } label: {
+                            Image(systemName: "ellipsis").frame(height: 20)
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityLabel("More options")
+                        .confirmationDialog("Always allow this?", isPresented: $confirmAlways, titleVisibility: .visible) {
+                            Button("Always allow") { decide("allow_always") }
+                        } message: {
+                            Text("\(request.rule ?? request.toolName) is added to the agent's allowed tools, so it won't ask again.")
+                        }
+                    }
+                }
+                .disabled(busy || !store.canWrite)
+                .controlSize(.small)
             }
-            .disabled(busy || !store.canWrite)
-            .controlSize(.small)
         }
         .padding(12)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).stroke(Theme.attention.opacity(0.4), lineWidth: 1))
-        .confirmationDialog("Always allow this?", isPresented: $confirmAlways, titleVisibility: .visible) {
-            Button("Always allow") { decide("allow_always") }
-        } message: {
-            Text("\(request.rule ?? request.toolName) is added to the agent's allowed tools, so it won't ask again.")
-        }
         .errorAlert($error)
         .sensoryFeedback(.success, trigger: busy) { old, new in old && !new && error == nil }
         // A container with its own identifier: on a plain stack it would also replace the identifiers inside
         // (permissionRisks, permissionExplain, permissionExplanation).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("approvalCard")
+    }
+
+    /// One question: its options as toggles, then "Something else" to type an answer.
+    private func questionView(_ i: Int, _ q: AskQuestion) -> some View {
+        let pick = picks[i] ?? AskQuestion.Pick()
+        return VStack(alignment: .leading, spacing: 6) {
+            if let h = q.header, !h.isEmpty {
+                Text(h.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            Text(q.question).font(.subheadline)
+            ForEach(q.options, id: \.label) { o in
+                let on = pick.chosen.contains(o.label)
+                Button { picks[i] = pick.toggling(o.label, multi: q.multiSelect) } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: on ? (q.multiSelect ? "checkmark.square.fill" : "largecircle.fill.circle")
+                                             : (q.multiSelect ? "square" : "circle"))
+                            .foregroundStyle(on ? Theme.accent : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(o.label).foregroundStyle(.primary)
+                            if let d = o.description, !d.isEmpty { Text(d).font(.caption).foregroundStyle(.secondary) }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .font(.footnote)
+                    .padding(.vertical, 8).padding(.horizontal, 10)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .background(on ? Theme.accent.opacity(0.12) : Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+            TextField(q.multiSelect ? "Something else, too…" : "Something else…",
+                      text: Binding(get: { pick.other }, set: { picks[i] = (picks[i] ?? AskQuestion.Pick()).typing($0, multi: q.multiSelect) }))
+                .font(.footnote)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Something else for: \(q.question)")
+            if q.multiSelect { Text("Pick any that apply.").font(.caption).foregroundStyle(.secondary) }
+        }
+        .disabled(busy)
     }
 
     private func riskLabels(_ risks: [PermissionRisk]) -> some View {
@@ -589,10 +625,10 @@ struct ApprovalCard: View {
         }
     }
 
-    private func decide(_ d: String) {
+    private func decide(_ d: String, answers: [String: String]? = nil) {
         busy = true
         Task {
-            do { try await store.decide(request, decision: d) } catch { self.error = APIError.from(error) }
+            do { try await store.decide(request, decision: d, answers: answers) } catch { self.error = APIError.from(error) }
             busy = false
         }
     }

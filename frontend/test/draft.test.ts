@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  EMPTY_DRAFT, clearAnswerDrafts, loadAnswerDraft, loadDraft, saveAnswerDraft, saveDraft,
+  EMPTY_DRAFT, NOTE_DRAFT, clearAnswerDrafts, loadAnswerDraft, loadDraft, saveAnswerDraft, saveDraft,
 } from "../src/lib/draft.ts";
 
 /** An in-memory localStorage; a fresh `loadDraft` on it stands in for a reload. */
@@ -16,7 +16,7 @@ function memory() {
   };
 }
 
-const draft = { text: "half a thought", images: ["a.png", "b.jpg"], task: "t1" };
+const draft = { text: "half a thought", images: ["a.png", "b.jpg"], task: "t1", reply: null };
 const NO_ANSWER = { text: "", images: [] };
 
 test("with nothing saved an agent's draft is empty", () => {
@@ -33,7 +33,7 @@ test("one agent's draft never shows in another's composer", () => {
   const s = memory();
   saveDraft("dev", draft, s);
   assert.deepEqual(loadDraft("reviewer", s), EMPTY_DRAFT);
-  saveDraft("reviewer", { text: "other", images: [], task: null }, s);
+  saveDraft("reviewer", { text: "other", images: [], task: null, reply: null }, s);
   assert.equal(loadDraft("dev", s).text, "half a thought");
   assert.equal(loadDraft("reviewer", s).text, "other");
 });
@@ -50,7 +50,16 @@ test("a corrupt draft loads as empty", () => {
   s.setItem("loft:draft:dev", "{not json");
   assert.deepEqual(loadDraft("dev", s), EMPTY_DRAFT);
   s.setItem("loft:draft:dev", JSON.stringify({ text: 3, images: ["a.png", 4], task: 5 }));
-  assert.deepEqual(loadDraft("dev", s), { text: "", images: ["a.png"], task: null });
+  assert.deepEqual(loadDraft("dev", s), { text: "", images: ["a.png"], task: null, reply: null });
+});
+
+test("the message a draft replies to is kept with it, also alone, and a broken one is dropped", () => {
+  const s = memory();
+  const reply = { id: 42, author: "Dev", excerpt: "Which port?" };
+  saveDraft("dev", { ...EMPTY_DRAFT, reply }, s);
+  assert.deepEqual(loadDraft("dev", s), { ...EMPTY_DRAFT, reply });
+  s.setItem("loft:draft:dev", JSON.stringify({ text: "hi", reply: { id: "42" } }));
+  assert.equal(loadDraft("dev", s).reply, null);
 });
 
 test("grill answer drafts are kept per question and round, with their images", () => {
@@ -64,6 +73,11 @@ test("grill answer drafts are kept per question and round, with their images", (
   assert.deepEqual(loadDraft("g1", s), EMPTY_DRAFT, "answers aren't a composer draft");
   saveAnswerDraft("g1", 2, "q1", NO_ANSWER, s);
   assert.equal(s.m.has("loft:draft:grill:g1:2:q1"), false, "an emptied answer takes no storage");
+  // The round's note is one more draft of the round, cleared with it.
+  saveAnswerDraft("g1", 2, NOTE_DRAFT, { text: "what about refunds?", images: ["refund.png"] }, s);
+  assert.deepEqual(loadAnswerDraft("g1", 2, NOTE_DRAFT, s), { text: "what about refunds?", images: ["refund.png"] });
+  clearAnswerDrafts("g1", 2, ["q1", "q2", NOTE_DRAFT], s);
+  assert.deepEqual(loadAnswerDraft("g1", 2, NOTE_DRAFT, s), NO_ANSWER);
 });
 
 test("a saved answer or a closed round deletes its drafts", () => {

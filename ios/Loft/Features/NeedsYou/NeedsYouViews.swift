@@ -1,6 +1,10 @@
+import LoftKit
 import SwiftUI
 
-struct NeedsYouRoute: Hashable {}
+struct NeedsYouRoute: Hashable {
+    /// The item to scroll to and outline: the Needs you widget's Approve.
+    var focus: String?
+}
 
 extension EnvironmentValues {
     /// In the open list: the items new during this visit (they stay new once marked seen). Elsewhere nil, and an item
@@ -32,14 +36,22 @@ struct NeedsYouListView: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @State private var fresh: Set<String> = []
+    /// Clear all's items, taken when its confirm opens: one that arrives while it's up stays.
+    @State private var clearing: NeedsYouClearAll?
+    @State private var clearError: String?
+    var focus: String?
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 8) {
                 if let items = store.needsYou?.items, !items.isEmpty {
                     ForEach(NeedsYouSection.build(items)) { section in
                         switch section {
-                        case .item(let i): NeedsYouRow(item: i)
+                        case .item(let i):
+                            NeedsYouRow(item: i, showsText: i.id == focus)
+                                .overlay { if i.id == focus { RoundedRectangle(cornerRadius: 14).stroke(Theme.accent, lineWidth: 2) } }
+                                .id(i.id)
                         case .project(let name, let prs): NeedsYouProjectGroup(name: name, items: prs)
                         }
                     }
@@ -51,10 +63,18 @@ struct NeedsYouListView: View {
             .padding(.horizontal, Theme.gutter)
             .padding(.vertical, 12)
         }
+        .onChange(of: store.needsYou?.items.contains { $0.id == focus } == true, initial: true) { _, there in
+            if there, let focus { proxy.scrollTo(focus, anchor: .center) }
+        }
+        }
         .background(Theme.background)
         .overlay(alignment: .top) { NeedsYouNotice() }
         .environment(\.needsYouFresh, fresh)
         .navigationTitle("Needs you")
+        .toolbar { clearAllButton }
+        // The button went (nothing left to clear) while its confirm was up: drop the confirm, or it would open again with
+        // the button.
+        .onChange(of: NeedsYouClearAll(store.needsYou?.items ?? []).clear) { _, n in if n == 0 { clearing = nil } }
         .refreshable { await store.refreshNeedsYou() }
         .task {
             await store.refreshNeedsYou()
@@ -62,6 +82,30 @@ struct NeedsYouListView: View {
         }
         .onChange(of: store.needsYou?.items.map(\.id)) { Task { await markSeen() } }
         .onChange(of: scenePhase) { Task { await markSeen() } }
+    }
+
+    /// Clear all: every item shown with Done, after a confirm; hidden when there's nothing to clear.
+    @ToolbarContentBuilder private var clearAllButton: some ToolbarContent {
+        let c = NeedsYouClearAll(store.needsYou?.items ?? [])
+        if c.clear > 0 {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(c.label) { clearing = c }
+                    .accessibilityIdentifier("needsYouClearAll")
+                    .confirmationDialog(clearing?.question ?? "", isPresented: Binding(get: { clearing != nil }, set: { if !$0 { clearing = nil } }),
+                                        titleVisibility: .visible, presenting: clearing) { taken in
+                        Button("Clear all", role: .destructive) {
+                            Task {
+                                do { try await store.clearAllNeedsYou(taken) } catch { clearError = error.localizedDescription }
+                            }
+                        }
+                    } message: { _ in
+                        Text("Each one is marked Done and leaves the list, on every device.")
+                    }
+                    .alert("Couldn't clear", isPresented: Binding(get: { clearError != nil }, set: { if !$0 { clearError = nil } })) {
+                        Button("OK", role: .cancel) {}
+                    } message: { Text(clearError ?? "") }
+            }
+        }
     }
 
     /// What's on screen counts as seen everywhere, but not while the app is in the background.
@@ -117,6 +161,8 @@ struct NeedsYouRow: View {
     @Environment(LoftStore.self) private var store
     @Environment(\.needsYouFresh) private var fresh
     let item: NeedsYouItem
+    /// The whole text too (the full command, for a permission): the card the Needs you widget's Approve opens.
+    var showsText = false
     @State private var assist: NeedsYouAssist?
     @State private var answering: String?
     @State private var busy = false
@@ -151,8 +197,15 @@ struct NeedsYouRow: View {
             }
             if let s = assist?.summary {
                 Label(s, systemImage: "sparkles").font(.footnote).accessibilityLabel("Summary: \(s)")
-            } else {
+            } else if !item.asksQuestions(store.permissions) {
                 Text(item.reason).font(.footnote).foregroundStyle(.secondary)
+            }
+            if item.changesWorkflows { WorkflowWarningLabel() }
+            if showsText, !item.text.isEmpty {
+                Text(item.text).font(.footnote.monospaced()).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8).background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .accessibilityIdentifier("needsYouText")
             }
             // Suggestions only, styled apart from the actions (dashed, like the quick reply) and only when there's a
             // real choice: a lone "Later" next to Skip read as a duplicate command.
@@ -206,8 +259,10 @@ struct NeedsYouRow: View {
                 switch a.kind {
                 case "open":
                     if let t = a.target {
-                        if let u = t.url.flatMap(URL.init(string:)) {
-                            Link(a.label, destination: u).buttonStyle(.bordered).controlSize(.small)
+                        if let s = t.url {
+                            if let u = PushDestination.needsYouLink(s, loftHost: store.api?.baseURL.host(), tailnetHost: store.info?.host) {
+                                Link(a.label, destination: u).buttonStyle(.bordered).controlSize(.small)
+                            }
                         } else if t.screen == "task", let id = t.taskId {
                             NavigationLink(a.label, value: TaskRoute(id: id)).buttonStyle(.bordered).controlSize(.small)
                         } else if let id = t.agentId {
@@ -334,4 +389,14 @@ struct AnyButtonStyle: PrimitiveButtonStyle {
     private let make: (Configuration) -> AnyView
     init(_ style: some PrimitiveButtonStyle) { make = { AnyView(style.makeBody(configuration: $0)) } }
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
+}
+
+/// A PR that changes CI workflows: on its Needs you item and its PR row.
+struct WorkflowWarningLabel: View {
+    var body: some View {
+        Label(WorkflowWarning.text, systemImage: "exclamationmark.triangle.fill")
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(Theme.attentionInk)
+            .accessibilityIdentifier("workflowWarning")
+    }
 }

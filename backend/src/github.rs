@@ -35,6 +35,9 @@ struct BudgetState {
     window: i64,
     /// source -> (requests that counted, 304s that didn't)
     by_source: std::collections::BTreeMap<&'static str, (u64, u64)>,
+    /// The token's scopes, from GitHub's `X-OAuth-Scopes`: only a classic token's answers carry it, so None for a
+    /// fine-grained or app token (or before any answer). Settings says from it whether the token can push workflows.
+    scopes: Option<Vec<String>>,
 }
 
 impl Budget {
@@ -50,6 +53,10 @@ impl Budget {
             }
             let used = h("x-ratelimit-used").unwrap_or(limit - remaining);
             b.resources.insert(resource, json!({ "limit": limit, "remaining": remaining, "used": used, "reset": reset }));
+        }
+        // Every full answer says it again, so a switch to a fine-grained token (no header) clears a classic one's (#701).
+        if !not_modified {
+            b.scopes = headers.get("x-oauth-scopes").and_then(|v| v.to_str().ok()).map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect());
         }
         let c = b.by_source.entry(source()).or_default();
         if not_modified { c.1 += 1 } else { c.0 += 1 }
@@ -80,7 +87,7 @@ impl Budget {
     pub fn snapshot(&self) -> Value {
         let b = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let by_source: serde_json::Map<String, Value> = b.by_source.iter().map(|(s, (n, free))| (s.to_string(), json!({ "requests": n, "not_modified": free }))).collect();
-        json!({ "resources": b.resources, "by_source": by_source, "window_reset": (b.window > 0).then_some(b.window) })
+        json!({ "resources": b.resources, "by_source": by_source, "window_reset": (b.window > 0).then_some(b.window), "scopes": b.scopes })
     }
 }
 
@@ -329,6 +336,7 @@ pub(crate) mod tests {
     pub(crate) struct Fake {
         routes: ByRoute<std::collections::VecDeque<(u16, Value)>>,
         headers: ByRoute<Vec<(String, String)>>,
+        delays: ByRoute<std::time::Duration>,
         seen: Mutex<Vec<Seen>>,
     }
 
@@ -347,6 +355,11 @@ pub(crate) mod tests {
         pub(crate) fn with_headers(&self, method: &str, path: &str, headers: &[(&str, &str)]) {
             let hs = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
             self.headers.lock().unwrap().insert((method.into(), path.into()), hs);
+        }
+
+        /// Wait this long before answering `method path`, like a slow GitHub.
+        pub(crate) fn slow(&self, method: &str, path: &str, delay: std::time::Duration) {
+            self.delays.lock().unwrap().insert((method.into(), path.into()), delay);
         }
 
         /// Requests received whose path starts with `prefix`, oldest first.
@@ -388,6 +401,10 @@ pub(crate) mod tests {
                                 body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                             });
                             let route = (method.to_string(), uri.path().to_string());
+                            let delay = fake.delays.lock().unwrap().get(&route).copied();
+                            if let Some(d) = delay {
+                                tokio::time::sleep(d).await;
+                            }
                             let hit = fake.routes.lock().unwrap().get_mut(&route).and_then(|q| if q.len() > 1 { q.pop_front() } else { q.front().cloned() });
                             let (status, body) = hit.unwrap_or((404, json!({ "message": "Not Found" })));
                             let mut hs = HeaderMap::new();
@@ -429,7 +446,7 @@ pub(crate) mod tests {
     pub(crate) fn state_with_token() -> AppState {
         let st = crate::tasks::tests::state();
         let mut s = st.settings.get();
-        s.projects_dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        s.projects_dir = st.cfg.root.as_path().to_path_buf();
         s.github_token = "test-token".into();
         st.settings.save(s).unwrap();
         st
@@ -569,6 +586,29 @@ pub(crate) mod tests {
         let axum::Json(v) = budget(axum::extract::State(st)).await;
         assert_eq!(v["by_source"], json!({ "user": { "requests": 1, "not_modified": 0 } }));
         assert_eq!((&v["resources"]["core"]["remaining"], &v["window_reset"]), (&json!(4999), &json!(1900003600i64)));
+    }
+
+    /// #701: Settings says whether the token can push workflows, from the scopes a classic token's answers list.
+    #[test]
+    fn the_budget_lists_a_classic_tokens_scopes_and_none_for_a_fine_grained_one() {
+        let st = state_with_token();
+        let scopes = |st: &AppState| st.gh_budget.snapshot()["scopes"].clone();
+        let answer = |st: &AppState, h: &[(&'static str, &str)]| {
+            let mut m = reqwest::header::HeaderMap::new();
+            for (k, v) in h {
+                m.insert(*k, v.parse().unwrap());
+            }
+            st.gh_budget.record(&m, false);
+        };
+        answer(&st, &[]);
+        assert_eq!(scopes(&st), Value::Null, "fine-grained, or no answer yet");
+        answer(&st, &[("x-oauth-scopes", "repo, workflow, read:org")]);
+        assert_eq!(scopes(&st), json!(["repo", "workflow", "read:org"]));
+        answer(&st, &[("x-oauth-scopes", "repo")]);
+        assert_eq!(scopes(&st), json!(["repo"]));
+        // Switched to a fine-grained token: its answers carry no scopes, so Settings no longer shows the old ones.
+        answer(&st, &[]);
+        assert_eq!(scopes(&st), Value::Null, "the classic token's scopes don't outlive it");
     }
 
 

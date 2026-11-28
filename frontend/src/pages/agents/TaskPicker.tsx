@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleDot, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import type { Agent } from "../../lib/api";
 import { ATTACH, filterIssues, SOURCES, type Source } from "../../lib/issueFilter";
 import { Origin } from "../../components/Origin";
-import { cx, timeAgo } from "../../lib/format";
-import { STATUS_TONE, useTasks } from "../../components/TaskChip";
+import { IssueRow } from "../../components/IssueRow";
+import { cx } from "../../lib/format";
+import { relTime } from "../../lib/time";
+import { taskStatus, toneText } from "../../lib/taskStatus";
+import { useTasks } from "../../hooks/lists";
 
 /** Open tasks first, the ones waiting on you on top; then the most recently updated. */
 const ORDER = ["waiting_approval", "blocked", "failed", "in_progress", "ready", "inbox", "done", "cancelled"];
 
 /** "Attach an issue" above the composer: Loft and GitHub issues, search (or #42), pick one with the mouse or ↑↓ + Enter, Esc closes. */
 export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPick: (id: string) => void; onClose: () => void }) {
-  const all = useTasks();
+  const all = useTasks().items;
   const [q, setQ] = useState("");
   const [source, setSource] = useState<Source>("all");
   const [index, setIndex] = useState(0);
@@ -26,7 +29,8 @@ export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPic
   const name = (id: string | null) => agents.find((a) => a.id === id)?.name;
 
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="dialog" aria-label={ATTACH}>
+    // A popover inside the composer, not a dialog: Needs you and the shortcuts look for open dialogs by role.
+    <div className="mb-2 overflow-hidden rounded-xl border border-line-strong bg-ink-850 shadow-xl" role="group" aria-label={ATTACH}>
       <label className="flex items-center gap-2 border-b border-line px-3 py-2">
         <Search className="size-3.5 text-fg-3" />
         <input
@@ -59,24 +63,16 @@ export function TaskPicker({ agents, onPick, onClose }: { agents: Agent[]; onPic
         {all === null && <div className="px-3 py-2 font-mono text-[11.5px] text-fg-3">Loading…</div>}
         {all !== null && list.length === 0 && <div className="px-3 py-2 text-[12.5px] text-fg-3">No issue matches.</div>}
         {list.map((t, i) => (
-          <button
+          <IssueRow
             key={t.id}
-            role="option"
-            aria-selected={i === index}
-            onMouseEnter={() => setIndex(i)}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              onPick(t.id);
-            }}
-            className={cx("flex w-full items-center gap-2.5 px-3 py-1.5 text-left", i === index && "bg-white/[0.06]")}
-          >
-            <CircleDot className={cx("size-3.5 shrink-0", STATUS_TONE[t.status])} />
-            <Origin github={!!t.github} />
-            <span className="min-w-0 flex-1 truncate text-[13px]">{t.title}</span>
-            <span className="shrink-0 truncate font-mono text-[10.5px] text-fg-3">
-              {[t.github && `#${t.github.number}`, t.status.replace("_", " "), name(t.agent_id), t.project, timeAgo(t.updated_at)].filter(Boolean).join(" · ")}
-            </span>
-          </button>
+            tone={toneText(taskStatus(t.status).tone)}
+            github={!!t.github}
+            title={t.title}
+            meta={[t.github && `#${t.github.number}`, taskStatus(t.status).label, name(t.agent_id), t.project, relTime(t.updated_at)]}
+            selected={i === index}
+            onHover={() => setIndex(i)}
+            onPick={() => onPick(t.id)}
+          />
         ))}
       </div>
       <div className="border-t border-line px-3 py-1.5 font-mono text-[10.5px] text-fg-3">The agent gets the issue's title, status and latest note with your message.</div>

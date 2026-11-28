@@ -93,7 +93,9 @@ pub fn run_fields(state: &AppState, agent_id: &str, v: &mut Value) {
     v["waiting_on"] = json!(info.map_or(&vec![], |i| &i.waiting_on));
     v["waiting_since"] = json!(info.and_then(|i| i.waiting_since.as_ref()));
     v["subagents"] = json!(info.map_or(&vec![], |i| &i.subagents));
-    v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(&vec![], |q| q));
+    v["queued_messages"] = json!(rt.queued_messages.get(agent_id).map_or(vec![], |q| q.iter().map(|(id, _)| *id).collect()));
+    // A Redraw waiting behind the current run or drawing now: the Redraw button shows it's busy.
+    v["redrawing"] = json!(rt.redraw_queued.contains(agent_id) || rt.redrawing.contains(agent_id));
 }
 
 /// Pushes the agent's run fields after they changed outside a database update.
@@ -165,10 +167,11 @@ pub(crate) async fn restart_quiet(state: &AppState) {
     }
 }
 
-/// Checks for quiet runs once a minute.
+/// Checks for quiet runs, and saved statuses no live run backs, once a minute.
 pub async fn quiet_watcher(state: AppState) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
+        reconcile_status(&state);
         restart_quiet(&state).await;
     }
 }
@@ -262,6 +265,45 @@ pub fn rule_matches(rule: &str, tool: &str, input: &Value) -> bool {
     false
 }
 
+/// Claude Code's multiple-choice question tool. Headless, it reaches the user only through the permission prompt,
+/// whose `updatedInput` must carry the user's `answers`; a plain allow leaves them empty ("The user did not answer").
+/// So once it is allowed (a prompt, or a rule), Loft asks the questions themselves as a second request.
+pub const ASK_TOOL: &str = "AskUserQuestion";
+
+/// The source of that second request: the questions, answered rather than allowed.
+pub const QUESTIONS: &str = "questions";
+
+/// Longest answer Loft takes for one question (chosen labels joined by ", ", plus what's typed under "Other").
+const MAX_ANSWER: usize = 4000;
+
+/// `input` with the user's answers, one per question text (choices joined by ", "). `Ok(Err(why))` tells the agent
+/// the user gave none; `Err` refuses the decision itself (it stays pending), naming what's wrong for the client.
+/// Only answers to this request's questions are kept, and every question needs one.
+fn with_answers(input: &Value, answers: Option<Value>) -> Result<Result<Value, String>> {
+    let Some(answers) = answers.filter(|a| !a.is_null()) else {
+        // An allow from a client that can't show the questions (an older app's plain "Allow").
+        return Ok(Err("The user couldn't answer your questions where they saw them. Ask them in your reply instead and end your run.".into()));
+    };
+    let Some(answers) = answers.as_object() else { anyhow::bail!("answers must be an object of answer text by question text") };
+    let Some(questions) = input.as_object().and_then(|i| i.get("questions")).and_then(Value::as_array) else {
+        anyhow::bail!("this request has no questions to answer: deny it instead")
+    };
+    let mut kept = serde_json::Map::new();
+    for q in questions.iter().filter_map(|q| q["question"].as_str()) {
+        let a = match answers.get(q) {
+            Some(Value::String(a)) if !a.trim().is_empty() => a,
+            Some(Value::String(_)) | None => anyhow::bail!("the question \"{q}\" has no answer"),
+            Some(_) => anyhow::bail!("the answer to \"{q}\" must be text"),
+        };
+        anyhow::ensure!(a.chars().count() <= MAX_ANSWER, "the answer to \"{q}\" is longer than {MAX_ANSWER} characters");
+        kept.insert(q.to_string(), Value::String(a.clone()));
+    }
+    anyhow::ensure!(!kept.is_empty(), "this request has no questions to answer: deny it instead");
+    let mut done = input.clone();
+    done["answers"] = Value::Object(kept);
+    Ok(Ok(done))
+}
+
 /// Rule suggested for "always allow" on a blocked tool call.
 pub fn suggest_rule(tool: &str, input: &Value) -> String {
     match tool {
@@ -293,25 +335,27 @@ pub async fn ask_permission(
 }
 
 /// Marks a request expired when it ends unanswered: at the timeout, or when whoever asked stops waiting (a kill
-/// whose command was stopped), so a later answer can't act on it.
+/// whose command was stopped, a run stopped mid-call), so a later answer can't act on it. Answered or not, the
+/// ask then stops counting toward the agent's status (`asked`).
 struct Unanswered<'a> {
     state: &'a AppState,
+    agent_id: String,
     id: String,
     answered: bool,
 }
 
 impl Drop for Unanswered<'_> {
     fn drop(&mut self) {
-        if self.answered {
-            return;
+        if !self.answered {
+            self.state.rt.lock().unwrap().waiters.remove(&self.id);
+            if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id)
+                && r.status == "pending" {
+                    r.status = "expired".into();
+                    let _ = self.state.db.save_permission(&r);
+                    self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
+                }
         }
-        self.state.rt.lock().unwrap().waiters.remove(&self.id);
-        if let Ok(Some(mut r)) = self.state.db.get_permission(&self.id)
-            && r.status == "pending" {
-                r.status = "expired".into();
-                let _ = self.state.db.save_permission(&r);
-                self.state.emit(Event::Permission { request: serde_json::to_value(&r).unwrap() });
-            }
+        asked(self.state, &self.agent_id);
     }
 }
 
@@ -341,43 +385,117 @@ pub async fn ask_permission_for(
     let (tx, rx) = oneshot::channel();
     state.rt.lock().unwrap().waiters.insert(req.id.clone(), tx);
     if let Err(e) = state.db.save_permission(&req) {
-        return Decision { allow: false, message: Some(format!("loft error: {e}")) };
+        return Decision { allow: false, message: Some(format!("loft error: {e}")), input: None };
     }
     add_msg(state, agent_id, None, "system", "permission", &req.tool_name, json!({ "request_id": req.id }));
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
-    let prev = state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default();
-    set_status(state, agent_id, "waiting", &format!("Waiting for permission: {tool_name}"));
+    {
+        // The text to bring back is the one from before the first of overlapping asks.
+        let mut rt = state.rt.lock().unwrap();
+        let ask = rt.asks.entry(agent_id.to_string()).or_insert_with(|| (0, state.db.get_agent(agent_id).ok().flatten().map(|a| a.status_text).unwrap_or_default()));
+        ask.0 += 1;
+    }
+    let waiting = if source == QUESTIONS { "Waiting for your answers".into() } else { format!("Waiting for permission: {tool_name}") };
+    set_status(state, agent_id, "waiting", &waiting);
 
-    let mut pending = Unanswered { state, id: req.id.clone(), answered: false };
+    let mut pending = Unanswered { state, agent_id: agent_id.to_string(), id: req.id.clone(), answered: false };
     let decision = match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(d)) => {
             pending.answered = true;
             d
         }
-        _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()) },
+        _ => Decision { allow: false, message: Some("The user did not respond to the permission request in time.".into()), input: None },
     };
     drop(pending);
-    if is_running(state, agent_id) {
-        set_status(state, agent_id, "running", &prev);
-    }
     decision
 }
 
-/// Resolve a pending request from the UI. `always` persists the rule into the agent config.
-pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, note: Option<String>) -> Result<PermissionRequest> {
+/// One of the agent's permission asks ended. Once none is left, it goes back to its run with the text from
+/// before them, or to idle when no run is live. The run check and the save happen under the run lock, and only
+/// over a status still "waiting", so a run that ends meanwhile can't leave it saved as running.
+fn asked(state: &AppState, agent_id: &str) {
+    let saved = {
+        let mut rt = state.rt.lock().unwrap();
+        let Some(ask) = rt.asks.get_mut(agent_id) else { return };
+        ask.0 = ask.0.saturating_sub(1);
+        if ask.0 > 0 {
+            return;
+        }
+        let (_, prev) = rt.asks.remove(agent_id).unwrap_or_default();
+        let (status, text) = if rt.running.contains_key(agent_id) { ("running", prev) } else { ("idle", String::new()) };
+        state.db.update_agent(agent_id, |a| {
+            if a.status == "waiting" {
+                a.status = status.into();
+                a.status_text = text.chars().take(160).collect();
+            }
+        })
+    };
+    if let Ok(Some(a)) = saved {
+        emit_agent(state, &a);
+    }
+}
+
+/// Sets an agent saved as running or waiting back to idle when it has no live run and nothing waits on the
+/// user: a panic, a dead process or a missed update left it behind.
+pub(crate) fn reconcile_status(state: &AppState) {
+    let Ok(agents) = state.db.list_agents() else { return };
+    for a in agents.into_iter().filter(|a| a.status == "running" || a.status == "waiting") {
+        let asking = state.db.list_permissions(Some(&a.id)).map_or(true, |ps| ps.iter().any(|p| p.status == "pending"));
+        let interviewing = crate::grill::active(state, &a.id).is_some_and(|s| crate::grill::open_round(&s).is_some());
+        if asking || interviewing {
+            continue;
+        }
+        let saved = {
+            let rt = state.rt.lock().unwrap();
+            if rt.running.contains_key(&a.id) || rt.asks.contains_key(&a.id) {
+                continue;
+            }
+            state.db.update_agent(&a.id, |a| {
+                if a.status == "running" || a.status == "waiting" {
+                    a.status = "idle".into();
+                    a.status_text = String::new();
+                }
+            })
+        };
+        if let Ok(Some(now)) = saved {
+            tracing::info!("{}: saved as {} with no live run, now idle", a.name, a.status);
+            emit_agent(state, &now);
+        }
+    }
+}
+
+/// Resolve a pending request from the UI. `always` persists the rule into the agent config. `answers` answers an
+/// `AskUserQuestion` prompt.
+pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, note: Option<String>, answers: Option<Value>) -> Result<PermissionRequest> {
     let mut req = state.db.get_permission(id)?.ok_or_else(|| anyhow::anyhow!("no such request"))?;
     anyhow::ensure!(req.status == "pending", "request already {}", req.status);
     // A kill's rule is the one Loft made from the processes, not one posted with the answer.
     if let Some(r) = rule.filter(|r| !r.trim().is_empty() && req.tool_name != "Kill") {
         req.rule = r.trim().to_string();
     }
-    let allow = decision != "deny";
+    let mut allow = decision != "deny";
+    let (mut note, mut input) = (note, None);
+    let asks = req.source == QUESTIONS;
+    if asks && allow {
+        match with_answers(&req.input, answers)? {
+            Ok(done) => {
+                req.input = done.clone();
+                input = Some(done);
+            }
+            Err(why) => (allow, note) = (false, Some(why)),
+        }
+    } else if asks {
+        note = Some(note.map_or_else(|| "The user chose not to answer your questions.".into(), |n| format!("The user chose not to answer your questions: {n}")));
+    }
     // Explicit requests are always about config, so any grant persists. A kill of a process the agent didn't start
     // saves only a rule naming a program (`Kill(<path>)`), never a bare `Kill`.
     if req.tool_name == "Kill" && decision == "allow_always" {
         anyhow::ensure!(crate::processes::kill_spec(&req.rule).is_some(), "there is no rule for this kill: allow it once");
     }
-    let persist = decision == "allow_always" || (allow && req.source == "request");
+    // A change to a user's checkout is allowed one command at a time: a saved rule would turn the guard off there.
+    anyhow::ensure!(!(req.tool_name == "Checkout" && decision == "allow_always"), "a change to your checkout can only be allowed once");
+    // Answers are for these questions only: they are never saved.
+    let persist = !asks && (decision == "allow_always" || (allow && req.source == "request"));
     req.status = match (allow, persist) {
         (false, _) => "denied",
         (true, true) => "allowed_always",
@@ -399,7 +517,7 @@ pub fn decide(state: &AppState, id: &str, decision: &str, rule: Option<String>, 
     state.emit(Event::Permission { request: serde_json::to_value(&req).unwrap() });
     let waiter = state.rt.lock().unwrap().waiters.remove(id);
     if let Some(tx) = waiter {
-        let _ = tx.send(Decision { allow, message: note });
+        let _ = tx.send(Decision { allow, message: note, input });
     }
     Ok(req)
 }
@@ -449,7 +567,8 @@ These rules are Loft's and apply to every message you send another agent with `m
 3. Send a verdict only to the agent that acts on it, not to everyone.
 4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.
 5. Don't reply to an FYI.
-6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.";
+6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.
+7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.";
 
 pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     let ws = workspace(state, &a.id);
@@ -458,7 +577,7 @@ pub fn system_prompt(state: &AppState, a: &Agent) -> String {
         let mut s = format!("You are woken up autonomously every {} minutes.", a.interval_minutes);
         if !a.quiet_hours.is_empty() {
             s += &format!(
-                " Wake-ups pause during the user's quiet hours ({}, local time) so background work doesn't use their Claude usage while they're working; the user can still message you then.",
+                " You only wake up on your own during your working hours ({}, local time); outside them you wait, then catch up. The user can still message you any time.",
                 schedule::describe(&a.quiet_hours)
             );
         }
@@ -481,7 +600,7 @@ pub fn system_prompt(state: &AppState, a: &Agent) -> String {
     };
     format!(
         r#"# Identity
-You are **{name}**{title}, an autonomous agent living inside Loft — the user's local developer command center. You talk with the user through the Loft chat UI, which shows your replies, reasoning, and every tool call.
+You are **{name}** ({role}), an autonomous agent living inside Loft — the user's local developer command center. You talk with the user through the Loft chat UI, which shows your replies, reasoning, and every tool call.
 
 # Personality
 {personality}
@@ -496,6 +615,9 @@ You are **{name}**{title}, an autonomous agent living inside Loft — the user's
 - Your private workspace is `{ws}`. It is your current working directory. Put every file you create there: scripts, notes, scratch data, and clones of repositories.
 - The user's projects live in `{projects}`. Never edit them in place. To work on one, clone it into your workspace (`git clone {projects}/<name>` or clone from its remote) and work on the clone.
 - Keep that one clone per project and reuse it for every ticket and review: make a branch per ticket in it, and to check a PR run `git fetch origin pull/<N>/head` and `git checkout --detach <sha>` (the SHA your verdict names). Never clone a project again for a ticket or a review while that clone exists; if it's gone (Loft deletes a clone when everything in it is pushed), clone the project again first and carry on. Never name a folder after a PR. If you need two branches at once, `git worktree add` from your own clone.
+- Run git only inside your clone (`git -C {ws}/<repo>`), never from the workspace root; if the clone is missing, clone it first, in a command of its own: run git on the new clone in the next command, not in the same one (`git clone x t && git -C t …` asks the user, because the guard can't know yet what the clone brought).
+- Write git commands with the literal absolute path: no shell variables, `cd` chains or `$(…)` in them.
+- Name the program you run literally (a path or a command name), never a variable like `$BIN` or `$A` as the command: the checkout guard asks for those.
 - Before each new branch, `git fetch origin` and create it from the remote: `git switch -c <branch> origin/<base>`, where `<base>` is the branch named in the ticket's `## Branch` section, or otherwise the default branch (`origin/HEAD`, whether it's `main` or `master`). Before each build or review round, `git fetch origin` and `git pull --ff-only` on your branch. Never build a ticket on a local default branch you haven't fetched.
 - Before you submit a ticket, mark a PR ready or start a review round, `git fetch origin` and `git merge origin/<base>` into your branch (merge, not rebase, so nobody force-pushes), resolve any conflicts, re-run the tests, then push. Loft refuses a submission whose branch is behind its base.
 - If your clone's `origin` isn't the project's GitHub remote (`git remote get-url origin`), `git remote set-url origin <the project's GitHub URL>` before fetching.
@@ -542,7 +664,7 @@ Be concise in chat. Lead with the answer or the result. When you finish a task, 
         subagents = subagents,
         grill = crate::grill::prompt_section(),
         messaging = if state.settings.get().messaging_rules { MESSAGING_RULES } else { "" },
-        title = if a.title.is_empty() { String::new() } else { format!(" ({})", a.title) },
+        role = crate::planning::role_label(if a.role.is_empty() { "custom" } else { &a.role }),
         personality = if a.personality.trim().is_empty() { "Helpful, direct, and curious." } else { a.personality.trim() },
         prompt = if a.prompt.trim().is_empty() { "(none yet — ask the user what they'd like you to own)" } else { a.prompt.trim() },
         ws = ws.display(),
@@ -592,21 +714,47 @@ pub fn enqueue(state: &AppState, agent_id: &str, text: Option<String>, trigger: 
 
 /// `enqueue`, with `meta` stored on the user message (e.g. a client id or task id). Returns that message.
 pub fn enqueue_with(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str) -> Option<Message> {
+    enqueue_message(state, agent_id, text, meta, trigger, false)
+}
+
+/// `enqueue_with` for a message the user typed in a chat: while it waits behind a run, they can still cancel it
+/// (`cancel_queued`). Anything else Loft queues (a task's brief or notices, a setup message) can't be cancelled:
+/// cancelling it would leave work half-done.
+pub fn enqueue_chat(state: &AppState, agent_id: &str, text: String, meta: Value) -> Option<Message> {
+    let cancellable = meta["task_id"].is_null();
+    enqueue_message(state, agent_id, Some(text), meta, "user", cancellable)
+}
+
+fn enqueue_message(state: &AppState, agent_id: &str, text: Option<String>, meta: Value, trigger: &'static str, cancellable: bool) -> Option<Message> {
     let prompt = text.as_ref().map(|t| {
         let p = crate::uploads::prompt(t, &meta);
+        let p = match crate::reply::prompt_block(state, agent_id, &meta) {
+            Some(q) => format!("{q}\n\n{p}"),
+            None => p,
+        };
         let refs: Vec<String> = meta["task_refs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         let p = if refs.is_empty() { p } else { format!("{p}\n\n{}", crate::tasks::reference_header(state, &refs)) };
         // A task that is both attached and tagged is described once, by its reference header.
         let tags: Vec<Value> = meta["tags"].as_array().into_iter().flatten().filter(|t| !t["task_id"].as_str().is_some_and(|id| refs.iter().any(|r| r == id))).cloned().collect();
-        match crate::tags::block(&Value::Array(tags)) {
+        let p = match crate::tags::block(&Value::Array(tags)) {
+            b if b.is_empty() => p,
+            b => format!("{p}\n\n{b}"),
+        };
+        match crate::tags::saved_block(state, &meta["tags"]) {
             b if b.is_empty() => p,
             b => format!("{p}\n\n{b}"),
         }
     });
     // The user's own message, or a schedule (or "Run now"): its reply is meant for them.
-    let for_user = matches!(trigger, "schedule" | "manual") || (text.is_some() && meta["from_agent"].is_null());
+    let for_user = matches!(trigger, "schedule" | "manual" | "scheduled") || (text.is_some() && meta["from_agent"].is_null());
     let msg = text.as_ref().and_then(|t| add_msg(state, agent_id, None, "user", "text", t, meta));
-    start(state, agent_id, prompt, trigger, for_user);
+    // Behind a running run it waits in the queue, where the user can still cancel it (`cancel_queued`).
+    start_with(state, agent_id, prompt, trigger, for_user, false, None, msg.as_ref().filter(|_| cancellable).map(|m| m.id), false);
+    if let Some(m) = &msg
+        && state.rt.lock().unwrap().queued_messages.get(agent_id).is_some_and(|q| q.iter().any(|(i, _)| *i == m.id))
+    {
+        emit_run(state, agent_id);
+    }
     msg
 }
 
@@ -625,6 +773,7 @@ fn fresh_threshold(setting: &str) -> u64 {
 fn reset_session_fields(a: &mut Agent) {
     a.session_id = None;
     a.context_tokens = None;
+    a.goal = None;
     a.grill_briefed = false;
     a.memory_index = None;
 }
@@ -659,14 +808,14 @@ fn ticket_boundary(state: &AppState, agent_id: &str, ticket: &str, builder: bool
 /// `wake` is the step it's for: when the run that takes it ends, Loft checks the step moved on.
 pub fn wake_on_ticket(state: &AppState, agent_id: &str, ticket: &str, builder: bool, prompt: String, wake: crate::delivery::Wake) {
     let fresh = ticket_boundary(state, agent_id, ticket, builder);
-    start_with(state, agent_id, Some(prompt), "delivery", false, fresh, Some(wake), None);
+    start_with(state, agent_id, Some(prompt), "delivery", false, fresh, Some(wake), None, false);
 }
 
 /// A Resume wake on `ticket`, the one its Delivery stalled on: the agent carries on with it, so it's never a
 /// ticket boundary, whatever the agent worked on meanwhile.
 pub fn resume_on_ticket(state: &AppState, agent_id: &str, ticket: &str, prompt: String, wake: crate::delivery::Wake) {
     let _ = state.db.update_agent(agent_id, |a| a.delivery_ticket = Some(ticket.to_string()));
-    start_with(state, agent_id, Some(prompt), "delivery", false, false, Some(wake), None);
+    start_with(state, agent_id, Some(prompt), "delivery", false, false, Some(wake), None, false);
 }
 
 /// How `Agent::delivery_ticket` names the ticket an agent's message is about, the way Delivery names it:
@@ -740,11 +889,19 @@ pub fn wake_with_reply(state: &AppState, agent_id: &str, prompt: String) {
 /// Have a new agent draw its own sticker from `brief`, in a quiet run: only `set_avatar`'s result shows.
 pub fn design_avatar(state: &AppState, agent_id: &str, brief: &str) {
     let prompt = format!(
-        "[Loft: you were just created] This is not a message from the user. Before any other work, design your sticker avatar.\nBrief: {brief}\n\nRead your name, title, personality and standing instructions as well: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.",
+        "[Loft: you were just created] This is not a message from the user. Before any other work, design your sticker avatar.\nBrief: {brief}\n\nRead your name, role, personality and standing instructions as well: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.",
         brief = brief.trim()
     );
     start(state, agent_id, Some(prompt), "avatar", false);
 }
+
+/// Redraw: have the agent draw a new sticker that fits who it is, in a quiet run on a throwaway session, so its
+/// own Session (chat and context) stays as it was. On a busy agent it waits for the rest of the queue.
+pub fn redraw_avatar(state: &AppState, agent_id: &str) {
+    start_with(state, agent_id, Some(REDRAW_PROMPT.into()), "avatar", false, false, None, None, true);
+}
+
+const REDRAW_PROMPT: &str = "[Loft: redraw your sticker] This is not a message from the user. The user asked you to draw a new sticker avatar.\n\nRead your role, personality and standing instructions, then your main project's README and top-level files: the sticker should say who you are and what you do at a glance. Follow the avatar style in your instructions and call `mcp__loft__set_avatar`; if it is rejected, fix the SVG and call it again. Do nothing else in this run.";
 
 /// `add_msg` for a run's output; quiet (grill) runs keep only errors. Their run still counts in the All-time spend.
 #[allow(clippy::too_many_arguments)]
@@ -775,26 +932,38 @@ pub fn message_from_agent(state: &AppState, from: &Agent, to: &Agent, text: &str
 
 /// `message_from_agent`, with extra `meta` on the stored message (e.g. which task it is about).
 pub fn message_from_agent_with(state: &AppState, from: &Agent, to: &Agent, text: &str, meta: Value) {
-    message_on_ticket(state, from, to, text, meta, None);
+    message_on_ticket(state, from, to, text, meta, None, false);
 }
 
 /// `message_from_agent_with` about `ticket` (a `message_ticket_key`), if it names one: at a ticket boundary,
 /// the recipient's Fresh context setting applies before the run, as on a Delivery wake. A Lead builds the
 /// tickets itself when its team has no Dev. Returns the message's id when it waits for a run to end.
-pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>) -> Option<i64> {
+/// With `report_back`, an agent's needs-action message hands `ticket` over: the recipient is told to report back.
+pub fn message_on_ticket(state: &AppState, from: &Agent, to: &Agent, text: &str, mut meta: Value, ticket: Option<&str>, report_back: bool) -> Option<i64> {
     let fresh = ticket.is_some_and(|t| ticket_boundary(state, &to.id, t, crate::delivery::fresh_context_applies(state, to)));
     if let Some(t) = ticket {
         meta["ticket"] = json!(t);
+        // Marks this message as a hand-over: a report back on the ticket answers it.
+        if report_back {
+            meta["report_back"] = json!(true);
+        }
     }
     meta["from_agent"] = json!({ "id": from.id, "name": from.name });
     let msg = add_msg(state, &to.id, None, "user", "text", text, meta).map(|m| m.id);
-    let prompt = format!(
+    let mut prompt = format!(
         "[Message from agent {name} (id {id}), not from the user]\n{text}\n\n[Your replies in this chat are seen by the user, not by {name}. To answer {name}, call `mcp__loft__message_agent` with agent \"{id}\".]",
         name = from.name,
         id = from.id,
     );
-    start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg);
-    let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.contains(id)));
+    if let Some(t) = ticket.filter(|_| report_back) {
+        prompt.push_str(&format!(
+            "\n[When this work is done, or blocked, report back to {name}: call `mcp__loft__message_agent` with agent \"{id}\", kind \"needs_action\" and ticket \"{t}\", saying what you did and where it is.]",
+            name = from.name,
+            id = from.id,
+        ));
+    }
+    start_with(state, &to.id, Some(prompt), "agent", false, fresh, None, msg, false);
+    let queued = msg.filter(|id| state.rt.lock().unwrap().queued_messages.get(&to.id).is_some_and(|q| q.iter().any(|(i, _)| i == id)));
     if queued.is_some() {
         emit_run(state, &to.id);
     }
@@ -824,8 +993,19 @@ pub fn fyi_from_loft(state: &AppState, to: &Agent, text: &str) {
     let _ = state.db.add_pending_fyi(&to.id, &format!("[FYI from Loft, not from the user. It needs no action and no reply.]\n{text}"));
 }
 
+/// A needs-action message from Loft itself (a Delivery that stalled): it wakes the agent, and the run sees `text` as its prompt; its reply is an Unread reply.
+pub fn needs_action_from_loft(state: &AppState, to: &Agent, text: &str) {
+    start(state, &to.id, Some(format!("[From Loft, not from the user.]\n{text}")), "delivery", true);
+}
+
 /// The most FYIs put in front of one prompt; older ones are only counted.
 const MAX_FYIS_PER_PROMPT: usize = 20;
+
+/// A prompt that is a slash command, like `/goal clear` or `/context`: claude may answer it itself, without a turn.
+/// It runs only as the whole prompt, so it runs alone: no FYIs in front, no other queued message joined to it.
+fn is_command(prompt: &str) -> bool {
+    prompt.starts_with('/')
+}
 
 /// Put the pending FYIs, oldest first, in front of the prompt: the newest MAX_FYIS_PER_PROMPT,
 /// after a line saying how many older ones were left out.
@@ -845,15 +1025,16 @@ fn with_fyis(fyis: &[(i64, String)], prompt: &str) -> String {
 
 /// `for_user`: the run answers the user (their message or a schedule), so its reply leaves an Unread reply.
 fn start(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool) {
-    start_with(state, agent_id, text, trigger, for_user, false, None, None);
+    start_with(state, agent_id, text, trigger, for_user, false, None, None, false);
 }
 
 /// `start`; `fresh`: the prompt starts a new Delivery ticket, so the run that delivers it first applies
 /// the agent's Fresh context setting (`fresh_if_due`). `delivery`: the Delivery step the prompt wakes the
 /// agent for, kept with the prompt (queued with it, then on the run that takes it). `msg`: the agent message
-/// the prompt carries, shown as queued while it waits (`Runtime::queued_messages`).
+/// the prompt carries, shown as queued while it waits (`Runtime::queued_messages`). `throwaway`: a Redraw, run on
+/// a session of its own (`redraw_avatar`).
 #[allow(clippy::too_many_arguments)]
-fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool, delivery: Option<crate::delivery::Wake>, msg: Option<i64>) {
+fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &'static str, for_user: bool, fresh: bool, delivery: Option<crate::delivery::Wake>, msg: Option<i64>, throwaway: bool) {
     let prompt = text.unwrap_or_else(|| {
         format!(
             "[Autonomous check-in — {}] This is a scheduled wake-up, not a message from the user. Review your standing instructions and memory, then do whatever is most useful right now. If there is nothing worth doing, say so in one line.",
@@ -866,7 +1047,17 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
             rt.fresh_before.insert(agent_id.to_string());
         }
         if rt.running.contains_key(agent_id) {
-            if trigger == "grill" {
+            if throwaway {
+                // One drawing run at a time: a Redraw already running or queued covers this click.
+                let queued = !rt.redrawing.contains(agent_id) && rt.redraw_queued.insert(agent_id.to_string());
+                // It waits for the run as it is: background work the agent waits on isn't stopped for it.
+                drop(rt);
+                if queued {
+                    // Clients hear it's queued (`redrawing`) before the run it waits for ends.
+                    emit_run(state, agent_id);
+                }
+                return;
+            } else if trigger == "grill" {
                 rt.grill_queued.entry(agent_id.to_string()).or_default().push(prompt);
             } else {
                 rt.queued.entry(agent_id.to_string()).or_default().push(prompt.clone());
@@ -874,10 +1065,10 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                     rt.queued_for_user.insert(agent_id.to_string());
                 }
                 if let Some(w) = delivery {
-                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt)));
+                    rt.delivery_queued.entry(agent_id.to_string()).or_default().push((w, Some(prompt.clone())));
                 }
                 if let Some(id) = msg {
-                    rt.queued_messages.entry(agent_id.to_string()).or_default().push(id);
+                    rt.queued_messages.entry(agent_id.to_string()).or_default().push((id, prompt));
                 }
             }
             if let Some(w) = rt.waiting.get(agent_id) {
@@ -887,6 +1078,9 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
         }
         let kill = Arc::new(Notify::new());
         rt.running.insert(agent_id.to_string(), kill.clone());
+        if throwaway {
+            rt.redrawing.insert(agent_id.to_string());
+        }
         if let Some(w) = delivery {
             rt.delivery_running.entry(agent_id.to_string()).or_default().push(w);
         }
@@ -895,22 +1089,31 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
     let state = state.clone();
     let agent_id = agent_id.to_string();
     tokio::spawn(async move {
+        let _ended = RunEnded { state: state.clone(), agent_id: agent_id.clone(), kill: kill.clone() };
         let mut prompt = prompt;
         let mut trigger = trigger;
         let mut for_user = for_user;
+        let mut throwaway = throwaway;
         loop {
-            // Only between runs: a ticket boundary queued behind a run waits for it to end.
-            fresh_boundary(&state, &agent_id);
+            #[cfg(test)]
+            if prompt.contains("loft-test-panic") {
+                panic!("a run panicked");
+            }
+            // Only between runs: a ticket boundary queued behind a run waits for it to end. A Redraw leaves the Session alone.
+            if !throwaway {
+                fresh_boundary(&state, &agent_id);
+            }
             if trigger == "grill" {
                 prompt = crate::grill::with_brief(&state, &agent_id, prompt);
             }
-            // `/compact` must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
-            let fyis = if trigger != "compact" && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
+            // A slash command must stay the whole prompt, and the avatar run does nothing else: FYIs wait for a real run.
+            let fyis = if !is_command(&prompt) && trigger != "avatar" { state.db.take_pending_fyis(&agent_id).unwrap_or_default() } else { vec![] };
             let full = with_fyis(&fyis, &prompt);
             let mut delivered = false;
-            let failed = match run_once(&state, &agent_id, &full, trigger, for_user, kill.clone(), &mut delivered).await {
+            let failed = match run_once(&state, &agent_id, &full, trigger, for_user, throwaway, kill.clone(), &mut delivered).await {
                 Ok(failed) => failed,
                 Err(e) => {
+                    end_run_info(&state, &agent_id);
                     // Claude never got the prompt, so the FYIs never reached it: keep them for the next run.
                     if !delivered {
                         let _ = state.db.restore_pending_fyis(&agent_id, &fyis);
@@ -924,38 +1127,78 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
                 }
             };
             crate::delivery::run_ended(&state, &agent_id, failed).await;
-            let (next, delivered) = {
+            // Test browsers the run left open hold gigabytes of memory: stop them, and say so in the next run.
+            let closed = crate::processes::stop_test_browsers(&state.cfg.storage_dir, &agent_id).await;
+            if closed > 0
+                && let Ok(Some(a)) = state.db.get_agent(&agent_id)
+            {
+                fyi_from_loft(&state, &a, &format!("Loft closed {closed} test browser{} left from your last run. Close your browsers in your scripts (`try`/`finally` `browser.close()`).", if closed == 1 { "" } else { "s" }));
+            }
+            let (next, push) = {
                 let mut rt = state.rt.lock().unwrap();
-                // The run that takes the queue delivers its agent messages.
-                let delivered = rt.queued_messages.remove(&agent_id).is_some();
-                let next = match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
-                    (Some(q), g) if !q.is_empty() => {
-                        // User work first; grill follow-ups wait for the run after it.
-                        if let Some(g) = g {
-                            rt.grill_queued.insert(agent_id.clone(), g);
+                let drew = rt.redrawing.remove(&agent_id);
+                // A slash command in a longer queue runs on its own first (a sent-now `/goal clear` put back, say);
+                // the rest waits for the run after it.
+                let command = rt.queued.get(&agent_id).filter(|q| q.len() > 1).and_then(|q| q.iter().find(|p| is_command(p)).cloned());
+                let (delivered, next) = if let Some(cmd) = command {
+                    let id = rt.queued_messages.get(&agent_id).and_then(|q| q.iter().find(|(_, p)| *p == cmd)).map(|(i, _)| *i);
+                    let mine = id.is_some_and(|i| state.db.get_message(&agent_id, i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()));
+                    match id {
+                        Some(i) => {
+                            unqueue(&state, &mut rt, &agent_id, i);
                         }
-                        let u = rt.queued_for_user.remove(&agent_id);
-                        take_delivery_queue(&mut rt, &agent_id);
-                        Some((q.join("\n\n"), "user", u))
+                        None => {
+                            let q = rt.queued.get_mut(&agent_id).unwrap();
+                            if let Some(at) = q.iter().position(|p| *p == cmd) {
+                                q.remove(at);
+                            }
+                        }
                     }
-                    (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false)),
-                    _ => {
-                        // Saved before the run stops counting as running, so a restart keeps the idle time.
-                        let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
-                        rt.running.remove(&agent_id);
-                        None
-                    }
+                    (id.is_some(), Some((cmd, "user", mine, false)))
+                } else {
+                    // The run that takes the queue delivers its agent messages.
+                    let delivered = rt.queued_messages.remove(&agent_id).is_some();
+                    let next = match (rt.queued.remove(&agent_id), rt.grill_queued.remove(&agent_id)) {
+                        (Some(q), g) if !q.is_empty() => {
+                            // User work first; grill follow-ups wait for the run after it.
+                            if let Some(g) = g {
+                                rt.grill_queued.insert(agent_id.clone(), g);
+                            }
+                            let u = rt.queued_for_user.remove(&agent_id);
+                            take_delivery_queue(&mut rt, &agent_id);
+                            Some((q.join("\n\n"), "user", u, false))
+                        }
+                        (_, Some(g)) if !g.is_empty() => Some((g.join("\n\n"), "grill", false, false)),
+                        // A Redraw waits for everything else.
+                        _ if rt.redraw_queued.remove(&agent_id) => {
+                            rt.redrawing.insert(agent_id.clone());
+                            Some((REDRAW_PROMPT.to_string(), "avatar", false, true))
+                        }
+                        _ => {
+                            // Saved before the run stops counting as running, so a restart keeps the idle time.
+                            let _ = state.db.update_agent(&agent_id, |a| a.last_run_ended_at = Some(chrono::Utc::now().to_rfc3339()));
+                            rt.running.remove(&agent_id);
+                            None
+                        }
+                    };
+                    (delivered, next)
                 };
-                (next, delivered)
+                let push = delivered || (drew && next.is_some());
+                (next, push)
             };
-            if delivered {
+            // Delivered agent messages leave `queued_messages`; a Redraw that ended with more work queued after it
+            // turns `redrawing` false now, not when the next run ends (with nothing queued, the event after the loop says it).
+            if push {
                 emit_run(&state, &agent_id);
             }
             match next {
-                Some((p, t, u)) => {
+                Some((p, t, u, w)) => {
+                    // A Stop pressed after the last run ended was for that run, not the queued one.
+                    let _ = tokio::time::timeout(Duration::ZERO, kill.notified()).await;
                     prompt = p;
                     trigger = t;
                     for_user = u;
+                    throwaway = w;
                 }
                 None => break,
             }
@@ -966,11 +1209,206 @@ fn start_with(state: &AppState, agent_id: &str, text: Option<String>, trigger: &
     });
 }
 
+/// Ends the run in Loft's books however its task ends: after a panic (or any way out that skipped the normal
+/// end) the agent is still marked running, so this clears the live run, its info and the saved status. A run
+/// started after this one ended has its own kill switch, and is left alone.
+struct RunEnded {
+    state: AppState,
+    agent_id: String,
+    kill: Arc<Notify>,
+}
+
+impl Drop for RunEnded {
+    fn drop(&mut self) {
+        let saved = {
+            // A panic while the lock was held poisons it: the run still has to end, and Loft to go on serving.
+            self.state.rt.clear_poison();
+            let mut rt = self.state.rt.lock().unwrap_or_else(|e| e.into_inner());
+            if !rt.running.get(&self.agent_id).is_some_and(|k| Arc::ptr_eq(k, &self.kill)) {
+                return;
+            }
+            rt.running.remove(&self.agent_id);
+            rt.runs.remove(&self.agent_id);
+            rt.waiting.remove(&self.agent_id);
+            rt.redrawing.remove(&self.agent_id);
+            tracing::warn!("agent {}: its run ended without finishing", self.agent_id);
+            self.state.db.update_agent(&self.agent_id, |a| {
+                a.status = "error".into();
+                a.status_text = "Last run failed".into();
+            })
+        };
+        if let Ok(Some(a)) = saved {
+            emit_agent(&self.state, &a);
+        }
+    }
+}
+
 /// The run that takes the agent's queue takes the Delivery steps it was woken for.
 pub(crate) fn take_delivery_queue(rt: &mut crate::state::Runtime, agent_id: &str) {
     if let Some(w) = rt.delivery_queued.remove(agent_id) {
         rt.delivery_running.entry(agent_id.to_string()).or_default().extend(w.into_iter().map(|(w, _)| w));
     }
+}
+
+/// Takes agent message `id` back out of `agent_id`'s queue before a run takes it, and marks it cancelled in the chat.
+/// The queue is read and changed under one lock, the one the run takes it under when it ends: a message is either
+/// cancelled or delivered, never both. False when it isn't queued (a run already took it).
+pub fn cancel_queued(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
+    {
+        let mut rt = state.rt.lock().unwrap();
+        if unqueue(state, &mut rt, agent_id, id).is_none() {
+            return Ok(false);
+        }
+        // The ticket and context clear a hand-over set are left as they are: the worst case is one context clear
+        // the agent didn't need on its next run.
+    }
+    state.db.mark_cancelled(agent_id, id)?;
+    emit_message(state, agent_id, id)?;
+    emit_run(state, agent_id);
+    Ok(true)
+}
+
+/// Takes queued message `id` out of `agent_id`'s queue, returning its prompt. None when it isn't queued.
+fn unqueue(state: &AppState, rt: &mut crate::state::Runtime, agent_id: &str, id: i64) -> Option<String> {
+    let at = rt.queued_messages.get(agent_id)?.iter().position(|(i, _)| *i == id)?;
+    let (_, prompt) = rt.queued_messages.get_mut(agent_id).unwrap().remove(at);
+    if let Some(q) = rt.queued.get_mut(agent_id)
+        && let Some(p) = q.iter().position(|x| *x == prompt)
+    {
+        q.remove(p);
+    }
+    // Nothing queued is for the user any more (every waiting prompt is a tracked message, none the user's own):
+    // the next run isn't an answer to them.
+    let rest: Vec<i64> = rt.queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+    if rt.queued.get(agent_id).map_or(0, |q| q.len()) == rest.len()
+        && !rest.iter().any(|i| state.db.get_message(agent_id, *i).ok().flatten().is_some_and(|m| m.meta["from_agent"].is_null()))
+    {
+        rt.queued_for_user.remove(agent_id);
+    }
+    Some(prompt)
+}
+
+fn emit_message(state: &AppState, agent_id: &str, id: i64) -> Result<()> {
+    if let Some(m) = state.db.get_message(agent_id, id)? {
+        state.emit(Event::Message { message: serde_json::to_value(&m).unwrap() });
+    }
+    Ok(())
+}
+
+/// Send now: delivers the user's queued message `id` into `agent_id`'s run in progress, as Ctrl+Enter does in the
+/// terminal, instead of waiting for the run to end. It leaves the queue for good: it can't be cancelled and the next
+/// run doesn't get it again. False, leaving it queued, for an agent's message, or when the run takes no more input
+/// (it's ending, or it's a quiet one): it waits for the next run as before.
+pub fn send_now(state: &AppState, agent_id: &str, id: i64) -> Result<bool> {
+    if !state.db.get_message(agent_id, id)?.is_some_and(|m| m.meta["from_agent"].is_null()) {
+        return Ok(false);
+    }
+    {
+        // Under the lock the run closes its input under: a message is either written to it or stays queued.
+        let mut rt = state.rt.lock().unwrap();
+        let Some(tx) = rt.runs.get(agent_id).and_then(|i| i.send_now.clone()) else {
+            return Ok(false);
+        };
+        let Some(prompt) = rt.queued_messages.get(agent_id).and_then(|q| q.iter().find(|(i, _)| *i == id)).map(|(_, p)| p.clone()) else {
+            return Ok(false);
+        };
+        if tx.send((id, prompt.clone())).is_err() {
+            return Ok(false);
+        }
+        unqueue(state, &mut rt, agent_id, id);
+        let info = rt.runs.get_mut(agent_id).unwrap();
+        info.sent.push((id, prompt));
+        // The run now answers the user: its reply is an Unread reply.
+        info.for_user = true;
+    }
+    state.db.mark_sent_now(agent_id, id, true)?;
+    emit_message(state, agent_id, id)?;
+    emit_run(state, agent_id);
+    Ok(true)
+}
+
+/// Send now for each of the user's messages in `agent_id`'s queue, in order, as when a goal or Stop hook blocks.
+/// A run that takes no input keeps them queued.
+fn send_queued_now(state: &AppState, agent_id: &str) {
+    let ids: Vec<i64> = state.rt.lock().unwrap().queued_messages.get(agent_id).map(|q| q.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+    for id in ids {
+        if let Err(e) = send_now(state, agent_id, id) {
+            tracing::warn!("send now {id} for {agent_id}: {e:#}");
+        }
+    }
+}
+
+/// The Goal active button: sends `/goal clear` as the user's message, into the run in progress when there is one
+/// (Send now, so it clears even while the goal keeps the run going), or as the next run otherwise.
+pub fn clear_goal(state: &AppState, agent_id: &str) -> Option<Message> {
+    let msg = enqueue_chat(state, agent_id, "/goal clear".into(), json!({}))?;
+    // A run that takes no more input gets it next, from the queue.
+    let _ = send_now(state, agent_id, msg.id);
+    Some(msg)
+}
+
+/// Records the agent's `/goal` as a run showed it, and pushes it to the clients when it changed.
+fn set_goal(state: &AppState, agent_id: &str, goal: Option<String>) {
+    if state.db.get_agent(agent_id).ok().flatten().is_none_or(|a| a.goal == goal) {
+        return;
+    }
+    if let Ok(Some(a)) = state.db.update_agent(agent_id, |a| a.goal = goal) {
+        emit_agent(state, &a);
+    }
+}
+
+/// What a claude-made reply line says about the goal: `Goal set: <condition>` (or `Goal active: …` on `/goal`
+/// after a resume) sets it, `Goal cleared: …` and `No goal set` drop it. None when it says nothing about it.
+fn goal_change(text: &str) -> Option<Option<String>> {
+    if let Some(g) = text.strip_prefix("Goal set:").or_else(|| text.strip_prefix("Goal active:")) {
+        return Some(Some(g.trim().trim_end_matches("(not yet evaluated)").trim().to_string()));
+    }
+    (text.starts_with("Goal cleared") || text.starts_with("No goal set")).then_some(None)
+}
+
+/// A Stop hook's block: the synthetic user line claude adds each time a Stop hook or a `/goal` sends it back to
+/// work, `Stop hook feedback:\n<reason>`, or `…\n[<condition>]: <reason>` for a goal. Returns the goal's
+/// condition, if a goal sent it (`goal` is the one Loft knows, to cut it off exactly), and the reason.
+fn hook_block(ev: &Value, goal: Option<&str>) -> Option<(Option<String>, String)> {
+    if ev["type"] != "user" || ev["isSynthetic"] != true {
+        return None;
+    }
+    let text = user_text(ev);
+    let rest = text.strip_prefix("Stop hook feedback:")?.trim();
+    let known = goal.and_then(|g| rest.strip_prefix(&format!("[{g}]:")).map(|r| (g.to_string(), r)));
+    let goal = known.or_else(|| rest.strip_prefix('[')?.split_once("]:").map(|(g, r)| (g.to_string(), r)));
+    Some(match goal {
+        Some((g, r)) => (Some(g), r.trim().to_string()),
+        None => (None, rest.to_string()),
+    })
+}
+
+/// The chat's line for a Stop hook's block: why the agent keeps going.
+fn hook_block_line(goal: bool, reason: &str) -> String {
+    let reason = if reason.is_empty() { "no reason given" } else { reason };
+    if goal { format!("Goal not met: {}", truncate(reason, 600)) } else { format!("Stop hook: {}", truncate(reason, 600)) }
+}
+
+/// The run is over in Loft's books: drops its info, and puts the user's messages sent now that claude never took
+/// back at the front of the queue, as they were, for the next run. Returns the info.
+fn end_run_info(state: &AppState, agent_id: &str) -> Option<crate::state::RunInfo> {
+    let info = {
+        let mut rt = state.rt.lock().unwrap();
+        rt.waiting.remove(agent_id);
+        let info = rt.runs.remove(agent_id)?;
+        for (id, prompt) in info.sent.iter().rev() {
+            rt.queued.entry(agent_id.to_string()).or_default().insert(0, prompt.clone());
+            rt.queued_messages.entry(agent_id.to_string()).or_default().insert(0, (*id, prompt.clone()));
+            rt.queued_for_user.insert(agent_id.to_string());
+        }
+        info
+    };
+    for (id, _) in &info.sent {
+        tracing::info!("agent {agent_id}: message {id} was sent now but the run ended before claude took it: queued again");
+        let _ = state.db.mark_sent_now(agent_id, *id, false);
+        let _ = emit_message(state, agent_id, *id);
+    }
+    Some(info)
 }
 
 pub fn stop(state: &AppState, agent_id: &str) -> bool {
@@ -1017,6 +1455,7 @@ fn tool_summary(name: &str, input: &Value) -> String {
             "list_agent_templates" => "Reading the agent templates".into(),
             "create_agent" => format!("Creating {}", if s("name").is_empty() { s("template") } else { s("name") }),
             "set_schedule" => "Changing its schedule".into(),
+            "set_group" => format!("Moving agents to {}", s("group")),
             "comment_issue" | "comment_task" => "Commenting on a Loft issue".into(),
             "get_issue" | "get_task" => "Reading a Loft issue".into(),
             other => other.replace('_', " "),
@@ -1062,7 +1501,7 @@ fn agent_file(state: &AppState, agent_id: &str, kind: &str) -> PathBuf {
 }
 
 pub(crate) const AGENT_FILES: &str = ".agent-files";
-const AGENT_FILE_KINDS: [&str; 4] = ["md", "mcp.json", "settings.json", "env.sh"];
+const AGENT_FILE_KINDS: [&str; 5] = ["md", "mcp.json", "settings.json", "env.sh", "commands.json"];
 /// Where the agents' files were kept before they held more than the prompt.
 const OLD_AGENT_FILES: &str = ".system-prompts";
 
@@ -1106,15 +1545,31 @@ fn loft_exe() -> Result<PathBuf> {
         if let Some(bin) = next_to_tests.filter(|b| b.exists()) {
             return Ok(bin);
         }
-        // With `CARGO_BUILD_BUILD_DIR` the test binary is built elsewhere; the loft binary stays in the target dir.
+        // With `build-dir` set the test binary is built elsewhere; the loft binary stays in the target dir.
         let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
         return Ok(target.join("debug/loft"));
     }
     Ok(exe)
 }
 
+/// Cargo keeps compiled dependencies in the workspace's `.cargo-build/`, shared by all the agent's clones; binaries
+/// stay in each clone's `target/`. It's set in the workspace's `.cargo/config.toml`, which every clone inside finds,
+/// and not in the environment: sccache hashes `CARGO_*` variables, so a build dir that differs per agent in the
+/// environment keeps agents from sharing cache hits.
+fn write_cargo_config(ws: &Path) -> Result<()> {
+    let dir = serde_json::to_string(&ws.join(".cargo-build").to_string_lossy())?;
+    let text = format!("[build]\nbuild-dir = {dir}\n");
+    let path = ws.join(".cargo/config.toml");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(&text) {
+        std::fs::create_dir_all(ws.join(".cargo"))?;
+        std::fs::write(path, text)?;
+    }
+    Ok(())
+}
+
 /// The claude command for a run. Writing its files fails the run rather than putting them on argv.
 fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
+    write_cargo_config(&workspace(state, &a.id))?;
     let mut servers = serde_json::Map::new();
     if let Value::Object(user) = &a.mcp_servers {
         for (k, v) in user {
@@ -1143,6 +1598,10 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         "hooks": crate::kill_guard::hooks(&exe),
     });
 
+    crate::commands::unlink_user_commands(&workspace(state, &a.id), &crate::sessions::claude_dir());
+    // Read from the workspace by a relative path, like the agent's files, so no user folder is on argv.
+    let user_plugin = crate::commands::sync_user_plugin(&state.cfg.storage_dir.join(AGENT_FILES), &crate::sessions::claude_dir())
+        .map(|p| PathBuf::from("..").join(AGENT_FILES).join(p.file_name().unwrap()));
     let ports = crate::ports::range(state, &a.id)?;
     let mut cmd = Command::new(state.settings.get().claude_bin);
     cmd.current_dir(workspace(state, &a.id))
@@ -1154,30 +1613,40 @@ fn build_command(state: &AppState, a: &Agent, resume: bool) -> Result<Command> {
         .arg("--mcp-config")
         .arg(write_agent_file(state, &a.id, "mcp.json", &mcp_config)?)
         .arg("--strict-mcp-config")
-        // Isolate agents from the user's own Claude Code settings, hooks and plugins.
+        // Agents read no settings file: not the user's, and not the workspace's, which the agent can write
+        // (an allow rule or a hook there would skip the approval prompt). The user's own commands and skills
+        // come as a plugin Loft owns (see `commands`).
         .args(["--setting-sources", ""])
         .arg("--settings")
         .arg(write_agent_file(state, &a.id, "settings.json", &settings.to_string())?)
         .args(["--permission-prompt-tool", "mcp__loft__approval_prompt"])
         .args(["--permission-mode", &a.permission_mode])
+        .args(user_plugin.iter().flat_map(|p| [std::ffi::OsStr::new("--plugin-dir"), p.as_os_str()]))
         .args(["--name", &a.name])
         .env("MCP_TOOL_TIMEOUT", TOOL_WAIT.as_millis().to_string())
         // The kill of a process the agent doesn't own waits that long for the user, inside a Bash call.
         .env("BASH_MAX_TIMEOUT_MS", TOOL_WAIT.as_millis().to_string())
         .env("CLAUDE_ENV_FILE", agent_file(state, &a.id, "env.sh"))
         .env(crate::processes::URL_VAR, format!("http://127.0.0.1:{}/kill/{}", state.cfg.port, a.id))
+        .env(crate::kill_guard::URL_VAR, format!("http://127.0.0.1:{}/guard/{}", state.cfg.port, a.id))
         .env("CLAUDE_CODE_ENTRYPOINT", "loft")
         // The agent's port range, for its dev servers: `PORT` (which many servers read) is its first port.
         .env("PORT", ports.start().to_string())
         .env(crate::ports::RANGE_VAR, crate::ports::describe(&ports))
-        // Cargo keeps compiled dependencies here, shared by all the agent's clones; binaries stay in each clone's `target/`.
-        .env("CARGO_BUILD_BUILD_DIR", workspace(state, &a.id).join(".cargo-build"))
+        // Workspaces live outside any repo (ADR 0005), but a home folder can be one: git in a workspace with no clone
+        // stops here instead of finding it. Git ignores a relative ceiling.
+        .env("GIT_CEILING_DIRECTORIES", std::path::absolute(&state.cfg.storage_dir).unwrap_or_else(|_| state.cfg.storage_dir.clone()))
         // Vite rejects requests for hostnames it doesn't know; let dev servers answer on the tailnet name.
         .env("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", crate::tailnet::host().unwrap_or_default())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if crate::project_settings::sccache_on(state, &a.project) {
+        crate::sccache::apply(&mut cmd, state.settings.dir());
+    } else {
+        crate::sccache::remove(&mut cmd);
+    }
     // Its own Simulator device, once it has one (an earlier run asked for it).
     match state.db.agent_device(&a.id)? {
         Some(udid) => cmd.env(crate::simulator::DEVICE_VAR, udid),
@@ -1228,10 +1697,12 @@ fn set_session(state: &AppState, agent_id: &str, sid: &str) -> Result<()> {
 
 /// `delivered` is set once a claude process has the prompt and acts on it (a stale session doesn't).
 /// Whether the run failed: claude reported an error, or exited without a result when nobody stopped it.
-async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<bool> {
-    let mut resume = true;
+/// `throwaway`: run on a new session that isn't saved, leaving the agent's own Session as it was.
+#[allow(clippy::too_many_arguments)]
+async fn run_once(state: &AppState, agent_id: &str, prompt: &str, trigger: &str, for_user: bool, throwaway: bool, kill: Arc<Notify>, delivered: &mut bool) -> Result<bool> {
+    let mut resume = !throwaway;
     loop {
-        match run_process(state, agent_id, prompt, trigger, for_user, kill.clone(), resume, delivered).await? {
+        match run_process(state, agent_id, prompt, trigger, for_user, throwaway, kill.clone(), resume, delivered).await? {
             RunOutcome::Done { failed } => return Ok(failed),
             RunOutcome::StaleSession if trigger == "compact" => anyhow::bail!("Nothing to compact: the session is gone."),
             RunOutcome::StaleSession if resume => {
@@ -1264,6 +1735,116 @@ enum RunOutcome {
     StaleSession,
 }
 
+/// Model turns in a row with no tool call after which Loft stops a run: a goal or Stop hook that never passes
+/// keeps claude answering the same text, each turn billed, until its own limit of 9.
+const BRAKE_TURNS: u32 = 5;
+
+/// Counts the agent's own model turns in a row that call no tool, within one claude turn (a `result` ends it).
+/// Claude only takes another turn without a tool call when something pushes it on, like a Stop hook's feedback.
+#[derive(Default)]
+struct Brake {
+    turns: u32,
+    /// The model turn being read (its message id; claude may split one turn over several lines) and whether it called a tool.
+    open: Option<(Option<String>, bool)>,
+    /// The last Stop hook feedback, which says why claude kept going (a goal's reason, without its condition).
+    reason: Option<String>,
+}
+
+impl Brake {
+    fn close(&mut self) {
+        if let Some((_, tools)) = self.open.take() {
+            self.turns = if tools { 0 } else { self.turns + 1 };
+        }
+    }
+
+    /// Reads one of claude's top-level lines; true when the run should stop before another turn.
+    fn see(&mut self, ev: &Value) -> bool {
+        let blocks = ev["message"]["content"].as_array().map(Vec::as_slice).unwrap_or_default();
+        match ev["type"].as_str() {
+            // Claude's own replies to commands like `/goal` aren't model turns.
+            Some("assistant") if ev["message"]["model"] == "<synthetic>" => {}
+            Some("assistant") => {
+                let id = ev["message"]["id"].as_str().map(String::from);
+                let tools = blocks.iter().any(|b| b["type"] == "tool_use");
+                match &mut self.open {
+                    Some((open, t)) if id.is_some() && *open == id => *t |= tools,
+                    _ => {
+                        self.close();
+                        if self.turns >= BRAKE_TURNS {
+                            return true;
+                        }
+                        self.open = Some((id, tools));
+                    }
+                }
+            }
+            Some("user") if !blocks.iter().any(|b| b["type"] == "tool_result") => {
+                self.close();
+                if ev["isSynthetic"] == true {
+                    if let Some((_, r)) = hook_block(ev, None) {
+                        self.reason = Some(r);
+                    }
+                } else {
+                    // A message from the user is new input, not a loop.
+                    self.turns = 0;
+                    self.reason = None;
+                }
+                return self.turns >= BRAKE_TURNS;
+            }
+            Some("result") => {
+                self.open = None;
+                self.turns = 0;
+                self.reason = None;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// What the chat says when the brake stops a run.
+    fn notice(&self) -> String {
+        let head = format!("Stopped the run: {BRAKE_TURNS} turns in a row without a tool call.");
+        match &self.reason {
+            Some(r) if !r.is_empty() => format!("{head} A goal or Stop hook kept it going: {}", truncate(r, 600)),
+            _ => format!("{head} It looked stuck in a loop."),
+        }
+    }
+}
+
+/// `prompt` as a line of claude's stream-json input, its images inline. `now`: for a run in progress, which claude
+/// otherwise takes only once its turn ends; during a Stop hook's or goal's block, that's never.
+async fn input_line(state: &AppState, agent_id: &str, prompt: &str, now: bool) -> String {
+    let line = crate::uploads::stdin_line(state, agent_id, prompt).await;
+    let mut v = line.and_then(|l| serde_json::from_str::<Value>(&l).ok()).unwrap_or_else(|| {
+        json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] } })
+    });
+    if now {
+        v["priority"] = json!("now");
+    }
+    v.to_string() + "\n"
+}
+
+/// The text of a user line, claude's or Loft's input: what tells a replay apart.
+fn user_text(ev: &Value) -> String {
+    let content = &ev["message"]["content"];
+    content.as_str().map(String::from).unwrap_or_else(|| content.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect())
+}
+
+/// Claude stays alive while its stdin is open: Loft closes it where the run would end. Not while a message sent
+/// now is still on its way in (claude takes it in a turn of its own); false then.
+fn close_input(state: &AppState, agent_id: &str, stdin: &mut Option<tokio::process::ChildStdin>) -> bool {
+    if stdin.is_none() {
+        return true;
+    }
+    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+        if !i.sent.is_empty() {
+            return false;
+        }
+        i.send_now = None;
+    }
+    *stdin = None;
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_process(
     state: &AppState,
@@ -1271,12 +1852,14 @@ async fn run_process(
     prompt: &str,
     trigger: &str,
     for_user: bool,
+    throwaway: bool,
     kill: Arc<Notify>,
     resume: bool,
     delivered: &mut bool,
 ) -> Result<RunOutcome> {
     let mut agent = state.db.get_agent(agent_id)?.ok_or_else(|| anyhow::anyhow!("agent not found"))?;
-    if !resume || agent.session_id.is_none() || agent.memory_index.is_none() {
+    // A throwaway run leaves the frozen memories to the agent's Session (its prompt builds them if there are none).
+    if !throwaway && (!resume || agent.session_id.is_none() || agent.memory_index.is_none()) {
         // A new Session (or the first run since Clear or Compact): freeze its memories for the runs to come.
         let block = memory_block(state, agent_id);
         agent = state.db.update_agent(agent_id, |a| a.memory_index = Some(block))?.unwrap_or(agent);
@@ -1307,11 +1890,15 @@ async fn run_process(
     }
     run_msg(quiet, state, agent_id, rid, "system", "run_start", trigger, json!({ "trigger": trigger, "resumed": resume && agent.session_id.is_some(), "for_user": for_user }));
 
-    let image_line = crate::uploads::stdin_line(state, agent_id, prompt).await;
+    let first = input_line(state, agent_id, prompt, false).await;
+    let first_text = serde_json::from_str::<Value>(&first).map(|v| user_text(&v)).unwrap_or_default();
     let mut cmd = build_command(state, &agent, resume)?;
-    if image_line.is_some() {
-        cmd.args(["--input-format", "stream-json"]);
+    if throwaway {
+        // Not saved, so it isn't listed among the agent's past Sessions either.
+        cmd.arg("--no-session-persistence");
     }
+    // Input as stream-json lines, each echoed back once claude takes it: a message sent now is delivered at its echo.
+    cmd.args(["--input-format", "stream-json", "--replay-user-messages"]);
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start `{}`: {e}", state.settings.get().claude_bin))?;
@@ -1320,10 +1907,17 @@ async fn run_process(
         && let Err(e) = crate::processes::record(&state.cfg.storage_dir, agent_id, pid) {
             tracing::warn!("agent {agent_id}: could not record its process session: {e}");
         }
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(image_line.as_deref().unwrap_or(prompt).as_bytes()).await?;
+    let mut stdin = child.stdin.take();
+    stdin.as_mut().unwrap().write_all(first.as_bytes()).await?;
+    // A run the user reads takes their messages sent now (`send_now`) while it lasts; a quiet one only its prompt.
+    let takes_input = !quiet && !throwaway;
+    if !takes_input {
+        stdin = None;
     }
+    let (send_tx, mut send_rx) = tokio::sync::mpsc::unbounded_channel::<(i64, String)>();
+    // Messages sent now written to claude, by the text claude echoes back once it takes one.
+    let mut written: Vec<(i64, String)> = Vec::new();
+    let mut first_echoed = false;
     *delivered = true;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stderr = child.stderr.take().unwrap();
@@ -1354,11 +1948,30 @@ async fn run_process(
     let mut replied = false;
     let mut held_end: Option<Value> = None;
     let preempt = Arc::new(Notify::new());
-    state.rt.lock().unwrap().runs.insert(agent_id.to_string(), crate::state::RunInfo { last_output_at: now(), for_user, ..Default::default() });
+    // Claude has exited, but a process it left behind can keep its pipes open: read what's buffered until then.
+    let mut drain_until: Option<tokio::time::Instant> = None;
+    let mut brake = Brake::default();
+    // The brake stopped the run: it ends like a stop, with the reason in the chat, and the queue goes on.
+    let mut braked = false;
+    // Claude ended the turn over its own limit of Stop hook blocks in a row: the goal didn't pass, it stays.
+    let mut capped = false;
+    state.rt.lock().unwrap().runs.insert(
+        agent_id.to_string(),
+        crate::state::RunInfo { last_output_at: now(), for_user, send_now: takes_input.then_some(send_tx), ..Default::default() },
+    );
     loop {
         let waiting = replied && !bg.is_empty();
         let line = tokio::select! {
             l = lines.next_line() => l?,
+            Some((id, p)) = send_rx.recv(), if stdin.is_some() => {
+                let line = input_line(state, agent_id, &p, true).await;
+                match stdin.as_mut().unwrap().write_all(line.as_bytes()).await {
+                    Ok(()) => written.push((id, serde_json::from_str::<Value>(&line).map(|v| user_text(&v)).unwrap_or_default())),
+                    // It stays among the run's `sent`: back to the queue when the run ends.
+                    Err(e) => tracing::warn!("agent {agent_id}: run {run_id}: could not send message {id} now: {e}"),
+                }
+                continue;
+            }
             _ = kill.notified() => {
                 tracing::info!("agent {agent_id}: stopping run {run_id}: stop or restart asked");
                 terminate(&mut child).await;
@@ -1386,6 +1999,14 @@ async fn run_process(
                 tracing::info!("agent {agent_id}: stopping run {run_id}: new messages arrived while only background work was left");
                 terminate(&mut child).await;
                 loft_stopped = true;
+                None
+            }
+            _ = child.wait(), if drain_until.is_none() => {
+                drain_until = Some(tokio::time::Instant::now() + EXIT_GRACE);
+                continue;
+            }
+            _ = async { tokio::time::sleep_until(drain_until.unwrap()).await }, if drain_until.is_some() => {
+                tracing::info!("agent {agent_id}: run {run_id}: claude exited while another process holds its output");
                 None
             }
             _ = async { tokio::time::sleep_until(exit_by.unwrap()).await }, if exit_by.is_some() => {
@@ -1419,15 +2040,24 @@ async fn run_process(
             }
         }
         let sub = ev["parent_tool_use_id"].as_str().map(|s| s.to_string());
+        if sub.is_none() && brake.see(&ev) {
+            tracing::info!("agent {agent_id}: stopping run {run_id}: {BRAKE_TURNS} turns in a row without a tool call");
+            run_msg(quiet, state, agent_id, rid, "system", "notice", &brake.notice(), json!({ "brake": true }));
+            terminate(&mut child).await;
+            loft_stopped = true;
+            braked = true;
+            break;
+        }
         match ev["type"].as_str() {
             Some("system") => match ev["subtype"].as_str() {
                 Some("init") => {
-                    if let Some(sid) = ev["session_id"].as_str() {
+                    let _ = crate::commands::save(&state.cfg.storage_dir, agent_id, &crate::commands::parse_init(&ev));
+                    if let Some(sid) = ev["session_id"].as_str().filter(|_| !throwaway) {
                         set_session(state, agent_id, sid)?;
                     }
                 }
                 // Manual /compact and Claude Code's own auto-compaction both land here.
-                Some("compact_boundary") => {
+                Some("compact_boundary") if !throwaway => {
                     let m = &ev["compact_metadata"];
                     run_msg(quiet, state, agent_id, rid, "system", "compact", "Context compacted.", json!({
                         "trigger": m["trigger"], "pre_tokens": m["pre_tokens"], "post_tokens": m["post_tokens"],
@@ -1440,6 +2070,7 @@ async fn run_process(
                         a.memory_index = None;
                     })?;
                 }
+                Some("notification") if ev["key"] == "stop-hook-block-cap" => capped = true,
                 Some("permission_denied") => {
                     run_msg(quiet, state, agent_id, rid, "system", "notice", ev["message"].as_str().unwrap_or("Permission denied"), json!({ "tool": ev["tool_name"] }));
                 }
@@ -1482,6 +2113,7 @@ async fn run_process(
                     }
                     if replied && bg.is_empty() {
                         // The last one finished after the reply; claude starts a turn to report it, or exits.
+                        close_input(state, agent_id, &mut stdin);
                         exit_by = Some(tokio::time::Instant::now() + FOLLOW_UP_GRACE);
                     }
                 }
@@ -1500,12 +2132,18 @@ async fn run_process(
                     }
                 }
                 // Everything sent as input this turn is the context: fresh, cache-read and cache-written tokens.
+                // Not claude's own replies (`<synthetic>`, like "Goal cleared: …"): their usage is all zeros.
                 let u = &ev["message"]["usage"];
-                if sub.is_none() && u.is_object() {
+                if sub.is_none() && u.is_object() && !throwaway && ev["message"]["model"] != "<synthetic>" {
                     let n = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().filter_map(|k| u[*k].as_u64()).sum();
                     set_context_tokens(state, agent_id, Some(n));
                 }
                 let blocks = ev["message"]["content"].as_array().cloned().unwrap_or_default();
+                if ev["message"]["model"] == "<synthetic>" && sub.is_none() && !throwaway {
+                    if let Some(g) = blocks.iter().filter_map(|b| b["text"].as_str()).find_map(goal_change) {
+                        set_goal(state, agent_id, g);
+                    }
+                }
                 for b in blocks {
                     let meta_sub = json!({ "subagent": sub });
                     match b["type"].as_str() {
@@ -1561,6 +2199,40 @@ async fn run_process(
                     }
                 }
             }
+            // Claude took one of its input lines: the prompt, or a message sent now, now delivered. Not shown again.
+            Some("user") if ev["isReplay"] == true => {
+                let text = user_text(&ev);
+                let at = match written.iter().position(|(_, t)| *t == text) {
+                    Some(at) => Some(at),
+                    None if !first_echoed && text == first_text => None,
+                    // Claude reworded it somehow: echoes come in the order the lines went in.
+                    None => (!written.is_empty()).then_some(0),
+                };
+                if text == first_text {
+                    first_echoed = true;
+                }
+                if let Some(at) = at {
+                    let (id, _) = written.remove(at);
+                    if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
+                        i.sent.retain(|(s, _)| *s != id);
+                    }
+                }
+            }
+            Some("user") if sub.is_none() && ev["isSynthetic"] == true => {
+                let known = if throwaway { None } else { state.db.get_agent(agent_id).ok().flatten().and_then(|a| a.goal) };
+                if let Some((goal, reason)) = hook_block(&ev, known.as_deref()) {
+                    run_msg(quiet, state, agent_id, rid, "system", "notice", &hook_block_line(goal.is_some(), &reason), json!({
+                        "hook_block": true, "goal": goal,
+                    }));
+                    // A goal's block says it's active, even one set before Loft knew (a resumed Session's).
+                    if goal.is_some() && !throwaway {
+                        set_goal(state, agent_id, goal);
+                    }
+                    // The run waits on an answer the queue would only give it once it ends: the user's queued
+                    // messages are what it waits for, so they go in now (agents' messages keep waiting).
+                    send_queued_now(state, agent_id);
+                }
+            }
             Some("user") => {
                 let blocks = ev["message"]["content"].as_array().cloned().unwrap_or_default();
                 for b in blocks {
@@ -1600,12 +2272,36 @@ async fn run_process(
                 }
             }
             Some("result") => {
-                got_result = true;
+                // A message sent now cut the turn short: claude goes on with it in a new turn of the same run.
+                let aborted = ev["terminal_reason"].as_str().is_some_and(|r| r.starts_with("aborted"));
+                got_result |= !aborted;
                 // Resuming a session whose background task was stopped first replays an empty result
-                // (no turns); the real turn follows, however long the model thinks first.
-                replied = ev["num_turns"].as_u64() != Some(0);
-                if replied && bg.is_empty() {
-                    exit_by = Some(tokio::time::Instant::now() + EXIT_GRACE);
+                // (no turns); the real turn follows, however long the model thinks first. A command claude
+                // answers itself, like `/goal clear`, takes no turns either, but says something: that's the reply.
+                let said = ev["result"].as_str().is_some_and(|r| !r.trim().is_empty());
+                replied = !aborted && (ev["num_turns"].as_u64() != Some(0) || said);
+                if !throwaway {
+                    if ev["num_turns"].as_u64() == Some(0) {
+                        if let Some(g) = ev["result"].as_str().and_then(goal_change) {
+                            set_goal(state, agent_id, g);
+                        }
+                    } else if ev["terminal_reason"] == "completed" && !capped {
+                        // A turn ends while a goal is active only once it passed, and claude says nothing then.
+                        set_goal(state, agent_id, None);
+                    }
+                }
+                capped = false;
+                // An error ends the run too, though it may come with no turns and nothing said (the first API call failed).
+                if (replied || ev["is_error"] == true) && bg.is_empty() {
+                    // The run ends here, unless a message sent now is still on its way in: claude answers it first.
+                    let grace = if close_input(state, agent_id, &mut stdin) { EXIT_GRACE } else { FOLLOW_UP_GRACE };
+                    exit_by = Some(tokio::time::Instant::now() + grace);
+                } else if !aborted && bg.is_empty() && is_command(&first_text) {
+                    // No turns and nothing said to a command claude answers itself, like `/context`: claude exits
+                    // once its input closes, no deadline. Any other prompt got the empty replay of a resume: the
+                    // real turn follows, however long the model thinks first, and takes messages sent now until
+                    // its own result closes the input.
+                    close_input(state, agent_id, &mut stdin);
                 } else if replied {
                     if let Some(i) = state.rt.lock().unwrap().runs.get_mut(agent_id) {
                         i.waiting_since = Some(now());
@@ -1621,7 +2317,10 @@ async fn run_process(
                 // On --resume Claude Code reports the session's running total; the run cost what it added.
                 let total = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
                 let mut cost = total;
-                if let Some(sid) = ev["session_id"].as_str() {
+                if throwaway {
+                    // A session of its own: all of it is this run's, and only the agent's total cost moves.
+                    state.db.update_agent(agent_id, |a| a.total_cost_usd += total)?;
+                } else if let Some(sid) = ev["session_id"].as_str() {
                     set_session(state, agent_id, sid)?;
                     state.db.update_agent(agent_id, |a| {
                         cost = crate::db::run_cost(total, a.session_cost_usd);
@@ -1631,8 +2330,9 @@ async fn run_process(
                 }
                 if ev["is_error"].as_bool().unwrap_or(false) {
                     let msg = ev["result"].as_str().or(ev["subtype"].as_str()).unwrap_or("run failed");
-                    run_msg(quiet, state, agent_id, rid, "system", "error", msg, json!({}));
-                    run_error = Some(msg.to_string());
+                    let msg = crate::login::with_fix(msg);
+                    run_msg(quiet, state, agent_id, rid, "system", "error", &msg, json!({}));
+                    run_error = Some(msg);
                 }
                 let end = json!({
                     "cost_usd": cost,
@@ -1643,7 +2343,9 @@ async fn run_process(
                     "is_error": ev["is_error"],
                     "usage": ev["usage"],
                 });
-                if replied || run_error.is_some() {
+                if aborted {
+                    // Neither a reply nor the run's end: its cost counts, in the next run end's running total.
+                } else if replied || run_error.is_some() {
                     run_msg(quiet, state, agent_id, rid, "system", "run_end", "", end);
                     held_end = None;
                 } else {
@@ -1655,12 +2357,12 @@ async fn run_process(
         }
     }
 
-    let had_subagents = {
-        let mut rt = state.rt.lock().unwrap();
-        rt.waiting.remove(agent_id);
-        rt.runs.remove(agent_id).is_some_and(|i| !i.subagents.is_empty())
-    };
-    if had_subagents {
+    drop(stdin);
+    // Messages sent now that claude never took go back to the queue, ahead of the rest.
+    let info = end_run_info(state, agent_id);
+    // A message the user sent now made this run an answer to them.
+    let for_user = for_user || info.as_ref().is_some_and(|i| i.for_user);
+    if info.is_some_and(|i| !i.subagents.is_empty()) {
         emit_run(state, agent_id);
     }
     if let Some(end) = held_end {
@@ -1677,7 +2379,10 @@ async fn run_process(
         }
     };
     let err = tokio::time::timeout(EXIT_GRACE, stderr_task).await.ok().and_then(|r| r.ok()).unwrap_or_default();
-    if !got_result {
+    if braked && !got_result {
+        run_msg(quiet, state, agent_id, rid, "system", "run_end", "", json!({ "stopped": true }));
+    }
+    if !got_result && !braked {
         if !killed && resume && agent.session_id.is_some() && !got_any && err.to_lowercase().contains("no conversation found") {
             return Ok(RunOutcome::StaleSession);
         }
@@ -1719,7 +2424,7 @@ async fn run_process(
             run_msg(quiet, state, agent_id, rid, "system", "run_end", "", json!({ "stopped": true }));
         }
     }
-    let (st, text) = if !killed && !got_result { ("error", "Last run failed") } else { ("idle", "") };
+    let (st, text) = if !killed && !braked && !got_result { ("error", "Last run failed") } else { ("idle", "") };
     set_status(state, agent_id, st, text);
     if for_user && !quiet && (!last_text.is_empty() || run_error.is_some()) {
         mark_replied(state, agent_id);
@@ -1749,7 +2454,7 @@ pub async fn scheduler(state: AppState) {
                 }
                 continue;
             }
-            // The next wake-up, pushed past quiet hours.
+            // The next wake-up, pushed into working hours.
             let next = schedule::next_wake(&a.quiet_hours, (now + chrono::Duration::minutes(a.interval_minutes)).with_timezone(&Local))
                 .with_timezone(&Utc)
                 .to_rfc3339();
@@ -1765,7 +2470,7 @@ pub async fn scheduler(state: AppState) {
                     }
                 }
                 Some(t) if t <= now => {
-                    // Came due inside quiet hours (they changed, or the Mac slept): wait them out.
+                    // Came due outside working hours (they changed, or the Mac slept): wait for them.
                     if let Some(until) = schedule::quiet_until(&a.quiet_hours, now.with_timezone(&Local)) {
                         let until = until.with_timezone(&Utc).to_rfc3339();
                         if let Ok(Some(a)) = state.db.update_agent(&a.id, |a| a.next_run_at = Some(until)) {
@@ -1791,12 +2496,49 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
+    fn answers_keep_only_this_requests_questions_and_need_one_each() {
+        let input = json!({ "questions": [{ "question": "Which store?" }, { "question": "Region?" }] });
+        let refused = |a: Value| with_answers(&input, Some(a)).unwrap_err().to_string();
+        let done = with_answers(&input, Some(json!({ "Which store?": "B2", "Region?": "EU", "rm -rf": "x" }))).unwrap().unwrap();
+        assert_eq!(done["answers"], json!({ "Which store?": "B2", "Region?": "EU" }), "an answer to no question is dropped");
+        assert_eq!(done["questions"], input["questions"]);
+        assert_eq!(refused(json!({ "Which store?": "B2" })), "the question \"Region?\" has no answer");
+        assert_eq!(refused(json!({ "Which store?": "B2", "Region?": " " })), "the question \"Region?\" has no answer");
+        assert_eq!(refused(json!({ "Which store?": "B2", "Region?": ["EU"] })), "the answer to \"Region?\" must be text");
+        assert!(refused(json!({ "Which store?": "B2", "Region?": "E".repeat(MAX_ANSWER + 1) })).contains("longer than 4000 characters"));
+        assert!(refused(json!(["B2", "EU"])).starts_with("answers must be an object"));
+        // No answers at all is an older app's plain allow: the agent hears why, the request isn't refused.
+        assert!(with_answers(&input, None).unwrap().is_err());
+        assert!(with_answers(&input, Some(Value::Null)).unwrap().is_err());
+    }
+
+    #[test]
+    fn answers_to_an_input_without_questions_are_refused_not_a_panic() {
+        for input in [json!("ask me"), json!([1, 2]), json!(7), json!({}), json!({ "questions": "x" }), json!({ "questions": [{ "question": 1 }] })] {
+            let e = with_answers(&input, Some(json!({ "x": "y" }))).unwrap_err().to_string();
+            assert!(e.contains("no questions to answer"), "{input}: {e}");
+        }
+    }
+
+    #[test]
     fn prompt_says_background_work_ends_with_the_reply() {
         let st = crate::tasks::tests::state();
         let p = system_prompt(&st, &crate::tasks::tests::agent(&st, "Worker"));
         assert!(p.contains("# Runs") && p.contains("doesn't outlive it") && p.contains("nohup <command>"));
         assert!(p.contains("Start servers with `nohup … &`, never with a daemon option (`--daemonize`, `--detach`, `pg_ctl start`)."));
         assert!(!p.contains("start them in the background"));
+    }
+
+    #[test]
+    fn the_identity_line_names_the_role_label() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Checker");
+        a.role = "code_reviewer".into();
+        assert!(system_prompt(&st, &a).contains("# Identity\nYou are **Checker** (Code reviewer), an autonomous agent"));
+        a.role = "custom".into();
+        assert!(system_prompt(&st, &a).contains("You are **Checker** (Custom), an autonomous agent"));
+        a.role = String::new();
+        assert!(system_prompt(&st, &a).contains("You are **Checker** (Custom), an autonomous agent"), "no role yet reads as Custom");
     }
 
     #[test]
@@ -1849,6 +2591,71 @@ pub(crate) mod tests {
         assert_eq!(env("BASH_MAX_TIMEOUT_MS").as_deref(), Some(named));
         assert_eq!(env("MCP_TOOL_TIMEOUT").as_deref(), Some(named));
         assert!(TOOL_WAIT > PERMISSION_TIMEOUT);
+    }
+
+    #[test]
+    fn git_in_a_workspace_with_no_clone_cannot_find_the_checkout_around_it() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cmd = build_command(&st, &a, false).unwrap();
+        let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap().to_owned();
+        assert_eq!(ceiling, st.cfg.storage_dir.as_os_str());
+        // The storage folder sits in a repo, as it would in a home folder kept in git.
+        let git = |dir: &Path, args: &[&str]| std::process::Command::new("git").args(args).current_dir(dir).env("GIT_CEILING_DIRECTORIES", &ceiling).output().unwrap();
+        let checkout = st.cfg.root.as_path();
+        assert!(git(checkout, &["init", "-q"]).status.success());
+        let ws = workspace(&st, &a.id);
+        std::fs::create_dir_all(ws.join("repo")).unwrap();
+        let out = git(&ws, &["status"]);
+        assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("not a git repository"), "{out:?}");
+        // The agent's own clone in its workspace still works.
+        assert!(git(&ws.join("repo"), &["init", "-q"]).status.success());
+        let out = git(&ws.join("repo"), &["rev-parse", "--show-toplevel"]);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap(), std::fs::canonicalize(ws.join("repo")).unwrap());
+    }
+
+    #[test]
+    fn a_project_with_sccache_off_runs_its_agents_without_it() {
+        let st = crate::tasks::tests::state();
+        let mut a = crate::tasks::tests::agent(&st, "Worker");
+        a.project = "rusty".into();
+        let env = |cmd: &Command, k: &str| cmd.as_std().get_envs().find(|(n, _)| *n == k).map(|(_, v)| v.map(|v| v.to_owned()));
+        // On (Loft's default): the shared cache, once sccache is installed.
+        let cmd = build_command(&st, &a, false).unwrap();
+        if crate::sccache::installed().is_some() {
+            assert_eq!(env(&cmd, "SCCACHE_DIR"), Some(Some(crate::sccache::cache_dir(st.settings.dir()).into_os_string())));
+        }
+        // Off: none of it, even when Loft's own environment has it.
+        crate::project_settings::set(&st, "rusty", crate::project_settings::SCCACHE, &serde_json::json!("off"), None).unwrap();
+        let cmd = build_command(&st, &a, false).unwrap();
+        assert_eq!((env(&cmd, "SCCACHE_DIR"), env(&cmd, "SCCACHE_CACHE_SIZE")), (Some(None), Some(None)));
+        assert!(!matches!(env(&cmd, "RUSTC_WRAPPER"), Some(Some(_))));
+        // Another project's agents keep it.
+        a.project = "other".into();
+        let cmd = build_command(&st, &a, false).unwrap();
+        assert_ne!(env(&cmd, "SCCACHE_DIR"), Some(None));
+    }
+
+    #[test]
+    fn a_relative_storage_folder_still_gives_git_an_absolute_ceiling() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let cfg = crate::state::Config { port: 0, storage_dir: "agent-local-storage".into(), xcrun: st.cfg.xcrun.clone(), xcode: st.cfg.xcode.clone(), root: st.cfg.root.clone() };
+        let st = AppState { cfg: std::sync::Arc::new(cfg), ..st };
+        let cmd = build_command(&st, &a, false).unwrap();
+        let ceiling = cmd.as_std().get_envs().find(|(n, _)| *n == "GIT_CEILING_DIRECTORIES").and_then(|(_, v)| v).unwrap();
+        assert_eq!(Path::new(ceiling), std::env::current_dir().unwrap().join("agent-local-storage"));
+    }
+
+    #[test]
+    fn every_agent_is_told_to_run_git_only_in_its_clone() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        let p = system_prompt(&st, &a);
+        assert!(p.contains(&format!("Run git only inside your clone (`git -C {}/<repo>`), never from the workspace root", workspace(&st, &a.id).display())), "{p}");
+        assert!(p.contains("Write git commands with the literal absolute path: no shell variables, `cd` chains or `$(…)` in them."), "{p}");
+        assert!(p.contains("Name the program you run literally (a path or a command name), never a variable like `$BIN` or `$A` as the command"), "{p}");
     }
 
     #[test]
@@ -1915,6 +2722,7 @@ pub(crate) mod tests {
                 "4. Mark needs action only when the recipient must act now (review, fix, decide, or tell the user something they must act on); otherwise FYI.",
                 "5. Don't reply to an FYI.",
                 "6. When a needs-action message hands over a ticket or is about one, name it in `ticket`, as the issue, not its pull request: the recipient's context may be cleared between tickets, never within one.",
+                "7. When you finish work another agent handed you, or it's blocked, report back to that agent as needs action, naming the same `ticket`: \"done, here is the result\" is something it must act on, not an FYI.",
             ] {
                 assert!(section.contains(rule), "missing {rule}");
             }
@@ -1980,11 +2788,27 @@ pub(crate) mod tests {
 /// "early" also replies right after the launch).
 /// "crash" exits without a result and "garbled" writes output that isn't text, which fails the run. "session-gone"
     /// with --resume answers like a session claude no longer has, and leaves itself unrunnable so the fresh retry fails to start.
+    /// A Redraw costs 0.25 on session "s-redraw" and waits for a `go` file before it replies.
     /// "bash-cmd" runs `cmd.sh` from the workspace the way Claude Code runs a Bash command, in a process session of
     /// its own after `CLAUDE_ENV_FILE`, and appends what it printed and its exit status to `bash.out`.
+    /// "goal-loop" asks for a password over and over, each text-only turn sent back by a Stop hook, and never ends
+    /// on its own; "goal-tools" does the same with a tool call after four turns and three more after it, then replies.
+    /// The goal scenarios send the lines the probe for #476 recorded from the real claude: "goal-pass" sets a goal,
+    /// is blocked once and waits for a `go` file before the goal passes (a completed turn, nothing said);
+    /// "goal-cap" is blocked by the goal and by a command Stop hook until claude's own limit ends the turn;
+    /// "goal-hold" is blocked and waits for a message sent now: `/goal clear` clears it in a turn of its own;
+    /// "goal-hold-resumed" does the same after the empty result (no turns, nothing said) a resume replays first.
+    /// "hold-block" asks for a password, waits for a `go` file, is blocked by a Stop hook and then takes two lines
+    /// from its stdin; "hold-plain" asks the same and replies at `go`, with no block.
+    /// "/goal clear" as the prompt clears it, without a model turn; both then wait for their stdin to close.
+    /// "/context" answers with no turns and nothing in its result, then waits for its stdin to close too.
+    /// "api-down" ends in an error with no turns and no `result`, as when the first API call fails, then waits the same way.
     /// It records SIGTERM in `terminated`, as claude would end its background shells then.
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
-prompt=$(cat)
+text() { perl -CO -MJSON::PP -ne 'my $c = JSON::PP->new->utf8->decode($_)->{message}{content}; print ref $c ? join("", map { $_->{text} // "" } @$c) : $c'; }
+IFS= read -r line
+prompt=$(printf '%s\n' "$line" | text)
+printf '%s\n' "$line" > input.json
 printf '%s\n---\n' "$prompt" >> prompts.log
 case "$prompt" in *session-gone*) case " $* " in *" --resume "*)
   chmod -x "$0"
@@ -2003,15 +2827,106 @@ while [ $# -gt 0 ]; do
 done
 printf '%s %s\n' "$PORT" "$LOFT_PORT_RANGE" >> ports.log
 printf '%s\n' "${LOFT_SIMULATOR_UDID-none}" >> device.log
-printf '%s\n' "${CARGO_BUILD_BUILD_DIR-none}" >> cargo-build.log
 cost=$(printf '%s' "$prompt" | sed -n 's/.*cost=\([0-9.]*\).*/\1/p')
 sid=$(printf '%s' "$prompt" | sed -n 's/.*sid=\([a-z0-9-]*\).*/\1/p')
+case "$prompt" in *"redraw your sticker"*) cost=0.25 sid=s-redraw;; esac
 : "${cost:=0}" "${sid:=s1}"
-echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
+echo '{"type":"system","subtype":"init","session_id":"'"$sid"'","slash_commands":["clear","review","doctor"],"skills":["review"],"terminal_slash_commands":["doctor"]}'
+case "$prompt" in *"redraw your sticker"*) while [ ! -f go ]; do sleep 0.05; done;; esac
 case "$prompt" in /compact*)
   echo '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000,"post_tokens":900}}';;
 esac
+case "$prompt" in *send-now*|*send-lost*)
+  replay() { sed 's/}$/,"isReplay":true}/'; }
+  printf '%s\n' "$line" | replay
+  for i in 1 2; do
+    echo '{"type":"assistant","message":{"id":"g'$i'","content":[{"type":"text","text":"What is the password?"}]}}'
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met."}]},"isSynthetic":true}'
+  done
+  IFS= read -r next
+  printf '%s\n' "$next" >> sent.log
+  case "$prompt" in *send-lost*) exit 1;; esac
+  printf '%s\n' "$next" | replay
+  echo '{"type":"result","subtype":"success","result":"","num_turns":2,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  said=$(printf '%s\n' "$next" | text)
+  echo '{"type":"assistant","message":{"id":"g3","content":[{"type":"text","text":"Got it: '"$said"'"}]}}'
+  echo '{"type":"result","subtype":"success","result":"Got it","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.02}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
+esac
+case "$prompt" in *hold-block*|*hold-plain*)
+  echo '{"type":"assistant","message":{"id":"h1","content":[{"type":"text","text":"What is the password?"}]}}'
+  while [ ! -f go ]; do sleep 0.05; done
+  case "$prompt" in *hold-plain*)
+    echo '{"type":"result","subtype":"success","result":"What is the password?","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+    cat > /dev/null
+    exit 0;;
+  esac
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: no password yet."}]},"isSynthetic":true}'
+  IFS= read -r one
+  IFS= read -r two
+  printf '%s\n%s\n' "$one" "$two" >> sent.log
+  printf '%s\n%s\n' "$one" "$two" | sed 's/}$/,"isReplay":true}/'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":1,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  echo '{"type":"assistant","message":{"id":"h2","content":[{"type":"text","text":"Got it: '"$(printf '%s\n' "$one" | text) $(printf '%s\n' "$two" | text)"'"}]}}'
+  echo '{"type":"result","subtype":"success","result":"Got it","num_turns":1,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.02}'
+  cat > /dev/null
+  exit 0;;
+esac
+goal='the user said the password'
+synthetic() { echo '{"type":"assistant","message":{"id":"syn-'$2'","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"'"$1"'"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'; }
+goal_block() { printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\n['"$goal"']: insufficient evidence: no password yet."}]},"isSynthetic":true}'; }
+cleared() {
+  synthetic "Goal cleared: $goal" c
+  echo '{"type":"result","subtype":"success","result":"Goal cleared: '"$goal"'","num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0
+}
+case "$prompt" in *goal-hold-resumed*)
+  echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}';;
+esac
+case "$prompt" in *goal-pass*|*goal-cap*|*goal-hold*)
+  synthetic "Goal set: $goal" s
+  echo '{"type":"assistant","message":{"id":"p1","model":"claude-haiku-5-5","content":[{"type":"text","text":"What is the password?"}]}}'
+  goal_block;;
+esac
+case "$prompt" in *goal-pass*)
+  while [ ! -f go ]; do sleep 0.05; done
+  echo '{"type":"assistant","message":{"id":"p2","content":[{"type":"text","text":"Thanks, that is it."}]}}'
+  echo '{"type":"result","subtype":"success","result":"Thanks, that is it.","num_turns":2,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+  exit 0;;
+esac
+case "$prompt" in *goal-cap*)
+  echo '{"type":"assistant","message":{"id":"p2","content":[{"type":"text","text":"What is the password?"}]}}'
+  echo '{"type":"system","subtype":"hook_response","hook_name":"Stop","hook_event":"Stop","output":"{}","exit_code":0,"outcome":"success"}'
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: the tests are still red."}]},"isSynthetic":true}'
+  echo '{"type":"system","subtype":"informational","content":"A hook blocked the turn from ending 9 consecutive times—overriding and ending turn."}'
+  echo '{"type":"system","subtype":"notification","key":"stop-hook-block-cap","text":"A hook blocked the turn from ending 9 consecutive times—overriding and ending turn."}'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":3,"terminal_reason":"completed","session_id":"s1","total_cost_usd":0.01}'
+  exit 0;;
+esac
+case "$prompt" in *goal-hold*)
+  IFS= read -r next
+  printf '%s\n' "$next" >> sent.log
+  printf '%s\n' "$next" | sed 's/}$/,"isReplay":true}/'
+  echo '{"type":"result","subtype":"success","result":"","num_turns":1,"terminal_reason":"aborted_streaming","session_id":"s1","total_cost_usd":0.01}'
+  echo '{"type":"system","subtype":"init","session_id":"s1"}'
+  case "$(printf '%s\n' "$next" | text)" in "/goal clear") cleared;; esac
+  exit 1;;
+esac
+case "$prompt" in "/goal clear") cleared;; esac
+case "$prompt" in /context)
+  echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
+esac
 case "$prompt" in *crash*) exit 1;; esac
+case "$prompt" in *leftover*) sleep 20 & exit 1;; esac
 case "$prompt" in *sigterm*) kill -TERM $$;; esac
 case "$prompt" in *exit-143*) exit 143;; esac
 case "$prompt" in *sigkill*) kill -KILL $$;; esac
@@ -2029,6 +2944,12 @@ esac
 case "$prompt" in *slow*)
   echo '{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"s1","total_cost_usd":0}'
   sleep 1;;
+esac
+case "$prompt" in *api-down*)
+  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"session_id":"s1","total_cost_usd":0}'
+  cat > /dev/null
+  echo yes > stdin-closed
+  exit 0;;
 esac
 case "$prompt" in *fail*)
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"session_id":"s1","total_cost_usd":0}'
@@ -2082,6 +3003,25 @@ esac
 case "$prompt" in *bg-agent*) ;; *linger*)
   echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","description":"Run the QA suite"}]}';;
 esac
+case "$prompt" in *goal-loop*|*goal-tools*)
+  feedback='{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nObjective not met: the user has not said the password yet."}]},"isSynthetic":true}'
+  turn() {
+    echo '{"type":"assistant","message":{"id":"m'$1'","content":[{"type":"thinking","thinking":"again"}]}}'
+    echo '{"type":"assistant","message":{"id":"m'$1'","content":[{"type":"text","text":"What is the password?"}]}}'
+    printf '%s\n' "$feedback"
+  }
+  case "$prompt" in *goal-loop*)
+    trap 'echo yes > terminated; exit 143' TERM
+    for i in 1 2 3 4 5 6 7 8 9; do turn $i; sleep 0.1; done
+    sleep 600 &
+    wait;;
+  esac
+  for i in 1 2 3 4; do turn $i; done
+  echo '{"type":"assistant","message":{"id":"t1","content":[{"type":"text","text":"Let me check."}]}}'
+  echo '{"type":"assistant","message":{"id":"t1","content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/x/notes.md"}}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"r1","content":"no password here"}]}}'
+  for i in 5 6 7; do turn $i; done;;
+esac
 case "$prompt" in *bash-cmd*)
   perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /bin/zsh -c '. "$CLAUDE_ENV_FILE"; . ./cmd.sh' >> bash.out 2>&1
   echo "exit $?" >> bash.out;;
@@ -2099,7 +3039,7 @@ esac
 
     pub(crate) fn fake_claude_state() -> (AppState, Agent) {
         let mut st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let bin = dir.join("fake-claude");
         std::fs::write(&bin, FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -2237,9 +3177,8 @@ esac
         let b = crate::tasks::tests::agent(&st, "Other");
         run(&st, &a.id, "hello", 1).await;
         run(&st, &b.id, "hello", 1).await;
-        let seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join("cargo-build.log")).unwrap().trim().to_string();
-        assert_eq!(seen(&a.id), workspace(&st, &a.id).join(".cargo-build").to_string_lossy());
-        assert_eq!(seen(&b.id), workspace(&st, &b.id).join(".cargo-build").to_string_lossy());
+        let seen = |id: &str| std::fs::read_to_string(workspace(&st, id).join(".cargo/config.toml")).unwrap();
+        assert_eq!(seen(&a.id), format!("[build]\nbuild-dir = {:?}\n", workspace(&st, &a.id).join(".cargo-build").to_string_lossy()));
         assert_ne!(seen(&a.id), seen(&b.id));
     }
 
@@ -2292,7 +3231,7 @@ esac
         for prompt in ["sigterm", "exit-143"] {
             let (st, a) = fake_claude_state();
             enqueue(&st, &a.id, Some(prompt.into()), "user");
-            until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+            until("the run to fail", 60, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
             assert!(error_text(&st, &a.id).unwrap().contains("from outside Loft"), "{prompt}: {:?}", error_text(&st, &a.id));
         }
     }
@@ -2303,7 +3242,7 @@ esac
         for prompt in ["sigkill", "exit-137"] {
             let (st, a) = fake_claude_state();
             enqueue(&st, &a.id, Some(prompt.into()), "user");
-            until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+            until("the run to fail", 60, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
             let err = error_text(&st, &a.id).unwrap();
             assert!(err.contains("without a result") && !err.contains("outside Loft"), "{prompt}: {err}");
         }
@@ -2316,7 +3255,7 @@ esac
         std::fs::create_dir_all(&st.cfg.storage_dir).unwrap();
         std::fs::write(st.cfg.storage_dir.join(AGENT_FILES), "").unwrap();
         enqueue(&st, &a.id, Some("hello".into()), "user");
-        until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+        until("the run to fail", 60, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
         assert!(error_text(&st, &a.id).unwrap().contains("File exists"));
         // claude never started: no prompt on argv instead.
         assert!(!workspace(&st, &a.id).join("argv.log").exists());
@@ -2340,27 +3279,27 @@ esac
         let (st, a) = fake_claude_state();
         // claude closed its output without a result and stayed alive: Loft stops it.
         enqueue(&st, &a.id, Some("stuck-pipes".into()), "user");
-        until("the run to fail", 10, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
+        until("the run to fail", 60, || !is_running(&st, &a.id) && error_text(&st, &a.id).is_some()).await;
         let err = error_text(&st, &a.id).unwrap();
         assert!(err.contains("without a result") && !err.contains("outside Loft"), "{err}");
 
         // Stop and restart.
         let (st, a) = fake_claude_state();
         enqueue(&st, &a.id, Some("busy".into()), "user");
-        until("the run to start", 10, || is_running(&st, &a.id)).await;
+        until("the run to start", 60, || is_running(&st, &a.id)).await;
         stop(&st, &a.id);
-        until("the stop", 10, || !is_running(&st, &a.id)).await;
+        until("the stop", 60, || !is_running(&st, &a.id)).await;
         enqueue(&st, &a.id, Some("busy".into()), "user");
-        until("the run to start", 10, || is_running(&st, &a.id)).await;
+        until("the run to start", 60, || is_running(&st, &a.id)).await;
         restart(&st, &a.id).await;
-        until("the restart", 10, || !is_running(&st, &a.id)).await;
+        until("the restart", 60, || !is_running(&st, &a.id)).await;
         let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
         assert!(msgs.iter().all(|m| !m.content.contains("outside Loft")), "{msgs:?}");
     }
 
     async fn run(st: &AppState, id: &str, text: &str, runs: usize) {
         enqueue(st, id, Some(text.into()), "user");
-        until("the run", 10, || !is_running(st, id) && memory_parts(st, id).len() == runs).await;
+        until("the run", 60, || !is_running(st, id) && memory_parts(st, id).len() == runs).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2369,7 +3308,7 @@ esac
         let fake = crate::github::tests::own_fake(&st);
         fake.route("GET", "/repos/octo/share-run/pulls/84", 200, json!({ "number": 84 }));
         run(&st, &a.id, "sharepr", 1).await;
-        until("the PR is tracked", 10, || st.db.find_pull_request(&a.id, "octo/share-run", 84).unwrap().is_some()).await;
+        until("the PR is tracked", 60, || st.db.find_pull_request(&a.id, "octo/share-run", 84).unwrap().is_some()).await;
         let pr = st.db.find_pull_request(&a.id, "octo/share-run", 84).unwrap().unwrap();
         assert_eq!(pr.tool_use_id.as_deref(), Some("s1"), "its card sits on the tool call");
     }
@@ -2395,7 +3334,7 @@ esac
 
         st.db.add_memory(&a.id, "Release on Fridays", "Releases ship on Friday mornings.", "").unwrap();
         compact(&st, &a.id, "");
-        until("the compaction", 10, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 4).await;
+        until("the compaction", 60, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 4).await;
         assert_eq!(memory_parts(&st, &a.id)[3], parts[2], "the compaction run itself still sends the frozen part");
         run(&st, &a.id, "after compact", 5).await;
         assert!(memory_parts(&st, &a.id)[4].contains("Release on Fridays"));
@@ -2441,7 +3380,7 @@ esac
         // A grill round saves no run end, yet it is a finished, paid run all the same.
         st.db.update_agent(&a.id, |a| a.grill_briefed = true).unwrap(); // a later round: no planning brief in front
         wake(&st, &a.id, format!("[Loft: grill] next round sid={s1} cost=0.005"), "grill");
-        until("the grill run", 10, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 8).await;
+        until("the grill run", 60, || !is_running(&st, &a.id) && memory_parts(&st, &a.id).len() == 8).await;
         assert_eq!(costs().len(), 7, "a quiet run's end stays out of the chat");
         assert!((st.db.get_agent(&a.id).unwrap().unwrap().total_cost_usd - 0.023).abs() < 1e-9);
         let (runs, cost) = st.db.all_time_spend().unwrap();
@@ -2488,6 +3427,110 @@ esac
         let past = "0b4355f1-11b6-4668-809e-1dc392203ef7";
         crate::sessions::tests::write(&dir, past, &[r#"{"type":"user","timestamp":"2026-10-20T09:00:00Z","message":{"content":"Fix the login bug"}}"#]);
         (dir, past.into())
+    }
+
+    #[tokio::test]
+    async fn a_queued_agent_message_can_be_cancelled_until_a_run_takes_it() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let to = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(to.id.clone(), Arc::new(Notify::new()));
+        let keep = message_on_ticket(&st, &from, &to, "keep me", json!({}), None, false).expect("queued behind the run");
+        let drop = message_on_ticket(&st, &from, &to, "never mind", json!({}), None, false).expect("queued behind the run");
+
+        assert!(cancel_queued(&st, &to.id, drop).unwrap());
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&to.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [keep]);
+            let q = &rt.queued[&to.id];
+            assert!(q.len() == 1 && q[0].contains("keep me") && !q.iter().any(|p| p.contains("never mind")), "{q:?}");
+        }
+        let m = st.db.get_message(&to.id, drop).unwrap().unwrap();
+        assert_eq!(m.meta["cancelled"], true);
+        assert!(st.db.get_message(&to.id, keep).unwrap().unwrap().meta["cancelled"].is_null());
+        assert!(!cancel_queued(&st, &to.id, drop).unwrap(), "twice: nothing left to cancel");
+
+        // The run ended and took the queue (it clears `queued_messages` under the same lock): too late.
+        st.rt.lock().unwrap().queued_messages.remove(&to.id);
+        assert!(!cancel_queued(&st, &to.id, keep).unwrap());
+        assert!(st.db.get_message(&to.id, keep).unwrap().unwrap().meta["cancelled"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_ticket_hand_over_leaves_the_ticket_state_alone() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let to = crate::tasks::tests::agent(&st, "Dev");
+        st.db.update_agent(&to.id, |a| a.fresh_context = "always".into()).unwrap();
+        st.rt.lock().unwrap().running.insert(to.id.clone(), Arc::new(Notify::new()));
+        let id = message_on_ticket(&st, &from, &to, "Build #12", json!({}), Some("o/r#12"), true).expect("queued");
+        assert!(cancel_queued(&st, &to.id, id).unwrap());
+        // Only the message left the queue; a clear the agent didn't need is the worst that can follow.
+        assert!(st.rt.lock().unwrap().fresh_before.contains(&to.id));
+        assert_eq!(st.db.get_agent(&to.id).unwrap().unwrap().delivery_ticket.as_deref(), Some("o/r#12"));
+        assert!(st.rt.lock().unwrap().queued.get(&to.id).is_none_or(|q| q.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_user_message_to_a_busy_agent_waits_in_the_queue_and_can_be_cancelled() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let keep = enqueue_chat(&st, &a.id, "first".into(), json!({})).unwrap().id;
+        let drop = enqueue_chat(&st, &a.id, "never mind".into(), json!({})).unwrap().id;
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&a.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [keep, drop]);
+            assert_eq!(rt.queued[&a.id].len(), 2);
+        }
+        assert!(cancel_queued(&st, &a.id, drop).unwrap());
+        let rt = st.rt.lock().unwrap();
+        assert_eq!(rt.queued[&a.id].len(), 1);
+        assert!(rt.queued[&a.id][0].contains("first"));
+        assert_eq!(st.db.get_message(&a.id, drop).unwrap().unwrap().meta["cancelled"], true);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_last_user_message_makes_the_next_run_not_for_the_user() {
+        let st = crate::tasks::tests::state();
+        let from = crate::tasks::tests::agent(&st, "Lead");
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let for_user = |st: &AppState| st.rt.lock().unwrap().queued_for_user.contains(&a.id);
+        let agent_msg = message_on_ticket(&st, &from, &a, "FYI-ish ask", json!({}), None, false).unwrap();
+        assert!(!for_user(&st));
+        let u1 = enqueue_chat(&st, &a.id, "mine".into(), json!({})).unwrap().id;
+        let u2 = enqueue_chat(&st, &a.id, "mine too".into(), json!({})).unwrap().id;
+        assert!(for_user(&st));
+        assert!(cancel_queued(&st, &a.id, u1).unwrap());
+        assert!(for_user(&st), "another of the user's messages still waits");
+        assert!(cancel_queued(&st, &a.id, u2).unwrap());
+        assert!(!for_user(&st), "only the agent's message is left");
+        assert_eq!(st.rt.lock().unwrap().queued_messages[&a.id].len(), 1);
+        let _ = agent_msg;
+
+        // A user's task brief waits untracked: it keeps the run for the user.
+        enqueue_chat(&st, &a.id, "Work on issue 12".into(), json!({ "task_id": "t1" }));
+        let u3 = enqueue_chat(&st, &a.id, "again".into(), json!({})).unwrap().id;
+        assert!(cancel_queued(&st, &a.id, u3).unwrap());
+        assert!(for_user(&st));
+    }
+
+    #[tokio::test]
+    async fn a_message_about_a_task_waits_but_cannot_be_cancelled() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let brief = enqueue_chat(&st, &a.id, "Work on issue 12".into(), json!({ "task_id": "t1" })).unwrap().id;
+        assert!(st.rt.lock().unwrap().queued_messages.get(&a.id).is_none_or(|q| q.is_empty()));
+        assert!(!cancel_queued(&st, &a.id, brief).unwrap());
+        assert_eq!(st.rt.lock().unwrap().queued[&a.id].len(), 1, "it still runs next");
+        assert!(st.db.get_message(&a.id, brief).unwrap().unwrap().meta["cancelled"].is_null());
+
+        // What Loft queues itself (a task notice, the planning card's setup message) is no chat message to cancel.
+        let notice = enqueue_with(&st, &a.id, Some("[Task t1] was cancelled by the user. Stop working on it.".into()), json!({}), "user").unwrap().id;
+        assert!(!cancel_queued(&st, &a.id, notice).unwrap());
+        assert_eq!(st.rt.lock().unwrap().queued[&a.id].len(), 2);
     }
 
     #[tokio::test]
@@ -2592,13 +3635,13 @@ esac
         let (st, a) = fake_claude_state();
         let ws = workspace(&st, &a.id);
         enqueue(&st, &a.id, Some("start the suite, linger".into()), "user");
-        until("the reply", 10, || status_text(&st, &a.id).starts_with("Waiting on: Run the QA suite")).await;
+        until("the reply", 60, || status_text(&st, &a.id).starts_with("Waiting on: Run the QA suite")).await;
         // With nothing queued, the background task is left to finish so the agent can still report on it.
         tokio::time::sleep(EXIT_GRACE * 3).await;
         assert!(is_running(&st, &a.id) && !ws.join("terminated").exists());
 
         enqueue(&st, &a.id, Some("next instructions".into()), "user");
-        until("the queued message to run", 10, || !is_running(&st, &a.id)).await;
+        until("the queued message to run", 60, || !is_running(&st, &a.id)).await;
         assert!(ws.join("terminated").exists(), "claude was stopped with SIGTERM, so its background shells end too");
         let log = std::fs::read_to_string(ws.join("prompts.log")).unwrap();
         let second = log.split("---").nth(1).unwrap();
@@ -2615,7 +3658,7 @@ esac
         // "follow up" arrives during the run; at the reply it must not sit behind the background task.
         enqueue(&st, &a.id, Some("linger".into()), "user");
         enqueue(&st, &a.id, Some("follow up".into()), "user");
-        until("the queue to drain", 10, || !is_running(&st, &a.id)).await;
+        until("the queue to drain", 60, || !is_running(&st, &a.id)).await;
         assert!(ws.join("terminated").exists());
         assert!(std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("follow up"));
     }
@@ -2624,7 +3667,7 @@ esac
     async fn empty_result_before_a_slow_turn_does_not_end_the_run() {
         let (st, a) = fake_claude_state();
         enqueue(&st, &a.id, Some("slow".into()), "user");
-        until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        until("the run to end", 60, || !is_running(&st, &a.id)).await;
         let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
         assert!(msgs.iter().any(|m| m.kind == "text" && m.content == "started"), "the turn after the empty result was cut off");
         assert_eq!(msgs.iter().filter(|m| m.kind == "run_end").count(), 1, "the empty result doesn't count as a finished run");
@@ -2635,14 +3678,368 @@ esac
         let (st, a) = fake_claude_state();
         let ws = workspace(&st, &a.id);
         enqueue(&st, &a.id, Some("busy".into()), "user");
-        until("the run to start", 10, || ws.join("prompts.log").exists()).await;
+        until("the run to start", 60, || ws.join("prompts.log").exists()).await;
         enqueue(&st, &a.id, Some("sent while it looked stuck".into()), "user");
         let r = crate::api::stop_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
         assert_eq!(r.ok().unwrap().0["ok"], json!(true));
-        until("the queue to run", 10, || !is_running(&st, &a.id)).await;
+        until("the queue to run", 60, || !is_running(&st, &a.id)).await;
         assert!(std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("sent while it looked stuck"));
         let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
         assert!(msgs.iter().any(|m| m.kind == "notice" && m.content == "Stopped by user. The queued message runs next."));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn five_turns_in_a_row_without_a_tool_stop_the_run_and_the_queue_goes_on() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-loop".into()), "user");
+        until("the run to start", 60, || ws.join("prompts.log").exists()).await;
+        enqueue(&st, &a.id, Some("BANANA-42".into()), "user");
+        until("the queue to drain", 60, || !is_running(&st, &a.id) && std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("BANANA-42")).await;
+        assert!(ws.join("terminated").exists(), "claude was stopped");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        let asks = msgs.iter().filter(|m| m.kind == "text" && m.content == "What is the password?").count();
+        assert_eq!(asks, BRAKE_TURNS as usize, "stopped at the 5th turn's feedback, before a 6th");
+        let notice = msgs.iter().find(|m| m.kind == "notice" && m.meta["brake"] == true).expect("the chat says why it stopped");
+        assert_eq!(
+            notice.content,
+            "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: Objective not met: the user has not said the password yet."
+        );
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.kind == "text" && m.content == "started"), "the queued message got its run");
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().status, "idle");
+    }
+
+    fn asked(st: &AppState, id: &str, n: usize) -> bool {
+        st.db.list_messages(id, 100, None).unwrap().iter().filter(|m| m.content == "What is the password?").count() >= n
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_now_delivers_the_users_queued_message_into_the_run_in_progress() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        // Not a run the user started: Send now makes its reply an answer to them.
+        wake(&st, &a.id, "send-now".into(), "agent");
+        until("the goal to block", 60, || asked(&st, &a.id, 2)).await;
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        message_from_agent(&st, &lead, &a, "Status?");
+        let from_agent = st.db.list_messages(&a.id, 100, None).unwrap().into_iter().find(|m| m.content == "Status?").unwrap().id;
+        let mine = enqueue_chat(&st, &a.id, "The password is BANANA-42.".into(), json!({})).unwrap().id;
+        assert!(!send_now(&st, &a.id, from_agent).unwrap(), "an agent's message only waits in the queue");
+        assert!(send_now(&st, &a.id, mine).unwrap());
+        {
+            let rt = st.rt.lock().unwrap();
+            assert_eq!(rt.queued_messages[&a.id].iter().map(|(i, _)| *i).collect::<Vec<_>>(), [from_agent], "it left the queue");
+        }
+        assert_eq!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta["sent_now"], true);
+        assert!(!cancel_queued(&st, &a.id, mine).unwrap(), "sent now: no cancelling it");
+        assert!(!send_now(&st, &a.id, mine).unwrap(), "once is enough");
+        until("the agent to answer it in the run", 60, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "Got it: The password is BANANA-42.")).await;
+        idle(&st, &a.id).await;
+        let sent = std::fs::read_to_string(ws.join("sent.log")).unwrap();
+        let line: Value = serde_json::from_str(sent.trim()).unwrap();
+        assert_eq!(line["priority"], "now", "it gets in during the hook's block");
+        assert_eq!(user_text(&line), "The password is BANANA-42.");
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input at the end of the run");
+        assert!(std::fs::read_to_string(ws.join("argv.log")).unwrap().lines().any(|l| l == "--replay-user-messages"));
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert_eq!(msgs.iter().filter(|m| m.content == "The password is BANANA-42.").count(), 1, "its replay isn't shown again");
+        assert!(msgs.iter().all(|m| !(m.role == "assistant" && m.content.trim().is_empty())), "no empty bubble for the cut-short turn");
+        // The cut-short turn isn't the run's end; the agent's message got the next run, and the user's didn't.
+        assert_eq!(msgs.iter().filter(|m| m.kind == "run_end").count(), 2, "one per run: {msgs:?}");
+        let p = prompts(&st, &a.id);
+        assert!(p.contains("Status?") && !p.contains("BANANA-42"), "{p}");
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_sent_now_that_claude_never_took_goes_back_to_the_queue() {
+        let (st, a) = fake_claude_state();
+        wake(&st, &a.id, "send-lost".into(), "agent");
+        until("the goal to block", 60, || asked(&st, &a.id, 2)).await;
+        let mine = enqueue_chat(&st, &a.id, "remember BANANA".into(), json!({})).unwrap().id;
+        assert!(send_now(&st, &a.id, mine).unwrap());
+        until("the next run to take it", 60, || prompts(&st, &a.id).contains("remember BANANA")).await;
+        idle(&st, &a.id).await;
+        assert!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta.get("sent_now").is_none());
+        // After the run, there's nothing to send it into: it waits for a run like any message.
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        let later = enqueue_chat(&st, &a.id, "later".into(), json!({})).unwrap().id;
+        assert!(!send_now(&st, &a.id, later).unwrap());
+        assert!(st.rt.lock().unwrap().queued_messages[&a.id].iter().any(|(i, _)| *i == later));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hook_block_sends_the_users_queued_messages_now_and_not_the_agents() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        wake(&st, &a.id, "hold-block".into(), "agent");
+        until("the question", 60, || asked(&st, &a.id, 1)).await;
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        let one = enqueue_chat(&st, &a.id, "The password".into(), json!({})).unwrap().id;
+        message_from_agent(&st, &lead, &a, "Status?");
+        let two = enqueue_chat(&st, &a.id, "is BANANA-42.".into(), json!({})).unwrap().id;
+        assert!(sent_log(&ws).is_empty(), "no block yet: they wait in the queue");
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the agent to answer them in the run", 60, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "Got it: The password is BANANA-42.")).await;
+        idle(&st, &a.id).await;
+        let sent: Vec<String> = sent_log(&ws).lines().map(|l| user_text(&serde_json::from_str(l).unwrap())).collect();
+        assert_eq!(sent, ["The password", "is BANANA-42."], "in the order they were queued, with no click");
+        for id in [one, two] {
+            assert_eq!(st.db.get_message(&a.id, id).unwrap().unwrap().meta["sent_now"], true);
+        }
+        let p = prompts(&st, &a.id);
+        assert!(p.contains("Status?") && !p.contains("BANANA-42"), "the agent's message got the next run: {p}");
+        assert_eq!(notices(&st, &a.id), ["Stop hook: Objective not met: no password yet."]);
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert!(unread(&st, &a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_a_hook_block_the_users_queued_message_waits_for_the_next_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("hold-plain".into()), "user");
+        until("the question", 60, || asked(&st, &a.id, 1)).await;
+        let mine = enqueue_chat(&st, &a.id, "BANANA-42".into(), json!({})).unwrap().id;
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the next run to take it", 60, || prompts(&st, &a.id).contains("BANANA-42")).await;
+        idle(&st, &a.id).await;
+        assert!(sent_log(&ws).is_empty());
+        assert!(st.db.get_message(&a.id, mine).unwrap().unwrap().meta.get("sent_now").is_none());
+    }
+
+    fn sent_log(ws: &std::path::Path) -> String {
+        std::fs::read_to_string(ws.join("sent.log")).unwrap_or_default()
+    }
+
+    fn goal_of(st: &AppState, id: &str) -> Option<String> {
+        st.db.get_agent(id).unwrap().unwrap().goal
+    }
+
+    fn notices(st: &AppState, id: &str) -> Vec<String> {
+        st.db.list_messages(id, 100, None).unwrap().into_iter().filter(|m| m.meta["hook_block"] == true).map(|m| m.content).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_block_says_why_in_the_chat_and_goal_active_lasts_until_the_goal_passes() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-pass".into()), "user");
+        until("the goal's block", 60, || !notices(&st, &a.id).is_empty()).await;
+        assert_eq!(goal_of(&st, &a.id).as_deref(), Some("the user said the password"), "Goal active while the run goes on");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        let line = msgs.iter().find(|m| m.meta["hook_block"] == true).unwrap();
+        assert_eq!((line.role.as_str(), line.kind.as_str()), ("system", "notice"));
+        assert_eq!(line.content, "Goal not met: insufficient evidence: no password yet.", "the reason, without the goal's condition");
+        assert_eq!(line.meta["goal"], "the user said the password");
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        assert_eq!(goal_of(&st, &a.id), None, "the turn ended: the goal passed, though claude said nothing");
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_goal_over_claudes_limit_stays_active_until_the_button_clears_it() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        run(&st, &a.id, "goal-cap", 1).await;
+        assert_eq!(notices(&st, &a.id), ["Goal not met: insufficient evidence: no password yet.", "Stop hook: Objective not met: the tests are still red."]);
+        assert_eq!(goal_of(&st, &a.id).as_deref(), Some("the user said the password"), "claude's limit ended the turn, not the goal");
+        // No run in progress: the button's /goal clear is the next run, which claude answers without a model turn.
+        set(&st, &a.id, |a| a.context_tokens = Some(5000));
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!((m.role.as_str(), m.content.as_str()), ("user", "/goal clear"));
+        until("the goal to clear", 60, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "the run ended on claude's answer, not hung on its open input");
+        assert!(prompts(&st, &a.id).contains("/goal clear"));
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.content == "Goal cleared: the user said the password"));
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().context_tokens, Some(5000), "the synthetic reply's zero usage isn't the context size");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_button_clears_a_goal_blocking_the_run_in_progress() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-hold".into()), "user");
+        until("the goal's block", 60, || goal_of(&st, &a.id).is_some() && !notices(&st, &a.id).is_empty()).await;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true, "sent into the run, not queued behind it");
+        until("the goal to clear", 60, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        let line: Value = serde_json::from_str(std::fs::read_to_string(ws.join("sent.log")).unwrap().trim()).unwrap();
+        assert_eq!((user_text(&line).as_str(), line["priority"].as_str()), ("/goal clear", Some("now")));
+        assert!(ws.join("stdin-closed").exists());
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resumed_run_takes_messages_sent_now_after_its_empty_replay() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("goal-hold-resumed".into()), "user");
+        until("the goal's block", 60, || goal_of(&st, &a.id).is_some() && !notices(&st, &a.id).is_empty()).await;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true, "the replay's empty result didn't close the run's input");
+        until("the goal to clear", 60, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        let line: Value = serde_json::from_str(sent_log(&ws).trim()).unwrap();
+        assert_eq!(user_text(&line), "/goal clear");
+        assert!(ws.join("stdin-closed").exists());
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+        assert_eq!(prompts(&st, &a.id).matches("goal-hold").count(), 1, "nothing ran again");
+    }
+
+    fn prompt_list(st: &AppState, id: &str) -> Vec<String> {
+        prompts(st, id).split("\n---\n").filter(|p| !p.is_empty()).map(String::from).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_buttons_goal_clear_runs_alone_and_pending_fyis_wait_for_the_next_run() {
+        let (st, a) = fake_claude_state();
+        set(&st, &a.id, |a| a.goal = Some("the user said the password".into()));
+        let lead = crate::tasks::tests::agent(&st, "Lead");
+        fyi_from_agent(&st, &lead, &a, "The build is green.");
+        clear_goal(&st, &a.id).unwrap();
+        until("the goal to clear", 60, || goal_of(&st, &a.id).is_none()).await;
+        idle(&st, &a.id).await;
+        assert_eq!(prompt_list(&st, &a.id), ["/goal clear"], "no FYI in front of the command");
+        let fyis = st.db.take_pending_fyis(&a.id).unwrap();
+        assert!(fyis.len() == 1 && fyis[0].1.ends_with("The build is green."), "the FYI waits for a real run: {fyis:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_goal_clear_runs_on_its_own_before_the_rest_of_the_queue() {
+        let (st, a) = fake_claude_state();
+        set(&st, &a.id, |a| a.goal = Some("the user said the password".into()));
+        // "slow" takes input but never reads it: what's sent now into it goes back to the queue when it ends.
+        enqueue(&st, &a.id, Some("slow".into()), "user");
+        until("the run to take input", 60, || st.rt.lock().unwrap().runs.get(&a.id).is_some_and(|i| i.send_now.is_some())).await;
+        let chatty = enqueue_chat(&st, &a.id, "chatty".into(), json!({})).unwrap().id;
+        let m = clear_goal(&st, &a.id).unwrap();
+        assert_eq!(st.db.get_message(&a.id, m.id).unwrap().unwrap().meta["sent_now"], true);
+        until("the queue to run", 60, || st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "On it.")).await;
+        idle(&st, &a.id).await;
+        assert_eq!(prompt_list(&st, &a.id), ["slow", "/goal clear", "chatty"], "the command alone, then the rest");
+        assert_eq!(goal_of(&st, &a.id), None);
+        assert!(st.rt.lock().unwrap().queued_messages.get(&a.id).is_none_or(|q| q.iter().all(|(i, _)| *i != chatty)));
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().all(|m| m.kind != "error"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_error_with_no_turns_and_nothing_said_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("api-down".into()), "user");
+        until("the run to start", 60, || prompts(&st, &a.id).contains("api-down")).await;
+        enqueue(&st, &a.id, Some("chatty".into()), "user");
+        until("the queued message to run next", 60, || prompts(&st, &a.id).contains("chatty")).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input on the error");
+        assert_eq!(error_text(&st, &a.id).as_deref(), Some("error_during_execution"));
+        assert!(st.db.list_messages(&a.id, 100, None).unwrap().iter().any(|m| m.content == "On it."), "the queued run replied");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_claude_answers_itself_with_nothing_said_still_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("/context".into()), "user");
+        until("the run to start", 60, || prompts(&st, &a.id).contains("/context")).await;
+        enqueue(&st, &a.id, Some("chatty".into()), "user");
+        until("the queued message to run next", 60, || prompts(&st, &a.id).contains("chatty")).await;
+        idle(&st, &a.id).await;
+        assert!(ws.join("stdin-closed").exists(), "Loft closed claude's input after its answer");
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.kind != "error" && m.content != "Stopped"), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.content == "On it."), "the queued run replied");
+    }
+
+    #[test]
+    fn hook_feedback_and_goal_replies_are_read_from_claudes_lines() {
+        let fb = |t: &str| json!({ "type": "user", "isSynthetic": true, "message": { "role": "user", "content": [{ "type": "text", "text": t }] } });
+        assert_eq!(hook_block(&fb("Stop hook feedback:\nObjective not met: no tests."), None), Some((None, "Objective not met: no tests.".into())));
+        assert_eq!(hook_block(&fb("Stop hook feedback:\n[Tests pass]: still red"), None), Some((Some("Tests pass".into()), "still red".into())));
+        // A condition with brackets of its own is cut off whole when Loft knows it.
+        let g = "Fix [the] bug";
+        assert_eq!(hook_block(&fb("Stop hook feedback:\n[Fix [the] bug]: not yet"), Some(g)), Some((Some(g.into()), "not yet".into())));
+        assert_eq!(hook_block(&json!({ "type": "user", "message": { "content": "Stop hook feedback:\nx" } }), None), None, "only claude's own line");
+        assert_eq!(hook_block(&fb("Hello"), None), None);
+        assert_eq!(goal_change("Goal set: Tests pass"), Some(Some("Tests pass".into())));
+        assert_eq!(goal_change("Goal active: Tests pass (not yet evaluated)"), Some(Some("Tests pass".into())));
+        assert_eq!(goal_change("Goal cleared: Tests pass"), Some(None));
+        assert_eq!(goal_change("No goal set. Usage: /goal <condition>"), Some(None));
+        assert_eq!(goal_change("Done."), None);
+        assert_eq!(hook_block_line(true, ""), "Goal not met: no reason given");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_call_starts_the_count_over() {
+        let (st, a) = fake_claude_state();
+        run(&st, &a.id, "goal-tools", 1).await;
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert!(msgs.iter().all(|m| m.meta["brake"] != true), "{msgs:?}");
+        assert_eq!(msgs.iter().filter(|m| m.kind == "text" && m.content == "What is the password?").count(), 7);
+        assert!(msgs.iter().any(|m| m.kind == "text" && m.content == "started"), "the run ended with its reply");
+    }
+
+    #[test]
+    fn the_brake_counts_model_turns_not_lines_and_a_user_message_or_result_starts_over() {
+        let text = |id: &str| json!({ "type": "assistant", "message": { "id": id, "content": [{ "type": "text", "text": "hi" }] } });
+        let feedback = json!({ "type": "user", "isSynthetic": true, "message": { "content": [{ "type": "text", "text": "Stop hook feedback:\n[goal]: not yet" }] } });
+        let mut b = Brake::default();
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("m{i}"))) && !b.see(&text(&format!("m{i}"))) && !b.see(&feedback));
+        }
+        assert_eq!(b.turns, 4, "two lines of one turn count once");
+        assert!(!b.see(&json!({ "type": "user", "message": { "content": "the password" } })));
+        assert_eq!(b.turns, 0, "the user's message is new input");
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("n{i}"))) && !b.see(&feedback));
+        }
+        assert!(!b.see(&json!({ "type": "result", "num_turns": 4 })));
+        assert_eq!(b.turns, 0, "a finished turn starts over");
+        for i in 0..4 {
+            assert!(!b.see(&text(&format!("k{i}"))) && !b.see(&feedback));
+        }
+        assert!(!b.see(&text("k4")));
+        assert!(b.see(&feedback), "the 5th turn's feedback stops it");
+        assert_eq!(b.notice(), "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: not yet");
+    }
+
+    /// Lines as Claude Code 2.1.332 prints them while background subagents report back (#496): each hand-back is a
+    /// synthetic user line that gets a turn of its own, closed by a result, so text-only replies to them never add up.
+    #[test]
+    fn the_brake_lets_an_agent_answer_its_subagents_reports_in_text() {
+        let mut b = Brake::default();
+        let launch = [
+            json!({ "type": "assistant", "message": { "id": "m1", "content": [{ "type": "tool_use", "id": "t1", "name": "Agent", "input": { "run_in_background": true } }] } }),
+            json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "Async agent launched successfully." }] } }),
+            json!({ "type": "assistant", "message": { "id": "m2", "content": [{ "type": "text", "text": "Estou esperando os dois sub-agentes terminarem." }] } }),
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] }),
+        ];
+        for ev in &launch {
+            assert!(!b.see(ev));
+        }
+        for i in 0..8 {
+            let report = [
+                json!({ "type": "system", "subtype": "init" }),
+                json!({ "type": "user", "isSynthetic": true, "isReplay": true, "message": { "content": [{ "type": "text", "text": format!("Another Claude session sent a message: <agent-message from=\"a{i}\"> [Subagent hand-back] red") }] } }),
+                json!({ "type": "result", "subtype": "success", "num_turns": 0, "result": "" }),
+                json!({ "type": "system", "subtype": "init" }),
+                json!({ "type": "assistant", "message": { "id": format!("r{i}"), "content": [{ "type": "text", "text": "Ainda falta um sub-agente." }] } }),
+                json!({ "type": "result", "subtype": "success", "num_turns": 1, "terminal_reason": "completed", "result": "Ainda falta um sub-agente." }),
+            ];
+            for ev in &report {
+                assert!(!b.see(ev), "report {i}: {ev}");
+            }
+        }
+        assert_eq!(b.turns, 0);
     }
 
     fn fields(st: &AppState, id: &str) -> Value {
@@ -2655,14 +4052,14 @@ esac
     async fn agent_json_shows_what_the_run_waits_on() {
         let (st, a) = fake_claude_state();
         enqueue(&st, &a.id, Some("linger".into()), "user");
-        until("the reply", 10, || fields(&st, &a.id)["waiting_on"] == json!(["Run the QA suite"])).await;
+        until("the reply", 60, || fields(&st, &a.id)["waiting_on"] == json!(["Run the QA suite"])).await;
         let v = fields(&st, &a.id);
         assert_eq!(v["subagents"], json!([]), "a background shell isn't a subagent");
         assert!(v["running"] == json!(true) && v["waiting_since"].is_string() && v["last_output_at"].is_string(), "{v}");
         let r = crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await;
         assert!(r.is_ok());
-        until("the restarted run to end", 10, || !is_running(&st, &a.id)).await;
-        assert_eq!(fields(&st, &a.id), json!({ "running": false, "last_output_at": null, "waiting_on": [], "waiting_since": null, "subagents": [], "queued_messages": [] }));
+        until("the restarted run to end", 60, || !is_running(&st, &a.id)).await;
+        assert_eq!(fields(&st, &a.id), json!({ "running": false, "last_output_at": null, "waiting_on": [], "waiting_since": null, "subagents": [], "queued_messages": [], "redrawing": false }));
         let log = std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap();
         assert!(log.contains("restarted your last run (it was waiting on Run the QA suite)"), "{log}");
     }
@@ -2696,18 +4093,18 @@ esac
         let ws = workspace(&st, &a.id);
         let pushed = pushed_subagents(&st, &a.id);
         enqueue(&st, &a.id, Some("delegate".into()), "user");
-        until("the nested call", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
+        until("the nested call", 60, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
         let subs = subagents(&st, &a.id);
         assert_eq!(subs.len(), 1, "the subagent's own Agent call isn't counted: {subs:?}");
         assert!(subs[0]["id"] == "a1" && subs[0]["description"] == "Find the parser" && subs[0]["type"] == "Explore" && subs[0]["started_at"].is_string(), "{subs:?}");
-        until("the start pushed", 10, || last_push(&pushed)["ids"] == json!(["a1"])).await;
+        until("the start pushed", 60, || last_push(&pushed)["ids"] == json!(["a1"])).await;
         std::fs::write(ws.join("go"), "").unwrap();
-        until("the subagent's result", 10, || subagents(&st, &a.id).is_empty()).await;
+        until("the subagent's result", 60, || subagents(&st, &a.id).is_empty()).await;
         assert!(is_running(&st, &a.id), "the result ends the subagent, not the run");
         // Nothing else changes before `go2`: only the result's own push can tell clients.
-        until("the result pushed", 10, || last_push(&pushed) == json!({ "running": true, "ids": [] })).await;
+        until("the result pushed", 60, || last_push(&pushed) == json!({ "running": true, "ids": [] })).await;
         std::fs::write(ws.join("go2"), "").unwrap();
-        until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        until("the run to end", 60, || !is_running(&st, &a.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2715,7 +4112,7 @@ esac
         let (st, a) = fake_claude_state();
         let pushed = pushed_subagents(&st, &a.id);
         enqueue(&st, &a.id, Some("orphan".into()), "user");
-        until("the run to end", 10, || !is_running(&st, &a.id) && st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "run_end")).await;
+        until("the run to end", 60, || !is_running(&st, &a.id) && st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.kind == "run_end")).await;
         assert!(subagents(&st, &a.id).is_empty());
         let seen = pushed.lock().unwrap().clone();
         let started = seen.iter().position(|p| p["ids"] == json!(["a1"])).expect("the subagent was pushed while the run went on");
@@ -2724,9 +4121,9 @@ esac
 
         let (st, a) = fake_claude_state();
         enqueue(&st, &a.id, Some("delegate".into()), "user");
-        until("the subagent", 10, || subagents(&st, &a.id).len() == 1).await;
+        until("the subagent", 60, || subagents(&st, &a.id).len() == 1).await;
         assert!(crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.is_ok());
-        until("the restarted run to end", 10, || !is_running(&st, &a.id)).await;
+        until("the restarted run to end", 60, || !is_running(&st, &a.id)).await;
         assert!(subagents(&st, &a.id).is_empty());
     }
 
@@ -2741,19 +4138,19 @@ esac
             let ws = workspace(&st, &a.id);
             let pushed = pushed_subagents(&st, &a.id);
             enqueue(&st, &a.id, Some(prompt.into()), "user");
-            until("the launch results", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.content.contains("launched successfully")).count() == 2).await;
+            until("the launch results", 60, || st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.content.contains("launched successfully")).count() == 2).await;
             assert_eq!(subagent_ids(&st, &a.id), vec![json!("b1"), json!("b2")], "{prompt}: the launch doesn't end them, and the shell isn't a subagent");
             std::fs::write(ws.join("go"), "").unwrap();
             if prompt == "bg-agent" {
-                until("the task list to drop b1 only", 10, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
-                until("the drop pushed", 10, || last_push(&pushed)["ids"] == json!(["b2"])).await;
+                until("the task list to drop b1 only", 60, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
+                until("the drop pushed", 60, || last_push(&pushed)["ids"] == json!(["b2"])).await;
             }
             // Without task ids, they end together once no subagent of the agent's own is listed.
             std::fs::write(ws.join("go2"), "").unwrap();
-            until("the task list to drop them", 10, || subagents(&st, &a.id).is_empty()).await;
-            until("the drop pushed", 10, || last_push(&pushed) == json!({ "running": true, "ids": [] })).await;
+            until("the task list to drop them", 60, || subagents(&st, &a.id).is_empty()).await;
+            until("the drop pushed", 60, || last_push(&pushed) == json!({ "running": true, "ids": [] })).await;
             std::fs::write(ws.join("go3"), "").unwrap();
-            until("the run to end", 10, || !is_running(&st, &a.id)).await;
+            until("the run to end", 60, || !is_running(&st, &a.id)).await;
         }
     }
 
@@ -2763,17 +4160,17 @@ esac
         let ws = workspace(&st, &a.id);
         enqueue(&st, &a.id, Some("tool-status".into()), "user");
         let tool_rows = || st.db.list_messages(&a.id, 50, None).unwrap().iter().filter(|m| m.kind == "tool_use").count();
-        until("the tool row", 10, || tool_rows() == 1).await;
+        until("the tool row", 60, || tool_rows() == 1).await;
         assert_eq!(status_text(&st, &a.id), "Thinking…", "the command shows in its tool row only");
         // The agent's own line (set_status) stays through the next tool call.
         set_status_text(&st, &a.id, "Reading the config");
         std::fs::write(ws.join("go"), "").unwrap();
-        until("the second tool row", 10, || tool_rows() == 2).await;
+        until("the second tool row", 60, || tool_rows() == 2).await;
         assert_eq!(status_text(&st, &a.id), "Reading the config");
         std::fs::write(ws.join("go2"), "").unwrap();
-        until("Loft's own state", 10, || status_text(&st, &a.id) == "Preparing the next question…").await;
+        until("Loft's own state", 60, || status_text(&st, &a.id) == "Preparing the next question…").await;
         std::fs::write(ws.join("go3"), "").unwrap();
-        until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        until("the run to end", 60, || !is_running(&st, &a.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2782,30 +4179,30 @@ esac
         let ws = workspace(&st, &a.id);
         let status = || st.db.get_agent(&a.id).unwrap().unwrap().status_text;
         enqueue(&st, &a.id, Some("bg-agent early".into()), "user");
-        until("the reply", 10, || fields(&st, &a.id)["waiting_since"].is_string()).await;
+        until("the reply", 60, || fields(&st, &a.id)["waiting_since"].is_string()).await;
         // The subagent bar shows the subagents; the waiting bar only the shell and the monitor.
         assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite", "Watch the logs"]));
         assert_eq!(subagent_ids(&st, &a.id), vec![json!("b1"), json!("b2")]);
         assert_eq!(status(), "Waiting on: Run the QA suite, Watch the logs, Audit 1, Audit 2");
         std::fs::write(ws.join("go"), "").unwrap();
-        until("the task list to drop b1", 10, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
-        until("the status to drop it", 10, || status() == "Waiting on: Run the QA suite, Watch the logs, Audit 2").await;
+        until("the task list to drop b1", 60, || subagent_ids(&st, &a.id) == vec![json!("b2")]).await;
+        until("the status to drop it", 60, || status() == "Waiting on: Run the QA suite, Watch the logs, Audit 2").await;
         std::fs::write(ws.join("go2"), "").unwrap();
-        until("the status to drop b2 and the monitor", 10, || status() == "Waiting on: Run the QA suite").await;
+        until("the status to drop b2 and the monitor", 60, || status() == "Waiting on: Run the QA suite").await;
         assert!(subagents(&st, &a.id).is_empty());
         assert_eq!(fields(&st, &a.id)["waiting_on"], json!(["Run the QA suite"]));
         std::fs::write(ws.join("go3"), "").unwrap();
-        until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        until("the run to end", 60, || !is_running(&st, &a.id)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_new_message_stopping_the_run_clears_its_background_subagents() {
         let (st, a) = fake_claude_state();
         enqueue(&st, &a.id, Some("bg-agent linger".into()), "user");
-        until("the reply", 10, || !fields(&st, &a.id)["waiting_on"].as_array().unwrap().is_empty()).await;
+        until("the reply", 60, || !fields(&st, &a.id)["waiting_on"].as_array().unwrap().is_empty()).await;
         assert_eq!(subagents(&st, &a.id).len(), 2, "still running after the reply");
         enqueue(&st, &a.id, Some("next".into()), "user");
-        until("the new message to run", 10, || !is_running(&st, &a.id)).await;
+        until("the new message to run", 60, || !is_running(&st, &a.id)).await;
         assert!(workspace(&st, &a.id).join("terminated").exists());
         assert!(subagents(&st, &a.id).is_empty());
     }
@@ -2817,10 +4214,10 @@ esac
         let restart = || crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone()));
         assert!(restart().await.is_err(), "nothing to restart while idle");
         enqueue(&st, &a.id, Some("busy".into()), "user");
-        until("the run to start", 10, || ws.join("prompts.log").exists()).await;
+        until("the run to start", 60, || ws.join("prompts.log").exists()).await;
         enqueue(&st, &a.id, Some("still there?".into()), "user");
         assert!(restart().await.is_ok());
-        until("the queue to run", 10, || !is_running(&st, &a.id)).await;
+        until("the queue to run", 60, || !is_running(&st, &a.id)).await;
         let log = std::fs::read_to_string(ws.join("prompts.log")).unwrap();
         assert!(log.contains("still there?") && !log.contains("restarted your last run"), "queued work is the next prompt as is: {log}");
         let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
@@ -2845,24 +4242,24 @@ esac
         for (spec, prompt, why) in [(40, "build it", "no_call"), (50, "build it and fail", "run_failed")] {
             save(spec);
             wake(spec, prompt);
-            until("the Delivery to stall", 10, || !stalled(spec).is_empty()).await;
+            until("the Delivery to stall", 60, || !stalled(spec).is_empty()).await;
             assert_eq!(stalled(spec), why);
             idle(&st, &a.id).await;
         }
 
         save(60);
         wake(60, "build it while busy");
-        until("the run to start", 10, || std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap_or_default().contains("while busy")).await;
+        until("the run to start", 60, || std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap_or_default().contains("while busy")).await;
         // The restarted run gets an FYI saying "busy", so it keeps going too.
         st.db.add_pending_fyi(&a.id, "stay busy").unwrap();
         assert!(crate::api::restart_agent(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.is_ok());
         let prompts = || std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap_or_default();
-        until("the restarted run to start", 10, || prompts().contains("restarted your last run")).await;
+        until("the restarted run to start", 60, || prompts().contains("restarted your last run")).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(stalled(60), "", "the restarted run carries on with the step");
         // Stopped from the agent's Stop without the call: now it stalls.
         assert!(stop(&st, &a.id));
-        until("the Delivery to stall", 10, || !stalled(60).is_empty()).await;
+        until("the Delivery to stall", 60, || !stalled(60).is_empty()).await;
         assert_eq!(stalled(60), "no_call");
     }
 
@@ -2878,7 +4275,7 @@ esac
         // Opens with the mention: only Web Dev runs.
         let r = send("@Web Dev what's in your workspace?").await.ok().unwrap().0;
         assert_eq!(r["mentioned"][0]["name"], json!("Web Dev"));
-        until("Web Dev's run", 10, || !is_running(&st, &dev.id) && st.db.list_messages(&orch.id, 50, None).unwrap().iter().any(|m| m.meta["mention_reply"] == json!(true))).await;
+        until("Web Dev's run", 60, || !is_running(&st, &dev.id) && st.db.list_messages(&orch.id, 50, None).unwrap().iter().any(|m| m.meta["mention_reply"] == json!(true))).await;
         assert!(!workspace(&st, &orch.id).join("prompts.log").exists(), "the chat's own agent wasn't woken");
         let prompt = std::fs::read_to_string(workspace(&st, &dev.id).join("prompts.log")).unwrap();
         assert!(prompt.starts_with(&format!("{}Worker's chat", crate::mentions::TAG)) && prompt.contains("what's in your workspace?"), "{prompt}");
@@ -2891,14 +4288,14 @@ esac
 
         // A later run of Web Dev that isn't about a mention isn't copied anywhere.
         enqueue(&st, &dev.id, Some("unrelated".into()), "user");
-        until("the unrelated run", 10, || !is_running(&st, &dev.id) && std::fs::read_to_string(workspace(&st, &dev.id).join("prompts.log")).unwrap().contains("unrelated")).await;
+        until("the unrelated run", 60, || !is_running(&st, &dev.id) && std::fs::read_to_string(workspace(&st, &dev.id).join("prompts.log")).unwrap().contains("unrelated")).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let mirrored = st.db.list_messages(&orch.id, 50, None).unwrap().into_iter().filter(|m| m.meta["mention_reply"] == json!(true)).count();
         assert_eq!(mirrored, 1);
 
         // A mention mid-message reaches both.
         let _ = send("Please plan it, and @Web Dev take a look too").await.ok().unwrap();
-        until("both runs", 10, || !is_running(&st, &dev.id) && !is_running(&st, &orch.id) && workspace(&st, &orch.id).join("prompts.log").exists()).await;
+        until("both runs", 60, || !is_running(&st, &dev.id) && !is_running(&st, &orch.id) && workspace(&st, &orch.id).join("prompts.log").exists()).await;
 
         // Another group's agent is reachable, but doesn't shadow this group's agent of the same name.
         let mut far = crate::tasks::tests::agent(&st, "Web Dev");
@@ -2916,7 +4313,7 @@ esac
     #[test]
     fn at_paths_start_at_the_projects_folder_when_there_is_one() {
         let st = crate::tasks::tests::state();
-        let dir = st.cfg.storage_dir.parent().unwrap().to_path_buf();
+        let dir = st.cfg.root.as_path().to_path_buf();
         let projects = dir.join("projects");
         std::fs::create_dir_all(projects.join("work/notes")).unwrap();
         std::fs::write(dir.join("settings.json"), json!({ "projects_dir": projects }).to_string()).unwrap();
@@ -2935,7 +4332,7 @@ esac
         let (st, a) = fake_claude_state();
         let ws = workspace(&st, &a.id);
         enqueue(&st, &a.id, Some("hang".into()), "user");
-        until("the run to end", 10, || !is_running(&st, &a.id)).await;
+        until("the run to end", 60, || !is_running(&st, &a.id)).await;
         assert!(ws.join("terminated").exists());
         let a = st.db.get_agent(&a.id).unwrap().unwrap();
         assert_eq!((a.status.as_str(), a.session_id.as_deref()), ("idle", Some("s1")));
@@ -2949,8 +4346,70 @@ esac
         crate::api::send_message(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()), axum::Json(serde_json::from_value(json!({ "text": text })).unwrap()))
     }
 
+    /// Generous: a run spawns a process, which can take seconds while a build loads the machine. A run that
+    /// never ends (the fake claude's `busy` sleeps 600s) still fails it.
     async fn idle(st: &AppState, id: &str) {
-        until("the runs to end", 10, || !is_running(st, id)).await;
+        until("the runs to end", 60, || !is_running(st, id)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_claude_that_dies_while_a_leftover_process_holds_its_output_ends_the_run() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "leftover").await.ok().unwrap();
+        // The leftover `sleep 20` keeps stdout open: the run ends on claude's exit, not on the pipe closing.
+        // Under 20s, with room for a loaded machine.
+        until("the run to end", 15, || !is_running(&st, &a.id)).await;
+        let now = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert_eq!((now.status.as_str(), now.status_text.as_str()), ("error", "Last run failed"));
+        assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panic_in_a_run_ends_it_and_loft_keeps_serving() {
+        let (st, a) = fake_claude_state();
+        save_status(&st, &a.id, "running", "Building");
+        let _ = send(&st, &a.id, "loft-test-panic").await.ok().unwrap();
+        until("the run to end", 60, || !is_running(&st, &a.id)).await;
+        assert_eq!(saved(&st, &a.id), ("error".into(), "Last run failed".into()));
+        assert!(!st.rt.lock().unwrap().runs.contains_key(&a.id));
+        // The next message runs as usual.
+        let _ = send(&st, &a.id, "hello again").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert!(prompts(&st, &a.id).contains("hello again"));
+        assert_eq!(saved(&st, &a.id).0, "idle");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_left_over_from_the_last_run_doesnt_stop_the_next_queued_one() {
+        let (st, a) = fake_claude_state();
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        started(&st, &a.id, 1).await;
+        let _ = send(&st, &a.id, "chatty next").await.ok().unwrap();
+        // The second Stop finds no run waiting on it: it must not carry over to the queued run.
+        assert!(stop(&st, &a.id) && stop(&st, &a.id));
+        until("the queued run", 60, || prompts(&st, &a.id).contains("chatty next")).await;
+        idle(&st, &a.id).await;
+        let msgs = st.db.list_messages(&a.id, 100, None).unwrap();
+        assert_eq!(msgs.iter().filter(|m| m.content.starts_with("Stopped by user")).count(), 1, "only the busy run was stopped");
+        assert!(msgs.iter().any(|m| m.role == "assistant" && m.content == "On it."), "the queued run replied");
+        assert_eq!(saved(&st, &a.id).0, "idle");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_stores_the_commands_its_cli_reports_and_the_api_lists_them_tagged() {
+        let (st, a) = fake_claude_state();
+        let none = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        assert_eq!(none.as_array().unwrap().len(), 12, "before a run: Loft's own commands only");
+        let _ = send(&st, &a.id, "hello").await.ok().unwrap();
+        idle(&st, &a.id).await;
+        let list = crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path(a.id.clone())).await.ok().unwrap().0;
+        let tag = |n: &str| list.as_array().unwrap().iter().find(|c| c["name"] == n).map(|c| c["tag"].clone());
+        assert_eq!((tag("/clear"), tag("/review"), tag("/doctor")), (Some(json!("loft")), Some(json!("passthrough")), Some(json!("terminal"))));
+        let doctor = list.as_array().unwrap().iter().find(|c| c["name"] == "/doctor").unwrap();
+        assert!(doctor["reason"].as_str().unwrap().contains("terminal"));
+        assert!(crate::commands::list(axum::extract::State(st.clone()), axum::extract::Path("nope".into())).await.is_err());
+        let argv = std::fs::read_to_string(workspace(&st, &a.id).join("argv.log")).unwrap();
+        assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|w| w == ["--setting-sources", ""]), "no settings file is read");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3022,7 +4481,7 @@ esac
 
         // Queued while the agent is busy: it runs next with trigger "user", but no message of the user's started it.
         message_from_agent(&st, &lead, &a, "busy");
-        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        until("the run to start", 60, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
         message_from_agent(&st, &lead, &a, "and this");
         stop(&st, &a.id);
         idle(&st, &a.id).await;
@@ -3036,12 +4495,186 @@ esac
         assert!(!unread(&st, &a.id), "avatar and grill runs are quiet");
     }
 
+    fn redraw(st: &AppState, id: &str) -> impl std::future::Future<Output = crate::api::ApiResult<Value>> {
+        crate::api::redraw_avatar(axum::extract::State(st.clone()), axum::extract::Path(id.to_string()))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redraw_draws_in_a_quiet_run_on_a_throwaway_session() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        st.db
+            .update_agent(&a.id, |a| {
+                a.session_id = Some("s-own".into());
+                (a.session_cost_usd, a.total_cost_usd) = (1.0, 1.0);
+                a.context_tokens = Some(5000);
+                a.memory_index = Some("- #1 frozen".into());
+            })
+            .unwrap();
+        let (runs, spend) = st.db.all_time_spend().unwrap();
+        assert_eq!(redraw(&st, &a.id).await.ok().unwrap().0, json!({ "ok": true }));
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+
+        let prompts = std::fs::read_to_string(ws.join("prompts.log")).unwrap();
+        assert!(prompts.contains("main project's README") && prompts.contains("mcp__loft__set_avatar"), "{prompts}");
+        assert!(!prompts.contains("just created"), "{prompts}");
+        assert!(!ws.join("resumed.log").exists(), "it doesn't resume the agent's Session");
+        assert!(std::fs::read_to_string(ws.join("argv.log")).unwrap().contains("--no-session-persistence"));
+        let now = st.db.get_agent(&a.id).unwrap().unwrap();
+        assert_eq!(now.session_id.as_deref(), Some("s-own"), "the saved session stays");
+        assert_eq!((now.session_cost_usd, now.context_tokens, now.memory_index.as_deref()), (1.0, Some(5000), Some("- #1 frozen")));
+        assert!((now.total_cost_usd - 1.25).abs() < 1e-9, "{}", now.total_cost_usd);
+        let (runs_now, spend_now) = st.db.all_time_spend().unwrap();
+        assert_eq!(runs_now, runs + 1);
+        assert!((spend_now - spend - 0.25).abs() < 1e-9, "the run counts in All-time spend");
+        assert!(st.db.list_messages(&a.id, 50, None).unwrap().is_empty(), "only errors reach the chat");
+        assert!(!unread(&st, &a.id));
+
+        // The next run resumes the agent's own Session (the Redraw's system prompt is the first).
+        run(&st, &a.id, "hello", 2).await;
+        assert_eq!(std::fs::read_to_string(ws.join("resumed.log")).unwrap(), "s-own\n");
+    }
+
+    async fn redrawing(st: &AppState, id: &str) -> bool {
+        let got = crate::api::get_agent(axum::extract::State(st.clone()), axum::extract::Path(id.to_string())).await.ok().unwrap().0;
+        got["redrawing"].as_bool().unwrap()
+    }
+
+    /// The last `redrawing` an agent event for `id` carried, of those received so far.
+    fn heard_redrawing(events: &mut tokio::sync::broadcast::Receiver<crate::state::Event>, id: &str) -> Option<bool> {
+        let mut last = None;
+        while let Ok(ev) = events.try_recv() {
+            if let crate::state::Event::AgentUpdated { agent } = ev
+                && agent["id"] == id {
+                    last = agent["redrawing"].as_bool();
+                }
+        }
+        last
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_agent_says_redrawing_while_a_redraw_waits_or_draws() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        run(&st, &a.id, "hello", 1).await;
+        assert!(!redrawing(&st, &a.id).await);
+
+        // Queued behind a busy run: the agent JSON and an event say so straight away.
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        until("the busy run", 60, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("busy")).await;
+        let events = std::sync::Mutex::new(st.events.subscribe());
+        // The run's last event follows its end: wait for it.
+        let hears_done = || heard_redrawing(&mut events.lock().unwrap(), &a.id) == Some(false);
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        assert!(redrawing(&st, &a.id).await, "a queued Redraw counts");
+        assert_eq!(heard_redrawing(&mut events.lock().unwrap(), &a.id), Some(true), "other tabs hear it's queued");
+
+        // Drawing: still true.
+        stop(&st, &a.id);
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        assert!(redrawing(&st, &a.id).await, "a Redraw drawing counts");
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        assert!(!redrawing(&st, &a.id).await, "false once it has drawn");
+        until("the last event to say it's done", 60, hears_done).await;
+
+        // A Redraw that ends without a sticker (stopped) clears it too.
+        std::fs::remove_file(ws.join("go")).unwrap();
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        assert!(redrawing(&st, &a.id).await);
+        stop(&st, &a.id);
+        idle(&st, &a.id).await;
+        assert!(!redrawing(&st, &a.id).await, "false once a stopped Redraw ends");
+        until("the last event to say it's done", 60, hears_done).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_redraw_ending_with_work_queued_after_it_says_so_before_that_work_ends() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        let _ = send(&st, &a.id, "after").await.ok().unwrap();
+        let mut events = st.events.subscribe();
+        std::fs::write(ws.join("go"), "").unwrap();
+        until("the next run", 60, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("after")).await;
+        assert!(!redrawing(&st, &a.id).await);
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|ev| matches!(&ev, crate::state::Event::AgentUpdated { agent } if agent["id"] == a.id && agent["redrawing"] == false)));
+        idle(&st, &a.id).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redraw_on_a_busy_agent_waits_for_its_run() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        run(&st, &a.id, "hello", 1).await;
+        let _ = send(&st, &a.id, "busy").await.ok().unwrap();
+        until("the busy run", 60, || std::fs::read_to_string(ws.join("prompts.log")).unwrap_or_default().contains("busy")).await;
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!std::fs::read_to_string(ws.join("prompts.log")).unwrap().contains("redraw your sticker"), "it waits for the run");
+        assert_ne!(status_text(&st, &a.id), "Drawing its avatar…");
+
+        stop(&st, &a.id);
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        let prompts = std::fs::read_to_string(ws.join("prompts.log")).unwrap();
+        assert!(prompts.find("busy").unwrap() < prompts.find("redraw your sticker").unwrap(), "{prompts}");
+        assert_eq!(std::fs::read_to_string(ws.join("resumed.log")).unwrap(), "s1\n", "only the busy run resumed the Session");
+        assert_eq!(st.db.get_agent(&a.id).unwrap().unwrap().session_id.as_deref(), Some("s1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redraw_does_not_stop_background_work_the_agent_waits_on() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        enqueue(&st, &a.id, Some("start the suite, linger".into()), "user");
+        until("the reply", 60, || status_text(&st, &a.id).starts_with("Waiting on: Run the QA suite")).await;
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        tokio::time::sleep(EXIT_GRACE * 3).await;
+        assert!(is_running(&st, &a.id) && !ws.join("terminated").exists(), "the background work keeps going");
+        assert_eq!(prompts(&st, &a.id).matches("\n---\n").count(), 1, "no run starts before the busy one ends");
+        assert!(status_text(&st, &a.id).starts_with("Waiting on: Run the QA suite"));
+
+        stop(&st, &a.id);
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        let log = prompts(&st, &a.id);
+        assert_eq!(log.matches("\n---\n").count(), 2, "only the Redraw ran after it: {log}");
+        assert!(!log.contains("was stopped when new messages arrived"), "{log}");
+        let msgs = st.db.list_messages(&a.id, 50, None).unwrap();
+        assert!(!msgs.iter().any(|m| m.content.contains("Stopped background work")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clicking_redraw_again_while_it_draws_draws_once() {
+        let (st, a) = fake_claude_state();
+        let ws = workspace(&st, &a.id);
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        until("the avatar run", 60, || status_text(&st, &a.id) == "Drawing its avatar…").await;
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        std::fs::write(ws.join("go"), "").unwrap();
+        idle(&st, &a.id).await;
+        assert_eq!(prompts(&st, &a.id).matches("redraw your sticker").count(), 1);
+
+        // Once it has drawn, Redraw draws again.
+        let _ = redraw(&st, &a.id).await.ok().unwrap();
+        idle(&st, &a.id).await;
+        assert_eq!(prompts(&st, &a.id).matches("redraw your sticker").count(), 2);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_queued_run_mixing_the_users_message_and_an_agents_counts() {
         let (st, a) = fake_claude_state();
         let lead = crate::tasks::tests::agent(&st, "Lead");
         message_from_agent(&st, &lead, &a, "busy");
-        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        until("the run to start", 60, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
         message_from_agent(&st, &lead, &a, "from the lead");
         let _ = send(&st, &a.id, "from me").await.ok().unwrap();
         stop(&st, &a.id);
@@ -3059,7 +4692,7 @@ esac
         // Running as far as Restart can tell: the run has registered whether it answers the user.
         let running = |st: &AppState, id: &str| st.rt.lock().unwrap().runs.contains_key(id);
         let _ = send(&st, &a.id, "busy").await.ok().unwrap();
-        until("the run to start", 10, || running(&st, &a.id)).await;
+        until("the run to start", 60, || running(&st, &a.id)).await;
         restart(&st, &a.id).await;
         idle(&st, &a.id).await;
         assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("restarted your last run"));
@@ -3067,7 +4700,7 @@ esac
 
         let b = crate::tasks::tests::agent(&st, "Failing");
         let _ = send(&st, &b.id, "busy").await.ok().unwrap();
-        until("the run to start", 10, || running(&st, &b.id)).await;
+        until("the run to start", 60, || running(&st, &b.id)).await;
         let mut s = st.settings.get();
         s.claude_bin = "/nonexistent/claude".into();
         st.settings.save(s).unwrap();
@@ -3089,7 +4722,7 @@ esac
     /// The agent's `n`th run has started and its first event (the session) has come in, so the quiet
     /// clock it sets can be moved back.
     async fn started(st: &AppState, id: &str, n: usize) {
-        until("the run to start", 10, || prompts(st, id).matches("\n---\n").count() == n && st.rt.lock().unwrap().runs.contains_key(id)).await;
+        until("the run to start", 60, || prompts(st, id).matches("\n---\n").count() == n && st.rt.lock().unwrap().runs.contains_key(id)).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
@@ -3128,12 +4761,118 @@ esac
 
         // Quiet 20 minutes with nothing to wait on: restarted, told so, and its reply is Unread as before.
         restart_quiet(&st).await;
-        until("the restarted run", 10, || prompts(&st, &a.id).contains("[Loft: Loft restarted your last run (no output for 25 min)")).await;
+        until("the restarted run", 60, || prompts(&st, &a.id).contains("[Loft: Loft restarted your last run (no output for 25 min)")).await;
         idle(&st, &a.id).await;
         assert!(unread(&st, &a.id), "the restarted run's reply");
         assert!(st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.starts_with("Restarted by Loft")));
         // It answered: the count starts over.
         assert!(!st.rt.lock().unwrap().auto_restarts.contains_key(&a.id));
+    }
+
+    fn saved(st: &AppState, id: &str) -> (String, String) {
+        let a = st.db.get_agent(id).unwrap().unwrap();
+        (a.status, a.status_text)
+    }
+
+    fn save_status(st: &AppState, id: &str, status: &str, text: &str) {
+        st.db.update_agent(id, |a| (a.status, a.status_text) = (status.into(), text.into())).unwrap();
+    }
+
+    /// The agent's permission asks still waiting on the user.
+    fn pending(st: &AppState, id: &str) -> Vec<String> {
+        st.db.list_permissions(Some(id)).unwrap().into_iter().filter(|p| p.status == "pending").map(|p| p.id).collect()
+    }
+
+    /// Asks a permission for the agent in the background, as an MCP call does, once the asks before it are saved.
+    async fn ask(st: &AppState, id: &str, tool: &str) -> tokio::task::JoinHandle<Decision> {
+        let n = pending(st, id).len();
+        let (st2, id2, tool) = (st.clone(), id.to_string(), tool.to_string());
+        let h = tokio::spawn(async move { ask_permission_for(&st2, &id2, "prompt", &tool, json!({}), "", String::new(), Duration::from_secs(30)).await });
+        until("the ask", 60, || pending(st, id).len() == n + 1 && saved(st, id).0 == "waiting").await;
+        h
+    }
+
+    #[test]
+    fn the_watcher_sets_a_stale_running_or_waiting_to_idle_and_leaves_live_runs_and_asks_alone() {
+        let st = crate::tasks::tests::state();
+        let [stale_run, stale_wait, live, asking] = ["A", "B", "C", "D"].map(|n| crate::tasks::tests::agent(&st, n));
+        save_status(&st, &stale_run.id, "running", "Building");
+        save_status(&st, &stale_wait.id, "waiting", "Waiting for permission: Bash");
+        save_status(&st, &live.id, "running", "Building");
+        st.rt.lock().unwrap().running.insert(live.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &asking.id, "waiting", "Waiting for permission: Bash");
+        st.db.save_permission(&crate::db::PermissionRequest {
+            id: "p-d".into(), agent_id: asking.id.clone(), source: "prompt".into(), tool_name: "Bash".into(), input: json!({}),
+            reason: String::new(), rule: String::new(), status: "pending".into(), created_at: crate::db::now(),
+        }).unwrap();
+        let mut events = st.events.subscribe();
+
+        reconcile_status(&st);
+        assert_eq!(saved(&st, &stale_run.id), ("idle".into(), String::new()));
+        assert_eq!(saved(&st, &stale_wait.id), ("idle".into(), String::new()));
+        assert_eq!(saved(&st, &live.id), ("running".into(), "Building".into()), "a live run");
+        assert_eq!(saved(&st, &asking.id), ("waiting".into(), "Waiting for permission: Bash".into()), "a pending permission");
+        let mut updated = vec![];
+        while let Ok(Event::AgentUpdated { agent }) = events.try_recv() {
+            updated.push(agent["id"].as_str().unwrap().to_string());
+        }
+        updated.sort();
+        let mut want = vec![stale_run.id.clone(), stale_wait.id.clone()];
+        want.sort();
+        assert_eq!(updated, want, "the corrected agents are emitted");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overlapping_asks_stay_waiting_until_the_last_then_bring_back_the_text_from_before() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &a.id, "running", "Building the app");
+        let first = ask(&st, &a.id, "Bash").await;
+        let second = ask(&st, &a.id, "Write").await;
+        let ids = pending(&st, &a.id);
+
+        decide(&st, &ids[0], "allow", None, None, None).unwrap();
+        until("the first ask to end", 60, || st.rt.lock().unwrap().asks.get(&a.id).map(|a| a.0) == Some(1)).await;
+        assert_eq!(saved(&st, &a.id).0, "waiting", "one ask is still pending");
+
+        decide(&st, &ids[1], "allow", None, None, None).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("running".into(), "Building the app".into()));
+        assert!(!st.rt.lock().unwrap().asks.contains_key(&a.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_ask_stops_counting_and_the_next_answered_ask_restores_the_status() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        save_status(&st, &a.id, "idle", "");
+        // The MCP call is cancelled: a run stopped mid-call, or a kill whose command stopped.
+        let h = ask(&st, &a.id, "Kill").await;
+        h.abort();
+        until("the ask to expire", 60, || pending(&st, &a.id).is_empty()).await;
+        assert_eq!(saved(&st, &a.id), ("idle".into(), String::new()));
+        assert!(!st.rt.lock().unwrap().asks.contains_key(&a.id));
+
+        // The next ask, in a run, counts from zero again.
+        st.rt.lock().unwrap().running.insert(a.id.clone(), Arc::new(Notify::new()));
+        save_status(&st, &a.id, "running", "Building");
+        let h = ask(&st, &a.id, "Bash").await;
+        decide(&st, &pending(&st, &a.id)[0], "allow", None, None, None).unwrap();
+        h.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("running".into(), "Building".into()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ask_outside_a_run_leaves_the_agent_idle_once_answered() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Worker");
+        save_status(&st, &a.id, "idle", "");
+        let h = ask(&st, &a.id, "Kill").await;
+        decide(&st, &pending(&st, &a.id)[0], "deny", None, None, None).unwrap();
+        h.await.unwrap();
+        assert_eq!(saved(&st, &a.id), ("idle".into(), String::new()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3168,7 +4907,7 @@ esac
         let (st, a) = fake_claude_state();
         let lead = crate::tasks::tests::agent(&st, "Lead");
         message_from_agent(&st, &lead, &a, "busy");
-        until("the run to start", 10, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
+        until("the run to start", 60, || st.db.get_agent(&a.id).unwrap().unwrap().status == "running").await;
         restart(&st, &a.id).await;
         idle(&st, &a.id).await;
         assert!(std::fs::read_to_string(workspace(&st, &a.id).join("prompts.log")).unwrap().contains("restarted your last run"));
@@ -3183,7 +4922,7 @@ esac
         let running = |st: &AppState, id: &str| st.db.get_agent(id).unwrap().unwrap().status == "running";
         // My run is restarted with only an agent's message queued: that message runs next, as the agent's.
         let _ = send(&st, &a.id, "busy").await.ok().unwrap();
-        until("the run to start", 10, || running(&st, &a.id)).await;
+        until("the run to start", 60, || running(&st, &a.id)).await;
         message_from_agent(&st, &lead, &a, "ask");
         restart(&st, &a.id).await;
         idle(&st, &a.id).await;
@@ -3193,7 +4932,7 @@ esac
         // My message is queued: it still counts.
         let b = crate::tasks::tests::agent(&st, "Mine");
         message_from_agent(&st, &lead, &b, "busy");
-        until("the run to start", 10, || running(&st, &b.id)).await;
+        until("the run to start", 60, || running(&st, &b.id)).await;
         let _ = send(&st, &b.id, "hello").await.ok().unwrap();
         restart(&st, &b.id).await;
         idle(&st, &b.id).await;
@@ -3202,7 +4941,7 @@ esac
         // Mine and an agent's queued together: still counts.
         let c = crate::tasks::tests::agent(&st, "Mixed");
         message_from_agent(&st, &lead, &c, "busy");
-        until("the run to start", 10, || running(&st, &c.id)).await;
+        until("the run to start", 60, || running(&st, &c.id)).await;
         message_from_agent(&st, &lead, &c, "hello");
         let _ = send(&st, &c.id, "hello").await.ok().unwrap();
         restart(&st, &c.id).await;
@@ -3237,7 +4976,7 @@ esac
     async fn on_ticket(st: &AppState, id: &str, key: &str, builder: bool) {
         let runs = count(st, id, "run_end");
         wake_on_ticket(st, id, key, builder, format!("work on {key}"), crate::delivery::Wake { repo: "o/r".into(), spec: 1, step: crate::delivery::Step::FinalReview { round: 0 } });
-        until("the ticket's run", 10, || !is_running(st, id) && count(st, id, "run_end") == runs + 1).await;
+        until("the ticket's run", 60, || !is_running(st, id) && count(st, id, "run_end") == runs + 1).await;
     }
 
     fn resumed(st: &AppState, id: &str) -> usize {
@@ -3319,14 +5058,14 @@ esac
         on_ticket(&st, &a.id, "o/r#1/2", true).await;
         set(&st, &a.id, |a| a.fresh_context = "always".into());
         enqueue(&st, &a.id, Some("delegate".into()), "user");
-        until("the run to start", 10, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
+        until("the run to start", 60, || st.db.list_messages(&a.id, 50, None).unwrap().iter().any(|m| m.content.contains("Nested"))).await;
         wake_on_ticket(&st, &a.id, "o/r#1/3", true, "work on #3".into(), crate::delivery::Wake { repo: "o/r".into(), spec: 1, step: crate::delivery::Step::FinalReview { round: 0 } });
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(count(&st, &a.id, "clear"), 0, "never during a run");
         let ws = workspace(&st, &a.id);
         std::fs::write(ws.join("go"), "").unwrap();
         std::fs::write(ws.join("go2"), "").unwrap();
-        until("the queued ticket's run", 10, || !is_running(&st, &a.id) && count(&st, &a.id, "run_end") == 3).await;
+        until("the queued ticket's run", 60, || !is_running(&st, &a.id) && count(&st, &a.id, "run_end") == 3).await;
         let mut msgs = st.db.list_messages(&a.id, 400, None).unwrap();
         msgs.sort_by_key(|m| m.id);
         let kinds: Vec<&str> = msgs.iter().filter(|m| matches!(m.kind.as_str(), "run_end" | "clear")).map(|m| m.kind.as_str()).collect();

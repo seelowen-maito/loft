@@ -1,0 +1,571 @@
+import CoreSpotlight
+import LoftKit
+import SwiftUI
+
+/// Loft for Mac (spec #382): the same client as the iPhone app, in Mac windows with a sidebar of sections.
+@main
+struct LoftMacApp: App {
+    @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var delegate
+    @State private var store: LoftStore
+    @State private var nav: MacNav
+    @State private var alerts: MacAlerts
+    @State private var voice: VoiceSession
+    @State private var quickSearch: QuickSearchController
+    @State private var voicePanel: VoicePanelController
+    @State private var spotlight: MacSpotlight?
+    @State private var openLoft: ShortcutBinding
+    @State private var focus: FocusController
+
+    init() {
+        Prefs.registerDefaults()
+        let store = LoftStore(api: Self.makeAPI())
+        // Live from launch: the menu bar item needs it with the window closed.
+        store.activate()
+        #if DEBUG
+        // Screenshots of the demo, as if its address was typed.
+        if ProcessInfo.processInfo.arguments.contains("-demo") { store.enterDemo() }
+        #endif
+        _store = State(initialValue: store)
+        let nav = MacNav()
+        _nav = State(initialValue: nav)
+        _alerts = State(initialValue: MacAlerts(store: store, nav: nav))
+        let voice = VoiceSession(store: store)
+        _voice = State(initialValue: voice)
+        _voicePanel = State(initialValue: VoicePanelController(store: store, nav: nav, voice: voice))
+        let quickSearch = QuickSearchController(store: store, nav: nav)
+        _quickSearch = State(initialValue: quickSearch)
+        // Brings the main window to the front from any app, opening it if it was closed.
+        _openLoft = State(initialValue: ShortcutBinding(.openLoft) {
+            quickSearch.showWindow?()
+            NSApp.activate(ignoringOtherApps: true)
+        })
+        #if DEBUG
+        // Opens the window itself: a directly launched app may not open one.
+        if let i = ProcessInfo.processInfo.arguments.firstIndex(of: "-render-app-store"), i + 1 < ProcessInfo.processInfo.arguments.count {
+            let folder = ProcessInfo.processInfo.arguments[i + 1], voicePanel = _voicePanel.wrappedValue
+            Task { await AppStoreShots.render(store: store, nav: nav, quickSearch: quickSearch, voicePanel: voicePanel, to: folder) }
+        }
+        #endif
+        // The PR screenshots draw a session that hides nothing.
+        let focus = FocusController(hidesApps: !ProcessInfo.processInfo.arguments.contains { $0 == "-render-window" || $0 == "-render-menubar" })
+        _focus = State(initialValue: focus)
+        nav.isFocusing = { focus.session != nil }
+        MacAppDelegate.dockMenu = {
+            focus.dockMenu {
+                quickSearch.showWindow?()
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+        MacAppDelegate.openSpotlightItem = { quickSearch.open(spotlightItem: $0) }
+        _spotlight = State(initialValue: Self.indexesSpotlight ? MacSpotlight(store: store) : nil)
+    }
+
+    private static func makeAPI() -> LoftAPI? {
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("-ui-onboarding") {
+            UserDefaults.standard.removeObject(forKey: Prefs.serverURL)
+            return nil
+        }
+        if args.contains("-ui-testing") {
+            SnapshotStore.standard.clear()
+            return FixtureAPI.fromLaunchArguments()
+        }
+        #endif
+        return UserDefaults.standard.string(forKey: Prefs.serverURL).flatMap(LiveLoftAPI.normalize).map(LiveLoftAPI.init(baseURL:))
+    }
+
+    /// Fixture runs (UI tests, screenshots) keep their sample agents and issues out of this Mac's Spotlight.
+    private static var indexesSpotlight: Bool {
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        return !args.contains("-ui-testing") && !args.contains("-ui-onboarding")
+        #else
+        return true
+        #endif
+    }
+
+    var body: some Scene {
+        Window("Loft", id: "main") {
+            MacRootView()
+                .tint(Theme.accent)
+                .environment(store)
+                .environment(nav)
+                .environment(voice)
+                .environment(focus)
+                .frame(minWidth: 1180, minHeight: 640)
+                .onAppear { store.activate() }
+                // A tap on a widget.
+                .onOpenURL { url in
+                    // The Talk widget or control: Talk with whoever you talked to last. No one yet: the most recent
+                    // Lead, the To: row's first chip. A link they didn't sign (another app, a web page): the agents, mic off.
+                    switch TalkLink.route(url, key: TalkKey.current, lastAgentId: UserDefaults.standard.string(forKey: Prefs.voiceLastAgent),
+                                          orchestratorId: store.orchestratorId, agents: store.agents) {
+                    case .start(let id): nav.talk(id)
+                    case .pick:
+                        if let id = TalkRecipients.chips(store.agents, current: nil).first?.id { nav.talk(id) } else { nav.open(.talk) }
+                    case .open(let link): nav.open(link)
+                    case nil: break
+                    }
+                }
+                // A Loft item chosen in Spotlight, when SwiftUI hands it to the window rather than the app delegate.
+                .onContinueUserActivity(CSSearchableItemActionType) { activity in
+                    if let id = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String { quickSearch.open(spotlightItem: id) }
+                }
+                #if DEBUG
+                .task {
+                    let args = ProcessInfo.processInfo.arguments
+                    if let i = args.firstIndex(of: "-render-menubar"), i + 1 < args.count { await renderMenuBar(store: store, nav: nav, focus: focus, to: args[i + 1]) }
+                    if let i = args.firstIndex(of: "-render-window"), i + 1 < args.count { await renderWindow(store: store, nav: nav, focus: focus, to: args[i + 1]) }
+                }
+                #endif
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    // Quitting mid-session brings the hidden apps back.
+                    focus.end()
+                    store.saveNow()
+                }
+        }
+        // Room for the sidebar, the agents, the chat and the agent's settings side by side.
+        .defaultSize(width: 1400, height: 860)
+        .commands { LoftCommands(nav: nav, focus: focus) }
+
+        MenuBarExtra { MenuBarContent(voicePanel: voicePanel).tint(Theme.accent).environment(store).environment(nav).environment(focus) } label: { MenuBarLabel(alerts: alerts, quickSearch: quickSearch, voicePanel: voicePanel).environment(store) }
+            .menuBarExtraStyle(.window)
+
+        Settings {
+            AddressForm(isOnboarding: false)
+                .tint(Theme.accent)
+                .environment(store)
+                .frame(width: 520)
+                .padding()
+        }
+    }
+}
+
+/// Where the window is: the section, the agent whose chat is open, the issue pages open, and the New message picker.
+@MainActor
+@Observable
+final class MacNav {
+    /// The section the window shows and the sidebar highlights, and the chat-opened count for the composer.
+    var selection = MacSelection()
+    /// A focus session is running: only its sections open (set by the app).
+    var isFocusing: () -> Bool = { false }
+    var section: MacSection {
+        get { FocusSession.shown(selection.section, focusing: isFocusing()) }
+        set { selection.go(FocusSession.shown(newValue, focusing: isFocusing())) }
+    }
+    var agentId: String?
+    var picksRecipient = false
+    /// Text from the voice panel's Edit in chat, for that agent's message box.
+    var voiceDraft: (agentId: String, text: String)?
+    /// The issue pages open in the Issues section, from the board's card on.
+    var issuePath: [String] = []
+    /// The saved item open in Saved, if any.
+    var savedPath: [Int64] = []
+
+    /// The Needs you item to scroll to and outline: the Needs you widget's Approve.
+    var needsYouFocus: String?
+    /// The chat to open Talk in, once it shows (the Talk widget or control).
+    var talkIn: String?
+    var chatNote: (agentId: String, text: String)? {
+        get { selection.chatNote }
+        set { selection.chatNote = newValue }
+    }
+
+    /// The message to scroll to once its chat shows (a saved item's Open in chat).
+    var chatFocus: (agentId: String, message: Int64)?
+
+    func openChat(_ agentId: String, message: Int64? = nil) {
+        selection.openChat()
+        self.agentId = agentId
+        chatFocus = message.map { (agentId, $0) }
+    }
+
+    /// Opens the agent's chat with Talk listening.
+    func talk(_ agentId: String) {
+        openChat(agentId)
+        talkIn = agentId
+    }
+
+    func open(_ link: DeepLink) {
+        switch link {
+        case .needsYou:
+            section = MacSection(link)
+            needsYouFocus = nil
+        case .needsYouItem(let id):
+            section = MacSection(link)
+            needsYouFocus = id
+        case .agent(let id): openChat(id)
+        case .issue(let id):
+            section = MacSection(link)
+            issuePath = [id]
+        case .agents, .talk, .overview: section = MacSection(link)
+        }
+    }
+}
+
+struct LoftCommands: Commands {
+    let nav: MacNav
+    let focus: FocusController
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Message…") { show { nav.picksRecipient = true } }
+                .keyboardShortcut("n")
+        }
+        CommandMenu("Go") {
+            ForEach(MacSection.allCases) { s in
+                Button(s.title) { show { nav.section = s } }
+                    .keyboardShortcut(KeyEquivalent(Character(String(s.rawValue))))
+                    // A focus session leaves only Agents and Issues.
+                    .disabled(focus.session != nil && !FocusSession.sections.contains(s))
+            }
+            Divider()
+            Button("Back") { nav.issuePath.removeLast() }
+                .keyboardShortcut("[")
+                .disabled(nav.section != .issues || nav.issuePath.isEmpty)
+        }
+        CommandMenu("Focus") {
+            FocusMenuItems(focus: focus) { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+        }
+    }
+
+    /// Goes there in the main window, opening or raising it: with only the menu bar item left, a shortcut still shows
+    /// where it went.
+    private func show(_ go: () -> Void) {
+        go()
+        openWindow(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// First the address, then the window's sections. Loft unreachable with nothing loaded yet says so.
+struct MacRootView: View {
+    @Environment(LoftStore.self) private var store
+    @AppStorage(Prefs.appearance) private var appearance = AppearanceChoice.dark.rawValue
+
+    var body: some View {
+        content
+            .background(WebTheme.canvas)
+            .onChange(of: appearance, initial: true) { Appearance.apply(appearance) }
+    }
+
+    @ViewBuilder private var content: some View {
+        if store.connection == .notConfigured {
+            AddressForm(isOnboarding: true)
+                .frame(maxWidth: 520)
+                .padding(32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if store.lastSync == nil, case .reconnecting(_, let error) = store.connection {
+            UnreachableScreen(error: error)
+        } else {
+            MainWindow()
+        }
+    }
+}
+
+/// Above every section in the demo, like the iPhone's: it's sample data, and Exit leaves it.
+struct DemoBanner: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(MacNav.self) private var nav
+
+    var body: some View {
+        HStack {
+            Label("Demo · sample data", systemImage: "play.circle.fill").font(.callout.weight(.semibold))
+            Spacer()
+            Button("Exit") {
+                nav.section = .agents
+                nav.agentId = nil
+                nav.issuePath = []
+                store.exitDemo()
+            }
+            .buttonStyle(.plain)
+            .font(.callout.weight(.semibold))
+            .underline()
+            .help("Leaves the demo. Nothing from it is kept.")
+            .accessibilityIdentifier("exitDemo")
+        }
+        .foregroundStyle(.black)
+        .padding(.horizontal, 14).padding(.vertical, 6)
+        // Only behind the banner, not up under the toolbar.
+        .background(Theme.attention, ignoresSafeAreaEdges: [])
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("demoBanner")
+    }
+}
+
+/// Loft didn't answer at the saved address and nothing is cached: why, and what to try.
+struct UnreachableScreen: View {
+    @Environment(LoftStore.self) private var store
+    let error: APIError
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "bolt.horizontal.circle").font(.system(size: 44)).foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text("Can't reach Loft").font(.title2.bold()).accessibilityIdentifier("unreachableTitle")
+            Text("Nothing answered at \(store.api?.baseURL.absoluteString ?? "the saved address"). Check that Loft is running on that Mac, or change the address.")
+                .multilineTextAlignment(.center).foregroundStyle(.secondary)
+            Text(error.title).font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            HStack {
+                Button("Try again") { store.reconnect() }.keyboardShortcut(.defaultAction)
+                Button("Change address…") { store.forgetServer() }
+            }
+        }
+        .frame(maxWidth: 460)
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct MainWindow: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(MacNav.self) private var nav
+    @Environment(FocusController.self) private var focus
+
+    /// The App Store screenshots leave the demo's banner and the sections' sidebar out.
+    private static var isAppStoreShot: Bool {
+        #if DEBUG
+        AppStoreShots.isRendering
+        #else
+        false
+        #endif
+    }
+    /// `-render-window` shows the sections' sidebar (Focus mode's control lives under it).
+    private static var isWindowShot: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-render-window")
+        #else
+        false
+        #endif
+    }
+    @State private var columns: NavigationSplitViewVisibility = isAppStoreShot ? .detailOnly : isWindowShot ? .all : .automatic
+
+    var body: some View {
+        @Bindable var nav = nav
+        NavigationSplitView(columnVisibility: $columns) {
+            List(selection: $nav.section) {
+                ForEach(focus.session == nil ? MacSection.allCases : FocusSession.sections) { s in
+                    Label(s.title, systemImage: s.symbol).accessibilityIdentifier("section-\(s.title)")
+                        .badge(s == .needsYou ? store.needsYou?.count ?? 0 : 0)
+                        .tag(s)
+                }
+            }
+            // A click on a row leaves a text field the keyboard, so ↑/↓ wouldn't move: the sidebar takes it.
+            .simultaneousGesture(TapGesture().onEnded { SidebarKeyboard.take(in: NSApp.keyWindow) })
+            .navigationSplitViewColumnWidth(min: 160, ideal: 180)
+            .scrollContentBackground(.hidden)
+            .background(WebTheme.canvas)
+            .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 0) {
+                FocusSidebarControl().padding(.horizontal, 10).padding(.vertical, 8)
+                Label {
+                    Text(store.connection.label).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(WebTheme.fg3)
+                } icon: {
+                    Image(systemName: store.connection.isUsable ? "circle.fill" : "circle.dotted")
+                        .foregroundStyle(store.connection.color)
+                }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .accessibilityIdentifier("connectionLabel")
+                }
+            }
+        } detail: {
+            Group {
+                switch nav.section {
+                case .overview: OverviewSection()
+                case .agents: AgentsSection()
+                case .issues: IssuesSection()
+                case .needsYou: NeedsYouScreen()
+                case .saved: SavedSection()
+                case .settings: SettingsSection()
+                }
+            }
+            // Over every section in the demo, under the toolbar.
+            .safeAreaInset(edge: .top, spacing: 0) { if store.isDemo && !Self.isAppStoreShot { DemoBanner() } }
+        }
+        // The web's page, cards and text colours behind every section.
+        .webPage()
+        .sheet(isPresented: $nav.picksRecipient) { RecipientPicker() }
+        // "Focus for…" (the Dock and Focus menus) opens the popover under the sidebar: show the sidebar first.
+        .onChange(of: focus.picksLength) { if focus.picksLength { columns = .all } }
+        .onChange(of: nav.section) { keepSidebarKeyboard() }
+    }
+
+    /// A section's own field (Agents' search, a chat's composer) can take the keyboard as it shows, which would make ↑/↓
+    /// stop moving between sections after a sidebar click. Takes it back unless a chat was opened from code.
+    private func keepSidebarKeyboard() {
+        guard nav.selection.sidebarKeepsKeyboard, let window = NSApp.keyWindow, !(window.firstResponder is NSText) else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            if nav.selection.sidebarKeepsKeyboard, window.firstResponder is NSText { SidebarKeyboard.take(in: window) }
+        }
+    }
+}
+
+/// The sidebar's table: SwiftUI's List leaves the window itself as first responder after a click, and ↑/↓ only move the
+/// selection while the table is.
+enum SidebarKeyboard {
+    /// - window: the window the click or section change was in; nothing happens if another one (a sheet, the quick
+    ///   search panel) is key by now.
+    @MainActor static func take(in window: NSWindow?) {
+        guard let window, NSApp.keyWindow === window, let root = window.contentView?.superview ?? window.contentView else { return }
+        func sidebar(in view: NSView) -> NSTableView? {
+            if let t = view as? NSTableView, t.accessibilityLabel() == "Sidebar" { return t }
+            for v in view.subviews { if let t = sidebar(in: v) { return t } }
+            return nil
+        }
+        guard let table = sidebar(in: root) else {
+            #if DEBUG
+            NSLog("SidebarKeyboard: no NSTableView labelled \"Sidebar\" in the window (collapsed, or renamed); ↑/↓ will not move between sections")
+            #endif
+            return
+        }
+        window.makeFirstResponder(table)
+    }
+}
+
+/// ⌘N: pick an agent and its chat opens.
+struct RecipientPicker: View {
+    @Environment(LoftStore.self) private var store
+    @Environment(MacNav.self) private var nav
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+
+    private var agents: [Agent] {
+        store.sortedAgents.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("New message").font(.headline)
+            TextField("Search agents", text: $search)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("recipientSearch")
+                .onSubmit { if let a = agents.first { pick(a) } }
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(agents) { a in AgentListRow(agent: a) { pick(a) } }
+                }
+            }
+            .frame(height: 280)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding()
+        .frame(width: 360)
+    }
+
+    private func pick(_ a: Agent) {
+        nav.openChat(a.id)
+        dismiss()
+    }
+}
+
+#if DEBUG
+/// `-render-window <folder>`: draws the main window to PNGs (the address step, or a chat, Issues, Overview, Needs you and
+/// Settings), then quits. For screenshots when a UI test can't drive the app (another copy of it is open, and XCUITest
+/// picks that one). `-appearance light|dark|system` picks the look for this launch only, without saving it.
+@MainActor
+func renderWindow(store: LoftStore, nav: MacNav, focus: FocusController, to folder: String) async {
+    for _ in 0..<80 where store.agents.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+    try? await Task.sleep(for: .seconds(1))
+    func png(_ name: String) {
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 600 }),
+              let view = window.contentView?.superview ?? window.contentView,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
+    }
+    /// A piece of the window on its own, at 2x, for a close-up.
+    func png<V: View>(_ content: V, _ name: String) {
+        let host = NSHostingView(rootView: content.environment(store).environment(nav).environment(focus).padding(10).background(WebTheme.canvas))
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        host.layoutSubtreeIfNeeded()
+        let size = host.bounds.size
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return }
+        rep.size = size
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: folder).appendingPathComponent("\(name).png"))
+    }
+    if store.agents.isEmpty {
+        png("connect")
+    } else {
+        // `-render-agent <name>` draws that agent's chat instead.
+        let args = ProcessInfo.processInfo.arguments
+        let name = args.firstIndex(of: "-render-agent").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } ?? "Orchestrator"
+        if let id = store.agents.first(where: { $0.name == name })?.id { nav.openChat(id) }
+        try? await Task.sleep(for: .seconds(2))
+        png("agents")
+        for section in [MacSection.issues, .overview, .needsYou, .saved, .settings] {
+            nav.section = section
+            try? await Task.sleep(for: .seconds(2))
+            png("\(section)")
+        }
+        // Saved (spec #675): an item's page, its edit form and the Save form for a chat message.
+        nav.section = .saved
+        nav.savedPath = [1]
+        try? await Task.sleep(for: .seconds(2))
+        png("saved-item")
+        nav.savedPath = []
+        if let item = try? await store.savedItem(id: 1) {
+            png(SavedEditForm(item: item, saved: { _ in }, cancel: {}).frame(width: 720), "saved-edit")
+        }
+        if let reply = try? await store.api?.messages(agentId: "qa", limit: 50, before: nil).first(where: Saved.canSave) {
+            png(SaveMessageSheet(message: reply), "saved-save-sheet")
+        }
+        // Quick search's row while it records.
+        HotKeyFailures.shared.recording = LoftShortcut.quickSearch.rawValue
+        try? await Task.sleep(for: .seconds(1))
+        png("settings-recording")
+        HotKeyFailures.shared.recording = nil
+        // What a refused recording says: ⌘Space is macOS's Spotlight.
+        HotKeyFailures.shared.refused[LoftShortcut.openLoft.rawValue] = LoftShortcut.openLoft.refusal(MacShortcut(keyCode: MacShortcut.space, modifiers: MacShortcut.command))
+        try? await Task.sleep(for: .seconds(1))
+        png("settings-refused")
+        HotKeyFailures.shared.refused[LoftShortcut.openLoft.rawValue] = nil
+        // A focus session (#609; this one hides nothing): only Agents and Issues, and the time left under the sidebar.
+        nav.section = .agents
+        try? await Task.sleep(for: .seconds(1))
+        png("focus-idle")
+        // The length popover: the last length (50) highlighted, then a custom last length (37) in Custom.
+        focus.start(minutes: 50)
+        focus.end()
+        png(FocusLengthPopover().fixedSize(), "focus-popover")
+        focus.start(minutes: 37)
+        focus.end()
+        png(FocusLengthPopover().fixedSize(), "focus-popover-custom")
+        focus.start(minutes: 50)
+        try? await Task.sleep(for: .seconds(3))
+        png("focus-agents")
+        png(FocusSidebarControl().frame(width: 180), "focus-row")
+        nav.section = .issues
+        try? await Task.sleep(for: .seconds(2))
+        png("focus-issues")
+        let dock = ImageRenderer(content: FocusDockIcon(timeLeft: "35m", progress: 0.3).frame(width: 128, height: 128))
+        dock.scale = 2
+        if let tiff = dock.nsImage?.tiffRepresentation, let data = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try? data.write(to: URL(fileURLWithPath: folder).appendingPathComponent("focus-dock.png"))
+        }
+        focus.end()
+    }
+    // The menu bar item (#516) on a light and a dark bar, with and without a count.
+    for dark in [false, true] {
+        for count in [0, 40] {
+            let bar = MenuBarMark(count: count).font(.system(size: 13)).foregroundStyle(dark ? .white : .black)
+                .padding(.horizontal, 10).frame(height: 24).background(dark ? Color(white: 0.16) : Color(white: 0.93))
+            let renderer = ImageRenderer(content: bar)
+            renderer.scale = 4
+            if let image = renderer.nsImage, let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: folder).appendingPathComponent("menubar-\(dark ? "dark" : "light")-\(count).png"))
+            }
+        }
+    }
+    NSApp.terminate(nil)
+}
+#endif

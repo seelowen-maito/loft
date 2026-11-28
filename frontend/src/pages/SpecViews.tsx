@@ -3,7 +3,8 @@ import type { Agent, Task } from "../lib/api";
 import { cx } from "../lib/format";
 import { Sticker } from "../components/Sticker";
 import { specProgress } from "../lib/issueOrder";
-import { DROPPED, STAGES, deliveryOf, stageOf, ticketLabel, ticketsOf, type DeliverySummary, type Stage } from "../lib/specViews";
+import { badgeText, deliveryWaits, deliveryOf, stageOf, ticketState, ticketsOf, waitsForYou, type DeliverySummary, type Stage } from "../lib/specViews";
+import { DeliveryLine } from "../components/DeliveryLine";
 
 /* Pieces shared by the Issues page's Specs board (./SpecBoard) and a spec's own page, which opens with its Delivery timeline (`SpecPanel`). */
 
@@ -15,14 +16,14 @@ export type Ctx = { tasks: Task[]; deliveries: DeliverySummary[]; agentById: Map
 
 /** Tickets done of all: the Delivery's own tickets when it has them (live), else the issue list's count. */
 export function progressOf(spec: Task, d: DeliverySummary | null, tasks: Task[]) {
+  // A standalone ticket's card is a ticket's: no progress bar.
+  if (d?.standalone) return null;
   const ts = d?.tickets ?? [];
   return ts.length ? { done: ts.filter((t) => t.state === "closed").length, total: ts.length } : specProgress(spec, tasks);
 }
 
 export function Badge({ stage, d }: { stage: Stage; d: DeliverySummary | null }) {
-  const label = [...STAGES, DROPPED].find((s) => s.key === stage)!.label;
-  const sub = stage === "delivery" && d?.state === "final_review" ? " · final review" : stage === "delivery" && d?.state === "final_fixes" ? " · fixing" : stage === "delivery" && d?.state === "needs_human" ? " · needs you" : "";
-  return <span className={cx("chip shrink-0 text-[11px]", STAGE_TONE[stage], stage === "delivery" && d?.state === "needs_human" && "text-warn")}>{label}{sub}</span>;
+  return <span className={cx("chip shrink-0 text-[11px]", STAGE_TONE[stage], stage === "delivery" && waitsForYou(d) && "text-warn")}>{badgeText(stage, d)}</span>;
 }
 
 export function Bar({ done, total, stage }: { done: number; total: number; stage: Stage }) {
@@ -36,9 +37,27 @@ export function Bar({ done, total, stage }: { done: number; total: number; stage
   );
 }
 
+/** The "Needs you" and "waiting for the Lead" lines of a Delivery, the same on the spec panel and the Delivery card. */
+export function DeliveryWaits({ d, className }: { d: { waiting_on_you?: number[]; waiting_for_lead?: number[] } | null; className?: string }) {
+  return <>{deliveryWaits(d).map((l) => <div key={l.text} className={cx(TONE_TEXT[l.tone], className)}>{l.text}</div>)}</>;
+}
+
 export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Map<string, Agent> }) {
+  // A standalone ticket's Delivery has no tickets: its Dev, while the Delivery runs and doesn't wait for the user.
+  if (d?.standalone) {
+    if (!d.agent_id || d.needs_human || !["running", "final_review", "final_fixes"].includes(d.state)) return null;
+    const a = agentById.get(d.agent_id);
+    return (
+      <div className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-fg-2">
+        {a && <Sticker avatar={a.avatar} lead={a.role === "lead"} size={16} />}
+        <span className="truncate"><span className="text-fg">{d.agent_name ?? "An agent"}</span> is on it</span>
+      </div>
+    );
+  }
   const running = d?.tickets.filter((t) => t.agent_id) ?? [];
-  if (!d || (!running.length && !d.waiting_for_lead?.length && !d.waiting_on_you?.length)) return null;
+  // Waiting for CI: no agent is on it, Loft follows its CI on GitHub.
+  const onCi = d?.tickets.filter((t) => t.waiting_for_ci) ?? [];
+  if (!d || (!running.length && !onCi.length && !d.waiting_for_lead?.length && !d.waiting_on_you?.length)) return null;
   return (
     <div className="space-y-0.5 text-[11.5px] text-fg-2">
       {running.map((t) => {
@@ -50,16 +69,22 @@ export function Who({ d, agentById }: { d: DeliverySummary | null; agentById: Ma
           </div>
         );
       })}
-      {!!d.waiting_on_you?.length && <div className="text-warn">Waiting on you: {d.waiting_on_you.map((n) => `#${n}`).join(", ")}</div>}
-      {!!d.waiting_for_lead?.length && <div className="text-warn">Waiting for the Lead: {d.waiting_for_lead.map((n) => `#${n}`).join(", ")}</div>}
+      {onCi.map((t) => (
+        <div key={t.number} className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate"><span className="font-mono text-[10.5px] text-fg-3">#{t.number}</span> {t.title}</span>
+          <span className={cx("shrink-0 font-mono text-[10.5px]", TONE_TEXT[ticketState(t).tone])}>{ticketState(t).text}</span>
+          <span className="shrink-0 font-mono text-[10px] text-fg-3" title="ci: pending">ci …</span>
+        </div>
+      ))}
+      <DeliveryWaits d={d} />
     </div>
   );
 }
 
 const prUrl = (spec: Task, d: DeliverySummary | null) => (d?.pr && spec.github ? `https://github.com/${spec.github.repo}/pull/${d.pr}` : null);
 
-function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number]; current: boolean; open?: () => void }) {
-  const l = ticketLabel(t.state);
+function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number] & { waiting_for_lead?: boolean }; current: boolean; open?: () => void }) {
+  const l = ticketState(t);
   const row = "flex w-full items-center gap-2 py-0.5 text-left text-[12.5px]";
   const body = (
     <>
@@ -71,7 +96,7 @@ function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number
       {Object.entries(t.verdicts ?? {}).map(([role, v]) => (
         <span key={role} className={cx("font-mono text-[10px]", v === "pass" ? "text-good" : "text-fg-3")} title={`${role}: ${v}`}>{role} {v === "pass" ? "✓" : "…"}</span>
       ))}
-      <span className={cx("shrink-0 font-mono text-[10.5px]", TONE_TEXT[l.tone])}>{l.text}</span>
+      <span className={cx("shrink-0 font-mono text-[10.5px]", TONE_TEXT[l.tone])} title={t.waiting ?? undefined}>{l.text}</span>
     </>
   );
   return <li>{open ? <button onClick={open} className={cx(row, "rounded-md hover:bg-white/[0.04]")}>{body}</button> : <div className={row}>{body}</div>}</li>;
@@ -81,7 +106,7 @@ function TicketLine({ t, current, open }: { t: DeliverySummary["tickets"][number
 export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTicket: (id: string) => void }) {
   const d = deliveryOf(spec, c.deliveries), stage = stageOf(spec, d), p = progressOf(spec, d, c.tasks), url = prUrl(spec, d);
   const own = d?.tickets.length ? ticketsOf(spec, d, c.tasks) : []; // same order as d.tickets, each with its own issue
-  const verdicts = (d?.tickets ?? []).filter((t) => t.state === "review");
+  const verdicts = (d?.tickets ?? []).filter((t) => t.state === "review" && !t.waiting_for_ci);
   return (
     <section className="panel space-y-4 p-4" aria-label="Delivery">
       <div className="flex flex-wrap items-center gap-2">
@@ -96,6 +121,7 @@ export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTi
         <div className="text-[13px] text-fg-3">Not started: no ticket has been handed to an agent yet.</div>
       ) : (
         <>
+          {d.state_line?.tone === "ci" && <DeliveryLine d={d} />}
           <Who d={d} agentById={c.agentById} />
           {verdicts.length > 0 && (
             <div className="space-y-1 rounded-xl border border-line bg-ink-950/40 p-3">
@@ -104,7 +130,7 @@ export function SpecPanel({ spec, openTicket, ...c }: Ctx & { spec: Task; openTi
             </div>
           )}
           <ol className="relative ml-2 border-l border-line pl-4">
-            {d.tickets.map((t, i) => <TicketLine key={t.number} t={t} current={!!t.agent_id} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
+            {d.tickets.map((t, i) => <TicketLine key={t.number} t={{ ...t, waiting_for_lead: !!d.waiting_for_lead?.includes(t.number) }} current={!!t.agent_id} open={own[i]?.taskId ? () => openTicket(own[i].taskId!) : undefined} />)}
           </ol>
         </>
       )}

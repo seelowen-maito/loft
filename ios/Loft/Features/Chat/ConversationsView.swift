@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 /// Every agent has one conversation in Loft. The orchestrator is the agent the
@@ -126,7 +127,7 @@ struct ConversationsView: View {
         if let last = store.conversation(a.id).last(where: { $0.kind == "text" }) {
             return (last.role == "user" ? "You: " : "") + last.content.replacingOccurrences(of: "\n", with: " ")
         }
-        if let t = a.title, !t.isEmpty { return t }
+        if a.role != nil { return a.roleLabel }
         if let last = a.lastRunAt { return "Last active \(last.shortAgo == "now" ? "just now" : last.shortAgo + " ago")" }
         return "Start a conversation"
     }

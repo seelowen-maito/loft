@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useLocation, useNavigate, useParams } from "react-router";
 import { PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
-import { api, type Agent, type GrillSession, type Message, type PermissionRequest, type PullRequest } from "../../lib/api";
+import { api, roleLabel, type Agent, type GrillSession, type Message } from "../../lib/api";
+import { agentsList, useAgents, usePermissions, usePullRequests } from "../../hooks/lists";
 import { useServerEvents, type ServerEvent } from "../../lib/events";
-import { cx, fmtNum, timeAgo } from "../../lib/format";
+import { cx, fmtNum } from "../../lib/format";
+import { relTime } from "../../lib/time";
 import { contextWarns, listedContext } from "../../lib/context";
 import { groupByTeam, projectsOf, teamOf } from "../../lib/team";
 import { ProjectHeader, useCollapsed } from "../../components/ProjectGroup";
@@ -16,6 +18,7 @@ import { NewAgentDialog } from "./NewAgentDialog";
 import { statusOf } from "./Status";
 import { saveLastAgent, selectedAgent } from "../../lib/lastAgent";
 import { saveRecent } from "../../lib/shortcuts";
+import { Tip } from "../../components/HoverTip";
 import { groupUnread, shouldMarkRead, showsUnreadDot } from "../../lib/unread";
 
 const COLLAPSED_KEY = "loft:collapsed-projects";
@@ -36,10 +39,12 @@ export default function AgentsPage() {
   const navigate = useNavigate();
   // `/agents/:id/interview`: the open interview full screen, in place of the chat.
   const interview = useLocation().pathname.endsWith("/interview");
-  const [agents, setAgents] = useState<Agent[] | null>(null);
+  const { items: agents, failed: agentsFailed } = useAgents();
   const [messages, setMessages] = useState<Message[]>([]);
-  const [perms, setPerms] = useState<PermissionRequest[]>([]);
-  const [prs, setPrs] = useState<PullRequest[]>([]);
+  const permList = usePermissions().items;
+  const perms = useMemo(() => permList ?? [], [permList]);
+  const prList = usePullRequests().items;
+  const prs = useMemo(() => prList ?? [], [prList]);
   const [creating, setCreating] = useState(false);
   const [grill, setGrill] = useState<GrillSession | null>(null);
   // Groups folded away in the roster, remembered per browser.
@@ -77,12 +82,6 @@ export default function AgentsPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [overlay]);
 
-  useEffect(() => {
-    api.agents().then(setAgents);
-    api.permissions().then(setPerms);
-    api.pullRequests().then(setPrs);
-  }, []);
-
   // `/agents` opens on the last agent viewed in this browser, or the first if it is gone.
   const selectedId = selectedAgent(routeId, agents);
   const selected = agents?.find((a) => a.id === selectedId) ?? null;
@@ -96,7 +95,7 @@ export default function AgentsPage() {
   const visible = useSyncExternalStore(onVisibilityChange, () => document.visibilityState === "visible");
   useEffect(() => {
     if (!shouldMarkRead(selected, selectedId, visible)) return;
-    setAgents((as) => as?.map((a) => (a.id === selectedId ? { ...a, unread_reply: false } : a)) ?? as);
+    agentsList.set((as) => as.map((a) => (a.id === selectedId ? { ...a, unread_reply: false } : a)));
     api.markRead(selectedId!).catch(() => {});
   }, [selected?.unread_reply, selectedId, visible]);
 
@@ -131,18 +130,10 @@ export default function AgentsPage() {
     useCallback(
       (e: ServerEvent) => {
         switch (e.type) {
-          case "agent_updated":
-            setAgents((as) => {
-              if (!as) return as;
-              const i = as.findIndex((a) => a.id === e.agent.id);
-              if (i < 0) return [...as, e.agent];
-              const next = [...as];
-              next[i] = { ...next[i], ...e.agent };
-              return next;
-            });
+          case "resync":
+            loadMessages();
             break;
           case "agent_deleted":
-            setAgents((as) => as?.filter((a) => a.id !== e.agent_id) ?? as);
             if (e.agent_id === selectedId) navigate("/agents");
             break;
           case "message":
@@ -151,36 +142,17 @@ export default function AgentsPage() {
               setMessages((ms) => (ms.some((m) => m.id === e.message.id) ? ms.map((m) => (m.id === e.message.id ? e.message : m)) : [...ms, e.message]));
             }
             break;
-          case "pull_request":
-            setPrs((ps) => {
-              const i = ps.findIndex((p) => p.id === e.pr.id);
-              if (i < 0) return [e.pr, ...ps];
-              const next = [...ps];
-              next[i] = e.pr;
-              return next;
-            });
-            break;
           case "grill":
             if (e.session.agent_id === selectedId) setGrill(e.session.state === "ended" ? null : e.session);
             break;
-          case "permission":
-            setPerms((ps) => {
-              const i = ps.findIndex((p) => p.id === e.request.id);
-              if (i < 0) return [e.request, ...ps];
-              const next = [...ps];
-              next[i] = e.request;
-              return next;
-            });
-            break;
         }
       },
-      [selectedId, navigate],
+      [selectedId, navigate, loadMessages],
     ),
   );
 
   const permMap = useMemo(() => new Map(perms.map((p) => [p.id, p])), [perms]);
   const agentPerms = useMemo(() => perms.filter((p) => p.agent_id === selectedId), [perms, selectedId]);
-  const agentPrs = useMemo(() => prs.filter((p) => p.agent_id === selectedId), [prs, selectedId]);
   const pendingBy = useMemo(() => {
     const m = new Map<string, number>();
     perms.forEach((p) => p.status === "pending" && m.set(p.agent_id, (m.get(p.agent_id) ?? 0) + 1));
@@ -191,7 +163,7 @@ export default function AgentsPage() {
   // The ref is read by drag handlers, which can fire before React re-renders with the new state.
   const dragging = useRef<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
-  const saveOrder = (as: Agent[] | null) => as && api.reorderAgents(as.map((a) => a.id)).catch(() => api.agents().then(setAgents));
+  const saveOrder = (as: Agent[] | null) => as && api.reorderAgents(as.map((a) => a.id)).catch(() => agentsList.reload());
 
   const working = agents?.filter((a) => a.running).length ?? 0;
   const groups = useMemo(() => groupByTeam(agents ?? []), [agents]);
@@ -252,7 +224,7 @@ export default function AgentsPage() {
                         const from = agents?.find((x) => x.id === id);
                         if (!id || !from || teamOf(from) !== teamOf(a)) return;
                         e.preventDefault();
-                        setAgents((as) => as && moved(as, id, a.id));
+                        agentsList.set((as) => moved(as, id, a.id));
                       }}
                       onDrop={(e) => e.preventDefault()}
                       onDragEnd={() => {
@@ -266,7 +238,7 @@ export default function AgentsPage() {
                         if (!target || !agents) return;
                         e.preventDefault();
                         const next = moved(agents, a.id, target.id);
-                        setAgents(next);
+                        agentsList.set(() => next);
                         saveOrder(next);
                       }}
                       title="Drag or Alt+↑/↓ to reorder"
@@ -286,13 +258,13 @@ export default function AgentsPage() {
                           {showsUnreadDot(a, selectedId) && <span className="size-2 shrink-0 rounded-full bg-accent" aria-label="Unread reply" title="Unread reply" />}
                           {!!pending && <span className="rounded-full bg-warn px-1.5 font-mono text-[10px] text-ink-950">{pending}</span>}
                           {a.running && !!a.queued_messages?.length && (
-                            <span className="shrink-0 rounded-full border border-line px-1.5 font-mono text-[10px] text-fg-2" title="Agent messages waiting for this run to end">
+                            <span className="shrink-0 rounded-full border border-line px-1.5 font-mono text-[10px] text-fg-2" title="Messages waiting for this run to end">
                               {a.queued_messages.length} queued
                             </span>
                           )}
-                          {!!a.project_problems?.length && (
-                            <span className="shrink-0 rounded-full border border-warn/60 px-1.5 font-mono text-[10px] text-warn" title={a.project_problems.map((f) => `${f.project}: ${f.problem}`).join("\n")}>
-                              pick projects
+                          {a.goal && (
+                            <span className="shrink-0 rounded-full border border-accent/40 px-1.5 font-mono text-[10px] text-accent" title={`Goal active: ${a.goal}`}>
+                              goal
                             </span>
                           )}
                           {(a.running || listedContext(a) != null) && (
@@ -310,7 +282,7 @@ export default function AgentsPage() {
                           {a.running || a.status === "waiting" ? (
                             <span className={s.text}>{s.label}</span>
                           ) : (
-                            <>{[a.title || "agent", shownProjects(a), a.last_run_at ? timeAgo(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
+                            <>{[roleLabel(a.role), shownProjects(a), a.last_run_at ? relTime(a.last_run_at) : "never run"].filter(Boolean).join(" · ")}</>
                           )}
                         </div>
                       </div>
@@ -325,7 +297,9 @@ export default function AgentsPage() {
 
       {/* main */}
       <section className="min-h-0 min-w-0 border-r border-line max-xl:border-r-0">
-        {agents && agents.length === 0 ? (
+        {agentsFailed ? (
+          <p className="p-6 text-[12.5px] text-bad">Couldn't load agents: {agentsFailed}</p>
+        ) : agents && agents.length === 0 ? (
           <Empty onCreate={() => setCreating(true)} />
         ) : selected && interview ? (
           <InterviewView agent={selected} session={grill} />
@@ -336,19 +310,20 @@ export default function AgentsPage() {
             messages={messages}
             loading={loadedFor !== selected.id}
             perms={permMap}
-            prs={agentPrs}
+            prs={prs}
             grill={grill}
             headerActions={
-              <button
-                className="btn-ghost"
-                onClick={toggleInspector}
-                aria-expanded={inspectorOpen}
-                aria-controls="inspector"
-                aria-label={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
-                title={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
-              >
-                {inspectorOpen ? <PanelRightClose className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
-              </button>
+              <Tip name={inspectorOpen ? "Hide agent settings" : "Show agent settings"}>
+                <button
+                  className="btn-ghost"
+                  onClick={toggleInspector}
+                  aria-expanded={inspectorOpen}
+                  aria-controls="inspector"
+                  aria-label={inspectorOpen ? "Hide agent settings" : "Show agent settings"}
+                >
+                  {inspectorOpen ? <PanelRightClose className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
+                </button>
+              </Tip>
             }
           />
         ) : (
@@ -384,11 +359,10 @@ export default function AgentsPage() {
         <NewAgentDialog
           groups={teams}
           projects={projects}
-          agents={agents ?? []}
           onClose={() => setCreating(false)}
           onCreated={(a) => {
             setCreating(false);
-            setAgents((as) => (as?.some((x) => x.id === a.id) ? as : [...(as ?? []), a]));
+            agentsList.set((as) => (as.some((x) => x.id === a.id) ? as : [...as, a]));
             navigate(`/agents/${a.id}`);
           }}
         />

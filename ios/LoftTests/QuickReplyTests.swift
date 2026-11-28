@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The rules around the quick acknowledgement and the route guess (no model needed).
 final class QuickReplyTests: XCTestCase {

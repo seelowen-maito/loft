@@ -1,6 +1,7 @@
+import LoftKit
 import SwiftUI
 
-/// The Issues tab's Specs view: the specs it's given (already filtered), in sections by stage.
+/// The Issues tab's Specs view: the specs it's given (already filtered), with standalone tickets in Delivery, in sections by stage.
 struct SpecsView<Header: View>: View {
     @Environment(LoftStore.self) private var store
     let specs: [HBTask]
@@ -56,7 +57,7 @@ struct SpecRow: View {
     private var delivery: DeliverySummary? { SpecViews.delivery(of: spec, in: store.deliverySummaries) }
     private var stage: SpecStage { SpecViews.stage(of: spec, delivery) }
 
-    private var badge: String? { delivery.map { SpecViews.deliveryLabel($0.state) } }
+    private var badge: String? { delivery.map(SpecViews.badge) }
 
     /// Each running ticket with its agent, then the tickets waiting for the Lead.
     private var onIt: [String] {
@@ -64,17 +65,38 @@ struct SpecRow: View {
         return SpecViews.onIt(d) + [SpecViews.waitingOnYouLine(d.waitingOnYou), SpecViews.waitingLine(d.waitingForLead)].compactMap { $0 }
     }
 
+    /// Truncates in the middle, so its `#n` always shows. A standalone ticket says it's one, since it has no spec.
+    private var refText: some View {
+        Text((delivery?.isStandalone == true ? "Ticket · " : "") + SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1).truncationMode(.middle)
+    }
+
+    @ViewBuilder private var projectText: some View {
+        if let project = SpecViews.project(spec) {
+            Text(project).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
+                .accessibilityLabel("Project \(project)")
+        }
+    }
+
+    @ViewBuilder private var badgeView: some View {
+        if let badge {
+            Text(badge).font(.caption2.weight(.medium))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Theme.accent.opacity(0.15), in: Capsule())
+                .foregroundStyle(Theme.accent)
+                .fixedSize()
+        }
+    }
+
     var body: some View {
         let p = SpecViews.progress(of: spec, delivery, tasks: store.tasks)
         VStack(alignment: .leading, spacing: 5) {
             Text(spec.title).font(.body).readableLineLimit(2)
-            HStack(spacing: 6) {
-                Text(SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1)
-                if let badge {
-                    Text(badge).font(.caption2.weight(.medium))
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Theme.accent.opacity(0.15), in: Capsule())
-                        .foregroundStyle(Theme.accent)
+            // All on one line when it fits; else the project moves to its own line, so it never pushes out the ref's `#n`.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) { refText.fixedSize(); projectText.fixedSize(); badgeView }
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) { refText; badgeView }
+                    projectText
                 }
             }
             if let p {

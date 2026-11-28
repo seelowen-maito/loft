@@ -1,3 +1,4 @@
+import LoftKit
 import SwiftUI
 
 struct AgentDetailView: View {
@@ -34,7 +35,7 @@ struct AgentDetailView: View {
                     AgentAvatar(name: agent.name, id: agent.id, size: 56, state: state)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(agent.name).font(.title3.weight(.semibold))
-                        if let t = agent.title, !t.isEmpty { Text(t).font(.subheadline).foregroundStyle(.secondary) }
+                        Text(agent.roleLabel).font(.subheadline).foregroundStyle(.secondary)
                         StatusBadge(state)
                     }
                 }
@@ -100,7 +101,7 @@ struct AgentDetailView: View {
             if !prs.isEmpty {
                 Section("Pull requests") {
                     ForEach(prs.prefix(5)) { pr in
-                        if let url = URL(string: pr.url) {
+                        if let url = PushDestination.link(pr.url, loftHost: store.api?.baseURL.host()) {
                             Link(destination: url) {
                                 HStack {
                                     Image(systemName: pr.state == "merged" ? "arrow.triangle.merge" : pr.state == "open" ? "arrow.triangle.pull" : "xmark.circle")
@@ -108,6 +109,7 @@ struct AgentDetailView: View {
                                     VStack(alignment: .leading) {
                                         Text(pr.title).lineLimit(2)
                                         Text("\(pr.slug) #\(pr.number) · \(pr.state)").font(.caption).foregroundStyle(.secondary)
+                                        if pr.showsWorkflowWarning { WorkflowWarningLabel() }
                                     }
                                 }
                             }
@@ -159,6 +161,13 @@ struct AgentDetailView: View {
                     }
                     .disabled(!store.canWrite || busy)
                     .accessibilityIdentifier("deleteAgent")
+                    .confirmationDialog("Delete \(agent.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                        Button("Delete agent and workspace", role: .destructive) { delete(agent, purgeFiles: true) }
+                        Button("Delete agent, keep workspace") { delete(agent, purgeFiles: false) }
+                    } message: {
+                        Text("Its chat, memories and settings are deleted. Its workspace holds its clones and notes"
+                             + (workspaceBytes.map { "; deleting it frees \(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file))." } ?? "."))
+                    }
                 }
             }
         }
@@ -168,18 +177,6 @@ struct AgentDetailView: View {
             async let stats: Void = store.refreshStats()
             try? await store.refresh()
             await stats
-        }
-        .confirmationDialog("Stop \(agent.name)'s current run?", isPresented: $confirmStop, titleVisibility: .visible) {
-            Button("Stop run", role: .destructive) { act { try await store.stopRun(agent.id) } }
-        } message: {
-            Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its issues stay as they are; cancel them separately.")
-        }
-        .confirmationDialog("Delete \(agent.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete agent and workspace", role: .destructive) { delete(agent, purgeFiles: true) }
-            Button("Delete agent, keep workspace") { delete(agent, purgeFiles: false) }
-        } message: {
-            Text("Its chat, memories and settings are deleted. Its workspace holds its clones and notes"
-                 + (workspaceBytes.map { "; deleting it frees \(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file))." } ?? "."))
         }
         .errorAlert($error)
         .task { workspaceBytes = try? await store.workspaceSize(agent.id) }
@@ -214,6 +211,11 @@ struct AgentDetailView: View {
         if state == .working || state == .waitingApproval || agent.running == true {
             Button(role: .destructive) { confirmStop = true } label: { Label("Stop current run", systemImage: "stop.circle").foregroundStyle(Theme.failure) }
                 .disabled(!store.canWrite || busy)
+                .confirmationDialog("Stop \(agent.name)'s current run?", isPresented: $confirmStop, titleVisibility: .visible) {
+                    Button("Stop run", role: .destructive) { act { try await store.stopRun(agent.id) } }
+                } message: {
+                    Text("This ends the Claude process running now. Messages waiting for it are dropped and pending approvals are denied. Its issues stay as they are; cancel them separately.")
+                }
         } else {
             Button { act { try await store.runNow(agent.id) } } label: { Label("Wake up now", systemImage: "play.circle") }
                 .disabled(!store.canWrite || busy)

@@ -18,7 +18,7 @@
   /* text */
   --color-fg: #eceae4;
   --color-fg-2: #a9a8a3;
-  --color-fg-3: #6e6e6b;
+  --color-fg-3: #85857f;
 
   /* spring accent + sequential ramp (one hue, dim -> bright on dark) */
   --color-accent: #c8f26d;
@@ -57,6 +57,15 @@
   0% { transform: rotate(0deg) scale(1); opacity: 1; }
   50% { transform: rotate(90deg) scale(0.8); opacity: 0.55; }
   100% { transform: rotate(180deg) scale(1); opacity: 1; }
+}
+/* A message a reply's quote jumped to. */
+@keyframes quote-flash {
+  from { background-color: color-mix(in srgb, var(--color-accent) 18%, transparent); }
+  to { background-color: transparent; }
+}
+.quote-flash {
+  border-radius: 12px;
+  animation: quote-flash 1.8s ease-out;
 }
 @keyframes shimmer {
   0% { background-position: -200% 0; }
@@ -124,6 +133,16 @@ body::after {
   }
   .input {
     @apply w-full rounded-xl border border-line-strong bg-ink-850 px-3 py-2 text-[13.5px] text-fg outline-none transition placeholder:text-fg-3 focus:border-accent/50 focus:ring-2 focus:ring-accent/10;
+  }
+  /* A message footer's action: a 28px ghost pill, with a 44px hit area on touch. */
+  .msg-act {
+    @apply relative inline-flex h-7 items-center gap-1.5 rounded-full px-2 font-sans text-[12px] text-fg-3 transition-colors hover:bg-white/[0.08] hover:text-fg focus-visible:text-fg focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-50;
+    @media (pointer: coarse) {
+      &::after {
+        content: "";
+        @apply absolute -inset-y-2 inset-x-0;
+      }
+    }
   }
   .chip {
     @apply inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 font-mono text-[11px] text-fg-2;

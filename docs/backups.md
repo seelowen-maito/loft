@@ -19,9 +19,34 @@ folder, with its settings in `.loft/settings.json`. It backs both up on its own 
 - **Failures:** Settings shows the last error. When backups keep failing and the last good one is more than
   two days old, it shows in Needs you.
 
-## Restore
+## Move Loft or restore on a new install
 
-There's no in-app restore. From a Terminal on the Mac:
+Setup restores a backup for you. Run `./setup.sh` (or the one-line installer). On an install with no
+`.loft/loft.db` yet (a new Mac, or a new Loft folder) it offers one straight away. On an install that already has
+data it asks "Restore from a backup? [y/N]" first; No (the default) keeps everything as it is. With no terminal it
+never restores over an existing database. It lists the backups it finds in the default folder and in
+iCloud Drive's "Loft backups", newest first with their date, size and the folder they are in (so an iCloud or typed folder is easy to tell from a local one; symlinked files and folders dated in the future are skipped), and asks which to restore. You can also type
+another folder (an external disk; Tab completes the path, and a bare name is looked for in your home folder, 3 levels deep, among the folders holding backups), or press Enter to start a fresh Loft.
+
+Choosing one stops Loft if it runs as this folder's background service (and starts it again afterwards, also if the
+restore is refused), says so when your current data is about to move, and moves any database aside to
+`.loft/before-restore/<date_time>/`, a new folder each time (with its `-wal` and `-shm` files, so an old `-wal` is never applied to the restored database), copies in the
+backup's `loft.db` and `settings.json`, and checks the copy with `PRAGMA integrity_check` before it replaces anything.
+A damaged backup is refused and leaves the install as it was. Then setup carries on and starts Loft.
+
+- If Loft is running some other way (the app, `start.sh`, another copy's service), setup asks you to stop it and
+  changes nothing.
+- Agent workspaces aren't in backups: after a restore, agents start with empty workspaces and clone their repos again.
+- Settings come back with it, including the projects folder and your GitHub token. If the projects folder isn't on
+  this Mac, change it under Settings.
+- Once you've checked it, delete `before-restore/`.
+
+`scripts/test-restore.sh` tests finding backups, a good restore over an existing database, a second restore, a
+corrupt backup, a failed move and a missing `sqlite3`.
+
+### By hand
+
+If setup can't do it, from a Terminal on the Mac:
 
 1. **Stop Loft** (quit the app, or stop `./start.sh`), so nothing writes to the database.
 2. **Move the current database aside**, with its `-wal` and `-shm` files. A `-wal` file left next to the

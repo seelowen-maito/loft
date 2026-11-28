@@ -1,6 +1,7 @@
 import Security
 import XCTest
 @testable import Loft
+import LoftKit
 
 final class OldPairingTests: XCTestCase {
     private func count() -> Int {

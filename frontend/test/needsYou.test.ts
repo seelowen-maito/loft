@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerBody, badgeText, beingLookedAt, badgeTitle, badgeTone, closeTarget, countAfter, countsOf, escCloses, freshAfter, headline, iconAction, idsChanged, itemView, placeOf, unseenIds, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
+import { answerBody, badgeText, beingLookedAt, badgeTitle, badgeTone, clearAll, clearTitle, closeTarget, countAfter, countsOf, escCloses, freshAfter, headline, iconAction, idsChanged, itemView, kindTag, placeOf, shortTitle, unseenIds, urgencyOf, type NeedsYouItem } from "../src/lib/needsYou.ts";
 
 const HOST = "mac.tail1234.ts.net";
 
@@ -79,7 +79,7 @@ test("push off points at Settings → Push", () => {
 });
 
 test("urgency in words", () => {
-  assert.deepEqual([3, 2, 1, 0].map((u) => urgencyOf(u).label), ["Blocks an agent", "Waiting for you", "Worth a look", "To review"]);
+  assert.deepEqual([3, 2, 1, 0].map((u) => urgencyOf(u).label), ["Blocks an agent", "Needs you", "Worth a look", "To review"]);
 });
 
 test("the counter counts only what hasn't been seen, from the list and then from needs_you events", () => {
@@ -164,4 +164,51 @@ test("Esc closes Needs you, but not while typing an answer, composing, or with a
   assert.equal(escCloses({ ...esc, defaultPrevented: true }), false);
   assert.equal(escCloses({ ...esc, dialogOpen: true }), false);
   assert.equal(escCloses({ ...esc, key: "Enter" }), false);
+});
+
+test("Clear all counts the items with Done, and says how many asks stay", () => {
+  const done = { kind: "dismiss", label: "Done", method: "POST", path: "/api/needs-you/x/dismiss" } as NeedsYouItem["actions"][number];
+  const withDone = item({ actions: [done] });
+  const a = { ...withDone, id: "a" }, b = { ...withDone, id: "b" };
+  assert.deepEqual(clearAll([a, b]), { ids: ["a", "b"], clear: 2, stay: 0 });
+  assert.deepEqual(clearAll([a, item({ id: "ask" })]).ids, ["a"], "the call names only what has Done");
+  assert.equal(clearAll([withDone, item({}), item({})]).stay, 2);
+  assert.equal(clearAll([item({})]).clear, 0, "hidden: nothing to clear");
+  assert.equal(clearAll([]).clear, 0);
+});
+
+test("Clear all's confirm keeps the ids it opened with, whatever arrives after", () => {
+  const withDone = (id: string) => item({ id, actions: [{ kind: "dismiss", label: "Done", method: "POST", path: "/x" } as NeedsYouItem["actions"][number]] });
+  const list = [withDone("a"), withDone("b")];
+  const opened = clearAll(list).ids; // what the page keeps while the dialog is open
+  list.push(withDone("late"));
+  assert.deepEqual(opened, ["a", "b"], "the late item isn't in the snapshot");
+  assert.deepEqual(clearAll(list).ids, ["a", "b", "late"]);
+  assert.equal(clearTitle(opened.length), "Mark 2 items done?");
+  assert.equal(clearTitle(1), "Mark 1 item done?");
+});
+
+test("each kind of item gets a tag in its colour", () => {
+  assert.deepEqual(kindTag("task_blocked"), { label: "Blocked", tone: "bad" });
+  assert.deepEqual(kindTag("question"), { label: "Question", tone: "warn" });
+  assert.deepEqual(kindTag("permission"), { label: "Permission", tone: "warn" });
+  assert.deepEqual(kindTag("pr_workflows"), { label: "CI warning", tone: "warn" });
+  assert.deepEqual(kindTag("pr_review"), { label: "Review", tone: "info" });
+  assert.equal(kindTag("something_new").label, "Heads-up", "every item still has a tag");
+});
+
+test("a PR title drops the owner, keeps the full name for the tooltip, and the meta line doesn't repeat the project", () => {
+  assert.deepEqual(shortTitle("dineouticeland/api#1865: Multi experiences (#1836)", "api"), {
+    text: "api#1865: Multi experiences (#1836)",
+    full: "dineouticeland/api#1865: Multi experiences (#1836)",
+    project: null,
+  });
+  assert.equal(shortTitle("A question", "loft").project, "loft", "no repo in the title: the project stays");
+  assert.deepEqual(shortTitle("Fix #12 now", null), { text: "Fix #12 now", full: "Fix #12 now", project: null });
+});
+
+test("Open pull request and the Pull request link are one button", () => {
+  const url = "https://github.com/o/r/pull/7";
+  const v = itemView(item({ type: "pr_ready", links: [{ label: "Pull request", url }], actions: [{ kind: "open", label: "Open pull request", target: { url } }] }), HOST);
+  assert.deepEqual(v.open.map((o) => o.label), ["Open pull request"]);
 });

@@ -101,6 +101,7 @@ async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
                 pr.etag = etag;
                 clear_stale_passes(state, &mut pr).await;
             }
+            files_read_if_open(state, &mut pr).await;
             mark_ready_if_due(state, &mut pr).await;
             pr.error = None;
             pr.gone = false;
@@ -123,6 +124,7 @@ async fn refresh_once(state: &AppState, id: &str) -> Result<PullRequest> {
         }
         Err(e) => pr.error = Some(e.to_string()),
     }
+    set_merge_method(state, &mut pr).await;
     pr.checked_at = Some(now());
     state.db.save_pull_request(&pr)?;
     emit(state, &pr);
@@ -153,15 +155,52 @@ fn apply(pr: &mut PullRequest, v: &Value) {
     pr.merged_by = v["merged_by"]["login"].as_str().map(Into::into);
     pr.merged_at = v["merged_at"].as_str().map(Into::into);
     pr.closed_at = v["closed_at"].as_str().map(Into::into);
-    let repo = &v["base"]["repo"];
-    let allowed = |k: &str| repo[k].as_bool().unwrap_or(true);
     pr.node_id = s("node_id");
     pr.labels = v["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(Into::into)).collect();
-    pr.merge_methods = [("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"), ("rebase", "allow_rebase_merge")]
+    pr.merge_methods = merge_methods_of(&v["base"]["repo"]);
+}
+
+/// The merge methods a repo allows, from GitHub's REST answer for it (a method it doesn't say is allowed).
+pub(crate) fn merge_methods_of(repo: &Value) -> Vec<String> {
+    let allowed = |k: &str| repo[k].as_bool().unwrap_or(true);
+    [("squash", "allow_squash_merge"), ("merge", "allow_merge_commit"), ("rebase", "allow_rebase_merge")]
         .iter()
         .filter(|(_, k)| allowed(k))
         .map(|(m, _)| m.to_string())
-        .collect();
+        .collect()
+}
+
+/// The project in the projects folder whose GitHub repo is `slug`, when there is one.
+async fn project_of(state: &AppState, slug: &str) -> Option<String> {
+    let known = crate::repos::list(state, false).await;
+    if let Some(r) = known.iter().find(|r| r.github.as_deref().is_some_and(|g| g.eq_ignore_ascii_case(slug))) {
+        return Some(r.name.clone());
+    }
+    // Not in the list read a while ago: the folder named after the repo, when its origin is that repo.
+    let name = slug.rsplit('/').next()?;
+    let theirs = crate::repos::github_repo(state, name).await.ok()?;
+    theirs.eq_ignore_ascii_case(slug).then(|| name.to_string())
+}
+
+/// Sets the method the PR's Merge uses: its project's merge method, as far as the repo allows it.
+async fn set_merge_method(state: &AppState, pr: &mut PullRequest) {
+    let project = project_of(state, &pr.slug).await.unwrap_or_default();
+    pr.merge_method = crate::project_settings::merge_method(state, &project, &pr.merge_methods);
+}
+
+/// After `project`'s merge method changed: its open PRs' Merge uses the new one.
+pub async fn merge_method_changed(state: &AppState, project: &str) {
+    let Ok(prs) = state.db.list_pull_requests(None) else { return };
+    for mut pr in prs.into_iter().filter(|p| p.state == "open" && !p.gone) {
+        if project_of(state, &pr.slug).await.as_deref() != Some(project) {
+            continue;
+        }
+        let before = pr.merge_method.clone();
+        set_merge_method(state, &mut pr).await;
+        if pr.merge_method != before && state.db.save_pull_request(&pr).is_ok() {
+            emit(state, &pr);
+        }
+    }
 }
 
 /// What one check of a commit says: a check run, by its status and conclusion, or a legacy commit status, by its state.
@@ -212,7 +251,9 @@ async fn checks(state: &AppState, slug: &str, sha: &str) -> Result<Value> {
 /// A checker's verdict on a PR: sets the label for `kind` (tests, qa or security) and removes its opposite in one
 /// call, after creating the label if the repo doesn't have it. `sha` is the head commit the checker tested.
 /// Only a QA, Security or Code reviewer agent in the team of the agent that opened the PR may.
-pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kind: &str, pass: bool, sha: &str) -> Result<String, String> {
+/// It wakes who acts on it: on a fail the PR's opener, and once every verdict the PR needs has passed on its
+/// head, the Lead of the opener's team. `comment` is the checker's comment on the PR, if it left one.
+pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kind: &str, pass: bool, sha: &str, comment: &str) -> Result<String, String> {
     let (slug, number) = github::extract_pr_links(url).into_iter().next().ok_or("pr must look like https://github.com/<owner>/<repo>/pull/<number>")?;
     let (_, good, bad) = *VERDICTS.iter().find(|(k, _, _)| *k == kind).ok_or("kind must be tests, qa or security")?;
     // The first agent that tracked it is its opener: a later share by another agent doesn't change whose team may.
@@ -220,9 +261,9 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
     let pr = known.ok_or_else(|| format!("Loft doesn't track {slug}#{number}: its opener shares it with share_pull_request first."))?;
     let opener = state.db.get_agent(&pr.agent_id).ok().flatten();
     let checker = matches!(me.role.as_str(), "qa" | "security" | "code_reviewer");
-    if !checker || opener.is_none_or(|o| me.team().is_empty() || o.team() != me.team()) {
+    let Some(opener) = opener.filter(|o| checker && !me.team().is_empty() && o.team() == me.team()) else {
         return Err("Only a QA, Security or Code reviewer agent of the team that opened this pull request can set its verdict.".into());
-    }
+    };
     // Read it fresh (a 304 when unchanged): a verdict is about the head commit it was tested on.
     let pr = refresh(state, &pr.id).await.map_err(|e| e.to_string())?;
     if sha.len() < 7 || !pr.head_sha.starts_with(sha) {
@@ -253,9 +294,55 @@ pub async fn set_verdict(state: &AppState, me: &crate::db::Agent, url: &str, kin
     }
     // The last verdict a PR needs makes it ready now, not at the next poll.
     mark_ready_if_due(state, &mut pr).await;
+    let lead = if pass { lead_to_tell(state, &mut pr, &opener).await } else { None };
     state.db.save_pull_request(&pr).map_err(|e| e.to_string())?;
     emit(state, &pr);
+    let head = &pr.head_sha[..pr.head_sha.len().min(8)];
+    let comment = if comment.trim().is_empty() { String::new() } else { format!(" Comment: {}", comment.trim()) };
+    if !pass {
+        let ticket = ticket_of(state, &pr).await;
+        let about = ticket.as_deref().map_or(String::new(), |t| format!(" (ticket {t})"));
+        let text = format!(
+            "[Verdict] {want} on {} at head {head}{about}.{comment}\nFix it, push, and tell {} the new head.",
+            pr.url, me.name
+        );
+        crate::agents::message_on_ticket(state, me, &opener, &text, json!({ "verdict": want }), ticket.as_deref(), false);
+    } else if let Some(lead) = lead {
+        let ticket = ticket_of(state, &pr).await;
+        let about = ticket.as_deref().map_or(String::new(), |t| format!(" (ticket {t})"));
+        let text = format!(
+            "[Verdict] {}{about} is ready to merge: every verdict it needs has passed on its head {head} (the last was {want}, by {}).{comment}\nTell the user it's ready to merge.",
+            pr.url, me.name
+        );
+        crate::agents::message_on_ticket(state, me, &lead, &text, json!({ "verdict": want }), ticket.as_deref(), false);
+    }
     Ok(format!("{want} is on {slug}#{number}."))
+}
+
+/// The Lead of the opener's team, when every verdict the PR needs has passed on its current head and the Lead
+/// wasn't told yet for this head (it marks it told). None otherwise.
+async fn lead_to_tell(state: &AppState, pr: &mut PullRequest, opener: &crate::db::Agent) -> Option<crate::db::Agent> {
+    if pr.state != "open" || pr.head_sha.is_empty() || pr.passes_sha != pr.head_sha || pr.ready_told_sha == pr.head_sha {
+        return None;
+    }
+    if pr.labels.iter().any(|l| VERDICTS.iter().any(|(_, _, bad)| bad == l)) || !kind_known(state, pr).await {
+        return None;
+    }
+    let have = |kind: &str| VERDICTS.iter().any(|(k, good, _)| *k == kind && pr.labels.iter().any(|l| l == good));
+    if !required(&pr.kind).iter().all(|k| have(k)) || opener.team().is_empty() {
+        return None;
+    }
+    let lead = state.db.list_agents().ok()?.into_iter().find(|a| a.role == "lead" && a.team() == opener.team())?;
+    pr.ready_told_sha = pr.head_sha.clone();
+    Some(lead)
+}
+
+/// The ticket a PR closes (its body's first "Closes #N"), as `owner/repo#N`, read fresh from GitHub.
+async fn ticket_of(state: &AppState, pr: &PullRequest) -> Option<String> {
+    let v = github::get(state, &format!("/repos/{}/pulls/{}", pr.slug, pr.number)).await.ok()?;
+    let body = v["body"].as_str().unwrap_or("");
+    let n = body.split('#').skip(1).filter_map(|s| s.split(|c: char| !c.is_ascii_digit()).next()?.parse::<i64>().ok()).find(|n| crate::delivery::closes_issue(body, *n))?;
+    Some(format!("{}#{n}", pr.slug))
 }
 
 /// What a PR's changed files make it: `ios` (any file under ios/), else `ui` (anything under frontend/), else
@@ -293,20 +380,8 @@ async fn mark_ready_if_due(state: &AppState, pr: &mut PullRequest) {
     if pr.labels.iter().any(|l| VERDICTS.iter().any(|(_, _, bad)| bad == l)) {
         return;
     }
-    if pr.kind_sha != pr.head_sha {
-        // More files than one page lists: take the strictest kind rather than guess.
-        let kind = if pr.changed_files > 100 {
-            Ok("ios")
-        } else {
-            match github::get(state, &format!("/repos/{}/pulls/{}/files?per_page=100", pr.slug, pr.number)).await {
-                Ok(v) => Ok(kind_of(&v.as_array().into_iter().flatten().filter_map(|f| f["filename"].as_str().map(String::from)).collect::<Vec<_>>())),
-                Err(e) => Err(e),
-            }
-        };
-        match kind {
-            Ok(k) => (pr.kind, pr.kind_sha) = (k.into(), pr.head_sha.clone()),
-            Err(e) => return tracing::warn!("files of {}#{}: {e}", pr.slug, pr.number),
-        }
+    if !kind_known(state, pr).await {
+        return;
     }
     let have = |kind: &str| VERDICTS.iter().any(|(k, good, _)| *k == kind && pr.labels.iter().any(|l| l == good));
     if !required(&pr.kind).iter().all(|k| have(k)) || (!required(&pr.kind).is_empty() && pr.passes_sha != pr.head_sha) {
@@ -321,6 +396,65 @@ async fn mark_ready_if_due(state: &AppState, pr: &mut PullRequest) {
         Ok(v) => tracing::warn!("marking {}#{} ready: {}", pr.slug, pr.number, v["errors"]),
         Err(e) => tracing::warn!("marking {}#{} ready: {e}", pr.slug, pr.number),
     }
+}
+
+/// A key for what a PR changes in GitHub Actions workflows or local actions (also renamed from there), from GitHub's
+/// files list: None when it changes none.
+fn workflows_key(files: &[Value]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let ci = |f: &Value, k: &str| f[k].as_str().is_some_and(|n| n.starts_with(".github/workflows/") || n.starts_with(".github/actions/"));
+    let mut changed: Vec<String> = files
+        .iter()
+        .filter(|f| ci(f, "filename") || ci(f, "previous_filename"))
+        .map(|f| format!("{}\t{}\t{}\t{}", f["filename"].as_str().unwrap_or(""), f["previous_filename"].as_str().unwrap_or(""), f["status"].as_str().unwrap_or(""), f["sha"].as_str().unwrap_or("")))
+        .collect();
+    if changed.is_empty() {
+        return None;
+    }
+    changed.sort();
+    Some(Sha256::digest(changed.join("\n").as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect())
+}
+
+/// Reads an open PR's files once per head, so a ready PR is flagged for changing workflows too, not only a draft.
+async fn files_read_if_open(state: &AppState, pr: &mut PullRequest) {
+    if pr.state == "open" && !pr.gone && !pr.head_sha.is_empty() {
+        kind_known(state, pr).await;
+    }
+}
+
+/// Reads the PR's kind, and whether it changes workflows, for its head when they aren't known yet (one files read
+/// per head). False when that fails.
+async fn kind_known(state: &AppState, pr: &mut PullRequest) -> bool {
+    if pr.kind_sha == pr.head_sha && pr.changes_workflows.is_some() {
+        return true;
+    }
+    // More files than one page lists: take the strictest kind rather than guess.
+    let kind = if pr.changed_files > 100 {
+        Ok(("ios", Some(pr.head_sha.clone())))
+    } else {
+        match github::get(state, &format!("/repos/{}/pulls/{}/files?per_page=100", pr.slug, pr.number)).await {
+            Ok(v) => {
+                let files: Vec<Value> = v.as_array().cloned().unwrap_or_default();
+                let names: Vec<String> = files.iter().filter_map(|f| f["filename"].as_str().map(String::from)).collect();
+                Ok((kind_of(&names), workflows_key(&files)))
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match kind {
+        // Sticky: once a head changed workflows, a revert doesn't clear it; a new change gets a new key.
+        Ok((k, w)) => {
+            (pr.kind, pr.changes_workflows, pr.kind_sha) = (k.into(), Some(w.is_some() || pr.changes_workflows == Some(true)), pr.head_sha.clone());
+            if let Some(key) = w {
+                pr.workflows_key = key;
+            }
+        }
+        Err(e) => {
+            tracing::warn!("files of {}#{}: {e}", pr.slug, pr.number);
+            return false;
+        }
+    }
+    true
 }
 
 fn names(v: &Value) -> Vec<String> {
@@ -369,8 +503,10 @@ async fn clear_stale_passes(state: &AppState, pr: &mut PullRequest) {
     pr.passes_sha.clear();
 }
 
-pub async fn merge(state: &AppState, id: &str, method: &str) -> Result<PullRequest> {
+/// Merges an open PR with `method`, or with its project's merge method when None.
+pub async fn merge(state: &AppState, id: &str, method: Option<&str>) -> Result<PullRequest> {
     let pr = refresh(state, id).await?;
+    let method = method.or(Some(pr.merge_method.as_str()).filter(|m| !m.is_empty())).unwrap_or("squash");
     if pr.state != "open" {
         bail!("pull request is already {}", pr.state);
     }
@@ -454,7 +590,9 @@ async fn refresh_batch(state: &AppState, prs: &[PullRequest]) -> Result<()> {
             apply_graphql(&mut pr, node);
             pr.error = None;
             clear_stale_passes(state, &mut pr).await;
+            files_read_if_open(state, &mut pr).await;
             mark_ready_if_due(state, &mut pr).await;
+            set_merge_method(state, &mut pr).await;
         }
         pr.checked_at = Some(now());
         state.db.save_pull_request(&pr)?;
@@ -571,7 +709,7 @@ mod tests {
         let ours = list.as_array().unwrap().iter().find(|v| v["id"] == pr.id).unwrap();
         assert_eq!(ours["labels"], json!(["tests:green", "qa:failed", "security:passed"]));
         assert_eq!(fake.seen("/").len(), before, "reading the PR list asks GitHub for nothing");
-        assert_eq!(fake.seen("/repos/octo/pr-labels/pulls/5").len(), 1, "the labels came with the one PR request");
+        assert_eq!(fake.seen("/repos/octo/pr-labels/pulls/5").iter().filter(|r| r.path == "/repos/octo/pr-labels/pulls/5").count(), 1, "the labels came with the one PR request");
     }
 
     fn settled_checks(fake: &crate::github::tests::Fake, slug: &str, sha: &str) {
@@ -587,6 +725,7 @@ mod tests {
         let a = crate::tasks::tests::agent(&st, "Dev");
         fake.in_turn("GET", "/repos/octo/pr-etag/pulls/7", vec![(200, pull(slug, 7, "abc")), (304, Value::Null)]);
         fake.with_headers("GET", "/repos/octo/pr-etag/pulls/7", &[("etag", "\"v1\"")]);
+        fake.route("GET", "/repos/octo/pr-etag/pulls/7/files", 200, json!([{ "filename": "backend/src/a.rs" }]));
         settled_checks(&fake, slug, "abc");
 
         let pr = register(&st, &a.id, slug, 7, None).await.unwrap();
@@ -594,8 +733,9 @@ mod tests {
         let before_checks = fake.seen("/repos/octo/pr-etag/commits/").len();
         let pr = refresh(&st, &pr.id).await.unwrap();
         assert_eq!((pr.title.as_str(), pr.checks["passed"].as_i64(), pr.error.as_deref()), ("Retry cap", Some(1), None), "the card keeps what it had");
-        let pulls = fake.seen("/repos/octo/pr-etag/pulls/7");
+        let pulls: Vec<_> = fake.seen("/repos/octo/pr-etag/pulls/7").into_iter().filter(|r| r.path == "/repos/octo/pr-etag/pulls/7").collect();
         assert_eq!(pulls.len(), 2);
+        assert_eq!(fake.seen("/repos/octo/pr-etag/pulls/7/files").len(), 1, "its files are read once, for its first head");
         assert_eq!(pulls[1].headers["if-none-match"], "\"v1\"");
         assert_eq!(fake.seen("/repos/octo/pr-etag/commits/").len(), before_checks, "settled checks on the same head aren't read again");
     }
@@ -695,7 +835,9 @@ mod tests {
         }));
 
         refresh_batch(&st, &prs).await.unwrap();
-        assert_eq!(fake.seen("/").len(), 1, "one request for three PRs, no REST calls");
+        assert_eq!(fake.seen("/graphql").len(), 1, "one request for three PRs");
+        let rest: Vec<String> = fake.seen("/repos/").into_iter().map(|r| r.path).collect();
+        assert_eq!(rest, ["/repos/octo/pr-batch/pulls/1/files?per_page=100"], "the only REST call: the open PR's files, for its new head");
         let q = fake.seen("/graphql")[0].body["query"].as_str().unwrap().to_string();
         assert!(q.contains(r#"p0: repository(owner: "octo", name: "pr-batch") { pullRequest(number: 1)"#) && q.contains("p2:"), "{q}");
 
@@ -729,7 +871,9 @@ mod tests {
 
 
     /// A dev that opened the PR, and a reviewer of the same project.
+    /// Claude is stubbed out, since a verdict can wake an agent.
     fn team(st: &AppState, project: &str) -> (crate::db::Agent, crate::db::Agent) {
+        no_claude(st);
         let mut dev = crate::tasks::tests::agent(st, &format!("Dev {project}"));
         (dev.project, dev.group) = (project.into(), project.into());
         st.db.save_agent(&dev).unwrap();
@@ -760,7 +904,7 @@ mod tests {
         register(&st, &dev.id, slug, 5, None).await.unwrap();
         let url = "https://github.com/octo/pr-verdict/pull/5";
 
-        let said = set_verdict(&st, &qa, url, "tests", true, "abc1234").await.unwrap();
+        let said = set_verdict(&st, &qa, url, "tests", true, "abc1234", "").await.unwrap();
         assert!(said.contains("tests:green"), "{said}");
         let writes: Vec<_> = fake.seen("/repos/octo/pr-verdict/").into_iter().filter(|r| r.method != "GET").collect();
         assert_eq!(writes.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["POST", "POST", "DELETE"], "the label is created, added, and its opposite removed");
@@ -775,7 +919,7 @@ mod tests {
         fake.route("POST", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "tests:green", "qa:failed"]));
         fake.route("DELETE", "/repos/octo/pr-verdict/issues/5/labels/qa%3Apassed", 404, json!({ "message": "Label does not exist" }));
         fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
-        set_verdict(&st, &qa, url, "qa", false, "abc1234").await.unwrap();
+        set_verdict(&st, &qa, url, "qa", false, "abc1234", "").await.unwrap();
         let pr = st.db.find_pull_request(&dev.id, slug, 5).unwrap().unwrap();
         assert_eq!(pr.labels, ["bug", "tests:green", "qa:failed"], "a 404 on the opposite is fine: it wasn't there");
         let creates = fake.seen("/repos/octo/pr-verdict/labels").into_iter().filter(|r| r.method == "POST").count();
@@ -786,7 +930,7 @@ mod tests {
         fake.route("POST", "/repos/octo/pr-verdict/issues/5/labels", 200, label_objects(&["bug", "needs-docs", "tests:green", "security:passed"]));
         fake.route("DELETE", "/repos/octo/pr-verdict/issues/5/labels/security%3Afindings", 404, json!({ "message": "Label does not exist" }));
         fake.route("POST", "/repos/octo/pr-verdict/labels", 201, json!({}));
-        set_verdict(&st, &qa, url, "security", true, "abc1234").await.unwrap();
+        set_verdict(&st, &qa, url, "security", true, "abc1234", "").await.unwrap();
         let pr = st.db.find_pull_request(&dev.id, slug, 5).unwrap().unwrap();
         assert!(pr.labels.contains(&"needs-docs".to_string()), "{:?}", pr.labels);
     }
@@ -830,7 +974,7 @@ mod tests {
         let before = fake.seen("/").len();
 
         for who in [&dev, &other_qa] {
-            let err = set_verdict(&st, who, url, "tests", true, "ccc3333").await.unwrap_err();
+            let err = set_verdict(&st, who, url, "tests", true, "ccc3333", "").await.unwrap_err();
             assert!(err.starts_with("Only a QA, Security or Code reviewer agent of the team"), "{err}");
         }
         // Every checker role of the team's group may, wherever its project is; the old "reviewer" role may not.
@@ -844,13 +988,13 @@ mod tests {
         st.db.save_agent(&qa).unwrap();
         let mut old = sec.clone();
         old.role = "reviewer".into();
-        assert!(set_verdict(&st, &old, url, "tests", true, "zzz9999").await.unwrap_err().starts_with("Only a QA"));
-        let err = set_verdict(&st, &sec, url, "tests", true, "zzz9999").await.unwrap_err();
+        assert!(set_verdict(&st, &old, url, "tests", true, "zzz9999", "").await.unwrap_err().starts_with("Only a QA"));
+        let err = set_verdict(&st, &sec, url, "tests", true, "zzz9999", "").await.unwrap_err();
         assert!(err.contains("Its head is now"), "{err}");
-        let err = set_verdict(&st, &qa, url, "tests", true, "zzz9999").await.unwrap_err();
+        let err = set_verdict(&st, &qa, url, "tests", true, "zzz9999", "").await.unwrap_err();
         assert!(err.contains("Its head is now ccc3333"), "{err}");
-        assert!(set_verdict(&st, &qa, url, "lint", true, "ccc3333").await.unwrap_err().contains("kind must be"));
-        assert!(set_verdict(&st, &qa, "https://github.com/octo/pr-auth/pull/99", "tests", true, "ccc3333").await.unwrap_err().contains("doesn't track octo/pr-auth#99"));
+        assert!(set_verdict(&st, &qa, url, "lint", true, "ccc3333", "").await.unwrap_err().contains("kind must be"));
+        assert!(set_verdict(&st, &qa, "https://github.com/octo/pr-auth/pull/99", "tests", true, "ccc3333", "").await.unwrap_err().contains("doesn't track octo/pr-auth#99"));
         let writes = fake.seen("/").into_iter().skip(before).filter(|r| r.method != "GET").count();
         assert_eq!(writes, 0, "a refused verdict writes nothing to GitHub");
     }
@@ -892,8 +1036,8 @@ mod tests {
         register(&st, &other_dev.id, slug, 7, None).await.unwrap();
         let url = "https://github.com/octo/pr-takeover/pull/7";
 
-        assert!(set_verdict(&st, &other_qa, url, "qa", true, "ccc3333").await.unwrap_err().starts_with("Only a QA"));
-        set_verdict(&st, &qa, url, "qa", true, "ccc3333").await.unwrap();
+        assert!(set_verdict(&st, &other_qa, url, "qa", true, "ccc3333", "").await.unwrap_err().starts_with("Only a QA"));
+        set_verdict(&st, &qa, url, "qa", true, "ccc3333", "").await.unwrap();
     }
 
     #[tokio::test]
@@ -948,6 +1092,108 @@ mod tests {
         assert_eq!(k(&[]), "backend", "nothing known: not docs-only");
     }
 
+    /// #701: a PR changing `.github/workflows/` runs it with the repo's secrets, so its card and Needs you flag it,
+    /// a ready PR as well as a draft, once per head.
+    #[tokio::test]
+    async fn a_pr_changing_workflows_is_flagged_on_its_card_and_in_needs_you() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let flagged = |st: &AppState| crate::needs_you::collect(st).unwrap().into_iter().filter(|i| i.kind == "pr_workflows").count();
+        let plain = draft_pr(&st, &fake, "wf-plain", 1, &[], &["backend/src/a.rs", ".github/dependabot.yml"]).await;
+        assert_eq!(plain.changes_workflows, Some(false));
+        assert_eq!(flagged(&st), 0);
+
+        // A ready PR: its files are read too.
+        let slug = "octo/wf-ready";
+        let (dev, _) = team(&st, "wf-ready");
+        fake.route("GET", &format!("/repos/{slug}/pulls/2"), 200, pull(slug, 2, "abcdef1234"));
+        settled_checks(&fake, slug, "abcdef1234");
+        fake.route("GET", &format!("/repos/{slug}/pulls/2/files"), 200, json!([{ "filename": "backend/src/a.rs" }, { "filename": ".github/workflows/ci.yml", "status": "modified", "sha": "blob1" }]));
+        let pr = register(&st, &dev.id, slug, 2, None).await.unwrap();
+        assert!(!pr.draft && pr.changes_workflows == Some(true) && pr.kind_sha == pr.head_sha, "{pr:?}");
+        assert_eq!(serde_json::to_value(&pr).unwrap()["changes_workflows"], json!(true), "the card gets it");
+        let item = crate::needs_you::collect(&st).unwrap().into_iter().find(|i| i.kind == "pr_workflows").unwrap();
+        assert_eq!(crate::needs_you::to_push(&item).kind, "delivery_stalled");
+        let v = crate::needs_you::snapshot(&st).unwrap();
+        let i = v["items"].as_array().unwrap().iter().find(|i| i["type"] == "pr_workflows").unwrap();
+        assert_eq!((i["id"].clone(), i["urgency"].clone()), (json!(format!("pr_workflows:{}:{}", pr.id, pr.workflows_key)), json!(2)));
+        assert_eq!(pr.workflows_key.len(), 16, "{pr:?}");
+        assert!(i["title"].as_str().unwrap().starts_with("octo/wf-ready#2") && i["reason"].as_str().unwrap().contains(".github/workflows/"), "{i}");
+        assert_eq!(i["actions"][0]["target"]["url"], json!("https://github.com/octo/wf-ready/pull/2/files"));
+
+        // A new head that reverts the workflow change: still flagged (security F1), with the same item.
+        fake.route("GET", &format!("/repos/{slug}/pulls/2"), 200, pull(slug, 2, "fedcba9876"));
+        settled_checks(&fake, slug, "fedcba9876");
+        fake.route("GET", &format!("/repos/{slug}/pulls/2/files"), 200, json!([{ "filename": "backend/src/a.rs" }]));
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert!(pr.changes_workflows == Some(true) && pr.kind_sha == "fedcba9876", "a revert doesn't clear it");
+        assert_eq!(flagged(&st), 1);
+
+        // A head whose files can't be read keeps the flag (L4).
+        fake.route("GET", &format!("/repos/{slug}/pulls/2"), 200, pull(slug, 2, "0123456789"));
+        settled_checks(&fake, slug, "0123456789");
+        fake.route("GET", &format!("/repos/{slug}/pulls/2/files"), 500, json!({ "message": "boom" }));
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert!(pr.changes_workflows == Some(true) && pr.kind_sha == "fedcba9876", "{pr:?}");
+        assert_eq!(flagged(&st), 1);
+
+        // Until the user dismisses it.
+        let first = pr.workflows_key.clone();
+        let _ = crate::needs_you::dismiss_item(axum::extract::State(st.clone()), axum::extract::Path(format!("pr_workflows:{}:{first}", pr.id))).await.unwrap();
+        assert_eq!(flagged(&st), 0);
+
+        // A new head with the same workflow change: still dismissed.
+        let head = |sha: &str, files: Value| {
+            fake.route("GET", &format!("/repos/{slug}/pulls/2"), 200, pull(slug, 2, sha));
+            settled_checks(&fake, slug, sha);
+            fake.route("GET", &format!("/repos/{slug}/pulls/2/files"), 200, files);
+        };
+        head("1111111111", json!([{ "filename": ".github/workflows/ci.yml", "status": "modified", "sha": "blob1" }, { "filename": "backend/src/b.rs" }]));
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert_eq!((pr.workflows_key.as_str(), flagged(&st)), (first.as_str(), 0), "the same change isn't raised again");
+
+        // A head that changes the workflow again: raised again, as a new item.
+        head("2222222222", json!([{ "filename": ".github/workflows/ci.yml", "status": "modified", "sha": "blob2" }]));
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert_ne!(pr.workflows_key, first);
+        assert_eq!(flagged(&st), 1, "a second change doesn't slip by");
+    }
+
+    /// #701 L1: a workflow renamed out of `.github/workflows/` changed it too.
+    #[tokio::test]
+    async fn a_workflow_renamed_out_of_its_folder_is_flagged() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/wf-renamed";
+        let (dev, _) = team(&st, "wf-renamed");
+        fake.route("GET", &format!("/repos/{slug}/pulls/4"), 200, pull(slug, 4, "abcdef1234"));
+        settled_checks(&fake, slug, "abcdef1234");
+        fake.route("GET", &format!("/repos/{slug}/pulls/4/files"), 200, json!([{ "filename": "old/ci.yml", "previous_filename": ".github/workflows/ci.yml" }]));
+        let pr = register(&st, &dev.id, slug, 4, None).await.unwrap();
+        assert_eq!(pr.changes_workflows, Some(true));
+    }
+
+    /// #701: a PR stored before `changes_workflows` existed has its files read once more, so it's flagged too; and a
+    /// local action under `.github/actions/` counts as a workflow change.
+    #[tokio::test]
+    async fn a_pr_stored_before_the_flag_is_read_once_and_actions_count() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let mut pr = draft_pr(&st, &fake, "wf-old", 3, &[], &[".github/actions/setup/action.yml"]).await;
+        assert_eq!(pr.changes_workflows, Some(true), "a local action runs with the repo's secrets too");
+        let files = || fake.seen("/repos/octo/wf-old/pulls/3/files").len();
+        assert_eq!(files(), 1);
+
+        // As stored before the upgrade: its kind is known for its head, the flag isn't.
+        pr.changes_workflows = None;
+        st.db.save_pull_request(&pr).unwrap();
+        let pr = refresh(&st, &pr.id).await.unwrap();
+        assert_eq!((pr.changes_workflows, files()), (Some(true), 2), "read once more, for the flag");
+        assert_eq!(crate::needs_you::collect(&st).unwrap().into_iter().filter(|i| i.kind == "pr_workflows").count(), 1);
+        refresh(&st, &pr.id).await.unwrap();
+        assert_eq!(files(), 2, "then not again for the same head");
+    }
+
     #[tokio::test]
     async fn the_last_verdict_marks_it_ready_and_needs_you_says_so() {
         let st = state_with_token();
@@ -958,7 +1204,7 @@ mod tests {
         fake.route("POST", "/repos/octo/rdy-last/labels", 201, json!({}));
         fake.route("POST", "/repos/octo/rdy-last/issues/8/labels", 200, label_objects(&["tests:green", "security:passed"]));
         fake.route("DELETE", "/repos/octo/rdy-last/issues/8/labels/security%3Afindings", 404, json!({ "message": "Label does not exist" }));
-        set_verdict(&st, &qa, "https://github.com/octo/rdy-last/pull/8", "security", true, "abcdef1").await.unwrap();
+        set_verdict(&st, &qa, "https://github.com/octo/rdy-last/pull/8", "security", true, "abcdef1", "").await.unwrap();
         let pr = st.db.get_pull_request(&pr.id).unwrap().unwrap();
         assert!(!pr.draft && pr.ready_sha == "abcdef1234");
         assert_eq!(ready_calls(&fake), 1);
@@ -967,4 +1213,103 @@ mod tests {
         assert!(reasons.iter().any(|r| r.starts_with("Loft marked it ready")), "{reasons:?}");
     }
 
+
+    /// The messages agents sent `to` (their wakes), with their ticket, and no real Claude started for them.
+    fn wakes(st: &AppState, to: &crate::db::Agent) -> Vec<(String, Option<String>, String)> {
+        st.db.list_messages(&to.id, 50, None).unwrap().into_iter()
+            .filter(|m| m.role == "user" && m.meta.get("from_agent").is_some())
+            .map(|m| (m.meta["from_agent"]["name"].as_str().unwrap_or("").to_string(), m.meta["ticket"].as_str().map(String::from), m.content))
+            .collect()
+    }
+
+    fn no_claude(st: &AppState) {
+        let mut s = st.settings.get();
+        s.claude_bin = "/nonexistent/claude".into();
+        st.settings.save(s).unwrap();
+    }
+
+    /// A team's Lead, in the group `team` makes.
+    fn lead(st: &AppState, project: &str) -> crate::db::Agent {
+        let mut l = crate::tasks::tests::agent(st, &format!("Lead {project}"));
+        (l.project, l.group, l.role) = (project.into(), project.into(), "lead".into());
+        st.db.save_agent(&l).unwrap();
+        l
+    }
+
+    #[tokio::test]
+    async fn a_fail_wakes_the_opener_naming_the_pr_its_ticket_the_head_and_the_comment() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/v-fail";
+        let (dev, qa) = team(&st, "v-fail");
+        let boss = lead(&st, "v-fail");
+        let mut p = pull(slug, 9, "abc1234def");
+        p["body"] = json!("Adds the cap.\n\nCloses #42");
+        fake.route("GET", "/repos/octo/v-fail/pulls/9", 200, p);
+        settled_checks(&fake, slug, "abc1234def");
+        fake.route("POST", "/repos/octo/v-fail/labels", 201, json!({}));
+        fake.route("POST", "/repos/octo/v-fail/issues/9/labels", 200, label_objects(&["qa:failed"]));
+        fake.route("DELETE", "/repos/octo/v-fail/issues/9/labels/qa%3Apassed", 404, json!({}));
+        register(&st, &dev.id, slug, 9, None).await.unwrap();
+        let link = "https://github.com/octo/v-fail/pull/9#issuecomment-1";
+
+        set_verdict(&st, &qa, "https://github.com/octo/v-fail/pull/9", "qa", false, "abc1234", link).await.unwrap();
+        let w = wakes(&st, &dev);
+        assert_eq!(w.len(), 1, "{w:?}");
+        let (from, ticket, text) = &w[0];
+        assert_eq!((from.as_str(), ticket.as_deref()), ("Tester v-fail", Some("octo/v-fail#42")));
+        for part in ["https://github.com/octo/v-fail/pull/9", "qa:failed", "abc1234d", link] {
+            assert!(text.contains(part), "{part} in {text}");
+        }
+        assert!(wakes(&st, &boss).is_empty(), "a fail isn't for the Lead");
+    }
+
+    #[tokio::test]
+    async fn the_last_needed_pass_on_the_head_wakes_the_lead_once() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/v-ready";
+        let (dev, qa) = team(&st, "v-ready");
+        let boss = lead(&st, "v-ready");
+        let mut p = pull(slug, 3, "abcdef1234");
+        p["labels"] = label_objects(&["tests:green"]);
+        p["body"] = json!("Fixes #7");
+        fake.route("GET", "/repos/octo/v-ready/pulls/3", 200, p);
+        settled_checks(&fake, slug, "abcdef1234");
+        fake.route("GET", "/repos/octo/v-ready/pulls/3/files", 200, json!([{ "filename": "backend/src/a.rs" }]));
+        fake.route("POST", "/repos/octo/v-ready/labels", 201, json!({}));
+        fake.route("POST", "/repos/octo/v-ready/issues/3/labels", 200, label_objects(&["tests:green", "security:passed"]));
+        fake.route("DELETE", "/repos/octo/v-ready/issues/3/labels/security%3Afindings", 404, json!({}));
+        register(&st, &dev.id, slug, 3, None).await.unwrap();
+        let url = "https://github.com/octo/v-ready/pull/3";
+
+        set_verdict(&st, &qa, url, "security", true, "abcdef1", "").await.unwrap();
+        let w = wakes(&st, &boss);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0].1.as_deref(), Some("octo/v-ready#7"));
+        assert!(w[0].2.contains(url) && w[0].2.contains("ready to merge") && w[0].2.contains("abcdef12"), "{}", w[0].2);
+        set_verdict(&st, &qa, url, "security", true, "abcdef1", "").await.unwrap();
+        assert_eq!(wakes(&st, &boss).len(), 1, "once per head");
+        assert!(wakes(&st, &dev).is_empty(), "a pass doesn't wake the opener");
+    }
+
+    #[tokio::test]
+    async fn a_verdict_on_an_old_head_wakes_nobody() {
+        let st = state_with_token();
+        let fake = own_fake(&st);
+        let slug = "octo/v-old";
+        let (dev, qa) = team(&st, "v-old");
+        let boss = lead(&st, "v-old");
+        let mut p = pull(slug, 4, "new5678abc");
+        p["labels"] = label_objects(&["tests:green"]);
+        fake.route("GET", "/repos/octo/v-old/pulls/4", 200, p);
+        settled_checks(&fake, slug, "new5678abc");
+        register(&st, &dev.id, slug, 4, None).await.unwrap();
+        let url = "https://github.com/octo/v-old/pull/4";
+
+        for pass in [false, true] {
+            assert!(set_verdict(&st, &qa, url, "security", pass, "old1234", "").await.is_err());
+        }
+        assert!(wakes(&st, &dev).is_empty() && wakes(&st, &boss).is_empty());
+    }
 }

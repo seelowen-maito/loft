@@ -1,23 +1,5 @@
 import type { Agent, CleanItem, CleanLog, GitCheck, QuietWindow } from "./api";
 
-
-export function timeAgo(input: string | number | null | undefined): string {
-  if (input === null || input === undefined || input === "") return "never";
-  const t = typeof input === "number" ? input * 1000 : new Date(input).getTime();
-  const s = Math.round((Date.now() - t) / 1000);
-  const future = s < 0;
-  const a = Math.abs(s);
-  const unit =
-    a < 45 ? "just now"
-    : a < 3600 ? `${Math.round(a / 60)}m`
-    : a < 86400 ? `${Math.round(a / 3600)}h`
-    : a < 86400 * 30 ? `${Math.round(a / 86400)}d`
-    : a < 86400 * 365 ? `${Math.round(a / (86400 * 30))}mo`
-    : `${Math.round(a / (86400 * 365))}y`;
-  if (unit === "just now") return unit;
-  return future ? `in ${unit}` : `${unit} ago`;
-}
-
 export function fmtNum(n: number): string {
   if (n >= 10000) return `${(n / 1000).toFixed(0)}k`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
@@ -53,20 +35,22 @@ export function fmtDays(days: number[]): string {
   return parts.join(", ");
 }
 
-/** "Mon–Fri 09:00–17:00; Sat, Sun all day". */
+/** "Works Mon–Fri 09:00–17:00; Sat, Sun all day", or "Never wakes on its own" when no window has a day. */
 export function fmtQuiet(windows: QuietWindow[]): string {
-  return windows.map((w) => `${fmtDays(w.days)} ${w.start === w.end ? "all day" : `${w.start}–${w.end}`}`).join("; ");
+  const days = windows.filter((w) => w.days.length > 0);
+  if (!days.length) return "Never wakes on its own";
+  return "Works " + days.map((w) => `${fmtDays(w.days)} ${w.start === w.end ? "all day" : `${w.start}–${w.end}`}`).join("; ");
 }
 
-/** The interval, marked custom when quiet hours shape it. */
+/** The interval, marked custom when working hours shape it. */
 export function fmtSchedule(a: Pick<Agent, "interval_minutes" | "quiet_hours">): string {
   return a.interval_minutes && a.quiet_hours?.length ? `${fmtInterval(a.interval_minutes)} · custom` : fmtInterval(a.interval_minutes);
 }
 
 const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
-/** Whether `minute` (since midnight) on `day` falls in a window. Mirrors backend/src/schedule.rs. */
-export function isQuiet(windows: QuietWindow[], day: number, minute: number): boolean {
+/** Whether `minute` (since midnight) on `day` falls in a working window. Mirrors backend/src/schedule.rs. */
+export function inWindow(windows: QuietWindow[], day: number, minute: number): boolean {
   return windows.some((w) => {
     const s = toMin(w.start), e = toMin(w.end);
     if (e > s) return w.days.includes(day) && minute >= s && minute < e;
@@ -190,4 +174,10 @@ export type CleanFilter = { agent: string; type: string; deletable: boolean };
 /** The Clean table's filters: one agent, one type ("" is all), and only what can be ticked. */
 export function filterClean(items: CleanItem[], f: CleanFilter): CleanItem[] {
   return items.filter((i) => (!f.agent || i.agent === f.agent) && (!f.type || cleanType(i) === f.type) && (!f.deletable || !cleanStatus(i, 0).locked));
+}
+
+/** A tool call's short name: Loft's own tools without their `mcp__loft__` prefix, other servers as `server › tool`. */
+export function shortToolName(name: string): string {
+  if (name.startsWith("mcp__loft__")) return name.slice("mcp__loft__".length);
+  return name.replace(/^mcp__/, "").replace("__", " › ");
 }

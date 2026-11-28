@@ -1,4 +1,6 @@
 import type { NeedsYouAction, NeedsYouList } from "./needsYou";
+import { errorText } from "./useAction.ts";
+import type { AgentTemplate } from "./newAgent";
 
 export type Avatar = { svg: string };
 
@@ -8,7 +10,6 @@ export type QuietWindow = { days: number[]; start: string; end: string };
 export type Agent = {
   id: string;
   name: string;
-  title: string;
   /** Its main project, where its issues go by default: the first of `projects`. */
   project: string;
   /** Free-text group its team goes by (Acme); "" means no team. Missing from servers before groups. */
@@ -16,13 +17,17 @@ export type Agent = {
   /** The projects it works in, main first. Missing from servers before groups. */
   projects?: string[];
   /** Projects that are a folder of repos or a missing folder: kept, but the user picks again. */
-  project_problems?: { project: string; problem: string }[];
+  project_problems?: { project: string; problem: string; hint?: boolean }[];
   personality: string;
   prompt: string;
   model: string;
   effort: string;
   interval_minutes: number;
   quiet_hours: QuietWindow[];
+  /** `/loop`: the prompt Loft sends again every interval until it's stopped. */
+  loop?: { prompt: string; interval_minutes: number; next_at: string } | null;
+  /** `/schedule`: prompts Loft sends once, or at each due time of a repeat. */
+  schedules?: { id: string; prompt: string; every: string | null; time: string | null; next_at: string }[];
   allowed_tools: string[];
   disallowed_tools: string[];
   mcp_servers: Record<string, unknown>;
@@ -43,6 +48,8 @@ export type Agent = {
   session_id: string | null;
   /** Tokens in the Claude session's context as of its last reply; null until a run reports it. */
   context_tokens?: number | null;
+  /** The `/goal` condition active in its Session (Goal active); null when there's none. */
+  goal?: string | null;
   last_run_at: string | null;
   next_run_at: string | null;
   total_cost_usd: number;
@@ -52,6 +59,8 @@ export type Agent = {
   /** The agent that created this one, if an agent did. */
   created_by?: string | null;
   running?: boolean;
+  /** A Redraw waits behind its current run or is drawing now. Missing from servers before Redraw showed it. */
+  redrawing?: boolean;
   workspace?: string;
   /** Last event from claude in the current run; null when not running. */
   last_output_at?: string | null;
@@ -75,6 +84,9 @@ export const ROLES: { value: string; label: string; hint: string }[] = [
   { value: "security", label: "Security", hint: "checks for security problems" },
   { value: "custom", label: "Custom", hint: "follows only its own instructions" },
 ];
+
+/** The label an agent goes by, from its role: "Code reviewer", "Custom". No role yet reads as Custom. */
+export const roleLabel = (role?: string) => ROLES.find((r) => r.value === (role || "custom"))?.label ?? role ?? "Custom";
 
 export type RunningSubagent = { id: string; description: string; type: string; started_at: string };
 
@@ -105,11 +117,16 @@ export type TaskStatus = "inbox" | "ready" | "in_progress" | "blocked" | "waitin
 /** A Loft issue (stored as a task): shaped like a GitHub issue, plus an agent, an execution status and a thread. */
 /** A Delivery as an issue page shows it. A spec's also lists its tickets: "elsewhere" ones are being built
  *  outside it (`skipped` says why), so it never hands them out. */
+/** An open ticket outside a spec that one of its tickets waits on (`owner/repo#n`), and the Delivery that owns it (null when it has none). */
+export type WaitsOn = { blocker: string; delivery: { repo: string; spec: number; started: boolean; issue_id: string | null } | null };
+
 export type IssueDelivery = {
   /** "planned", "running", "final_review", "final_fixes", "needs_human", "stalled", "paused", "ready", "settled" or "merged". */
   state: string;
-  /** Why it stalled: "run_failed", "no_call", "restart" or "ci_missing"; null unless stalled. */
+  /** Why it stalled: "run_failed", "no_call", "restart", "ci_missing", "billing" (a Billing block), "infra" (its CI failed twice for GitHub's infrastructure) or "ci_queued" (a CI job sat queued 30 minutes without starting), among others; null unless stalled. */
   stall_reason?: string | null;
+  /** Stalled by a Billing block: the repo owner's billing page on GitHub; null otherwise. An older server doesn't send it. */
+  billing_url?: string | null;
   /** The card's state line as the server words it; null before it started. An older server doesn't send it. */
   state_line?: { tone: string; text: string } | null;
   /** Pause applies: the Delivery is running (its final review and fixes included), and no ticket waits for the user. */
@@ -121,18 +138,48 @@ export type IssueDelivery = {
   /** A ticket, or the final review, waits for the user after too many changes rounds. */
   needs_human?: boolean;
   started: boolean;
+  /** A Loft issue whose project can't hold its Delivery (no git repo of its own): why, instead of a Start button. */
+  cannot_start?: string;
   agent_id: string | null;
   agent_name: string | null;
   pr: number | null;
+  /** Its PR's Checks tab on GitHub (the spec PR, or a standalone ticket's PR); null in a plan kept in Loft or before the PR opens. An older server doesn't send it. */
+  checks_url?: string | null;
+  /** When its earliest ticket waiting for CI started waiting (RFC 3339), a standalone ticket's included, or, while that CI sits queued with no job running ("CI queued, not started"), since when it does; null when none is. An older server doesn't send it. */
+  ci_since?: string | null;
+  /** The GitHub Actions minutes its branch spent so far, each job rounded up as GitHub bills it; null before it started or in a plan kept in Loft. An older server doesn't send it. */
+  actions_minutes?: number | null;
+  /** `actions_minutes` as they use up the owner's included minutes (macOS jobs count 10×, Windows 2×); null when `actions_minutes` is. An older server doesn't send it. */
+  actions_weighted?: number | null;
   spec?: boolean;
   current?: { number: number; title: string } | null;
-  tickets?: { number: number; title: string; state: string; skipped: string; agent_id?: string | null; agent_name?: string | null }[];
+  /** What the spec's tickets wait on outside it: starting it before those close leaves them waiting. */
+  waits_on?: WaitsOn[];
+  /** `waiting_for_ci`: its reviewers all passed, only its CI is left (no agent on it), since `ci_since` (RFC 3339). */
+  tickets?: { number: number; title: string; state: string; skipped: string; waiting_on?: string[]; agent_id?: string | null; agent_name?: string | null; waiting?: string | null; waiting_for_ci?: boolean; ci_since?: string | null }[];
   /** With a Lead on the team: the ready tickets nobody has yet, while the Lead hands them out. */
   waiting_for_lead?: number[];
   /** Tickets that had too many rounds of changes: no agent runs them until the user resumes. */
   waiting_on_you?: number[];
   /** Its open PR's branch is behind its base by `count` commits; null when it isn't. An older server doesn't send it. */
   behind?: { count: number; base: string } | null;
+  /** A ticket started while the spec PR was ready for review: Loft put it back to draft (`ok`), or GitHub refused, and `text` says so; null otherwise. An older server doesn't send it. */
+  draft_again?: { ok: boolean; text: string } | null;
+  /** A line per ticket whose CI passed with none run on its commit although the repo has active workflows. An older server doesn't send it. */
+  no_ci?: string[];
+  /** On a private repo: what the workflow check found, until the Delivery is done; null when there's nothing to warn about. An older server doesn't send it. */
+  workflows?: WorkflowCheck | null;
+};
+
+/** The workflow check of a private repo: each workflow's way of spending more Actions minutes than it needs to on the
+ *  draft spec PR ("push_and_pull_request", "no_cancel_in_progress", "heavy_in_draft"), with the minutes each ticket will
+ *  spend (`measured` on recent runs, else a guess) and `text`, the line saying so. */
+export type WorkflowCheck = {
+  warnings: { kind: string; workflow: string; text: string }[];
+  minutes_per_ticket: number;
+  measured: boolean;
+  text: string;
+  checked_at: string;
 };
 
 export type Task = {
@@ -249,6 +296,8 @@ export type CardSpec = {
   tickets: PlannedIssue[];
   /** The spec's Delivery, for Start delivery; `started` once it started: who got which ticket. */
   delivery?: { repo: string; spec: number; standalone?: boolean; local?: boolean; started?: DeliveryStarted } | null;
+  /** On a private repo whose workflows spend more than they need to: the workflow check, when the spec was published. */
+  workflows?: WorkflowCheck;
 };
 
 /** The first spec sits at the top (older cards have only that one); further specs of the grill are in `more`. */
@@ -310,7 +359,9 @@ export type Memory = { id: number; agent_id: string; title: string; content: str
 export type PermissionRequest = {
   id: string;
   agent_id: string;
-  source: "prompt" | "request";
+  /** prompt: a blocked tool call. request: the agent asked explicitly. questions: an allowed `AskUserQuestion`'s
+   *  questions, answered rather than allowed. */
+  source: "prompt" | "request" | "questions";
   tool_name: string;
   input: Record<string, any>;
   reason: string;
@@ -397,6 +448,8 @@ export type PullRequest = {
   mergeable: boolean | null;
   mergeable_state: string;
   merge_methods: string[];
+  /** The method Merge uses: the project's merge method, when the repo allows it. */
+  merge_method?: string;
   head_ref: string;
   base_ref: string;
   author: string;
@@ -416,6 +469,12 @@ export type PullRequest = {
   labels?: string[];
   /** Commits on the base the branch doesn't have; 0 when up to date. An older server doesn't send it. */
   behind_by?: number;
+  /** Some head of it changed `.github/workflows/` or `.github/actions/`, which run with the repo's secrets; it stays
+   *  set once true. null until its files are read. An older server doesn't send it. */
+  changes_workflows?: boolean | null;
+  /** The head commit its files (kind, `changes_workflows`) were read for, and its current head. */
+  kind_sha?: string;
+  head_sha?: string;
 };
 
 export type AgentSummary = {
@@ -434,6 +493,23 @@ export type AgentSummary = {
   memories: number;
   pending_permissions: number;
   prs: { total: number; open: number; merged: number };
+};
+
+/** A chat message kept in Saved (`/saved`). */
+export type SavedItem = {
+  id: number;
+  title: string;
+  tag: string;
+  /** The message as Markdown. */
+  content: string;
+  /** The agent it was saved from, and its name then: the agent may be gone. */
+  agent_id: string;
+  agent_name: string;
+  message_id: number;
+  created_at: string;
+  updated_at: string | null;
+  /** The pull request of its last export to docs (an id in /pull-requests). */
+  export_pr: string | null;
 };
 
 /** The home line's figures next to the per-agent summaries (`GET /agents/summary?totals=true`). */
@@ -468,12 +544,12 @@ export type HerdrStatus = {
 };
 
 export type UpdateStatus = {
-  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error";
+  phase: "disabled" | "up_to_date" | "waiting" | "updating" | "restart" | "error" | "blocked";
   current: string;
   latest: string | null;
   running_agents: number;
   error: string | null;
-  /** For "restart": why the restart hasn't happened. */
+  /** For "restart": why the restart hasn't happened. For "blocked": why the checkout can't update. */
   why: string | null;
 };
 
@@ -486,10 +562,6 @@ export type Settings = {
   auto_update: boolean;
   show_simulator: boolean;
   messaging_rules: boolean;
-  /** Publish new Loft issues to GitHub as they're made (projects with a GitHub repo). */
-  auto_publish_all: boolean;
-  /** How comments on GitHub issues are approved, for every project: ask (every one waits), own (yours go straight) or all. */
-  comment_approval_default: ApprovalMode;
   /** Where the daily backups go; "" is ~/Library/Application Support/Loft/backups. */
   backup_dir: string;
   /** Hours with no run before an agent counts as idle and Loft shuts its Simulator device down. At least 1. */
@@ -511,6 +583,8 @@ export type WorkspaceSizes = {
   agents: { id: string; name: string; bytes: number; busy: boolean; processes: number }[];
   free_bytes: number | null;
   low_disk_bytes: number;
+  /** The shared Rust build cache: whether sccache is installed, what its cache takes, and its cap. */
+  sccache: { installed: boolean; bytes: number; limit_bytes: number };
 };
 /** A process an idle agent left running, listed in Clean; `age_secs` is how long ago it started. */
 export type LeftProcess = { pid: number; command: string; age_secs: number };
@@ -553,14 +627,34 @@ export type CleanLog = {
   failed: number;
 };
 
-export type ApprovalMode = "ask" | "own" | "all";
-
 /** GitHub's rate limit as its last answers said (`reset` in Unix seconds), and Loft's requests this hour by source. */
 export type GithubBudget = {
   resources: Record<string, { limit: number; remaining: number; used: number; reset: number }>;
   by_source: Record<string, { requests: number; not_modified: number }>;
   window_reset: number | null;
+  /** The token's scopes as GitHub listed them (a classic token); null for a fine-grained or app token. An older
+   *  server doesn't send it. */
+  scopes?: string[] | null;
 };
+
+/** An owner's (org or account) GitHub Actions minutes this month, in UTC: the org's billed minutes (`billing`, when the
+ *  token has `admin:org`) or the sum of its private repos Loft knows (`repos`), and the monthly quota the user set. */
+export type ActionsOwner = {
+  owner: string;
+  /** `Organization` or `User`; empty before any repo of it was read. */
+  kind: string;
+  minutes: number;
+  source: "billing" | "repos";
+  quota: number | null;
+  repos: { repo: string; minutes: number; private: boolean }[];
+};
+
+export type ActionsOwners = { month: string; owners: ActionsOwner[] };
+
+/** A project's repo minutes this month and its owner's month; `repo` is null when the project isn't on GitHub. */
+export type ProjectActions =
+  | { project: string; repo: null; why: string }
+  | { project: string; repo: string; month: string; read: boolean; private: boolean | null; minutes: number; owner: ActionsOwner };
 
 /** What reading GitHub just did: per mirrored project, and why the others aren't mirrored. */
 export type MirrorSync = {
@@ -570,6 +664,11 @@ export type MirrorSync = {
   projects: { project: string; repo: string; created: number; updated: number; error?: string }[];
   skipped: { project: string; reason: string }[];
 };
+
+/** Loft's https address on the tailnet (null when `tailscale serve` doesn't serve it), and the command that turns it on. */
+export type Https = { url: string | null; host: string | null; command: string };
+/** Whether this Mac can transcribe the web's voice, and whether cleanup runs on Apple's on-device model or on Haiku. */
+export type VoiceStatus = { speech: { ready: boolean; text: string }; cleanup: { on_device: boolean; text: string } };
 
 /** Whether macOS lets Loft into each guarded folder; `waiting`: a prompt is up on the Mac now. */
 export type MacAccess = {
@@ -591,6 +690,9 @@ export type SettingsView = {
   running_agents: number;
 };
 
+/** Whether the claude CLI is logged in (`GET /claude/login`). */
+export type ClaudeLogin = { logged_in: boolean; account: string | null; plan: string | null; note: string | null; steps: string };
+
 /** Claude plan limits, as in Claude Code's /usage. percent is 0–100. */
 export type UsageWindow = { key: string; label: string; percent: number; resets_at: string | null };
 export type Usage = { windows: UsageWindow[]; error: string | null };
@@ -607,7 +709,33 @@ export type SystemReading = {
   sampled_at: string | null;
 };
 
+/** A folder suggested for the Projects folder: `label` is `path` with `~` for home; `repos` counts the git repos in it. */
+export type FolderSuggestion = { path: string; label: string; repos: number };
 export type Info = { projects_dir: string; storage_dir: string; github_token: boolean; version: string };
+
+/** One of a project's settings: its choices, Loft's default, its value and, once changed, when and by which agent (none: the user).
+ *  A `branch` setting takes one of the repo's branches (`projectBranches`) instead of `choices`; empty is the repo's default branch.
+ *  A `number` setting takes a whole number from `min` to `max`, in `unit`.
+ *  A `merge_method` setting takes one of its `choices` that the repo allows (`projectMergeMethods`). */
+type ProjectSettingBase = {
+  key: string;
+  label: string;
+  help: string;
+  choices: { value: string; label: string; help: string }[];
+  changed: { at: string; agent: { id: string; name: string } | null } | null;
+};
+/** One role that can review each ticket: the project's agent in it (none when the team has none) and whether it does. */
+export type ReviewerRow = { role: string; label: string; note: string; agent: { id: string; name: string; avatar: Avatar } | null; on: boolean };
+export type ProjectSetting =
+  | (ProjectSettingBase & { kind: "choice" | "branch" | "merge_method"; default: string; value: string })
+  | (ProjectSettingBase & { kind: "reviewers"; default: string[]; value: string[]; reviewers: ReviewerRow[] })
+  | (ProjectSettingBase & { kind: "number"; default: number; value: number; min: number; max: number; unit: string });
+export type ProjectSettingsView = { project: string; settings: ProjectSetting[] };
+/** The team defaults new agents of a project start on, shown together with "Apply to the team now". */
+export const TEAM_SETTINGS = ["team_model", "team_effort", "team_subagent_model"];
+export type ProjectBranches = { repo: string; default_branch: string; branches: string[] };
+/** The merge methods a project's repo allows on GitHub, and the one its PRs' Merge uses. */
+export type ProjectMergeMethods = { repo: string; allowed: string[]; method: string };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -615,6 +743,11 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     headers: body !== undefined ? { "content-type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  return answer<T>(res);
+}
+
+/** A response's JSON, or its `error` thrown. */
+async function answer<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as any).error ?? `${res.status} ${res.statusText}`);
   return data as T;
@@ -623,7 +756,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 /** A grill request's error as text for the user: the 409 codes the server sends when the round was sent or the
  * interview ended elsewhere. Same list as the app's `LoftStore.grillFailure`. */
 export function grillError(e: unknown) {
-  const m = (e as Error).message;
+  const m = errorText(e);
   if (m === "grill_closed") return "This interview has already ended.";
   if (m === "round_closed" || m === "question_closed") return "This round was already sent.";
   return m;
@@ -641,6 +774,8 @@ export type SimulatorInput =
   | { action: "key"; code: number }
   | { action: "button"; name: "home" | "lock" };
 
+export type AgentCommand = { name: string; description: string; tag: "passthrough" | "loft" | "terminal"; reason: string | null };
+
 export const api = {
   simulators: () => req<{ interactive: boolean; devices: Simulator[]; error?: string }>("GET", "/simulator"),
   /** Agents' Simulator devices, biggest first; none without Xcode. */
@@ -651,7 +786,25 @@ export const api = {
   usage: () => req<Usage>("GET", "/usage"),
   system: () => req<SystemReading>("GET", "/system"),
   /** Lists a fixed set of macOS-guarded folders; can show macOS's prompts on the Mac. */
+  claudeLogin: () => req<ClaudeLogin>("GET", "/claude/login"),
+  claudeLoginTerminal: () => req<{ ok: boolean }>("POST", "/claude/login/terminal"),
   macAccess: () => req<MacAccess>("POST", "/system/mac-access"),
+  /** Adds a chunk of a Talk session's audio (16 kHz mono 16-bit PCM) and returns the text of all of it so far; the
+   * final chunk ends the session. */
+  transcribe: async (session: string, audio: Uint8Array, final: boolean): Promise<{ text: string; final: boolean }> => {
+    const res = await fetch(`/api/voice/transcribe?session=${encodeURIComponent(session)}${final ? "&final=true" : ""}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: audio as BodyInit,
+    });
+    return answer<{ text: string; final: boolean }>(res);
+  },
+  /** Tidies a dictation; the original comes back (`cleaned: false`) when it can't. */
+  voiceClean: (text: string) => req<{ text: string; cleaned: boolean }>("POST", "/voice/clean", { text }),
+  /** Asks Tailscale whether it serves Loft over https. */
+  https: () => req<Https>("GET", "/system/https"),
+  /** Checks the transcriber and the on-device model now. */
+  voiceStatus: () => req<VoiceStatus>("GET", "/voice/status"),
   settings: () => req<SettingsView>("GET", "/settings"),
   /** github_token: undefined keeps the saved token, "" removes it. */
   saveSettings: (s: Omit<Settings, "github_token" | "backup_dir"> & { github_token?: string; backup_dir?: string }) => req<SettingsView>("PUT", "/settings", s),
@@ -677,9 +830,25 @@ export const api = {
   stopLeftRunning: (agent: string) => req<{ stopped: number }>("POST", `/workspaces/${agent}/stop-processes`),
   backUpNow: () => req<BackupStatus>("POST", "/backups"),
   githubBudget: () => req<GithubBudget>("GET", "/github/budget"),
+  actionsOwners: () => req<ActionsOwners>("GET", "/actions/owners"),
+  /** Sets an owner's monthly Actions quota in minutes, or none with null. */
+  setActionsQuota: (owner: string, quota: number | null) => req<ActionsOwners>("PUT", `/actions/owners/${encodeURIComponent(owner)}`, { quota }),
+  projectActions: (project: string) => req<ProjectActions>("GET", `/actions/project?project=${encodeURIComponent(project)}`),
   repos: (refresh = false) => req<Repo[]>("GET", `/repos${refresh ? "?refresh=true" : ""}`),
   github: (refresh = false) => req<Record<string, GithubInfo>>("GET", `/repos/github${refresh ? "?refresh=true" : ""}`),
   commits: (name: string) => req<Commit[]>("GET", `/repos/${encodeURIComponent(name)}/commits`),
+  /** Folders for what's typed in Settings → Projects folder: the typed parent's, then the ones found by name in home. */
+  suggestFolders: (q: string) => req<FolderSuggestion[]>("GET", `/folders/suggest?q=${encodeURIComponent(q)}`),
+  /** The Agent templates, their instructions filled in for `project` ("" before one is picked). */
+  agentTemplates: (project: string) => req<AgentTemplate[]>("GET", `/agent-templates?project=${encodeURIComponent(project)}`),
+  projectSettings: (project: string) => req<ProjectSettingsView>("GET", `/project-settings?project=${encodeURIComponent(project)}`),
+  setProjectSetting: (project: string, key: string, value: string | string[] | number) => req<ProjectSettingsView>("PUT", "/project-settings", { project, key, value }),
+  /** Asks Loft's own agent `loft` to set up an agent in a reviewer role the project's team has no one in. */
+  /** Gives the agents whose main project it is the project's team defaults that are set; `applied` names the ones it changed. */
+  applyTeamDefaults: (project: string) => req<ProjectSettingsView & { applied: { id: string; name: string }[] }>("POST", "/project-settings/apply-team", { project }),
+  createReviewer: (project: string, role: string) => req<{ agent: { id: string; name: string }; message: string }>("POST", "/project-settings/reviewer", { project, role }),
+  projectBranches: (project: string) => req<ProjectBranches>("GET", `/project-settings/branches?project=${encodeURIComponent(project)}`),
+  projectMergeMethods: (project: string) => req<ProjectMergeMethods>("GET", `/project-settings/merge-methods?project=${encodeURIComponent(project)}`),
 
   agents: () => req<Agent[]>("GET", "/agents"),
   /** Only what the ⌘J shortcut reads; see docs/needs-you-api.md for the whole item. */
@@ -688,6 +857,8 @@ export const api = {
   needsYouList: () => req<NeedsYouList>("GET", "/needs-you"),
   /** Marks the Needs you items shown as seen, for every client: the counter stops counting them. */
   needsYouSeen: (ids: string[]) => req<{ ok: boolean; new: number; new_urgent: number }>("POST", "/needs-you/seen", { ids }),
+  /** Done on these items (the ones shown) that still offer it, in one call; returns how many it cleared. */
+  needsYouClearAll: (ids: string[]) => req<{ ok: boolean; cleared: number }>("POST", "/needs-you/dismiss-all", { ids }),
   /** Sends one of a Needs you item's actions as the item gives it; its path starts with `/api`. */
   needsYouCall: (a: NeedsYouAction, body?: Record<string, unknown>) =>
     req<{ delivered_to?: unknown }>(a.method ?? "POST", (a.path ?? "").replace(/^\/api(?=\/)/, ""), body ?? a.body ?? {}),
@@ -699,9 +870,12 @@ export const api = {
   workspaceSize: (id: string) => req<{ bytes: number }>("GET", `/agents/${id}/workspace-size`),
   deleteAgent: (id: string, purge: boolean) => req<{ ok: boolean }>("DELETE", `/agents/${id}?purge_files=${purge}`),
   messages: (id: string) => req<Message[]>("GET", `/agents/${id}/messages?limit=400`),
-  /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. */
-  send: (id: string, text: string, images: string[] = [], taskId?: string) =>
-    req<{ ok: boolean; queued: boolean }>("POST", `/agents/${id}/messages`, { text, images, ...(taskId ? { meta: { task_id: taskId } } : {}) }),
+  /** `taskId` attaches a task: the agent gets its title, status and latest note with the message. `replyTo`: the id
+   * of the message in this chat it replies to, which the agent gets quoted first. */
+  send: (id: string, text: string, images: string[] = [], taskId?: string, replyTo?: number) =>
+    req<{ ok: boolean; queued: boolean }>("POST", `/agents/${id}/messages`, {
+      text, images, ...(taskId ? { meta: { task_id: taskId } } : {}), ...(replyTo != null ? { reply_to: replyTo } : {}),
+    }),
   /** "Set up the team with lofty" on an end-of-planning card: sends its setup message once. */
   sendTeamSetup: (id: string, messageId: number) =>
     req<{ ok: boolean; duplicate?: boolean; message: Message }>("POST", `/agents/${id}/messages/${messageId}/team-setup`),
@@ -724,8 +898,16 @@ export const api = {
   clearMessages: (id: string) => req("DELETE", `/agents/${id}/messages`),
   run: (id: string) => req("POST", `/agents/${id}/run`),
   stop: (id: string) => req("POST", `/agents/${id}/stop`),
+  /** What the agent's CLI offers (Loft's own commands, then the CLI's by name), each tagged with how it runs. */
+  commands: (id: string) => req<AgentCommand[]>("GET", `/agents/${id}/commands`),
   /** The user has seen this chat: clears its Unread reply in every browser. */
   markRead: (id: string) => req<Agent>("POST", `/agents/${id}/read`),
+  /** Takes an agent's message back out of the queue before a run takes it; `ok` is false when one already did. */
+  cancelQueued: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/cancel`),
+  /** Send now: the user's queued message into the agent's run in progress; `ok` is false when it stays queued (the run is ending, or takes no input). */
+  sendNow: (agent: string, message: number) => req<{ ok: boolean }>("POST", `/agents/${agent}/messages/${message}/send-now`),
+  /** Goal active's button: sends `/goal clear` as the user's message, into the run in progress when there is one. */
+  clearGoal: (agent: string) => req<{ ok: boolean; message: Message | null }>("POST", `/agents/${agent}/goal/clear`),
   /** Stops a run that waits or went quiet; queued messages are kept and run next. */
   tasks: () => req<Task[]>("GET", "/issues"),
   /** Reads the projects' GitHub issues now; new and changed ones arrive as task events. */
@@ -778,8 +960,9 @@ export const api = {
   keepComment: (id: string, cid: number) => req<TaskComment>("POST", `/issues/${id}/comments/${cid}/keep`, {}),
   /** The agent's open interview, or null. */
   grill: (id: string) => req<GrillSession>("GET", `/agents/${id}/grill`).catch(() => null),
-  grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string) =>
-    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID() }),
+  /** `note`, with "send": the Round note that goes with the round. */
+  grillCommand: (sessionId: string, command: "send" | "decide" | "pause" | "resume" | "end", questionId?: string, note?: { text: string; images: string[] }) =>
+    req<{ ok: boolean; session: GrillSession }>("POST", `/grill/${sessionId}/command`, { command, question_id: questionId, client_id: crypto.randomUUID(), note }),
   /** Holds an answer to a round question (Loft doesn't run the agent until the round is sent). "Yes" accepts the recommendation. */
   /** Holds an answer to one question of the open round; with `discuss`, it is a comment for the agent instead of a decision. */
   grillAnswer: (agentId: string, sessionId: string, questionId: string, text: string, discuss = false, images: string[] = []) =>
@@ -789,10 +972,25 @@ export const api = {
     req<{ ok: boolean }>("POST", `/agents/${agentId}/messages`, { text, client_id: crypto.randomUUID(), meta: { grill: { role: "start_request" } } }),
   restartRun: (id: string) => req("POST", `/agents/${id}/restart`),
   resetSession: (id: string) => req<Agent>("POST", `/agents/${id}/reset-session`),
+  loopStart: (id: string, interval: string, prompt: string) => req<{ ok: boolean }>("POST", `/agents/${id}/loop`, { interval, prompt }),
+  scheduleAdd: (id: string, text: string) => req<{ ok: boolean }>("POST", `/agents/${id}/schedules`, { text }),
+  scheduleCancel: (id: string, sid: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/schedules/${sid}`),
+  agentCommand: (id: string, name: string, arg: string) => req<{ text: string }>("POST", `/agents/${id}/command`, { name, arg }),
+  loopStop: (id: string) => req<{ ok: boolean }>("DELETE", `/agents/${id}/loop`),
   compact: (id: string, instructions: string) => req<{ ok: boolean }>("POST", `/agents/${id}/compact`, { instructions }),
   sessions: (id: string) => req<{ sessions: PastSession[]; current: string | null }>("GET", `/agents/${id}/sessions`),
   resumeSession: (id: string, sessionId: string) => req<Agent>("POST", `/agents/${id}/resume-session`, { session_id: sessionId }),
-  randomizeAvatar: (id: string) => req<Agent>("POST", `/agents/${id}/avatar/randomize`),
+  /** Redraw: the agent draws a new sticker in a quiet run; it arrives with the agent event. */
+  redrawAvatar: (id: string) => req<{ ok: boolean }>("POST", `/agents/${id}/avatar/redraw`),
+  saveMessage: (agentId: string, messageId: number, title: string, tag: string) =>
+    req<SavedItem>("POST", "/saved", { agent_id: agentId, message_id: messageId, title, tag }),
+  savedList: (q = "", tag = "") => req<{ items: SavedItem[]; tags: string[] }>("GET", `/saved?${new URLSearchParams({ q, tag })}`),
+  /** `source_exists`: the message it came from is still in its agent's chat; `pr`: its last export to docs. */
+  savedItem: (id: number) => req<SavedItem & { source_exists: boolean; pr: PullRequest | null }>("GET", `/saved/${id}`),
+  /** Opens a pull request adding (or updating) `docs/<slug>.md` on the project's repo. */
+  exportSaved: (id: number, project: string) => req<PullRequest>("POST", `/saved/${id}/export`, { project }),
+  updateSaved: (id: number, title: string, tag: string, content: string) => req<SavedItem>("PUT", `/saved/${id}`, { title, tag, content }),
+  deleteSaved: (id: number) => req<{ ok: boolean }>("DELETE", `/saved/${id}`),
   memories: (id: string) => req<Memory[]>("GET", `/agents/${id}/memories`),
   addMemory: (id: string, title: string, content = "", tags = "") => req<Memory>("POST", `/agents/${id}/memories`, { title, content, tags }),
   deleteMemory: (id: string, mid: number) => req("DELETE", `/agents/${id}/memories/${mid}`),
@@ -813,7 +1011,9 @@ export const api = {
   permissions: (agentId?: string) => req<PermissionRequest[]>("GET", `/permissions${agentId ? `?agent_id=${agentId}` : ""}`),
   pullRequests: (agentId?: string) => req<PullRequest[]>("GET", `/pull-requests${agentId ? `?agent_id=${agentId}` : ""}`),
   refreshPullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/refresh`),
-  mergePullRequest: (id: string, method: string) => req<PullRequest>("POST", `/pull-requests/${id}/merge`, { method }),
-  decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string) =>
-    req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule }),
+  /** Merges with the project's merge method. */
+  mergePullRequest: (id: string) => req<PullRequest>("POST", `/pull-requests/${id}/merge`, {}),
+  /** `answers` answers an `AskUserQuestion` prompt: the pick per question text. */
+  decide: (id: string, decision: "allow_once" | "allow_always" | "deny", rule?: string, answers?: Record<string, string>) =>
+    req<PermissionRequest>("POST", `/permissions/${id}`, { decision, rule, answers }),
 };

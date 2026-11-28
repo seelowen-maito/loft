@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The stage rules mirror the web's `specViews.ts` tests.
 final class SpecViewsTests: XCTestCase {
@@ -51,6 +52,21 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertEqual(SpecViews.ref(spec()), "o/r#7")
         var local = spec(); local.github = nil
         XCTAssertEqual(SpecViews.ref(local), "Loft · loft")
+    }
+
+    func testProjectShowsNextToAGitHubRefButNotTwiceForALoftSpec() {
+        XCTAssertEqual(SpecViews.project(spec()), "loft")
+        var local = spec(); local.github = nil
+        XCTAssertNil(SpecViews.project(local), "the ref already reads Loft · loft")
+        var none = spec(); none.project = ""
+        XCTAssertNil(SpecViews.project(none))
+    }
+
+    func testProjectShowsOnlyItsLastPathPartSoItDoesNotRepeatTheRepo() {
+        var t = spec(); t.project = "dineout/dineout/pos"
+        XCTAssertEqual(SpecViews.project(t), "pos")
+        t.project = "Passora"
+        XCTAssertEqual(SpecViews.project(t), "Passora")
     }
 
     func testDecodesTheSummaryEndpoint() throws {
@@ -105,6 +121,8 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertNil(SpecViews.waitingOnYouLine([]))
         XCTAssertEqual(SpecViews.waitingOnYouLine([47]), "Waiting on you: #47")
         XCTAssertEqual(SpecViews.ticketLabel("needs_human"), "Waiting on you")
+        XCTAssertEqual(SpecViews.ticketLabel("open", waitingOn: ["octo/api#12"]), "waiting on octo/api#12")
+        XCTAssertEqual(SpecViews.ticketLabel("started", waitingOn: ["octo/api#12"]), "building", "only an open ticket waits")
     }
 
     /// #181: the summary names every started ticket's agent and the ready tickets waiting for the Lead.
@@ -114,5 +132,73 @@ final class SpecViewsTests: XCTestCase {
         XCTAssertEqual(d.tickets.map(\.agentName), ["Dev 1", "Dev 2", nil])
         XCTAssertEqual(d.waitingForLead, [3])
         XCTAssertEqual(SpecViews.tickets(of: spec(), d, tasks: []).map(\.current), [true, true, false], "every running ticket is current")
+    }
+
+    /// The board's Issues column (the web's `boardIssues`): no specs, no spec's tickets, closed ones only when asked.
+    func testBoardIssuesLeaveOutSpecsAndTheirTicketsAndClosedOnes() {
+        func issue(_ id: String, _ status: String = "ready", number: Int? = nil, parent: String? = nil, description: String = "", minutes: Double = 0) -> HBTask {
+            var t = HBTask(id: id, title: id, description: description, kind: "work", status: status, priority: "normal", project: "loft", agentId: nil,
+                           parentId: parent, dependsOn: [], dueAt: nil, createdBy: "user", note: "", summary: "", error: "",
+                           createdAt: Date(), updatedAt: Date().addingTimeInterval(-minutes * 60))
+            if let number { t.github = .init(repo: "o/r", number: number, url: "", state: "open") }
+            return t
+        }
+        var s = spec(id: "spec")
+        s.labels = ["Spec"]
+        var d = delivery("running")
+        d.tickets = [.init(number: 9, title: "In a Delivery", state: "open")]
+        let tasks = [s, issue("old", minutes: 10), issue("new"), issue("done", "done"), issue("child", parent: "spec"),
+                     issue("templated", description: "## Parent\n\n#7"), issue("ticket", number: 9)]
+        XCTAssertEqual(SpecViews.boardIssues(tasks, [d], showClosed: false).map(\.id), ["new", "old"])
+        XCTAssertEqual(SpecViews.boardIssues(tasks, [d], showClosed: true).map(\.id), ["new", "old", "done"], "closed ones last")
+        XCTAssertEqual(SpecViews.specs(tasks, in: .delivery, SpecViews.index([d])).map(\.id), ["spec"])
+        XCTAssertTrue(SpecViews.specs(tasks, in: .planned, SpecViews.index([d])).isEmpty)
+    }
+
+    /// #434: the summary's tickets carry what they wait on in another spec, and the spec's detail labels them.
+    func testDecodesWhatTicketsWaitOnInAnotherSpec() throws {
+        let json = ###"[{"state":"planned","agent_id":null,"agent_name":null,"current":null,"repo":"o/r","spec":9,"spec_id":null,"local":false,"waits_on":[{"blocker":"o/api#12","delivery":{"repo":"o/api","spec":10,"started":false,"issue_id":"i10"}}],"tickets":[{"number":1,"id":null,"title":"A","state":"open","skipped":"","waiting_on":["o/api#12"],"agent_id":null,"agent_name":null,"verdicts":{}}]}]"###
+        let d = try JSONCoding.decoder.decode([DeliverySummary].self, from: Data(json.utf8))[0]
+        XCTAssertEqual(d.waitsOn?.first?.delivery?.issueId, "i10")
+        XCTAssertEqual(SpecViews.tickets(of: spec(), d, tasks: []).map(\.waitingOn), [["o/api#12"]])
+    }
+
+    /// #424: a ticket only its CI is left on reads "waiting for CI" with how long, has no "ci waiting" chip and no Dev;
+    /// the spec row's badge reads "Waiting for CI" when that's all the Delivery does.
+    func testATicketWaitingForCIAndTheBadge() throws {
+        let json = ###"[{"state":"running","state_line":{"tone":"ci","text":"Waiting for CI on #41"},"checks_url":"https://github.com/o/r/pull/500/checks","agent_id":null,"agent_name":null,"current":null,"repo":"o/r","spec":9,"spec_id":null,"local":false,"tickets":[{"number":40,"id":null,"title":"A","state":"closed","skipped":"","agent_id":null,"agent_name":null,"waiting_for_ci":false,"ci_since":null,"verdicts":{"qa":"pass","ci":"pass"}},{"number":41,"id":null,"title":"B","state":"review","skipped":"","agent_id":null,"agent_name":null,"waiting_for_ci":true,"ci_since":"2026-11-13T12:00:00.123456+00:00","verdicts":{"qa":"pass","ci":"pending"}}]}]"###
+        let d = try JSONCoding.decoder.decode([DeliverySummary].self, from: Data(json.utf8))[0]
+        XCTAssertEqual(d.checksUrl, "https://github.com/o/r/pull/500/checks")
+        XCTAssertEqual(SpecViews.badge(d), "Waiting for CI")
+        XCTAssertEqual(SpecViews.onIt(d), [], "no Dev on a ticket waiting for CI")
+
+        let lines = SpecViews.tickets(of: spec(), d, tasks: [])
+        XCTAssertEqual(lines.map(\.waitingForCi), [false, true])
+        XCTAssertFalse(lines[1].current)
+        let now = JSONCoding.parseDate("2026-11-13T12:06:30Z")!
+        XCTAssertEqual(SpecViews.ticketLabel(lines[1].state, waitingForCi: true, ciSince: lines[1].ciSince, now: now), "waiting for CI ·\u{a0}6\u{a0}min")
+        XCTAssertEqual(lines[1].shownVerdicts.map(\.role), ["qa"], "the label says it waits for CI: no ci chip")
+        XCTAssertEqual(lines[0].shownVerdicts.map(\.role), ["ci", "qa"], "a ticket not waiting keeps its ci chip")
+        XCTAssertEqual(SpecViews.ticketLabel("review"), "in review")
+        XCTAssertEqual(SpecViews.ticketLabel("review", waitingForCi: true), "waiting for CI", "no start time, no elapsed")
+        XCTAssertEqual(SpecViews.ticketLabel("started", waitingForCi: true), "building", "only a ticket in review waits for CI")
+
+        var other = d
+        other.stateLine = .init(tone: "running", text: "Running.")
+        XCTAssertEqual(SpecViews.badge(other), "Running", "an agent at work: the state as before")
+        other.stateLine = nil
+        XCTAssertEqual(SpecViews.badge(other), "Running", "an older backend sends no state line")
+    }
+
+    func testHowLongATicketHasWaited() {
+        let at = "2026-11-13T12:00:00+00:00", start = JSONCoding.parseDate(at)!
+        func after(_ minutes: Double) -> String? { SpecViews.waited(since: at, now: start.addingTimeInterval(minutes * 60)) }
+        XCTAssertEqual(after(0.5), "<1\u{a0}min")
+        XCTAssertEqual(after(-3), "<1\u{a0}min", "clock skew")
+        XCTAssertEqual(after(6), "6\u{a0}min")
+        XCTAssertEqual(after(60), "1\u{a0}h")
+        XCTAssertEqual(after(125), "2\u{a0}h\u{a0}5\u{a0}min")
+        XCTAssertNil(SpecViews.waited(since: nil))
+        XCTAssertNil(SpecViews.waited(since: "not a date"))
     }
 }

@@ -1,5 +1,6 @@
 import XCTest
 @testable import Loft
+@testable import LoftKit
 
 /// The wrapper's fallbacks, without the model (these run anywhere; the model's quality is measured by ios/Evaluations).
 final class OnDeviceModelTests: XCTestCase {
@@ -43,6 +44,30 @@ final class OnDeviceModelTests: XCTestCase {
         XCTAssertEqual(OnDeviceModel.Status.available.text, "Available")
         XCTAssertTrue(OnDeviceModel.Status.appleIntelligenceOff.text.contains("Turned off"))
         XCTAssertFalse(OnDeviceModel.Status.deviceNotEligible.isAvailable)
+        #if !os(macOS)
+        XCTAssertEqual(OnDeviceModel.Status.needsNewerSystem.text, "Needs iOS 26 or later")
+        #endif
+    }
+
+    /// The Mac features (summaries, chat replies, "Send to…?") are the shared ones behind Settings' switches: switched
+    /// off (as they are while the model can't run) they give nothing, and Loft works as before. The real model's
+    /// answers need the Mac itself (listed in the spec PR).
+    @MainActor
+    func testTheMacFeaturesGiveNothingWhenTheirSwitchIsOff() async {
+        let keys = [Prefs.aiNeedsYou, Prefs.aiChatReplies, Prefs.aiRoute]
+        let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
+        defer { zip(keys, saved).forEach { UserDefaults.standard.set($1, forKey: $0) } }
+        keys.forEach { UserDefaults.standard.set(false, forKey: $0) }
+        let item = NeedsYouItem(id: "q", type: "question", urgency: 2, agent: nil, taskId: nil, title: "Merge?", reason: "", text: "Shall I merge it now?",
+                                createdAt: nil, ageSeconds: nil, links: nil, actions: [], project: nil, pr: nil)
+        let assist = await OnDeviceFeatures.needsYouAssist(item)
+        XCTAssertNil(assist)
+        let replies = await OnDeviceFeatures.chatReplies(to: "Shall I merge it now?")
+        XCTAssertTrue(replies.isEmpty)
+        if #available(iOS 26.0, macOS 26.0, *) {
+            let guess = await OnDeviceFeatures.routeGuess(for: "fix the login", agents: [], orchestratorId: nil)
+            XCTAssertNil(guess)
+        }
     }
 
     private func status(_ reason: String?, languageSupported: Bool = true) -> OnDeviceModel.Status {

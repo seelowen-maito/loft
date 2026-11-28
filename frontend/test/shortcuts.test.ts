@@ -3,8 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   comboFromEvent, formatCombo, isReserved, isTyping, loadCombo, normalizeCombo, loadCombos, loadRecent, matchesCombo, nextNeedsYou, saveCombo, saveRecent,
-  OPEN_SHORTCUT, openShortcut, searchRows, shortcutAction, switcherAgents,
+  FIXED, OPEN_SHORTCUT, openShortcut, searchRows, shortcutAction, switcherAgents,
 } from "../src/lib/shortcuts.ts";
+import { roleLabel } from "../src/lib/api.ts";
 
 function memory() {
   const m = new Map<string, string>();
@@ -119,6 +120,23 @@ test("g then a letter opens a page; / focuses the chat box and ? opens the sheet
   assert.equal(at(key("KeyG", { metaKey: true })), null, "⌘G stays the browser's");
 });
 
+test("T opens Talk outside a text field or dialog only, once per press, and the sheet lists it (#712)", () => {
+  const at = (e: ReturnType<typeof key>, typing = false, afterG = false) => shortcutAction(e, { combos: defaults, typing, afterG, mac: true });
+  assert.deepEqual(at(key("KeyT")), { type: "talk" });
+  assert.deepEqual(at(key("KeyT", { shiftKey: true }, "T")), { type: "talk" });
+  assert.equal(at(key("KeyT"), true), null, "typing a t in a field types it");
+  assert.equal(at(key("KeyT", { metaKey: true })), null, "⌘T stays the browser's");
+  assert.equal(at(key("KeyT"), false, true), null, "g then t isn't a page");
+  assert.ok(FIXED.some((f) => f.keys === "T" && f.label === "Talk to an agent"));
+  // Any open dialog (Glossary, a confirm, Talk itself) keeps the plain keys from acting behind it; ⌘K still works.
+  const behind = (e: ReturnType<typeof key>) => shortcutAction(e, { combos: defaults, typing: false, afterG: false, dialog: true, mac: true });
+  assert.equal(behind(key("KeyT")), null);
+  assert.equal(behind(key("Slash", { shiftKey: true }, "?")), null);
+  assert.equal(behind(key("KeyG")), null);
+  assert.deepEqual(behind(key("KeyK", { metaKey: true })), { type: "switcher" });
+  assert.equal(at({ ...key("KeyT"), repeat: true }), null, "holding T doesn't open Talk again");
+});
+
 test("⌘J goes through the agents in Needs you, in its order, and wraps", () => {
   const items = [{ agent: { id: "dev" } }, { agent: null }, { agent: { id: "lead" } }, { agent: { id: "dev" } }, { agent: { id: "qa" } }];
   assert.equal(nextNeedsYou(items, null), "dev");
@@ -131,11 +149,13 @@ test("⌘J goes through the agents in Needs you, in its order, and wraps", () =>
 });
 
 const agents = [
-  { id: "lead", name: "Loft Lead", title: "Plans", group: "Loft", project: "loft" },
-  { id: "dev", name: "Loft Dev", title: "Rust and TypeScript", group: "Loft", project: "loft" },
-  { id: "mobile", name: "Loft mobile dev", title: "iOS", group: "Loft", project: "loft" },
-  { id: "dine", name: "Dineout Dev", title: "Backend", group: "Dineout", project: "api", projects: ["api", "web"] },
+  { id: "lead", name: "Loft Lead", role: "lead", group: "Loft", project: "loft" },
+  { id: "dev", name: "Loft Dev", role: "dev", group: "Loft", project: "loft" },
+  { id: "mobile", name: "Loft mobile dev", role: "dev", group: "Loft", project: "ios" },
+  { id: "dine", name: "Dineout Dev", role: "code_reviewer", group: "Dineout", project: "api", projects: ["api", "web"] },
+  { id: "odd", name: "Odd", group: "", project: "" },
 ];
+const label = (a: { role?: string }) => roleLabel(a.role);
 
 test("with nothing typed the most recently opened come first, then the rest in order", () => {
   const s = memory();
@@ -143,18 +163,21 @@ test("with nothing typed the most recently opened come first, then the rest in o
   saveRecent("dine", s);
   saveRecent("mobile", s);
   assert.deepEqual(loadRecent(s), ["mobile", "dine"]);
-  assert.deepEqual(switcherAgents(agents, "", loadRecent(s)).map((a) => a.id), ["mobile", "dine", "lead", "dev"]);
+  assert.deepEqual(switcherAgents(agents, "", loadRecent(s), label).map((a) => a.id), ["mobile", "dine", "lead", "dev", "odd"]);
 });
 
-test("typing filters by name, title, group and project", () => {
-  const ids = (q: string) => switcherAgents(agents, q, []).map((a) => a.id);
+test("typing filters by name, Role label, group and project", () => {
+  const ids = (q: string) => switcherAgents(agents, q, [], label).map((a) => a.id);
   assert.deepEqual(ids("ios"), ["mobile"]);
   assert.deepEqual(ids("dineout"), ["dine"]);
   assert.deepEqual(ids("web"), ["dine"], "any of its projects");
   assert.deepEqual(ids("loft dev"), ["dev", "mobile"], "every word, names starting with it first");
   assert.deepEqual(ids("DEV"), ids("dev"), "case-insensitive");
   assert.deepEqual(ids("dev"), ["dev", "mobile", "dine"]);
-  assert.deepEqual(ids("d"), ["dine", "lead", "dev", "mobile"], "a name starting with it comes first");
+  assert.deepEqual(ids("reviewer"), ["dine"], "its Role label");
+  assert.deepEqual(ids("code reviewer"), ["dine"]);
+  assert.deepEqual(ids("custom"), ["odd"], "no role reads as Custom");
+  assert.deepEqual(ids("d"), ["dine", "lead", "dev", "mobile", "odd"], "a name starting with it comes first");
   assert.deepEqual(ids("nobody"), []);
 });
 
@@ -202,4 +225,11 @@ test("clicking a hint opens the search or the sheet through one event", () => {
   openShortcut("sheet", target);
   openShortcut("switcher", target);
   assert.deepEqual(got, ["sheet", "switcher"]);
+});
+
+test("an agent goes by its Role label", () => {
+  assert.equal(roleLabel("code_reviewer"), "Code reviewer");
+  assert.equal(roleLabel("custom"), "Custom");
+  assert.equal(roleLabel(""), "Custom", "an agent saved before roles");
+  assert.equal(roleLabel(undefined), "Custom");
 });

@@ -38,11 +38,13 @@ pub struct Delivery {
     /// step's call: see `resume_to`), "paused" (the user paused it: see `resume_to`), "ready" (Loft marked the spec PR ready; a plan kept in Loft waits for
     /// Merge), "merged" (a plan kept in Loft, merged) or "settled" (the PR was found ready, merged or closed).
     pub state: String,
-    /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes").
+    /// While stalled or paused: the state it goes back to ("running", "final_review" or "final_fixes", or "ready"
+    /// for a Billing block or an infrastructure failure on the ready PR's CI).
     #[serde(default)]
     pub resume_to: String,
-    /// Why it stalled: "run_failed", "no_call" (the run ended without its call) or "restart" (the run was
-    /// lost when Loft restarted).
+    /// Why it stalled: "run_failed", "no_call" (the run ended without its call), "restart" (the run was
+    /// lost when Loft restarted), "billing" (a Billing block: see `billing`), "infra" (its CI failed twice for
+    /// GitHub's infrastructure: see `infra`) or "ci_queued" (a CI job sat queued too long: see `ci_queued_since`), among others.
     #[serde(default)]
     pub stall_reason: String,
     /// When it stalled (RFC 3339): a new stall is a new Needs you item.
@@ -71,13 +73,53 @@ pub struct Delivery {
     /// The agent building the current ticket: the team's Dev, or the planner without one.
     #[serde(default)]
     pub dev: String,
-    /// Changes rounds of the final Code Review of the whole spec PR.
+    /// Changes rounds of the final Code Review of the whole spec PR, and then, once it's ready, of its CI.
     #[serde(default)]
     pub final_rounds: u32,
+    /// After Loft marked the spec PR (or a standalone ticket's PR) ready: "following" while Loft follows its CI,
+    /// which must be green before the Delivery is done, and "fixing" while the Dev fixes a red one (the
+    /// Delivery is in its final fixes, or stalled, paused or waiting for the user in them). Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_ci: String,
+    /// Since when Loft follows the ready PR's CI (RFC 3339): a commit with no check waits for one from then.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_ci_since: String,
+    /// The last commit of the fix the Dev submitted for a red CI on the ready PR: Loft follows the CI once the
+    /// PR's head includes it. Empty before any fix.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_ci_fix: String,
+    /// The short SHA of the ready PR's commit that passed with no CI run although the repo has workflows: a line on
+    /// the card. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub final_no_ci: String,
+    /// The GitHub Actions workflow runs of its branch (the spec branch, or a standalone ticket's), by run id, with
+    /// the minutes each took: what the Delivery spent on Actions so far. See `crate::actions`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub actions_runs: std::collections::BTreeMap<String, crate::actions::RunMinutes>,
     /// After Reopen delivery: the spec branch's newest commit when it reopened. Its commits passed a final
     /// review already, so the next one reviews only what came after. Empty before any reopen.
     #[serde(default)]
     pub reviewed_to: String,
+    /// A ticket started while its spec PR was ready for review: whether Loft put the PR back to draft, and the
+    /// card's line saying so (or why GitHub refused). Cleared when the PR is marked ready again or reopened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_again: Option<DraftAgain>,
+    /// On a private repo: what the workflow check found when the spec was published or the Delivery started,
+    /// while there's something to warn about. See `crate::workflows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<crate::workflows::Check>,
+    /// The last Billing block on its CI: GitHub refused to run its jobs because the owner's payments failed or its
+    /// spending limit was reached. Kept after Resume re-runs the jobs, so their old checks aren't taken for a new block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<BillingBlock>,
+    /// The last CI failure that wasn't the code's but GitHub's infrastructure (a job cancelled with no newer run,
+    /// failed to start, stale, or failed with no log), and Loft's re-run of it. A second one on the same commit stalls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infra: Option<InfraFailure>,
+    /// While a job of the CI Loft follows sits queued with none running: since when (RFC 3339), the later of when it
+    /// queued and when the CI last moved, or when Resume gave it another `CI_QUEUE_MINUTES`. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ci_queued_since: String,
     /// The notes of the last changes verdict (a ticket's reviewer, or the final Code Review): Resume on a
     /// ticket or final review waiting for the user hands them to the Dev.
     #[serde(default)]
@@ -99,6 +141,10 @@ pub struct Delivery {
     /// For a plan kept in Loft: the branch the spec branch started from and merges into.
     #[serde(default)]
     pub base: String,
+    /// For a plan kept in Loft whose tickets name repos inside the project folder: each repo's base, by the
+    /// repo's subfolder (`DeliveryTicket::repo`). `base` stays the project folder's.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bases: std::collections::BTreeMap<String, String>,
     /// For a plan kept in Loft: the spec's title, to name it.
     #[serde(default)]
     pub title: String,
@@ -138,11 +184,65 @@ impl Delivery {
             if self.stall_ask.as_ref().is_some_and(|a| a.ticket == Some(n)) {
                 self.stall_ask = None;
             }
-            if self.stalled_on.is_empty() {
+            // A Billing block or an infrastructure failure waits for the user's Resume, whatever its tickets do meanwhile.
+            if self.stalled_on.is_empty() && !ci_stall(&self.stall_reason) {
                 self.unstall();
             }
         }
     }
+}
+
+/// See [`Delivery::draft_again`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DraftAgain {
+    /// The PR is a draft again; false when GitHub refused, so it stayed ready for review.
+    pub ok: bool,
+    pub text: String,
+}
+
+/// Whether a Delivery stalled for `reason` stalled on its CI for something only the user can fix (a Billing block, an
+/// infrastructure failure twice, or a job queued too long without starting): Resume re-runs the failed jobs, or gives
+/// the queued ones more time.
+pub fn ci_stall(reason: &str) -> bool {
+    matches!(reason, "billing" | "infra" | "ci_queued")
+}
+
+/// See [`Delivery::infra`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfraFailure {
+    /// The commit whose CI failed.
+    pub head: String,
+    /// The workflow runs of the failed jobs: a re-run re-runs their failed jobs.
+    pub runs: Vec<i64>,
+    /// The failed check runs: a re-run gives its jobs new ones.
+    pub checks: Vec<i64>,
+    /// When Loft (or Resume) asked GitHub to re-run them (RFC 3339); empty while the Delivery is stalled for it.
+    #[serde(default)]
+    pub rerun_at: String,
+}
+
+/// See [`Delivery::billing`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BillingBlock {
+    /// The owner's billing page on GitHub.
+    pub url: String,
+    /// The workflow runs whose jobs GitHub refused: Resume re-runs their failed jobs.
+    pub runs: Vec<i64>,
+    /// The refused check runs (each an Actions job): a re-run gives its jobs new ones.
+    pub checks: Vec<i64>,
+    /// When Resume asked GitHub to re-run them (RFC 3339); empty while the block waits for the user.
+    #[serde(default)]
+    pub rerun_at: String,
+}
+
+/// A project setting changed from Loft's default: its value, who changed it (an agent's id, empty for the user, and
+/// the name it had then) and when (RFC 3339).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSetting {
+    pub value: Value,
+    pub changed_by: String,
+    pub changed_by_name: String,
+    pub changed_at: String,
 }
 
 /// What the agent whose run stalled a Delivery asked at the end of that run: Needs you shows it with the stall.
@@ -165,6 +265,9 @@ pub struct DeliveryTicket {
     pub title: String,
     #[serde(default)]
     pub blocked_by: Vec<i64>,
+    /// Open blockers outside this spec, as `owner/repo#n`: the ticket isn't handed out until each closes.
+    #[serde(default)]
+    pub waiting_on: Vec<String>,
     /// "open", "started" (being built, or fixed), "review" (submitted), "changes" (sent back for changes while
     /// the Dev builds another ticket: its fix waits in `changes`), "closing" (passed, its close failed and is
     /// retried), "needs_human" (too many changes rounds), "elsewhere" (being built outside this Delivery:
@@ -183,9 +286,21 @@ pub struct DeliveryTicket {
     /// When the commits were last submitted (RFC 3339): how long a commit with no check yet has waited for one.
     #[serde(default)]
     pub submitted_at: String,
+    /// When it started waiting for CI (RFC 3339): its last reviewer passed while the CI was pending, or it was
+    /// submitted to a team with no reviewers. Empty otherwise: cleared when the CI passes or a changes round starts.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ci_since: String,
+    /// The commit its CI passed on with no CI at all although the repo has active workflows: no check showed up
+    /// within the CI grace (a workflow's `paths` filter can skip a commit). Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub no_ci: String,
     /// In a plan kept in Loft: the ticket's Loft issue (`number` is then its place in the plan).
     #[serde(default)]
     pub id: String,
+    /// In a plan kept in Loft in a folder of several repos: the repo inside the project folder it changes, its
+    /// subfolder (`api`). Its spec branch is made and merged there. Empty: the project folder itself.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
     /// Why an "elsewhere" ticket is skipped: "is labelled in-progress" or "has its own open PR #12".
     #[serde(default)]
     pub skipped: String,
@@ -198,6 +313,14 @@ pub struct DeliveryTicket {
     /// The notes of the last changes verdict on this ticket (what a reassigned Dev starts from).
     #[serde(default)]
     pub notes: String,
+    /// What a "started" ticket waits on, after its Dev called `wait_ticket`: an issue as `owner/repo#N`, or an
+    /// agent's id. Empty while it's being built. Loft wakes the Dev when that issue closes or that agent
+    /// messages it.
+    #[serde(default)]
+    pub wait_for: String,
+    /// Why it waits, in the Dev's words.
+    #[serde(default)]
+    pub wait_reason: String,
 }
 
 impl DeliveryTicket {
@@ -211,7 +334,6 @@ impl DeliveryTicket {
 pub struct Agent {
     pub id: String,
     pub name: String,
-    pub title: String,
     /// Its main project: where its issues go by default. Always the first of `projects` ("" when it has
     /// none), so clients that only know one project keep working.
     #[serde(default)]
@@ -228,9 +350,16 @@ pub struct Agent {
     pub effort: String,
     /// Minutes between autonomous runs. 0 disables the heartbeat.
     pub interval_minutes: i64,
-    /// Windows when autonomous wake-ups are held (e.g. working hours). Empty runs around the clock.
+    /// Working hours: the windows when it may wake up on its own, and outside them it waits. Empty runs around the clock.
+    /// (Named for when they meant the pauses.)
     #[serde(default)]
     pub quiet_hours: Vec<QuietWindow>,
+    /// `/loop`: a prompt Loft sends again every interval until it's stopped.
+    #[serde(default, rename = "loop")]
+    pub repeat: Option<crate::loops::Loop>,
+    /// `/schedule`: prompts Loft sends once, or at each due time of a repeat.
+    #[serde(default)]
+    pub schedules: Vec<crate::schedules::Schedule>,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
     /// Map of MCP server name -> Claude Code MCP server config.
@@ -272,6 +401,10 @@ pub struct Agent {
     /// Tokens in the Claude session's context as of its last reply. None until a run reports one.
     #[serde(default)]
     pub context_tokens: Option<u64>,
+    /// The `/goal` condition active in its Claude session, as its runs last showed it: set by `/goal`, gone when
+    /// the goal passes or is cleared. None when there's none.
+    #[serde(default)]
+    pub goal: Option<String>,
     pub last_run_at: Option<String>,
     /// When its last run ended, so the idle time survives a restart. None until a run ends.
     #[serde(default)]
@@ -326,12 +459,12 @@ impl Agent {
     }
 }
 
-/// A weekly window with no autonomous wake-ups, in this Mac's local time.
+/// A weekly window when an agent may wake up on its own, in this Mac's local time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuietWindow {
     /// Days the window starts on, 0 = Monday … 6 = Sunday.
     pub days: Vec<u8>,
-    /// "HH:MM". An end at or before the start runs past midnight; equal times cover the whole day.
+    /// "HH:MM". An end before the start runs past midnight; equal times cover the whole day.
     pub start: String,
     pub end: String,
 }
@@ -362,6 +495,24 @@ pub struct TaskComment {
     pub text: String,
     pub meta: Value,
     pub created_at: String,
+}
+
+/// A chat message kept in Saved: a copy of its text with where it came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedItem {
+    pub id: i64,
+    pub title: String,
+    pub tag: String,
+    /// The message as Markdown.
+    pub content: String,
+    /// The agent whose chat it was saved from, and its name then: it may be deleted since.
+    pub agent_id: String,
+    pub agent_name: String,
+    pub message_id: i64,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    /// The pull request of its last export to a project's docs (`pull_requests.id`), if any.
+    pub export_pr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,6 +576,8 @@ pub struct PullRequest {
     /// clean | dirty | blocked | behind | unstable | has_hooks | draft | unknown
     pub mergeable_state: String,
     pub merge_methods: Vec<String>,
+    /// The method the card's Merge uses: the project's merge method, when the repo allows it (#468).
+    pub merge_method: String,
     pub head_ref: String,
     pub head_sha: String,
     pub base_ref: String,
@@ -457,10 +610,21 @@ pub struct PullRequest {
     /// What the files changed at `kind_sha` make this PR: ios | ui | backend | docs (it decides the verdicts it needs).
     pub kind: String,
     pub kind_sha: String,
+    /// Some head of this PR touched `.github/workflows/` or `.github/actions/` (also renamed from there): on a branch of
+    /// the repo those run with its secrets on push, so the card and Needs you flag it (#701). Sticky: a later head that
+    /// reverts the change, or a files read that fails, never clears it. More files than one page lists counts as
+    /// touching them. None: not read yet, as for a PR stored before it existed, so its files are read once more.
+    pub changes_workflows: Option<bool>,
+    /// What the workflow and action changes were, last time a head had some: a hash of those files' names, status and
+    /// blob shas (the head itself when there were more files than one page lists). Needs you keys its item by it, so a
+    /// dismissed warning comes back when they change again, and not on every push of the same change.
+    pub workflows_key: String,
     /// Commits on the base branch the head doesn't have, from GitHub's compare; 0 when up to date or unknown.
     pub behind_by: i64,
     /// The head commit Loft marked ready, so it is done once and a draft the user chose to keep isn't flipped again.
     pub ready_sha: String,
+    /// The head commit the team's Lead was told is ready to merge (every verdict it needs passed), so it is told once.
+    pub ready_told_sha: String,
 }
 
 /// A Loft issue (stored as a task): a personal todo, or work handed to an agent. It is shaped like a
@@ -711,6 +875,43 @@ CREATE TABLE IF NOT EXISTS agent_devices (
     agent_id TEXT PRIMARY KEY,
     udid TEXT NOT NULL
 );
+-- Each project's settings changed from Loft's default (project_settings.rs): the value as JSON, and who changed it
+-- and when. `changed_by` is the agent's id, empty for the user.
+CREATE TABLE IF NOT EXISTS project_settings (
+    project TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    changed_by TEXT NOT NULL,
+    changed_by_name TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
+    PRIMARY KEY(project, key)
+);
+-- Each GitHub repo's Actions minutes in a month (actions.rs): `data` is its runs read so far and its own facts, as JSON.
+-- `month` is `YYYY-MM`, in UTC.
+CREATE TABLE IF NOT EXISTS actions_months (
+    repo TEXT NOT NULL,
+    month TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY(repo, month)
+);
+-- Each GitHub owner's Actions quota and warnings (actions.rs), as JSON.
+CREATE TABLE IF NOT EXISTS actions_owners (
+    owner TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
+-- Saved: chat messages kept for good (saved.rs). Independent of messages and agents: deleting either keeps them.
+CREATE TABLE IF NOT EXISTS saved_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    content TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    export_pr TEXT
+);
 "#;
 
 /// Run ends saved before #164 hold Claude Code's running total for the session, not the run's own cost.
@@ -820,6 +1021,23 @@ fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
     })
 }
 
+const SAVED_COLS: &str = "id, title, tag, content, agent_id, agent_name, message_id, created_at, updated_at, export_pr";
+
+fn saved_from_row(r: &Row) -> rusqlite::Result<SavedItem> {
+    Ok(SavedItem {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        tag: r.get(2)?,
+        content: r.get(3)?,
+        agent_id: r.get(4)?,
+        agent_name: r.get(5)?,
+        message_id: r.get(6)?,
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
+        export_pr: r.get(9)?,
+    })
+}
+
 fn memory_from_row(r: &Row) -> rusqlite::Result<Memory> {
     Ok(Memory {
         id: r.get(0)?,
@@ -866,6 +1084,11 @@ impl Db {
         if !has_updated {
             conn.execute("ALTER TABLE memories ADD COLUMN updated_at TEXT", [])?;
         }
+        // Saved items made before export had no PR of their own.
+        let has_export: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('saved_items') WHERE name = 'export_pr'", [], |r| r.get(0))?;
+        if !has_export {
+            conn.execute("ALTER TABLE saved_items ADD COLUMN export_pr TEXT", [])?;
+        }
         // FYIs used to wait in the agent's `data`; move any still there to their table, once.
         conn.execute_batch(
             "BEGIN;
@@ -911,6 +1134,21 @@ impl Db {
              WHERE json_type(data, '$.projects') IS NULL",
             [],
         )?;
+        // Schedule windows used to say when an agent pauses; now they say when it works. Each agent's pause
+        // windows become the matching working windows, once (the database's user_version marks it).
+        if conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? < 1 {
+            let rows: Vec<(String, String)> = {
+                let mut st = conn.prepare("SELECT id, data FROM agents WHERE json_array_length(data, '$.quiet_hours') > 0")?;
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (id, data) in rows {
+                let Ok(mut v) = serde_json::from_str::<Value>(&data) else { continue };
+                let Ok(paused) = serde_json::from_value::<Vec<QuietWindow>>(v["quiet_hours"].clone()) else { continue };
+                v["quiet_hours"] = serde_json::to_value(crate::schedule::pauses_to_working(&paused))?;
+                conn.execute("UPDATE agents SET data = ?1 WHERE id = ?2", params![v.to_string(), id])?;
+            }
+            conn.pragma_update(None, "user_version", 1)?;
+        }
         // Agents saved before the six roles get one, once: the `lead` flag becomes Lead, and the rest come
         // from their old role, name and title. The user can change it.
         let unroled: Vec<(Value, &str)> = {
@@ -1336,6 +1574,37 @@ impl Db {
         self.0.lock().unwrap().path().filter(|p| !p.is_empty()).map(Into::into)
     }
 
+    /// A copy of the whole database at `to`, a file that mustn't exist yet (`VACUUM INTO`).
+    pub fn copy_to(&self, to: &Path) -> Result<()> {
+        self.0.lock().unwrap().execute("VACUUM INTO ?1", [to.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// Replaces `from` with `to` in every text value of every table, whatever its column's declared type, in one
+    /// transaction: the absolute paths stored in chats, memories, tasks and the rest, when the agents' workspaces
+    /// move (storage.rs). Returns the number of values changed.
+    pub fn replace_everywhere(&self, from: &str, to: &str) -> Result<usize> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let tables: Vec<String> = tx
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut n = 0;
+        for t in tables {
+            let cols: Vec<String> = tx
+                .prepare("SELECT name FROM pragma_table_info(?1)")?
+                .query_map([&t], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for col in cols {
+                let sql = format!("UPDATE \"{t}\" SET \"{col}\" = replace(\"{col}\", ?1, ?2) WHERE typeof(\"{col}\") = 'text' AND instr(\"{col}\", ?1) > 0");
+                n += tx.execute(&sql, params![from, to])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Raw access for tests elsewhere in the crate that need to set up rows directly.
     #[cfg(test)]
     pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -1566,13 +1835,24 @@ impl Db {
                 current: None,
                 dev: String::new(),
                 final_rounds: 0,
+                final_ci: String::new(),
+                final_ci_since: String::new(),
+                final_ci_fix: String::new(),
+                final_no_ci: String::new(),
+                actions_runs: Default::default(),
                 reviewed_to: String::new(),
+                draft_again: None,
+                billing: None,
+                infra: None,
+                ci_queued_since: String::new(),
+                workflows: None,
                 last_notes: String::new(),
                 migrated: true,
                 standalone: false,
                 local: false,
                 spec_id: String::new(),
                 base: String::new(),
+                bases: Default::default(),
                 title: String::new(),
                 created_at: now(),
             };
@@ -1595,6 +1875,72 @@ impl Db {
             "INSERT OR REPLACE INTO deliveries (repo, spec, state, data) VALUES (?1, ?2, ?3, ?4)",
             params![d.repo, d.spec, d.state, serde_json::to_string(d)?],
         )?;
+        Ok(())
+    }
+
+    // ---- project settings ----------------------------------------------
+
+    /// The settings `project` changed from Loft's default, by key.
+    pub fn project_settings(&self, project: &str) -> Result<HashMap<String, ProjectSetting>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT key, value, changed_by, changed_by_name, changed_at FROM project_settings WHERE project = ?1")?;
+        let rows = st.query_map([project.trim()], |r| {
+            let value: String = r.get(1)?;
+            Ok((r.get::<_, String>(0)?, ProjectSetting { value: serde_json::from_str(&value).unwrap_or(Value::Null), changed_by: r.get(2)?, changed_by_name: r.get(3)?, changed_at: r.get(4)? }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    pub fn set_project_setting(&self, project: &str, key: &str, s: &ProjectSetting) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT OR REPLACE INTO project_settings (project, key, value, changed_by, changed_by_name, changed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![project.trim(), key, serde_json::to_string(&s.value)?, s.changed_by, s.changed_by_name, s.changed_at],
+        )?;
+        Ok(())
+    }
+
+    // ---- Actions minutes per owner ----------------------------------
+
+    /// What was read of `repo`'s Actions minutes in `month`, as JSON.
+    pub fn actions_month(&self, repo: &str, month: &str) -> Result<Option<String>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row("SELECT data FROM actions_months WHERE repo = ?1 AND month = ?2", params![repo, month], |r| r.get(0)).optional()?)
+    }
+
+    /// Every repo read in `month`: (repo, data as JSON), by repo.
+    pub fn actions_months(&self, month: &str) -> Result<Vec<(String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT repo, data FROM actions_months WHERE month = ?1 ORDER BY repo")?;
+        let rows = st.query_map([month], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Saves `repo`'s month, and forgets its months before it.
+    pub fn save_actions_month(&self, repo: &str, month: &str, data: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO actions_months (repo, month, data) VALUES (?1, ?2, ?3)", params![repo, month, data])?;
+        c.execute("DELETE FROM actions_months WHERE repo = ?1 AND month < ?2", params![repo, month])?;
+        Ok(())
+    }
+
+    /// Every owner's quota and warnings: (owner, data as JSON), by owner.
+    pub fn actions_owners(&self) -> Result<Vec<(String, String)>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT owner, data FROM actions_owners ORDER BY owner")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn save_actions_owner(&self, owner: &str, data: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("INSERT OR REPLACE INTO actions_owners (owner, data) VALUES (?1, ?2)", params![owner, data])?;
+        Ok(())
+    }
+
+    pub fn delete_delivery(&self, repo: &str, spec: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("DELETE FROM deliveries WHERE repo = ?1 AND spec = ?2", params![repo, spec])?;
         Ok(())
     }
 
@@ -1628,6 +1974,25 @@ impl Db {
         let mut q = c.prepare("SELECT data FROM deliveries WHERE state = ?1 ORDER BY repo, spec")?;
         let rows = q.query_map(params![state], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows.iter().map(|d| serde_json::from_str(d)).collect::<serde_json::Result<_>>()?)
+    }
+
+    /// Marks a message cancelled (an agent message taken back out of a queue).
+    pub fn mark_cancelled(&self, agent_id: &str, id: i64) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("UPDATE messages SET meta = json_set(meta, '$.cancelled', json('true')) WHERE agent_id = ?1 AND id = ?2", params![agent_id, id])?;
+        Ok(())
+    }
+
+    /// Marks a queued message as sent into the run in progress (Send now), or not any more when it went back to the queue.
+    pub fn mark_sent_now(&self, agent_id: &str, id: i64, sent: bool) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        let sql = if sent {
+            "UPDATE messages SET meta = json_set(meta, '$.sent_now', json('true')) WHERE agent_id = ?1 AND id = ?2"
+        } else {
+            "UPDATE messages SET meta = json_remove(meta, '$.sent_now') WHERE agent_id = ?1 AND id = ?2"
+        };
+        c.execute(sql, params![agent_id, id])?;
+        Ok(())
     }
 
     /// Records on an end-of-planning card that its Delivery started: who got which ticket.
@@ -1737,6 +2102,66 @@ impl Db {
     pub fn delete_memory(&self, agent_id: &str, id: i64) -> Result<bool> {
         let c = self.0.lock().unwrap();
         Ok(c.execute("DELETE FROM memories WHERE agent_id = ?1 AND id = ?2", params![agent_id, id])? > 0)
+    }
+
+    // ---- saved --------------------------------------------------------
+
+    pub fn add_saved(&self, title: &str, tag: &str, content: &str, agent_id: &str, agent_name: &str, message_id: i64) -> Result<SavedItem> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO saved_items (title, tag, content, agent_id, agent_name, message_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![title, tag, content, agent_id, agent_name, message_id, now()],
+        )?;
+        let id = c.last_insert_rowid();
+        Ok(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row)?)
+    }
+
+    /// Newest first. `query` matches the title or content, ignoring case; `tag` matches exactly, ignoring case.
+    pub fn list_saved(&self, query: &str, tag: &str) -> Result<Vec<SavedItem>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare(&format!(
+            "SELECT {SAVED_COLS} FROM saved_items
+             WHERE (?1 = '' OR instr(lower(title), lower(?1)) > 0 OR instr(lower(content), lower(?1)) > 0)
+               AND (?2 = '' OR lower(tag) = lower(?2))
+             ORDER BY created_at DESC, id DESC"
+        ))?;
+        let rows = st.query_map(params![query, tag], saved_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every tag in use, sorted.
+    pub fn saved_tags(&self) -> Result<Vec<String>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT DISTINCT tag FROM saved_items WHERE tag != '' ORDER BY lower(tag)")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn get_saved(&self, id: i64) -> Result<Option<SavedItem>> {
+        let c = self.0.lock().unwrap();
+        Ok(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row).optional()?)
+    }
+
+    /// Sets the title, tag and content and stamps `updated_at`; None when there's no such item.
+    pub fn update_saved(&self, id: i64, title: &str, tag: &str, content: &str) -> Result<Option<SavedItem>> {
+        let c = self.0.lock().unwrap();
+        if c.execute("UPDATE saved_items SET title = ?2, tag = ?3, content = ?4, updated_at = ?5 WHERE id = ?1", params![id, title, tag, content, now()])? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(c.query_row(&format!("SELECT {SAVED_COLS} FROM saved_items WHERE id = ?1"), [id], saved_from_row)?))
+    }
+
+    /// Records the pull request of the item's latest export.
+    pub fn set_saved_export(&self, id: i64, pr_id: &str) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute("UPDATE saved_items SET export_pr = ?2 WHERE id = ?1", params![id, pr_id])?;
+        Ok(())
+    }
+
+    /// False when there was no such item.
+    pub fn delete_saved(&self, id: i64) -> Result<bool> {
+        let c = self.0.lock().unwrap();
+        Ok(c.execute("DELETE FROM saved_items WHERE id = ?1", [id])? > 0)
     }
 
     // ---- permissions --------------------------------------------------
@@ -2127,6 +2552,27 @@ mod tests {
         db.update_agent("a", |a| a.group = "Acme".into()).unwrap();
         drop(db);
         assert_eq!(Db::open(&path).unwrap().get_agent("a").unwrap().unwrap().group, "Acme", "migrated once");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pause_windows_become_working_windows_once() {
+        let path = crate::testdir::for_this_test("working-hours").join("working-hours.db");
+        let paused = vec![QuietWindow { days: vec![0, 1, 2, 3, 4], start: "09:00".into(), end: "17:00".into() }];
+        {
+            let db = Db::open(&path).unwrap();
+            let mut a = agent("a");
+            a.quiet_hours = paused.clone();
+            db.save_agent(&a).unwrap();
+            db.save_agent(&agent("b")).unwrap();
+            db.0.lock().unwrap().pragma_update(None, "user_version", 0).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let working = db.get_agent("a").unwrap().unwrap().quiet_hours;
+        assert_eq!(working, crate::schedule::pauses_to_working(&paused));
+        assert!(db.get_agent("b").unwrap().unwrap().quiet_hours.is_empty(), "no windows still means any time");
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().get_agent("a").unwrap().unwrap().quiet_hours, working, "migrated once");
         let _ = std::fs::remove_file(&path);
     }
 

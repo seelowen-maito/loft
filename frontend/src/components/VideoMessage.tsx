@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { fmtLength } from "../lib/video";
+import { fmtDuration } from "../lib/time";
 
 /** A video sent in the chat: an inline player, with its length under it once known. */
 export function VideoMessage({ src }: { src: string }) {
@@ -23,7 +23,7 @@ export function VideoMessage({ src }: { src: string }) {
         onLoadedMetadata={(e) => setLength(e.currentTarget.duration)}
         className="max-h-72 max-w-full rounded-xl border border-line bg-ink-950"
       />
-      {length !== null && <figcaption className="font-mono text-[10.5px] text-fg-3">Video · {fmtLength(length)}</figcaption>}
+      {length !== null && <figcaption className="font-mono text-[10.5px] text-fg-3">Video · {Number.isFinite(length) ? fmtDuration(length * 1000) : ""}</figcaption>}
     </figure>
   );
 }

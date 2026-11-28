@@ -1,11 +1,14 @@
+mod actions;
 mod agents;
 mod apns;
 mod api;
 mod avatar;
 mod backup;
+mod commands;
 mod db;
 mod delivery;
 mod file_search;
+mod folders;
 mod devices;
 mod git_check;
 mod github;
@@ -18,14 +21,22 @@ mod ports;
 mod guard;
 mod herdr;
 mod kill_guard;
+mod chat_commands;
+mod login;
+mod loops;
+mod schedules;
 mod mac_access;
 mod mcp;
 mod mentions;
 mod mirror;
 mod processes;
+mod project_settings;
 mod prs;
 mod push;
 mod signin;
+mod reply;
+mod saved;
+mod sccache;
 mod repos;
 mod schedule;
 mod sessions;
@@ -34,6 +45,7 @@ mod setup;
 mod signing;
 mod simulator;
 mod state;
+mod storage;
 mod sweep;
 mod system;
 mod tailnet;
@@ -44,6 +56,7 @@ mod testdir;
 mod updater;
 mod uploads;
 mod voice;
+mod workflows;
 mod usage;
 
 use std::path::PathBuf;
@@ -62,6 +75,8 @@ fn main() -> anyhow::Result<()> {
         Some(kill_guard::ARG) => kill_guard::hook(),
         // And as their `kill`, `pkill` and `killall`.
         Some(processes::ARG) => processes::cli(),
+        // And as setup.sh's way to sign the build before the background service points at its signed copy.
+        Some(signing::ARG) => signing::cli(),
         _ => {}
     }
     serve()
@@ -73,16 +88,26 @@ fn api_routes() -> Router<AppState> {
         .route("/info", get(api::info))
         .route("/update", get(api::update_status))
         .route("/usage", get(api::usage))
+        .route("/claude/login", get(login::get))
+        .route("/claude/login/terminal", post(login::open_terminal))
         .route("/system", get(system::get))
         .route("/system/mac-access", post(mac_access::check))
+        .route("/system/https", get(tailnet::https))
         .route("/settings", get(api::get_settings).put(api::put_settings))
+        .route("/folders/suggest", get(folders::suggest_route))
         .route("/backups", get(backup::get).post(backup::now))
         .route("/restart", post(api::restart))
         .route("/events", get(api::events))
         .route("/repos", get(api::list_repos))
         .route("/repos/github", get(api::github))
         .route("/repos/{name}/commits", get(api::repo_commits))
+        .route("/project-settings", get(project_settings::get).put(project_settings::put))
+        .route("/project-settings/branches", get(project_settings::branches))
+        .route("/project-settings/merge-methods", get(project_settings::merge_methods))
+        .route("/project-settings/reviewer", post(project_settings::create_reviewer))
+        .route("/project-settings/apply-team", post(project_settings::apply_team))
         .route("/agents", get(api::list_agents).post(api::create_agent))
+        .route("/agent-templates", get(setup::templates_route))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
         .route("/agents/{id}", get(api::get_agent).patch(api::update_agent).delete(api::delete_agent))
@@ -107,13 +132,21 @@ fn api_routes() -> Router<AppState> {
         .route("/agents/{id}/uploads/{file}", get(uploads::get))
         .route("/agents/{id}/run", post(api::run_now))
         .route("/agents/{id}/stop", post(api::stop_agent))
+        .route("/agents/{id}/messages/{message}/cancel", post(api::cancel_queued_message))
+        .route("/agents/{id}/messages/{message}/send-now", post(api::send_queued_now))
+        .route("/agents/{id}/goal/clear", post(api::clear_goal))
         .route("/agents/{id}/read", post(api::mark_read))
+        .route("/agents/{id}/commands", get(commands::list))
         .route("/agents/{id}/restart", post(api::restart_agent))
         .route("/agents/{id}/reset-session", post(api::reset_session))
         .route("/agents/{id}/compact", post(api::compact_session))
+        .route("/agents/{id}/loop", post(loops::start).delete(loops::stop))
+        .route("/agents/{id}/command", post(chat_commands::run))
+        .route("/agents/{id}/schedules", post(schedules::add))
+        .route("/agents/{id}/schedules/{sid}", axum::routing::delete(schedules::cancel))
         .route("/agents/{id}/sessions", get(api::list_sessions))
         .route("/agents/{id}/resume-session", post(api::resume_session))
-        .route("/agents/{id}/avatar/randomize", post(api::randomize_avatar))
+        .route("/agents/{id}/avatar/redraw", post(api::redraw_avatar))
         .route("/agents/{id}/memories", get(api::list_memories).post(api::add_memory))
         .route("/agents/{id}/memories/{mid}", delete(api::delete_memory))
         .route("/agents/{id}/files", get(api::list_files))
@@ -135,23 +168,33 @@ fn api_routes() -> Router<AppState> {
         .route("/activity", get(tasks::activity))
         .route("/needs-you", get(needs_you::list))
         .route("/needs-you/seen", post(needs_you::mark_seen))
+        .route("/needs-you/dismiss-all", post(needs_you::dismiss_all))
         .route("/needs-you/{id}/dismiss", post(needs_you::dismiss_item))
         .route("/voice/clean", post(voice::clean))
         .route("/voice/brief", post(voice::brief))
+        .route("/voice/transcribe", post(voice::transcribe))
+        .route("/voice/status", get(voice::status))
         .route("/devices", get(devices::list).post(devices::register))
         .route("/devices/{token}", axum::routing::patch(devices::update).delete(devices::remove))
         .route("/devices/{token}/test", post(devices::test))
         .route("/push", get(devices::status).put(devices::configure))
         .route("/push/signin", post(signin::start))
+        .route("/saved", get(saved::list).post(saved::create))
+        .route("/saved/{id}", get(saved::get).put(saved::update).delete(saved::delete))
+        .route("/saved/{id}/export", post(saved::export))
         .route("/permissions", get(api::list_permissions))
         .route("/permissions/{id}", post(api::decide_permission))
         .route("/pull-requests", get(api::list_pull_requests))
         .route("/pull-requests/{id}/refresh", post(api::refresh_pull_request))
         .route("/pull-requests/{id}/merge", post(api::merge_pull_request))
         .route("/github/budget", get(github::budget))
+        .route("/actions/owners", get(actions::owners_get))
+        .route("/actions/owners/{owner}", put(actions::set_quota))
+        .route("/actions/project", get(actions::project))
         // Herdr UI: Loft's agents in the Herdr terminal multiplexer (herdr.rs, herdr/ at the root).
         .route("/herdr", get(herdr::status))
         .route("/herdr/setup", post(herdr::setup_local))
+        .route("/herdr/focus/{agent_id}", post(herdr::focus))
         .route("/herdr/install.sh", get(herdr::install_script))
         .route("/herdr/files/{name}", get(herdr::file))
         .route("/herdr/bin/{platform}", get(herdr::binary))
@@ -168,6 +211,8 @@ fn app(state: &AppState, dist: &std::path::Path) -> Router {
         .route("/mcp/{agent_id}", post(mcp::handle).layer(axum::middleware::from_fn(guard::local_host)))
         // Agents' `kill`, `pkill` and `killall` (processes.rs). JSON only, so a web page can't send one.
         .route("/kill/{agent_id}", post(processes::handle).layer(axum::middleware::from_fn(guard::local_host)))
+        // The Bash hook asking before an agent changes a user's checkout (kill_guard.rs). JSON only, likewise.
+        .route("/guard/{agent_id}", post(kill_guard::handle).layer(axum::middleware::from_fn(guard::local_host)))
         // No CORS layer: every client is same-origin (the built frontend, the Vite proxy, `tailscale serve`)
         // or not a browser (the iOS app, agents' MCP calls). A permissive policy let any web page the user
         // visits read and drive the API from their browser.
@@ -191,19 +236,26 @@ async fn serve() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf());
     let data_dir = root.join(".loft");
+    std::fs::create_dir_all(&data_dir)?;
+    let db = db::Db::open(&data_dir.join("loft.db"))?;
+    // Agents' workspaces live outside any repo (ADR 0005); an older install's move out of the checkout, before any run.
+    let chosen = storage::chosen(&root, &data_dir, storage::data_home)?;
+    let settings = settings::Store::load(&data_dir)?;
+    let projects_dir = settings.boot().projects_dir.clone();
+    let (storage_dir, not_moved) = storage::migrate(&root.join(storage::NAME), &chosen, &root, &projects_dir, &data_dir, &db, &sessions::claude_dir().join("projects"))?;
     let cfg = Config {
         port: std::env::var("LOFT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7420),
-        storage_dir: root.join("agent-local-storage"),
+        root: root.clone(),
+        storage_dir,
         xcrun: "xcrun".into(),
         xcode: state::XcodeLookup::system(),
     };
     std::fs::create_dir_all(&cfg.storage_dir)?;
-    std::fs::create_dir_all(&data_dir)?;
     agents::remove_old_agent_files(&cfg.storage_dir);
 
     let (events, _) = broadcast::channel(1024);
     let state = AppState {
-        db: db::Db::open(&data_dir.join("loft.db"))?,
+        db,
         cfg: Arc::new(cfg),
         events,
         rt: Arc::new(Mutex::new(Runtime::default())),
@@ -213,7 +265,7 @@ async fn serve() -> anyhow::Result<()> {
         gh_pace: Arc::new(github::Pace::default()),
         gh_budget: Arc::new(Default::default()),
         update: Arc::new(Mutex::new(updater::UpdateStatus::default())),
-        settings: Arc::new(settings::Store::load(&data_dir)?),
+        settings: Arc::new(settings),
         usage: Arc::new(usage::Cache::default()),
         system: Arc::new(system::Cache::default()),
         grill_locks: Arc::new(grill::Locks::default()),
@@ -224,16 +276,20 @@ async fn serve() -> anyhow::Result<()> {
         xcode: Arc::new(Default::default()),
         needs_you: Arc::new(Default::default()),
     };
+    // Needs you says why, until the move happens.
+    state.rt.lock().unwrap().workspaces_not_moved = not_moved;
     setup::ensure_loft(&state);
     {
-        let with_repo: Vec<String> = repos::list(&state, false).await.into_iter().filter(|r| r.github.is_some()).map(|r| r.name).collect();
-        if let Err(e) = state.settings.migrate_github_settings(&with_repo) {
+        // GitHub publishing moved from Settings to each project's Project settings: the projects there now inherit it.
+        let projects: Vec<String> = repos::list(&state, false).await.into_iter().map(|r| r.name).collect();
+        if let Err(e) = project_settings::migrate_github_settings(&state, &projects) {
             tracing::warn!("GitHub settings migration: {e}");
         }
     }
     // Before any run starts: the runs Deliveries were waiting on were lost with the last process.
     delivery::stall_lost_runs(&state);
     tokio::spawn(agents::scheduler(state.clone()));
+    tokio::spawn(loops::scheduler(state.clone()));
     tokio::spawn(prs::poller(state.clone()));
     tokio::spawn(github_inbox::poller(state.clone()));
     tokio::spawn(prs::backfill(state.clone()));
@@ -246,8 +302,11 @@ async fn serve() -> anyhow::Result<()> {
     tokio::spawn(agents::quiet_watcher(state.clone()));
     tokio::spawn(processes::pruner(state.cfg.storage_dir.clone()));
     tokio::spawn(mac_access::watcher(state.clone()));
+    let port = state.cfg.port;
+    tokio::task::spawn_blocking(move || tailnet::check_https(port));
     tokio::spawn(mirror::poller(state.clone()));
     tokio::spawn(delivery::ci_poller(state.clone()));
+    tokio::spawn(actions::poller(state.clone()));
     tokio::spawn(backup::scheduler(state.clone()));
     tokio::spawn(sweep::scheduler(state.clone()));
     tokio::spawn(simulator::tidier(state.clone()));

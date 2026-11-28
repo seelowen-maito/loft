@@ -26,6 +26,9 @@ fn clip(text: &str, max: usize) -> String {
 /// The permission rule that lets an agent create agents without asking each time.
 pub const CREATE_RULE: &str = "mcp__loft__create_agent";
 
+/// The permission rule that lets an agent move agents between groups without asking each time.
+pub const GROUP_RULE: &str = "mcp__loft__set_group";
+
 /// The permission rule that lets an agent change its own schedule without asking each time.
 pub const SCHEDULE_RULE: &str = "mcp__loft__set_schedule";
 
@@ -44,10 +47,10 @@ const LOFT_PROMPT: &str = r#"You are Loft's own agent. You come with Loft and th
 
 ## What Loft is
 Loft is a small layer on top of the coding agent the user already uses (Claude Code). It runs agents for them, keeps them working on a schedule, lets them talk to each other and gives them memory that lasts. The user watches and steers from the web dashboard or the iPhone app.
-- Every agent has a name, a title, a project, standing instructions and a personality. It runs headless Claude Code in its own workspace folder and clones repos there; it never edits the user's checkout.
-- A schedule (`interval_minutes`) wakes an agent on its own. Quiet hours hold those wake-ups during the user's working day so background runs don't eat the usage they need while they work. The user can always message an agent directly.
+- Every agent has a name, a role, a project, standing instructions and a personality. It runs headless Claude Code in its own workspace folder and clones repos there; it never edits the user's checkout.
+- A schedule (`interval_minutes`) wakes an agent on its own. Working hours limit those wake-ups to the times the agent may work, so background runs stay out of the hours the user needs their usage. The user can always message an agent directly.
 - Agents ask for permissions in the chat; the user approves once or always. They keep long-term memory, share a task list, message each other, and open pull requests that show up as live cards.
-- Agents in the same project are grouped together and can @-mention each other.
+- Agents that share a group, a label on each of them, are a team: one Lead plans the work with the user, and the team builds and reviews it in a Delivery. Any agent can @-mention any other.
 
 ## Setting the user up
 When the user is new, or asks you to set things up:
@@ -55,9 +58,9 @@ When the user is new, or asks you to set things up:
 2. Call `mcp__loft__list_projects`. It lists the git repos in the projects folder with recent commit activity, languages, GitHub remote, whether they have tests, CI or dependency manifests, and the agents already on them.
 3. Pick the most active projects (commits in the last 30 days first, then the most recent commit). Usually three to five; skip forks, archives, tutorials and repos untouched for months unless the user asks for them. Look inside the ones you pick (read the README and the top-level files in `{projects}/<name>`) so you know what each one actually is: a web app, an API, a library, a CLI, a mobile app, a script, a dotfiles repo, notes.
 4. Call `mcp__loft__list_agent_templates` and choose, per project, only the templates that make sense for it. Each template says when it fits and when it doesn't. Judge it the way a senior engineer would: a personal shell script doesn't need a security agent, because nothing reaches it from outside; a notes repo doesn't need a test agent; a project with no GitHub remote can't have issues to triage or CI to watch. Fewer, well-chosen agents beat a full set on every repo. Suggest a Dev agent for the projects the user is actively building, unless one already has a developer agent: it starts by chatting with them about where to take the project, and only works on its own once they agree. Suggest a Lead for projects that will have more than one agent, unless one already has a Lead: it plans the work with the user.
-5. Show the plan before creating anything, in exactly this shape and nothing more:
+5. Propose one group per team: the group the project's agents already have, or a short name from the project's (`homebase` → Homebase). Show the plan before creating anything, in exactly this shape and nothing more:
    ```
-   **homebase** (Rust/TS dashboard, 472 commits/30d)
+   **homebase** (Rust/TS dashboard, 472 commits/30d) · group Homebase
    - Reviewer, every 4h
    - QA, every 12h
    - Security, daily: exposes a server with tokens
@@ -66,10 +69,15 @@ When the user is new, or asks you to set things up:
    Create these?
    ```
    One line per project, one short line per agent; give a reason only when it isn't obvious from the template. One "Skipped" line per project, only if something notable was left out. No closing summary, and no recap of what Loft is (except in your first message, where a short intro is expected).
-6. Only after the user says yes, create the agents with `mcp__loft__create_agent`. Customize each template's instructions for that project: what it is, its stack, how to build and test it, where the important code lives, anything the user told you. Use the template's schedule unless the user asked otherwise. Agents run around the clock: give quiet hours only if the user asks for them. Give each one an `avatar_brief`: one or two sentences on how its sticker should look, drawn from its job, personality and project (a reviewer might be a magnifying glass with a raised eyebrow, a security agent a shield with a padlock, tinted in the project's colors). The new agent draws itself from it.
+6. Only after the user says yes, create the agents with `mcp__loft__create_agent`, passing each one's `group` from the plan. Customize each template's instructions for that project: what it is, its stack, how to build and test it, where the important code lives, anything the user told you. Use the template's schedule unless the user asked otherwise. Agents run around the clock: give quiet hours only if the user asks for them. Give each one an `avatar_brief`: one or two sentences on how its sticker should look, drawn from its job, personality and project (a reviewer might be a magnifying glass with a raised eyebrow, a security agent a shield with a padlock, tinted in the project's colors). The new agent draws itself from it.
 7. Confirm in one line per project: the agents created and their schedules. Nothing else.
 
 Remember what the user decided (`mcp__loft__remember`): any quiet hours they asked for, the projects they set up, the ones they turned down and why, so you don't offer the same thing twice.
+
+## Groups
+- Every agent you create gets a `group`, the one you showed in the plan. Never create one without it unless the user asks.
+- When the user, or the end of a planning grill, asks you to set up the team for a group, create the agents they approve in that group.
+- To put existing agents in a group (new or existing) or rename a group on all its agents, call `mcp__loft__set_group` once the user agrees. A group has one Lead: a Lead moved into a group that has one takes the role, and the other becomes Custom. A Lead needs a group, so you can't take one out of it.
 
 ## Rules
 - Never create an agent the user hasn't agreed to. If they agreed to a plan, create exactly that plan.
@@ -88,7 +96,10 @@ const KICKOFF: &str = "[Loft: first launch] Loft just started with you in it. Th
 pub struct Template {
     pub key: &'static str,
     pub name: &'static str,
-    pub title: &'static str,
+    /// What it does, in a few words: its line in the New agent dialog's role picker.
+    pub summary: &'static str,
+    /// What it does, in a sentence for the user: the picker's footer when its line is highlighted.
+    pub about: &'static str,
     /// When this agent is worth having, for the agent that picks templates.
     pub fits: &'static str,
     /// When it isn't.
@@ -114,11 +125,12 @@ pub const TEMPLATES: &[Template] = &[
     Template {
         key: "dev",
         name: "Dev",
-        title: "Feature developer",
+        summary: "Builds new features and the tickets",
+        about: "Agrees on a roadmap with you, then ships it one small pull request at a time, and builds the tickets of a Delivery.",
         fits: "Projects the user is actively building and wants to push forward: apps, products, tools with a roadmap or a backlog of ideas. Suggest it for the most active projects.",
         skip: "Projects that already have a developer agent the user set up, finished or archived projects, and repos that only hold notes, config or dotfiles.",
         personality: "A builder who loves shipping. Curious about where the user wants to take the project, asks sharp questions before writing code, then delivers in small, reviewable steps. Upbeat, but never pads a reply.",
-        prompt: r#"You build new features for **{project}** (`{path}`), toward the direction the user sets. You start with no schedule: you only act when the user talks to you, until the two of you have agreed on a direction and a rhythm.
+        prompt: r#"You build new features for **{project}** (`{path}`), toward the direction the user sets. You start with no schedule: you work when the user or another agent hands you work, until the two of you have agreed on a direction and a rhythm.
 
 ## 1. Agree on a direction
 Before writing any code:
@@ -128,7 +140,7 @@ Before writing any code:
 4. Show the user the roadmap and ask them to confirm or reorder it.
 
 ## 2. Agree on a rhythm
-Once the roadmap is confirmed, propose how often to work on your own (for example every 6 hours). When they agree, call `mcp__loft__set_schedule` with that interval, and quiet hours only if they ask for them. Until then, don't start work on your own.
+Once the roadmap is confirmed, propose how often to work on your own (for example every 6 hours). When they agree, call `mcp__loft__set_schedule` with that interval, and working hours only if they ask for them. Until then, don't start work on your own.
 
 ## 3. Build
 On each check-in, and whenever the user asks:
@@ -136,11 +148,11 @@ On each check-in, and whenever the user asks:
 2. Take the top roadmap item that isn't done. Build it as a small, complete slice on its own branch, with tests, following the project's conventions.
 3. Build and run the tests. Open a pull request (`gh pr create`) that says what it adds, why (which roadmap item) and how to try it.
 4. Update the roadmap: mark what shipped and note anything you learned.
-5. Report in a few lines: what you built, the pull request link, and what is next.
+5. Report in a few lines to whoever handed you the work (the user, or the agent that messaged you, as needs-action): what you built, the pull request link, and what is next.
 
 ## Rules
 - Never push to the default branch and never merge: every change goes through a pull request the user reviews.
-- When the direction is unclear, or a feature needs a decision (a new dependency, a data model change, a paid service), ask instead of guessing.
+- Ask only for real product decisions (the direction, a new dependency, a data model change, a paid service). Decide everything else with sensible defaults and carry on.
 - When the user changes direction, update the roadmap first, then follow it."#,
         model: "sonnet",
         interval_minutes: 0,
@@ -152,11 +164,12 @@ On each check-in, and whenever the user asks:
     Template {
         key: "lead",
         name: "Lead",
-        title: "Team lead",
+        summary: "Plans the work with you",
+        about: "Turns your ideas into specs and tickets through a grill, then hands the tickets to the team. One per group.",
         fits: "Projects with more than one agent, or that the user wants to plan before building: someone to turn ideas into specs and tickets for the team. Suggest it once a project has a Dev or the user plans to grow its team.",
         skip: "Projects with a single agent and nothing to plan, projects that already have a Lead, and agents without a project (a Lead always belongs to a project).",
         personality: "A calm captain. Asks the questions that matter, always with a recommendation, looks facts up instead of asking for them, and keeps the team pointed at the same goal.",
-        prompt: r#"You lead the team working on **{project}** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team; you have no step in that.
+        prompt: r#"You lead the team working on **{project}** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team: when it wakes you with ready tickets, you hand them out to the team's Devs (`mcp__loft__assign_ticket`) and do nothing else on the Delivery.
 
 Work only in your clone in your workspace; pull the default branch before you investigate.
 
@@ -183,7 +196,8 @@ Decisions the user made, one entry each. Ticket order lives in GitHub's blocking
     Template {
         key: "reviewer",
         name: "Reviewer",
-        title: "Code reviewer",
+        summary: "Reviews every change",
+        about: "Reads new commits and pull requests for bugs first, then clarity, and points at the exact line with a fix.",
         fits: "Any project that changes often: recent commits, open pull requests, more than one contributor or agent working on it.",
         skip: "Repos that rarely change, generated code, notes or dotfiles.",
         personality: "Careful and specific. Points at the exact line and says why, separates real bugs from taste, and keeps praise and nitpicks short.",
@@ -192,11 +206,11 @@ Decisions the user made, one entry each. Ticket order lives in GitHub's blocking
 On each check-in:
 1. Keep a clone of the repo in your workspace and pull it. Look at what changed since your last review (remember the last commit you reviewed): new commits on the default branch and open pull requests (`gh pr list` if the repo is on GitHub).
 2. Review each change for correctness first: logic errors, unhandled edge cases, broken error handling, race conditions, data loss, API misuse, missing migrations. Then for clarity and consistency with the surrounding code.
-3. For a pull request, leave the review on GitHub (`gh pr review --comment`) when you have permission to; otherwise report it here. Lead with the problems that would cause a bug, each with the file, the line and a suggested fix.
+3. For a pull request, leave the review on GitHub (`gh pr review --comment`) when you have permission to; otherwise report it to whoever handed you the work. Lead with the problems that would cause a bug, each with the file, the line and a suggested fix.
 4. Don't push to the default branch and don't merge anything. If a fix is small and clear, you may open a pull request with it.
 5. Remember the last commit and pull requests you reviewed so the next check-in starts where you stopped.
 
-If nothing changed, say so in one line."#,
+If nothing changed, say so in one line. Report to whoever handed you the work."#,
         model: "sonnet",
         interval_minutes: 240,
         planning: false,
@@ -207,7 +221,8 @@ If nothing changed, say so in one line."#,
     Template {
         key: "security",
         name: "Security",
-        title: "Security auditor",
+        summary: "Looks for security problems",
+        about: "Audits the code for problems an attacker could really use, rated honestly, with how the attack would work.",
         fits: "Anything that can be reached or fed input by someone else: web apps, APIs, servers, mobile apps, browser extensions, bots, services that handle accounts, payments, personal data or secrets, and libraries other people install.",
         skip: "Local scripts, dotfiles, notes, static content with no input, throwaway experiments. Nothing reaches them from outside, so there is nothing to attack.",
         personality: "Calm and precise. Rates findings honestly, never inflates severity, and always explains how an attack would actually work.",
@@ -218,7 +233,7 @@ On each check-in:
 2. Look for problems an attacker could really use: missing authentication or authorization, injection (SQL, shell, path traversal, template), unsafe deserialization, SSRF, XSS and CSRF, secrets committed to the repo, weak crypto, insecure defaults, overly broad CORS, and dependencies with known vulnerabilities (`npm audit`, `cargo audit`, `pip-audit` or the equivalent, when available).
 3. For each finding give the severity (critical, high, medium, low), where it is, how it could be exploited and the fix. Verify before you report: trace the input to the sink. No speculative findings.
 4. Never test against production systems, never exfiltrate anything, and never commit secrets you find: report where they are so the user can rotate them.
-5. Report findings in this chat and add a Loft issue for each high or critical one (`mcp__loft__create_issue`). Open a pull request only for fixes that are small and safe.
+5. Report findings to whoever handed you the work (the user, or the agent that messaged you, as needs-action) and add a Loft issue for each high or critical one (`mcp__loft__create_issue`). Open a pull request only for fixes that are small and safe.
 6. Remember what you have already reported so you don't repeat it.
 
 If you found nothing new, say so in one line."#,
@@ -232,7 +247,8 @@ If you found nothing new, say so in one line."#,
     Template {
         key: "tests",
         name: "QA",
-        title: "Test keeper",
+        summary: "Tests the work",
+        about: "Keeps the test suite green, adds tests where they are missing and checks that each change does what it says.",
         fits: "Projects with real logic and a test setup, or ones that clearly need one: apps, services, libraries, CLIs.",
         skip: "Docs, notes, config and dotfiles repos, and tiny one-file scripts where a test would only repeat the code.",
         personality: "Methodical and skeptical. Trusts a passing test only once it has seen it fail for the right reason.",
@@ -245,7 +261,7 @@ On each check-in:
 4. Don't weaken or delete a test to make it pass. Don't push to the default branch.
 5. Remember how to run the suite and its usual run time, so later check-ins are quick.
 
-If everything passes and nothing new needs tests, say so in one line."#,
+If everything passes and nothing new needs tests, say so in one line. Report to whoever handed you the work."#,
         model: "sonnet",
         interval_minutes: 720,
         planning: false,
@@ -256,7 +272,8 @@ If everything passes and nothing new needs tests, say so in one line."#,
     Template {
         key: "deps",
         name: "Deps",
-        title: "Dependency keeper",
+        summary: "Keeps dependencies up to date",
+        about: "Upgrades dependencies in small, safe steps, after reading the changelogs, and flags known vulnerabilities.",
         fits: "Projects with a dependency manifest (package.json, Cargo.toml, requirements.txt or pyproject.toml, go.mod, Gemfile, Podfile, Package.swift) that are still in use.",
         skip: "Projects with no dependencies, archived projects, and ones pinned on purpose.",
         personality: "Conservative. Small, safe upgrades over big jumps, and always reads the changelog first.",
@@ -280,7 +297,8 @@ If everything is current, say so in one line."#,
     Template {
         key: "docs",
         name: "Docs",
-        title: "Docs keeper",
+        summary: "Keeps the docs true to the code",
+        about: "Updates the README and docs when the code changes, written plainly for a newcomer.",
         fits: "Projects other people read or use: libraries, public repos, APIs, apps with setup steps, projects with a docs folder.",
         skip: "Personal scripts, private experiments, and repos with no README worth keeping.",
         personality: "Clear and plain-spoken. Writes for a newcomer, cuts jargon, and keeps docs short.",
@@ -303,7 +321,8 @@ If the docs are already accurate, say so in one line."#,
     Template {
         key: "triage",
         name: "Triage",
-        title: "Issue triage",
+        summary: "Triages GitHub issues",
+        about: "Labels new issues, asks reporters for what is missing and spots duplicates, without closing anything it isn't sure about.",
         fits: "Projects on GitHub that get issues, especially from other people.",
         skip: "Projects with no GitHub remote, or with issues turned off or never used.",
         personality: "Friendly and organized. Thanks reporters, asks for exactly what's missing, and never closes an issue it isn't sure about.",
@@ -327,7 +346,8 @@ If there is nothing new, say so in one line."#,
     Template {
         key: "ci",
         name: "CI",
-        title: "CI watcher",
+        summary: "Watches CI",
+        about: "Reads failed CI runs, finds the first real error in the logs and says what broke it.",
         fits: "Projects on GitHub with CI workflows (.github/workflows) that run on every push or pull request.",
         skip: "Projects with no CI, or CI that only runs by hand.",
         personality: "Quick and to the point. Finds the first real error in a wall of logs and says what broke it.",
@@ -349,6 +369,44 @@ If CI is green, say so in one line."#,
     },
 ];
 
+/// A template's instructions for `project`, whose folder is `path`: no project reads as the user's projects, with no folder.
+fn fill(prompt: &str, project: &str, path: &str) -> String {
+    let prompt = if path.is_empty() { prompt.replace(" (`{path}`)", "") } else { prompt.to_string() };
+    prompt.replace("{project}", if project.is_empty() { "the user's projects" } else { project }).replace("{path}", path)
+}
+
+#[derive(serde::Deserialize)]
+pub struct TemplatesQuery {
+    #[serde(default)]
+    project: String,
+}
+
+/// `GET /api/agent-templates?project=<name>`: the templates `create_agent` starts from, for the New agent dialog,
+/// with `project`'s name and folder in their instructions.
+pub async fn templates_route(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Query(q): axum::extract::Query<TemplatesQuery>) -> axum::Json<Value> {
+    axum::Json(templates_for(&state, q.project.trim()))
+}
+
+fn templates_for(state: &AppState, project: &str) -> Value {
+    let path = if project.is_empty() { String::new() } else { state.settings.boot().projects_dir.join(project).display().to_string() };
+    TEMPLATES
+        .iter()
+        .map(|t| {
+            json!({
+                "key": t.key,
+                "name": t.name,
+                "role": t.role,
+                "summary": t.summary,
+                "about": t.about,
+                "personality": t.personality,
+                "prompt": fill(t.prompt, project, &path),
+                "model": t.model,
+                "interval_minutes": t.interval_minutes,
+            })
+        })
+        .collect()
+}
+
 pub fn template(key: &str) -> Option<&'static Template> {
     TEMPLATES.iter().find(|t| t.key.eq_ignore_ascii_case(key.trim()))
 }
@@ -356,7 +414,8 @@ pub fn template(key: &str) -> Option<&'static Template> {
 /// The quiet hours agents a setup created used to get unless the user gave theirs: weekdays 09:00–18:00.
 /// Agents now run around the clock unless the user asks for quiet hours.
 fn old_default_quiet_hours() -> Vec<QuietWindow> {
-    vec![QuietWindow { days: vec![0, 1, 2, 3, 4], start: "09:00".into(), end: "18:00".into() }]
+    // Stored as the working hours the pause became (see schedule::pauses_to_working).
+    crate::schedule::pauses_to_working(&[QuietWindow { days: vec![0, 1, 2, 3, 4], start: "09:00".into(), end: "18:00".into() }])
 }
 
 /// `loft`'s display name. Its id stays `LOFT_ID`.
@@ -365,23 +424,31 @@ const LOFT_NAME: &str = "lofty";
 /// `loft`'s schedule on a new install: a weekly look for projects that became active since the last setup.
 const LOFT_INTERVAL: i64 = 10080;
 
-/// Lines in `loft`'s instructions from before agents ran around the clock by default, and what replaces them.
-const OLD_QUIET_LINES: &[(&str, &str)] = &[
+/// Lines in `loft`'s instructions from older installs, and what replaces them: from before agents ran around the
+/// clock by default, then from before it put every agent it creates in a group. No new line contains its old one,
+/// so each is replaced once.
+const OLD_LINES: &[(&str, &str)] = &[
     ("   Create these? And your working hours, for quiet hours?", "   Create these?"),
     (" Use the template's schedule unless the user asked otherwise, and their working hours as quiet hours.", " Use the template's schedule unless the user asked otherwise. Agents run around the clock: give quiet hours only if the user asks for them."),
     ("Remember what the user decided (`mcp__loft__remember`): their working hours, the projects", "Remember what the user decided (`mcp__loft__remember`): any quiet hours they asked for, the projects"),
+    ("- Agents in the same project are grouped together and can @-mention each other.", "- Agents that share a group, a label on each of them, are a team: one Lead plans the work with the user, and the team builds and reviews it in a Delivery. Any agent can @-mention any other."),
+    ("5. Show the plan before creating anything, in exactly this shape and nothing more:", "5. Propose one group per team: the group the project's agents already have, or a short name from the project's (`homebase` → Homebase). Show the plan before creating anything, in exactly this shape and nothing more:"),
+    ("472 commits/30d)\n   - Reviewer", "472 commits/30d) · group Homebase\n   - Reviewer"),
+    ("6. Only after the user says yes, create the agents with `mcp__loft__create_agent`. ", "6. Only after the user says yes, create the agents with `mcp__loft__create_agent`, passing each one's `group` from the plan. "),
+    ("so you don't offer the same thing twice.\n\n## Rules", "so you don't offer the same thing twice.\n\n## Groups\n- Every agent you create gets a `group`, the one you showed in the plan. Never create one without it unless the user asks.\n- When the user, or the end of a planning grill, asks you to set up the team for a group, create the agents they approve in that group.\n- To put existing agents in a group (new or existing) or rename a group on all its agents, call `mcp__loft__set_group` once the user agrees. A group has one Lead: a Lead moved into a group that has one takes the role, and the other becomes Custom. A Lead needs a group, so you can't take one out of it.\n\n## Rules"),
 ];
 
 /// Make sure `loft` exists. A new one introduces itself and suggests a setup on its first run.
 pub fn ensure_loft(state: &AppState) {
     match state.db.get_agent(LOFT_ID) {
         Ok(Some(a)) => {
-            // Installs from before the rename, and before `loft` ran through working hours: update them,
+            // Installs from before the rename, before `loft` ran through working hours, and before it put its
+            // agents in groups: update them,
             // unless the user renamed it, set its schedule or edited those lines themselves. Other agents stay as
             // they are.
             let rename = a.name == "loft";
             let unpause = a.interval_minutes == LOFT_INTERVAL && a.quiet_hours == old_default_quiet_hours();
-            let reword = OLD_QUIET_LINES.iter().any(|(old, _)| a.prompt.contains(old));
+            let reword = OLD_LINES.iter().any(|(old, _)| a.prompt.contains(old));
             if a.builtin && !rename && !unpause && !reword {
                 return;
             }
@@ -394,7 +461,7 @@ pub fn ensure_loft(state: &AppState) {
                     a.quiet_hours.clear();
                     a.next_run_at = None;
                 }
-                for (old, new) in OLD_QUIET_LINES {
+                for (old, new) in OLD_LINES {
                     a.prompt = a.prompt.replace(old, new);
                 }
             });
@@ -406,7 +473,6 @@ pub fn ensure_loft(state: &AppState) {
             let projects = state.settings.boot().projects_dir.display().to_string();
             let patch = json!({
                 "name": LOFT_NAME,
-                "title": "Your Loft guide",
                 "personality": LOFT_PERSONALITY,
                 "prompt": LOFT_PROMPT.replace("{projects}", &projects),
                 "model": "sonnet",
@@ -457,10 +523,10 @@ pub fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "set_schedule",
-            "description": "Change your own schedule: how often you wake up on your own, and the quiet hours when you don't. The user approves it with a card unless they allowed it for good. Only call it after the user agreed to the rhythm in the chat.",
+            "description": "Change your own schedule: how often you wake up on your own, and the working hours when you may (outside them you wait). The user approves it with a card unless they allowed it for good. Only call it after the user agreed to the rhythm in the chat.",
             "inputSchema": { "type": "object", "properties": {
                 "interval_minutes": { "type": "integer", "description": "Minutes between check-ins: 0 to stop, otherwise at least 60." },
-                "quiet_hours": { "type": "array", "description": "When check-ins pause, only if the user asked for them. Omit to keep the current ones; [] runs around the clock.", "items": { "type": "object", "properties": {
+                "quiet_hours": { "type": "array", "description": "Your working hours: when you may check in on your own; outside them you wait. Only if the user asked for them. Omit to keep the current ones; [] runs around the clock.", "items": { "type": "object", "properties": {
                     "days": { "type": "array", "items": { "type": "integer" }, "description": "0 = Monday … 6 = Sunday" },
                     "start": { "type": "string", "description": "HH:MM" },
                     "end": { "type": "string", "description": "HH:MM" }
@@ -476,14 +542,13 @@ pub fn mcp_tools() -> Vec<Value> {
                 "project": { "type": "string", "description": "The project it works on: a repo name exactly as list_projects shows it (e.g. \"work/api\")." },
                 "group": { "type": "string", "description": "Its group, the label that makes its team, e.g. \"Loft\". Leave it out and it has no group, so no team and no part in a Delivery." },
                 "name": { "type": "string", "description": "Short name, unique within its main project. Defaults to the template's." },
-                "title": { "type": "string" },
                 "role": { "type": "string", "enum": ["lead", "dev", "code_reviewer", "qa", "security", "custom"], "description": "What it does in its team: \"lead\" plans with the user (one per group: it takes the role from any other Lead there), \"dev\" builds the tickets, \"code_reviewer\", \"qa\" and \"security\" review them, \"custom\" has no part in the team's work. Defaults to the template's, or custom without one." },
                 "prompt": { "type": "string", "description": "Its standing instructions. With a template, this is added after the template's under \"About this project\": what the project is, its stack, how to build and test it, what the user cares about." },
                 "replace_prompt": { "type": "boolean", "description": "Use `prompt` instead of the template's instructions rather than after them." },
                 "personality": { "type": "string" },
-                "model": { "type": "string", "enum": ["haiku", "sonnet", "opus"] },
+                "model": { "type": "string", "enum": ["haiku", "sonnet", "opus", "fable"] },
                 "interval_minutes": { "type": "integer", "description": "Minutes between scheduled check-ins (0 = only when messaged, otherwise at least 60). Defaults to the template's." },
-                "quiet_hours": { "type": "array", "description": "When scheduled check-ins pause, Defaults to none: the agent runs around the clock. Only set it when the user asks.", "items": { "type": "object", "properties": {
+                "quiet_hours": { "type": "array", "description": "The agent's working hours: when it may check in on its own; outside them it waits. Defaults to none: it runs around the clock. Only set it when the user asks.", "items": { "type": "object", "properties": {
                     "days": { "type": "array", "items": { "type": "integer" }, "description": "0 = Monday … 6 = Sunday" },
                     "start": { "type": "string", "description": "HH:MM" },
                     "end": { "type": "string", "description": "HH:MM" }
@@ -491,6 +556,16 @@ pub fn mcp_tools() -> Vec<Value> {
                 "avatar_brief": { "type": "string", "description": "How its sticker avatar should look, from its job, personality and project: shape, colors, expression, an accessory. The new agent draws itself from this right after it is created." },
                 "reason": { "type": "string", "description": "Why this agent, in one line. Shown to the user if they have to approve it." }
             } }
+        }),
+        json!({
+            "name": "set_group",
+            "description": "Put existing agents in a group, new or existing (pass `agents`), or rename a group on all its agents (pass `rename`). A group is the label that makes agents a team. One Lead per group: a Lead moved into a group that has one takes the role, and the other becomes Custom. Only after the user agreed to it in the chat.",
+            "inputSchema": { "type": "object", "properties": {
+                "group": { "type": "string", "description": "The group to put the agents in, or the group's new name, e.g. \"Loft\"." },
+                "agents": { "type": "array", "items": { "type": "string" }, "description": "The agents to move, by name or id as list_agents shows them." },
+                "rename": { "type": "string", "description": "The group to rename, as it is now: every agent in it gets `group`. Instead of `agents`." },
+                "reason": { "type": "string", "description": "Why, in one line. Shown to the user if they have to approve it." }
+            }, "required": ["group"] }
         }),
     ]
 }
@@ -501,6 +576,7 @@ pub async fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) ->
         "list_projects" => Ok(list_projects(state, args["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize).await),
         "list_agent_templates" => Ok(list_templates()),
         "create_agent" => create_agent(state, me, args).await,
+        "set_group" => set_group(state, me, args).await,
         "set_schedule" => set_schedule(state, me, args).await,
         _ => return None,
     })
@@ -511,11 +587,10 @@ fn list_templates() -> String {
         .iter()
         .map(|t| {
             format!(
-                "## {key}: {name} ({title})\nFits: {fits}\nSkip: {skip}\nDefault: role {role}, {every}, model {model}.{starts}\nInstructions:\n{prompt}",
+                "## {key}: {name}\nFits: {fits}\nSkip: {skip}\nDefault: role {role}, {every}, model {model}.{starts}\nInstructions:\n{prompt}",
                 key = t.key,
                 role = t.role,
                 name = t.name,
-                title = t.title,
                 fits = t.fits,
                 skip = t.skip,
                 every = if t.interval_minutes > 0 { format!("every {}", every(t.interval_minutes)) } else { "no schedule (only runs when messaged, until it sets its own)".into() },
@@ -635,7 +710,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     let custom = s("prompt");
     let prompt = match tpl {
         Some(t) => {
-            let base = t.prompt.replace("{project}", if project.is_empty() { "the user's projects" } else { &project }).replace("{path}", &path);
+            let base = fill(t.prompt, &project, &path);
             match (custom.is_empty(), args["replace_prompt"].as_bool().unwrap_or(false)) {
                 (true, _) => base,
                 (false, true) => custom,
@@ -645,9 +720,11 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         None if custom.is_empty() => return Err("prompt is required without a template".into()),
         None => custom,
     };
-    let model = Some(s("model")).filter(|m| !m.is_empty()).unwrap_or_else(|| tpl.map_or("sonnet", |t| t.model).to_string());
-    if !["haiku", "sonnet", "opus"].contains(&model.as_str()) {
-        return Err("model must be haiku, sonnet or opus".into());
+    // The project's team model, when it has one, before the template's.
+    let team = crate::project_settings::team_defaults(state, &project).into_iter().find(|(f, _)| *f == "model").map(|(_, m)| m);
+    let model = Some(s("model")).filter(|m| !m.is_empty()).or(team).unwrap_or_else(|| tpl.map_or("sonnet", |t| t.model).to_string());
+    if !["haiku", "sonnet", "opus", "fable"].contains(&model.as_str()) {
+        return Err("model must be haiku, sonnet, opus or fable".into());
     }
     let interval = args["interval_minutes"].as_i64().unwrap_or_else(|| tpl.map_or(0, |t| t.interval_minutes));
     if interval != 0 && interval < MIN_INTERVAL {
@@ -660,7 +737,6 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     // Only these fields: an agent can't hand another agent more tools, MCP servers or a looser permission mode.
     let patch = json!({
         "name": name,
-        "title": Some(s("title")).filter(|t| !t.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.title.to_string())),
         "project": project,
         "group": s("group"),
         "personality": Some(s("personality")).filter(|p| !p.is_empty()).unwrap_or_else(|| tpl.map_or(String::new(), |t| t.personality.to_string())),
@@ -688,7 +764,7 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         _ => String::new(),
     };
     let schedule = if a.interval_minutes > 0 {
-        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(" (paused {})", crate::schedule::describe(&a.quiet_hours)) };
+        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(" (works {})", crate::schedule::describe(&a.quiet_hours)) };
         format!("checks in every {}{quiet}", every(a.interval_minutes))
     } else {
         "runs only when messaged".into()
@@ -711,6 +787,93 @@ async fn create_agent(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
         None => "",
     };
     Ok(format!("Created {} (id {}) for {}; it {schedule}.{lead}{drawing}{starts}", a.name, a.id, if a.project.is_empty() { "no project" } else { &a.project }))
+}
+
+/// Moves agents into a group (`agents`), or renames a group on all its agents (`rename`). `loft` does it
+/// outright, any other agent with the user's approval. The Lead rule is the API's: a Lead moved into a group
+/// takes its Lead role, and with several Leads moved at once the first one named keeps it.
+async fn set_group(state: &AppState, me: &Agent, args: &Value) -> Result<String, String> {
+    let group = crate::api::group_name(args["group"].as_str().unwrap_or(""))?;
+    if group.is_empty() {
+        return Err("group is required: agents leave a group only from their settings.".into());
+    }
+    let all = state.db.list_agents().map_err(|e| e.to_string())?;
+    let names: Vec<String> = match &args["agents"] {
+        Value::Null => vec![],
+        v => serde_json::from_value(v.clone()).map_err(|_| "agents must be a list of agent names or ids".to_string())?,
+    };
+    let rename = args["rename"].as_str().map(str::trim).unwrap_or("");
+    let moving: Vec<Agent> = match (names.is_empty(), rename.is_empty()) {
+        (false, false) | (true, true) => return Err("Pass either `agents`, to move them, or `rename`, to rename a group.".into()),
+        (false, true) => {
+            let mut out: Vec<Agent> = vec![];
+            for key in names.iter().map(|k| k.trim()).filter(|k| !k.is_empty()) {
+                let a = match all.iter().find(|a| a.id == key) {
+                    Some(a) => a,
+                    None => match all.iter().filter(|a| a.name.eq_ignore_ascii_case(key)).collect::<Vec<_>>()[..] {
+                        [a] => a,
+                        [] => return Err(format!("No agent called {key}. Call list_agents to see who exists.")),
+                        _ => return Err(format!("More than one agent is called {key}: name it by its id from list_agents.")),
+                    },
+                };
+                if !out.iter().any(|o| o.id == a.id) {
+                    out.push(a.clone());
+                }
+            }
+            if out.is_empty() {
+                return Err("agents is empty: name the agents to move.".into());
+            }
+            out
+        }
+        (true, false) => {
+            let out: Vec<Agent> = all.iter().filter(|a| a.team() == rename).cloned().collect();
+            if out.is_empty() {
+                let mut groups: Vec<&str> = all.iter().map(|a| a.team()).filter(|g| !g.is_empty()).collect();
+                groups.sort();
+                groups.dedup();
+                let known = if groups.is_empty() { "No agent has a group yet.".into() } else { format!("The groups: {}.", groups.join(", ")) };
+                return Err(format!("No agent is in the group {rename}. {known}"));
+            }
+            out
+        }
+    };
+    let new_group = !all.iter().any(|a| a.team() == group);
+    let who = moving.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
+    let patch = json!({ "group": group, "agents": moving.iter().map(|a| a.name.clone()).collect::<Vec<_>>(), "rename": rename });
+
+    let allowed = me.builtin || me.allowed_tools.iter().any(|r| crate::agents::rule_matches(r, GROUP_RULE, &patch));
+    if !allowed {
+        let what = if rename.is_empty() { format!("put {who} in the group {group}") } else { format!("rename the group {rename} to {group}") };
+        let reason = args["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).map(String::from).unwrap_or_else(|| format!("{} wants to {what}.", me.name));
+        let d = crate::agents::ask_permission(state, &me.id, "prompt", GROUP_RULE, patch.clone(), &reason, GROUP_RULE.into()).await;
+        if !d.allow {
+            return Err(format!("The user declined.{}", d.message.map(|m| format!(" Their note: {m}")).unwrap_or_default()));
+        }
+    }
+
+    let mut lead: Option<Agent> = None;
+    for a in &moving {
+        let saved = state.db.update_agent(&a.id, |a| a.group = group.clone()).map_err(|e| e.to_string())?;
+        if let Some(a) = saved {
+            crate::agents::emit_agent(state, &a);
+            if a.role == "lead" && lead.is_none() {
+                lead = Some(a);
+            }
+        }
+    }
+    // After every move, so the first Lead named is the one left: take_lead makes every other Lead in the group Custom.
+    let note = match &lead {
+        Some(l) => match crate::api::take_lead(state, l).map_err(|e| e.1)? {
+            Some(o) => format!(" {} is its Lead now ({} became Custom).", l.name, o.name),
+            None => format!(" {} is its Lead.", l.name),
+        },
+        None => String::new(),
+    };
+    Ok(if rename.is_empty() {
+        format!("Put {who} in the group {group}{}.{note}", if new_group { " (a new group)" } else { "" })
+    } else {
+        format!("Renamed the group {rename} to {group} on {who}.{note}")
+    })
 }
 
 /// Run a new agent's kickoff as a grill run: only the interview questions reach the chat, which the grill
@@ -773,7 +936,7 @@ async fn set_schedule(state: &AppState, me: &Agent, args: &Value) -> Result<Stri
     Ok(if a.interval_minutes == 0 {
         "Schedule off: you only run when messaged.".into()
     } else {
-        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(", paused {}", crate::schedule::describe(&a.quiet_hours)) };
+        let quiet = if a.quiet_hours.is_empty() { String::new() } else { format!(", works {}", crate::schedule::describe(&a.quiet_hours)) };
         format!("You now check in every {}{quiet}.", every(a.interval_minutes))
     })
 }
@@ -793,6 +956,26 @@ mod tests {
         let err = create_agent(&st, &lead, &json!({ "template": "dev", "project": "homebase" })).await.unwrap_err();
         assert!(err.starts_with("Planning agents don't create agents: that stays with loft."), "{err}");
         assert!(!st.db.list_agents().unwrap().iter().any(|a| a.name == "Dev"));
+    }
+
+    #[tokio::test]
+    async fn loft_creates_a_project_agent_on_the_projects_team_defaults() {
+        let st = state();
+        let mut me = agent(&st, "loft");
+        me.allowed_tools.push(CREATE_RULE.into());
+        st.db.save_agent(&me).unwrap();
+        std::fs::create_dir_all(st.settings.boot().projects_dir.join("teamed")).unwrap();
+        crate::project_settings::set(&st, "teamed", crate::project_settings::TEAM_MODEL, &json!("fable"), None).unwrap();
+        crate::project_settings::set(&st, "teamed", crate::project_settings::TEAM_EFFORT, &json!("xhigh"), None).unwrap();
+        let made = |name: &str| st.db.list_agents().unwrap().into_iter().find(|a| a.name == name).unwrap();
+        // The team's model over the template's (Security's is sonnet), and its effort.
+        create_agent(&st, &me, &json!({ "template": "security", "project": "teamed" })).await.unwrap();
+        let a = made("Security");
+        assert_eq!((a.model.as_str(), a.effort.as_str(), a.subagent_model.as_str()), ("fable", "xhigh", ""));
+        // A model the call names wins.
+        create_agent(&st, &me, &json!({ "template": "tests", "project": "teamed", "model": "haiku" })).await.unwrap();
+        let a = made("QA");
+        assert_eq!((a.model.as_str(), a.effort.as_str()), ("haiku", "xhigh"));
     }
 
     #[tokio::test]
@@ -817,6 +1000,8 @@ mod tests {
         assert_eq!(a.created_by.as_deref(), Some(me.id.as_str()));
         assert!(a.prompt.contains("**work/api**") && a.prompt.ends_with("## About this project\nAn Axum API behind Cloudflare."), "{}", a.prompt);
         assert!(a.quiet_hours.is_empty(), "runs through working hours unless the user asks");
+        let schema = mcp_tools().into_iter().find(|t| t["name"] == "create_agent").unwrap();
+        assert!(schema["inputSchema"]["properties"].get("title").is_none() && schema["inputSchema"]["properties"].get("role").is_some());
 
         std::fs::create_dir_all(st.settings.boot().projects_dir.join("site")).unwrap();
         // A project that isn't one: refused before anyone is asked.
@@ -862,9 +1047,18 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!(req.tool_name, CREATE_RULE);
-        crate::agents::decide(&st, &req.id, "deny", None, Some("not now".into())).unwrap();
+        crate::agents::decide(&st, &req.id, "deny", None, Some("not now".into()), None).unwrap();
         assert_eq!(call.await.unwrap().unwrap_err(), "The user declined. Their note: not now");
         assert!(!st.db.list_agents().unwrap().iter().any(|a| a.name == "Docs"));
+    }
+
+    #[test]
+    fn role_templates_report_to_whoever_handed_over_the_work() {
+        for key in ["dev", "reviewer", "security", "tests"] {
+            let p = template(key).unwrap().prompt;
+            assert!(!p.contains("only act when the user talks to you") && !p.contains("in this chat") && !p.contains("report it here"), "{key}");
+            assert!(p.contains("whoever handed you the work"), "{key}");
+        }
     }
 
     #[test]
@@ -882,7 +1076,7 @@ mod tests {
         assert_eq!((a.name.as_str(), a.quiet_hours.is_empty()), (LOFT_NAME, true));
 
         // lofty's instructions saved with the old lines no longer ask for working hours; other agents stay as they are.
-        let old = format!("Intro.\n{}\nOutro.", OLD_QUIET_LINES.iter().map(|(old, _)| *old).collect::<Vec<_>>().join("\n"));
+        let old = format!("Intro.\n{}\nOutro.", OLD_LINES.iter().map(|(old, _)| *old).collect::<Vec<_>>().join("\n"));
         let mut dev = agent(&st, "Dev");
         dev.prompt = old.clone();
         st.db.save_agent(&dev).unwrap();
@@ -954,7 +1148,7 @@ mod tests {
     async fn a_dev_agent_waits_for_a_direction_and_opens_the_interview() {
         let st = state();
         // The avatar run really starts: point it at a stand-in for claude that stays busy and does nothing.
-        let bin = st.cfg.storage_dir.parent().unwrap().join("idle-claude");
+        let bin = st.cfg.root.as_path().join("idle-claude");
         std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let mut set = st.settings.get();
@@ -984,9 +1178,9 @@ mod tests {
     async fn a_kickoff_that_never_opens_the_interview_is_asked_again_and_its_text_stays_hidden() {
         let st = state();
         // A model that only narrates: it never posts a round.
-        let bin = st.cfg.storage_dir.parent().unwrap().join("chatty-claude");
+        let bin = st.cfg.root.as_path().join("chatty-claude");
         std::fs::write(&bin, r#"#!/bin/sh
-prompt=$(cat)
+IFS= read -r prompt
 printf '%s\n---\n' "$prompt" >> prompts.log
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Hi, I am Dev!"}]}}'
@@ -1028,8 +1222,8 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!((req.tool_name.as_str(), req.reason.as_str()), (SCHEDULE_RULE, "Agreed: every 6h"));
-        crate::agents::decide(&st, &req.id, "allow_once", None, None).unwrap();
-        assert_eq!(call.await.unwrap().unwrap(), "You now check in every 6 hour(s), paused Mon–Fri 09:00–18:00.");
+        crate::agents::decide(&st, &req.id, "allow_once", None, None, None).unwrap();
+        assert_eq!(call.await.unwrap().unwrap(), "You now check in every 6 hour(s), works Mon–Fri 09:00–18:00.");
         let a = st.db.get_agent(&me.id).unwrap().unwrap();
         assert_eq!((a.interval_minutes, a.quiet_hours.len()), (360, 1));
     }
@@ -1050,8 +1244,9 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
             assert!(t.prompt.contains("{project}") && t.prompt.contains("{path}"), "{}", t.key);
             assert!(t.interval_minutes == 0 || t.interval_minutes >= MIN_INTERVAL, "{}", t.key);
         }
-        assert!(list_templates().contains("## security: Security (Security auditor)"));
-        assert!(list_templates().contains("## lead: Lead (Team lead)"));
+        assert!(list_templates().contains("## security: Security\n"));
+        assert!(list_templates().contains("## lead: Lead\n"));
+        assert!(!list_templates().contains("Security auditor") && !list_templates().contains("Team lead"), "no titles");
         let roles: Vec<_> = TEMPLATES.iter().map(|t| (t.key, t.role)).collect();
         assert_eq!(roles[..5], [("dev", "dev"), ("lead", "lead"), ("reviewer", "code_reviewer"), ("security", "security"), ("tests", "qa")]);
         assert!(roles[5..].iter().all(|(_, r)| *r == "custom"), "{roles:?}");
@@ -1059,6 +1254,49 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         // A Lead that hands out tickets by message names them, so Fresh context applies between tickets (#251).
         let lead = template("lead").unwrap();
         assert!(lead.prompt.contains("When you hand a ticket to an agent by message, name it in `ticket`"), "{}", lead.prompt);
+    }
+
+    #[tokio::test]
+    async fn the_templates_route_serves_every_template_for_the_chosen_project() {
+        let st = state();
+        let app = axum::Router::new().nest("/api", crate::api_routes()).with_state(st.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let get = |q: &'static str| {
+            let url = format!("{base}/api/agent-templates{q}");
+            async move { reqwest::get(url).await.unwrap().json::<Value>().await.unwrap() }
+        };
+
+        let all = get("?project=site").await;
+        let all = all.as_array().unwrap();
+        let rows: Vec<_> = all.iter().map(|t| (t["key"].as_str().unwrap(), t["role"].as_str().unwrap(), t["model"].as_str().unwrap(), t["interval_minutes"].as_i64().unwrap())).collect();
+        assert_eq!(rows, [
+            ("dev", "dev", "sonnet", 0),
+            ("lead", "lead", "opus", 0),
+            ("reviewer", "code_reviewer", "sonnet", 240),
+            ("security", "security", "sonnet", 1440),
+            ("tests", "qa", "sonnet", 720),
+            ("deps", "custom", "sonnet", 10080),
+            ("docs", "custom", "sonnet", 1440),
+            ("triage", "custom", "haiku", 180),
+            ("ci", "custom", "haiku", 120),
+        ]);
+        let path = st.settings.boot().projects_dir.join("site").display().to_string();
+        for t in all {
+            for k in ["name", "summary", "about", "personality"] {
+                assert!(!t[k].as_str().unwrap().is_empty(), "{} {k}", t["key"]);
+            }
+            let prompt = t["prompt"].as_str().unwrap();
+            assert!(prompt.contains("**site**") && prompt.contains(&format!("`{path}`")), "{}", t["key"]);
+            assert!(!prompt.contains("{project}") && !prompt.contains("{path}"), "{}", t["key"]);
+        }
+        // No project yet: the instructions read as the user's projects, as create_agent writes them.
+        let none = get("").await;
+        assert!(none[0]["prompt"].as_str().unwrap().contains("**the user's projects**"), "{}", none[0]["prompt"]);
+        for t in none.as_array().unwrap() {
+            assert!(!t["prompt"].as_str().unwrap().contains("``"), "no empty folder in {}", t["key"]);
+        }
     }
 
     #[tokio::test]
@@ -1132,20 +1370,181 @@ echo '{"type":"result","subtype":"success","result":"","num_turns":1,"session_id
         let path = st.settings.boot().projects_dir.join("lead-std").display().to_string();
         assert!(path.starts_with(&std::env::temp_dir().display().to_string()), "tests never use the real projects folder");
         assert!(lead.prompt.starts_with(&format!(
-            "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team; you have no step in that.\n\nWork only in your clone in your workspace;"
+            "You lead the team working on **lead-std** (`{path}`): you answer questions, investigate and plan with the user. You never write or edit product code, approve, or merge. Loft itself runs the tickets you plan through the team: when it wakes you with ready tickets, you hand them out to the team's Devs (`mcp__loft__assign_ticket`) and do nothing else on the Delivery.\n\nWork only in your clone in your workspace;"
         )), "{}", lead.prompt);
         assert!(lead.prompt.contains("Ticket order lives in GitHub's blocking links, not in memory."));
-        // It no longer hands out or tracks tickets: Loft's Delivery does.
+        // It no longer tracks tickets by hand: Loft's Delivery does; it only hands out the ones Loft names.
         for gone in ["Handing out work", "in-progress", "needs-human", "changes-requested", "## Tracking"] {
             assert!(!lead.prompt.contains(gone), "still has {gone}");
         }
         assert!(!lead.prompt.contains("{project}") && !lead.prompt.contains("{path}"));
         let t = template("lead").unwrap();
-        assert_eq!((t.name, t.title, t.model, t.planning, t.role), ("Lead", "Team lead", "opus", true, "lead"));
+        assert_eq!((t.name, t.model, t.planning, t.role), ("Lead", "opus", true, "lead"));
 
         // Planning's rules win over standing instructions on specs and tickets.
         let sys = crate::agents::system_prompt(&st, &lead);
         assert!(sys.contains(&lead.prompt));
         assert!(sys.contains("# Planning: precedence\nLoft's Planning instructions (the ones below, those Loft sends when a grill starts, and `mcp__loft__planning_guide`) override your standing instructions on how specs and tickets are written, labelled, linked and published"), "{sys}");
+    }
+
+    /// `loft` and agents in groups, by name: (name, group, role).
+    fn grouped(st: &AppState, list: &[(&str, &str, &str)]) -> Agent {
+        let mut me = agent(st, "lofty");
+        me.builtin = true;
+        st.db.save_agent(&me).unwrap();
+        for (name, group, role) in list {
+            let mut a = agent(st, name);
+            (a.group, a.role) = (group.to_string(), role.to_string());
+            st.db.save_agent(&a).unwrap();
+        }
+        me
+    }
+
+    fn group_of(st: &AppState, name: &str) -> (String, String) {
+        let a = st.db.list_agents().unwrap().into_iter().find(|a| a.name == name).unwrap();
+        (a.group, a.role)
+    }
+
+    #[tokio::test]
+    async fn set_group_moves_agents_into_a_new_or_existing_group() {
+        let st = state();
+        let me = grouped(&st, &[("Dev", "", "dev"), ("QA", "Old", "qa"), ("Docs", "", "custom"), ("Reviewer", "Homebase", "code_reviewer")]);
+        let dev_id = st.db.list_agents().unwrap().into_iter().find(|a| a.name == "Dev").unwrap().id;
+        // By id or by name, ignoring case; a new group is just a new label.
+        let out = set_group(&st, &me, &json!({ "group": " Garden ", "agents": [dev_id, "qa"] })).await.unwrap();
+        assert_eq!(out, "Put Dev, QA in the group Garden (a new group).");
+        assert_eq!(group_of(&st, "Dev"), ("Garden".into(), "dev".into()));
+        assert_eq!(group_of(&st, "QA"), ("Garden".into(), "qa".into()));
+        // Into an existing group.
+        let out = set_group(&st, &me, &json!({ "group": "Homebase", "agents": ["Docs"] })).await.unwrap();
+        assert_eq!(out, "Put Docs in the group Homebase.");
+        assert_eq!(group_of(&st, "Docs").0, "Homebase");
+        assert_eq!(group_of(&st, "Reviewer").0, "Homebase");
+        // Nothing to name, or a name that isn't there, moves nobody.
+        for (args, want) in [
+            (json!({ "group": "Homebase", "agents": ["Dev", "Ghost"] }), "No agent called Ghost. Call list_agents to see who exists."),
+            (json!({ "group": "Homebase", "agents": [] }), "Pass either `agents`, to move them, or `rename`, to rename a group."),
+            (json!({ "group": "Homebase", "agents": ["Dev"], "rename": "Garden" }), "Pass either `agents`, to move them, or `rename`, to rename a group."),
+            (json!({ "group": "Homebase", "agents": [" "] }), "agents is empty: name the agents to move."),
+        ] {
+            assert_eq!(set_group(&st, &me, &args).await.unwrap_err(), want, "{args}");
+        }
+        assert_eq!(group_of(&st, "Dev").0, "Garden");
+        // Two agents with one name: only by id.
+        agent(&st, "Dev");
+        let err = set_group(&st, &me, &json!({ "group": "Homebase", "agents": ["Dev"] })).await.unwrap_err();
+        assert!(err.starts_with("More than one agent is called Dev"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn set_group_renames_a_group_on_all_its_agents() {
+        let st = state();
+        let me = grouped(&st, &[("Lead", "Home", "lead"), ("Dev", "Home", "dev"), ("QA", " Home ", "qa"), ("Other", "Garden", "dev"), ("Loose", "", "custom")]);
+        let out = set_group(&st, &me, &json!({ "group": "Homebase", "rename": "Home" })).await.unwrap();
+        assert_eq!(out, "Renamed the group Home to Homebase on Lead, Dev, QA. Lead is its Lead.");
+        for name in ["Lead", "Dev", "QA"] {
+            assert_eq!(group_of(&st, name).0, "Homebase", "{name}");
+        }
+        assert_eq!(group_of(&st, "Lead").1, "lead");
+        assert_eq!((group_of(&st, "Other").0, group_of(&st, "Loose").0), ("Garden".into(), String::new()));
+        let err = set_group(&st, &me, &json!({ "group": "X", "rename": "Home" })).await.unwrap_err();
+        assert_eq!(err, "No agent is in the group Home. The groups: Garden, Homebase.");
+    }
+
+    #[tokio::test]
+    async fn a_lead_moved_into_a_group_with_a_lead_takes_the_role() {
+        let st = state();
+        let me = grouped(&st, &[("Ana", "Garden", "lead"), ("Bo", "Home", "lead"), ("Cy", "Web", "lead"), ("Dev", "Home", "dev"), ("Eve", "Shop", "lead")]);
+        // Moved in: it takes the role, and the group's Lead becomes Custom, as when its settings move it.
+        let out = set_group(&st, &me, &json!({ "group": "Home", "agents": ["Ana"] })).await.unwrap();
+        assert_eq!(out, "Put Ana in the group Home. Ana is its Lead now (Bo became Custom).");
+        assert_eq!((group_of(&st, "Ana"), group_of(&st, "Bo")), (("Home".into(), "lead".into()), ("Home".into(), "custom".into())));
+        // Two Leads at once: the first named keeps it.
+        set_group(&st, &me, &json!({ "group": "Home", "agents": ["Cy", "Eve"] })).await.unwrap();
+        let leads: Vec<String> = st.db.list_agents().unwrap().into_iter().filter(|a| a.team() == "Home" && a.role == "lead").map(|a| a.name).collect();
+        assert_eq!(leads, ["Cy"]);
+        // A rename onto a group that has a Lead: the renamed group's Lead keeps it.
+        let mut fy = agent(&st, "Fy");
+        (fy.group, fy.role) = ("Shop".into(), "lead".into());
+        st.db.save_agent(&fy).unwrap();
+        let out = set_group(&st, &me, &json!({ "group": "Home", "rename": "Shop" })).await.unwrap();
+        assert_eq!(out, "Renamed the group Shop to Home on Fy. Fy is its Lead now (Cy became Custom).");
+        let leads: Vec<String> = st.db.list_agents().unwrap().into_iter().filter(|a| a.team() == "Home" && a.role == "lead").map(|a| a.name).collect();
+        assert_eq!(leads, ["Fy"]);
+    }
+
+    #[tokio::test]
+    async fn set_group_refuses_names_the_settings_refuse() {
+        let st = state();
+        let me = grouped(&st, &[("Dev", "Home", "dev")]);
+        for g in ["x".repeat(101), "Dine\nout".into(), "Tab\there".into()] {
+            let err = set_group(&st, &me, &json!({ "group": g, "agents": ["Dev"] })).await.unwrap_err();
+            assert_eq!(err, "group must be at most 100 characters, with no control characters", "{g:?}");
+        }
+        assert!(set_group(&st, &me, &json!({ "group": "  ", "agents": ["Dev"] })).await.unwrap_err().starts_with("group is required"));
+        assert!(set_group(&st, &me, &json!({ "agents": ["Dev"] })).await.unwrap_err().starts_with("group is required"));
+        assert_eq!(group_of(&st, "Dev").0, "Home");
+        assert!(set_group(&st, &me, &json!({ "group": "y".repeat(100), "agents": ["Dev"] })).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn other_agents_need_the_users_approval_to_set_a_group() {
+        let st = state();
+        let me = agent(&st, "Dev");
+        agent(&st, "QA");
+        let ask = |st: AppState, me: Agent| tokio::spawn(async move { set_group(&st, &me, &json!({ "group": "Home", "agents": ["QA"], "reason": "QA joins the Home team." })).await });
+        let pending = |st: &AppState| {
+            let st = st.clone();
+            async move {
+                loop {
+                    if let Some(p) = st.db.list_permissions(None).unwrap().into_iter().find(|p| p.status == "pending") {
+                        break p;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        };
+        let call = ask(st.clone(), me.clone());
+        let req = pending(&st).await;
+        assert_eq!((req.tool_name.as_str(), req.reason.as_str(), req.input["group"].as_str()), (GROUP_RULE, "QA joins the Home team.", Some("Home")));
+        crate::agents::decide(&st, &req.id, "deny", None, Some("not now".into()), None).unwrap();
+        assert_eq!(call.await.unwrap().unwrap_err(), "The user declined. Their note: not now");
+        assert_eq!(group_of(&st, "QA").0, "");
+        // Approved, it moves.
+        let call = ask(st.clone(), me.clone());
+        let req = pending(&st).await;
+        crate::agents::decide(&st, &req.id, "allow", None, None, None).unwrap();
+        assert_eq!(call.await.unwrap().unwrap(), "Put QA in the group Home (a new group).");
+        assert_eq!(group_of(&st, "QA").0, "Home");
+    }
+
+    #[test]
+    fn lofty_puts_every_agent_it_creates_in_a_group() {
+        assert!(LOFT_PROMPT.contains("472 commits/30d) · group Homebase\n"));
+        assert!(LOFT_PROMPT.contains("create the agents with `mcp__loft__create_agent`, passing each one's `group` from the plan."));
+        assert!(LOFT_PROMPT.contains("Propose one group per team: the group the project's agents already have, or a short name from the project's"));
+        assert!(LOFT_PROMPT.contains("set up the team for a group, create the agents they approve in that group."));
+        assert!(LOFT_PROMPT.contains("call `mcp__loft__set_group` once the user agrees"));
+        assert!(mcp_tools().iter().any(|t| t["name"] == "set_group"));
+    }
+
+    #[test]
+    fn an_existing_lofty_learns_about_groups_once() {
+        let st = state();
+        st.rt.lock().unwrap().running.insert(LOFT_ID.into(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        ensure_loft(&st);
+        let now = st.db.get_agent(LOFT_ID).unwrap().unwrap().prompt;
+        // As saved before groups: the old lines back in place of the new ones.
+        let before = OLD_LINES.iter().skip(3).fold(now.clone(), |p, (old, new)| p.replace(new, old));
+        assert!(!before.contains("set_group") && !before.contains("group Homebase"));
+        st.db.update_agent(LOFT_ID, |a| a.prompt = before.clone()).unwrap();
+        ensure_loft(&st);
+        assert_eq!(st.db.get_agent(LOFT_ID).unwrap().unwrap().prompt, now);
+        // And never again.
+        ensure_loft(&st);
+        assert_eq!(st.db.get_agent(LOFT_ID).unwrap().unwrap().prompt, now);
+        for (old, new) in OLD_LINES {
+            assert!(!new.contains(old), "{old}");
+        }
     }
 }

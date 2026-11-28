@@ -12,6 +12,8 @@ use crate::repos::RepoCache;
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    /// This client's stream lagged and dropped events: it reloads its lists.
+    Resync,
     AgentUpdated { agent: serde_json::Value },
     AgentDeleted { agent_id: String },
     Message { message: serde_json::Value },
@@ -38,10 +40,15 @@ pub enum Event {
 pub struct Decision {
     pub allow: bool,
     pub message: Option<String>,
+    /// The tool's input as the user completed it: `AskUserQuestion` with their `answers`.
+    pub input: Option<serde_json::Value>,
 }
 
 pub struct Config {
     pub port: u16,
+    /// Loft's checkout: its `herdr/` and `ios/` sources, and `.loft/` with the database. Never the workspaces' parent.
+    pub root: PathBuf,
+    /// The agents' workspaces, outside any repo (storage.rs).
     pub storage_dir: PathBuf,
     /// `xcrun`, which runs `simctl` (simulator.rs). Tests point it at a fake.
     pub xcrun: PathBuf,
@@ -79,6 +86,12 @@ pub struct RunInfo {
     pub for_user: bool,
     /// Tool calls (ids) whose result hasn't come back yet.
     pub tools_open: Vec<String>,
+    /// Send now: the way into the run's claude (message id, prompt) while its stdin is open and takes the user's
+    /// queued messages. None once Loft closed it, and in runs that take no input (quiet or throwaway ones).
+    pub send_now: Option<tokio::sync::mpsc::UnboundedSender<(i64, String)>>,
+    /// The user's messages sent now that claude hasn't taken yet (no replay of them): if the run ends first,
+    /// they go back to the queue.
+    pub sent: Vec<(i64, String)>,
 }
 
 /// A running subagent, as clients show it above the composer.
@@ -105,15 +118,24 @@ pub struct Subagent {
 pub struct Runtime {
     /// agent id -> kill switch for the currently running claude process
     pub running: HashMap<String, Arc<Notify>>,
+    /// `repo#spec` -> when Loft last read the Actions minutes of that Delivery's branch
+    pub actions_read: HashMap<String, std::time::Instant>,
+    /// GitHub repo, or `org:<owner>` for an org's billing -> when Loft last read its Actions minutes this month
+    pub actions_month_read: HashMap<String, std::time::Instant>,
     /// agent id -> user messages that arrived while a run was in progress
     pub queued: HashMap<String, Vec<String>>,
-    /// agent id -> the agent messages (their ids in its chat) waiting in `queued` for the current run to end
-    pub queued_messages: HashMap<String, Vec<i64>>,
+    /// agent id -> the agent messages (their ids in its chat, with the prompt each added to `queued`) waiting
+    /// for the current run to end
+    pub queued_messages: HashMap<String, Vec<(i64, String)>>,
     /// agents whose queued work includes the user's own message or a schedule: the run it starts counts
     /// for an Unread reply
     pub queued_for_user: std::collections::HashSet<String>,
     /// agent id -> grill prompts waiting for the current run; run quietly after user work
     pub grill_queued: HashMap<String, Vec<String>>,
+    /// agents whose Redraw waits for the current run; it runs after the rest of the queue
+    pub redraw_queued: std::collections::HashSet<String>,
+    /// agents whose current run is a Redraw, so another click doesn't queue a second drawing run
+    pub redrawing: std::collections::HashSet<String>,
     /// agent id -> wake-up for a run that has replied but waits on a Claude Code background task;
     /// new work stops the task so the queue isn't held up behind it
     pub waiting: HashMap<String, Arc<Notify>>,
@@ -136,6 +158,9 @@ pub struct Runtime {
     pub push_off_since: Option<String>,
     /// The disk is almost full: Needs you shows `disk_low`, until free space is back over LOW_DISK + LOW_DISK_MARGIN
     pub disk_low: bool,
+    /// Why the agents' workspaces didn't move out of the checkout on start (storage.rs): Needs you shows
+    /// `workspaces_not_moved` with it
+    pub workspaces_not_moved: Option<String>,
     /// agent id -> who restarted its run ("user" or "Loft"); the stop notice says so
     pub restarting: HashMap<String, &'static str>,
     /// agent id -> automatic restarts in a row with no output since (agents::restart_quiet)
@@ -150,6 +175,9 @@ pub struct Runtime {
     pub backup: crate::backup::Status,
     /// The running or last clean of agents' build output: its log (sweep.rs)
     pub clean: crate::sweep::Log,
+    /// agent id -> its permission asks still waiting on the user, and its status text from before the first
+    /// (agents::ask_permission_for), so overlapping asks restore it once the last is answered
+    pub asks: HashMap<String, (usize, String)>,
     /// permission request id -> waiter blocked inside an MCP call
     pub waiters: HashMap<String, oneshot::Sender<Decision>>,
 }
