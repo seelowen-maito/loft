@@ -1,5 +1,5 @@
 //! `/loop <interval> <prompt>`: Loft sends the prompt to the agent every interval until it's stopped.
-//! The loop lives on the agent, so it survives a restart. Quiet hours delay it, and while the agent is still busy
+//! The loop lives on the agent, so it survives a restart. Outside its working hours it waits, and while the agent is still busy
 //! with the last run nothing is queued.
 use axum::extract::{Path, State};
 use axum::Json;
@@ -35,7 +35,7 @@ pub fn parse_interval(s: &str) -> Option<i64> {
     (1..=30 * 24 * 60).contains(&minutes).then_some(minutes)
 }
 
-/// An interval from `now`, pushed past quiet hours.
+/// An interval from `now`, pushed into working hours.
 fn next_at(a: &Agent, minutes: i64, now: DateTime<Utc>) -> String {
     let t = (now + chrono::Duration::minutes(minutes)).with_timezone(&Local);
     schedule::next_wake(&a.quiet_hours, t).with_timezone(&Utc).to_rfc3339()
@@ -62,7 +62,7 @@ pub fn tick(state: &AppState, now: DateTime<Utc>) -> usize {
         if !due.is_ok_and(|t| t <= now) {
             continue;
         }
-        // Came due inside quiet hours (they changed, or the Mac slept): wait them out.
+        // Came due outside working hours (they changed, or the Mac slept): wait for them.
         if let Some(until) = schedule::quiet_until(&a.quiet_hours, now.with_timezone(&Local)) {
             set_next(state, &a.id, until.with_timezone(&Utc).to_rfc3339());
             continue;
@@ -189,13 +189,13 @@ mod tests {
     }
 
     #[test]
-    fn quiet_hours_delay_it() {
+    fn outside_working_hours_delays_it() {
         let st = crate::tasks::tests::state();
         let a = crate::tasks::tests::agent(&st, "Worker");
-        let quiet = vec![QuietWindow { days: vec![0], start: "09:00".into(), end: "17:00".into() }];
+        let working = vec![QuietWindow { days: vec![0], start: "17:00".into(), end: "23:00".into() }];
         let t0 = at(10, 0);
         st.db.update_agent(&a.id, |x| {
-            x.quiet_hours = quiet;
+            x.quiet_hours = working;
             x.repeat = loop_of(x, 10, t0);
         })
         .unwrap();
@@ -216,10 +216,10 @@ mod tests {
     }
 
     #[test]
-    fn a_new_loop_is_pushed_past_quiet_hours() {
+    fn a_new_loop_is_pushed_to_working_hours() {
         let st = crate::tasks::tests::state();
         let mut a = crate::tasks::tests::agent(&st, "Worker");
-        a.quiet_hours = vec![QuietWindow { days: vec![0], start: "09:00".into(), end: "17:00".into() }];
+        a.quiet_hours = vec![QuietWindow { days: vec![0], start: "17:00".into(), end: "23:00".into() }];
         assert_eq!(next_at(&a, 30, at(8, 45)), at(17, 0).to_rfc3339());
         assert_eq!(next_at(&a, 30, at(18, 0)), at(18, 30).to_rfc3339());
     }

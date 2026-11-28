@@ -3,7 +3,7 @@ import Foundation
 /// The chat header's lines and the agents list's context size, as the web tells them (frontend lib/format.ts,
 /// lib/context.ts, pages/agents/Chat.tsx).
 public enum AgentHeader {
-    /// "every 30m · custom · next in 12m": the interval (custom when quiet hours shape it), then the next wake-up,
+    /// "every 30m · custom · next in 12m": the interval (custom when working hours shape it), then the next wake-up,
     /// "next: any moment" when it's under 45 s away or overdue (the web's `nextRunText`). "manual" with no interval.
     public static func schedule(_ a: Agent, now: Date = Date()) -> String {
         let minutes = a.intervalMinutes ?? 0
@@ -15,10 +15,12 @@ public enum AgentHeader {
         return s
     }
 
-    /// "Paused Mon–Fri 22:00–07:00": when its quiet hours keep it asleep; nil without any.
+    /// "Works Mon–Fri 22:00–07:00": its working hours, when it may wake up on its own ("Never wakes on its own" when no window has a day); nil without any.
     public static func quietHours(_ a: Agent) -> String? {
         guard (a.intervalMinutes ?? 0) > 0, let q = a.quietHours, !q.isEmpty else { return nil }
-        return "Paused " + q.map { "\(days($0.days)) \($0.start == $0.end ? "all day" : "\($0.start)–\($0.end)")" }.joined(separator: "; ")
+        let working = q.filter { !$0.days.isEmpty }
+        if working.isEmpty { return "Never wakes on its own" }
+        return "Works " + working.map { "\(days($0.days)) \($0.start == $0.end ? "all day" : "\($0.start)–\($0.end)")" }.joined(separator: "; ")
     }
 
     /// Whether it has a Session: one to compact or clear. Older servers don't send the id; a known size still means one.

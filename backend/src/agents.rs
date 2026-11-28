@@ -577,7 +577,7 @@ pub fn system_prompt(state: &AppState, a: &Agent) -> String {
         let mut s = format!("You are woken up autonomously every {} minutes.", a.interval_minutes);
         if !a.quiet_hours.is_empty() {
             s += &format!(
-                " Wake-ups pause during the user's quiet hours ({}, local time) so background work doesn't use their Claude usage while they're working; the user can still message you then.",
+                " You only wake up on your own during your working hours ({}, local time); outside them you wait, then catch up. The user can still message you any time.",
                 schedule::describe(&a.quiet_hours)
             );
         }
@@ -2453,7 +2453,7 @@ pub async fn scheduler(state: AppState) {
                 }
                 continue;
             }
-            // The next wake-up, pushed past quiet hours.
+            // The next wake-up, pushed into working hours.
             let next = schedule::next_wake(&a.quiet_hours, (now + chrono::Duration::minutes(a.interval_minutes)).with_timezone(&Local))
                 .with_timezone(&Utc)
                 .to_rfc3339();
@@ -2469,7 +2469,7 @@ pub async fn scheduler(state: AppState) {
                     }
                 }
                 Some(t) if t <= now => {
-                    // Came due inside quiet hours (they changed, or the Mac slept): wait them out.
+                    // Came due outside working hours (they changed, or the Mac slept): wait for them.
                     if let Some(until) = schedule::quiet_until(&a.quiet_hours, now.with_timezone(&Local)) {
                         let until = until.with_timezone(&Utc).to_rfc3339();
                         if let Ok(Some(a)) = state.db.update_agent(&a.id, |a| a.next_run_at = Some(until)) {

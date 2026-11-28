@@ -546,7 +546,7 @@ export function Chat({
             {/* The schedule and run time are details: on a phone the context size gets the room, to warn. */}
             <span
               className="flex shrink-0 items-center gap-1 font-mono text-[11px] text-fg-3 max-md:hidden"
-              title={agent.interval_minutes && agent.quiet_hours?.length ? `Paused ${fmtQuiet(agent.quiet_hours)}` : undefined}
+              title={agent.interval_minutes && agent.quiet_hours?.length ? fmtQuiet(agent.quiet_hours) : undefined}
             >
               <Clock className="size-3" /> {fmtSchedule(agent)}
               {agent.next_run_at && agent.interval_minutes > 0 && <> · {nextRunText(agent.next_run_at)}</>}
