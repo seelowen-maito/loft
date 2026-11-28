@@ -60,11 +60,12 @@ struct GrillRoundCard: View {
         .accessibilityIdentifier(open == nil ? "grillRound" : "grillOpenRound")
     }
 
-    /// "2 of 3 answered", Send round, and Pause · Summary so far · End; Resume while paused.
+    /// "Anything else?" (the Round note), "2 of 3 answered", Send round, and Pause · Summary so far · End; Resume while paused.
     private func footer(_ s: GrillSession, _ qs: [GrillQuestion]) -> some View {
         let answered = qs.filter { $0.state != .open }.count
         return VStack(alignment: .leading, spacing: 8) {
             Divider()
+            RoundNoteField(agentId: agent.id, command: command)
             Text("\(answered) of \(qs.count) answered\(answered < qs.count ? ". Unanswered ones come back next round." : "")")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -312,6 +313,54 @@ struct GrillQuestionCard: View {
             do { try await f() } catch { self.error = APIError.from(error) }
             busy = false
         }
+    }
+}
+
+/// "Anything else?": the open round's Round note, for ideas or questions its questions don't cover. It goes with the round
+/// on Send round, wherever that is pressed (the round, the full screen, the voice), and the agent asks about it next round.
+/// After the last question the voice asks for it too: the field shows that, with Back to the last question.
+struct RoundNoteField: View {
+    @Environment(LoftStore.self) private var store
+    let agentId: String
+    let command: (GrillCommand) -> Void
+
+    var body: some View {
+        let asked = store.grillAsksNote(for: agentId)
+        VStack(alignment: .leading, spacing: 6) {
+            Label(asked ? "Anything else? · answer by voice or below" : "Anything else?", systemImage: asked ? "waveform" : "text.bubble")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(asked ? Theme.accent : Color.secondary)
+            Text("Ideas or questions this round doesn't cover: the agent asks about them next round.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("Optional: goes with the round when you send it", text: Binding(
+                get: { store.grillNote(for: agentId) },
+                set: { store.setGrillNote($0, agentId: agentId) }
+            ), axis: .vertical)
+                .lineLimit(1...5)
+                .textFieldStyle(.roundedBorder)
+                .disabled(!store.canWrite)
+                .accessibilityLabel("Round note: anything else?")
+                .accessibilityIdentifier("grillNote")
+            if asked {
+                Button { command(.back) } label: {
+                    Label("Back", systemImage: "backward").padding(.horizontal, 10).frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .font(.footnote.weight(.semibold))
+                .accessibilityHint("Goes back to the round's last question")
+                .accessibilityIdentifier("grillNoteBack")
+            }
+        }
+        .padding(asked ? 10 : 0)
+        .background(asked ? Theme.background.opacity(0.6) : .clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.accent.opacity(asked ? 0.6 : 0), lineWidth: 1.5)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(asked ? "grillNoteAsked" : "grillNoteField")
     }
 }
 

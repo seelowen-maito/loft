@@ -20,6 +20,8 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
     private var grillState: GrillSession?
     /// Commands the app sent, for UI tests to check.
     public private(set) var grillCommandsSent: [GrillCommand] = []
+    /// The Round note each sent round carried (nil: none), for tests to check.
+    public private(set) var grillNotesSent: [String?] = []
     /// The next grill command fails with this, as when the network drops (tests).
     public var failNextGrillCommand: APIError?
     /// Team setup messages the server sent to `loft`, for tests to check it happens once.
@@ -361,12 +363,14 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
 
     /// The round was sent: the answers go in the chat and the next round follows at once, with what was
     /// left open carried first (lock held). Without `next`, the agent is still working on it.
-    private func sendGrillRound(next postNext: Bool = true) {
+    private func sendGrillRound(next postNext: Bool = true, note: String? = nil) {
         guard var s = grillState, let qs = s.questions, let n = s.round else { return }
         let lines = qs.enumerated().map { i, q in
             "\(i + 1). " + (q.accepted ? "Yes (\(q.recommendation))" : q.state == .open ? "(no answer)" : (q.answer ?? ""))
         }
-        grillMessage("Answers to round \(n):\n\n" + lines.joined(separator: "\n"), GrillMeta(sessionId: s.sessionId, role: .answers, round: n), role: "user")
+        // The Round note closes the echo, as the server writes it.
+        let anythingElse = note.map { "\n\nAnything else? \($0)" } ?? ""
+        grillMessage("Answers to round \(n):\n\n" + lines.joined(separator: "\n") + anythingElse, GrillMeta(sessionId: s.sessionId, role: .answers, round: n), role: "user")
         guard postNext else {
             s.questions = qs.map { var q = $0; if q.state == .open { q.state = .carried }; return q }
             s.waiting = true
@@ -650,7 +654,7 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
         return locked { agentId == "orch" ? grillState : nil }
     }
 
-    public func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, clientId: String) async throws -> GrillSession? {
+    public func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, note: String?, clientId: String) async throws -> GrillSession? {
         try check()
         guard grill else { throw APIError.server(status: 404, message: "Not Found") }
         return try locked { () -> GrillSession? in
@@ -664,7 +668,8 @@ public final class FixtureAPI: LoftAPI, @unchecked Sendable {
             if [.send, .decide].contains(command), s.waiting == true { throw APIError.server(status: 409, message: "round_closed") }
             switch command {
             case .send:
-                sendGrillRound(); s = grillState!
+                grillNotesSent.append(note)
+                sendGrillRound(note: note); s = grillState!
             case .decide:
                 guard var qs = s.questions, let i = qs.firstIndex(where: { $0.id == questionId }) else { break }
                 qs[i].state = .decided

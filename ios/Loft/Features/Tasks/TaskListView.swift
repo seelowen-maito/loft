@@ -80,7 +80,8 @@ struct TaskListView: View {
                            message: "This server doesn't have the issues API yet. Pull the latest Loft on your Mac and restart it.")
             } else {
                 if mode == .specs {
-                    SpecsView(specs: store.tasks.filter { SpecViews.isSpec($0) && inScope($0) }, showDropped: showDropped,
+                    // The specs, and the standalone tickets whose Delivery started, which move through the same stages.
+                    SpecsView(specs: store.tasks.filter { SpecViews.onStages($0, store.deliverySummaries) && inScope($0) }, showDropped: showDropped,
                               clearFilters: hasFilters ? clearFilters : nil) {
                         modePicker
                     }

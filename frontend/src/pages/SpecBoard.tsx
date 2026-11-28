@@ -12,7 +12,8 @@ import { GithubUser } from "../components/GithubUser";
 import { STAGES, arrange, deliveryOf, parseBoard, specOfAgent, stageOf, ticketState, ticketsOf, withBoard, DROPPED, specMeta, type BoardOptions, type BoardType, type BoardTicket, type DeliverySummary, type SortKey, type Stage } from "../lib/specViews";
 import { Badge, Bar, STAGE_TONE, TONE_BG, TONE_TEXT, Who, progressOf, type Ctx } from "./SpecViews";
 
-/* The Issues page: an Issues column (issues that are no spec and no spec's ticket), then spec cards in stage columns, each with its tickets inline (expandable).
+/* The Issues page: an Issues column (issues that are no spec and no spec's ticket), then spec cards in stage columns, each with its tickets inline (expandable),
+ * and the cards of standalone tickets whose Delivery started, with no tickets of their own.
  * The filters and options sit in a bar on top and live in the URL. */
 
 type View = Ctx & { specs: Task[]; issues: Task[]; loaded: boolean; o: BoardOptions; openSpec: (id: string) => void; openTicket: (id: string) => void };
@@ -90,7 +91,7 @@ function SpecHead({ s, v, children }: { s: Task; v: View; children?: React.React
       <div className="flex flex-wrap items-start gap-x-2 gap-y-1"><span className={cx("min-w-[9rem] flex-1 leading-snug", v.o.dense ? "truncate text-[12.5px]" : "text-[13px]")}>{s.title}</span><Badge stage={stage} d={d} /></div>
       {p && <Bar {...p} stage={stage} />}
       {!v.o.dense && <Who d={d} agentById={v.agentById} />}
-      <div className="flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-fg-3"><span title="Where this spec lives">{m.ref}</span>{m.project && <span title="Project">{m.project}</span>}{d?.pr && <span className="inline-flex items-center gap-1"><GitPullRequest className="size-3" />#{d.pr}</span>}{s.owner && <span className="ml-auto text-fg-2"><GithubUser login={s.owner} bare /></span>}</div>
+      <div className="flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-fg-3">{d?.standalone && <span className="inline-flex items-center gap-1" title="A standalone ticket: no spec"><CircleDot className="size-3" />ticket</span>}<span title={d?.standalone ? "Where this ticket lives" : "Where this spec lives"}>{m.ref}</span>{m.project && <span title="Project">{m.project}</span>}{d?.pr && <span className="inline-flex items-center gap-1"><GitPullRequest className="size-3" />#{d.pr}</span>}{s.owner && <span className="ml-auto text-fg-2"><GithubUser login={s.owner} bare /></span>}</div>
       {children}
     </button>
   );
