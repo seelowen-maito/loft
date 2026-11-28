@@ -8,6 +8,7 @@ mod commands;
 mod db;
 mod delivery;
 mod file_search;
+mod folders;
 mod devices;
 mod git_check;
 mod github;
@@ -93,6 +94,7 @@ fn api_routes() -> Router<AppState> {
         .route("/system/mac-access", post(mac_access::check))
         .route("/system/https", get(tailnet::https))
         .route("/settings", get(api::get_settings).put(api::put_settings))
+        .route("/folders/suggest", get(folders::suggest_route))
         .route("/backups", get(backup::get).post(backup::now))
         .route("/restart", post(api::restart))
         .route("/events", get(api::events))
@@ -105,6 +107,7 @@ fn api_routes() -> Router<AppState> {
         .route("/project-settings/reviewer", post(project_settings::create_reviewer))
         .route("/project-settings/apply-team", post(project_settings::apply_team))
         .route("/agents", get(api::list_agents).post(api::create_agent))
+        .route("/agent-templates", get(setup::templates_route))
         .route("/agents/summary", get(api::agents_summary))
         .route("/agents/order", put(api::reorder_agents))
         .route("/agents/{id}", get(api::get_agent).patch(api::update_agent).delete(api::delete_agent))

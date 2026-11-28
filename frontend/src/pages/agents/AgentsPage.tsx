@@ -359,7 +359,6 @@ export default function AgentsPage() {
         <NewAgentDialog
           groups={teams}
           projects={projects}
-          agents={agents ?? []}
           onClose={() => setCreating(false)}
           onCreated={(a) => {
             setCreating(false);

@@ -7,6 +7,7 @@ import { exactDollars } from "../lib/usage";
 import { useServerEvents, type ServerEvent } from "../lib/events";
 import { PushSettings } from "./PushSettings";
 import { MacAccess } from "./MacAccess";
+import { FolderField } from "./FolderField";
 import { HttpsAccess } from "./HttpsAccess";
 import { VoiceOnThisMac } from "./VoiceOnThisMac";
 import { SettingsCard } from "../components/SettingsCard";
@@ -722,8 +723,8 @@ export default function SettingsPage() {
         )}
 
         <SettingsCard id="general" title="General">
-          <Field label="Projects folder" hint="Where your git repos live." restart>
-            {(id) => <input id={id} className="input font-mono" value={draft.projects_dir} onChange={(e) => set("projects_dir", e.target.value)} />}
+          <Field label="Projects folder" hint="Where your git repos live. Type a path or a folder's name to see suggestions." restart>
+            {(id) => <FolderField id={id} value={draft.projects_dir} onChange={(v) => set("projects_dir", v)} />}
           </Field>
           <Field label="Claude command" hint="What agents run.">
             {(id) => <input id={id} className="input font-mono" value={draft.claude_bin} onChange={(e) => set("claude_bin", e.target.value)} />}

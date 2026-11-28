@@ -5,6 +5,8 @@
 //!   isn't set up) are marked as seen, not pushed.
 //! - Per device: only the kinds it chose, never inside its quiet hours.
 //! - At most `LIMIT` pushes per device per `WINDOW`; the rest become one "N more things need you".
+//!   Items go in the Needs you order (most urgent first, then newest first), so the limit is spent on the
+//!   most urgent; within one urgency a tick's fresh items arrived seconds apart, so the newest go first.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -466,16 +468,17 @@ mod tests {
         assert_eq!(sent.len(), 6, "{sent:?}");
         assert!(relayed_to(&picky).is_empty() && relayed_to(&asleep).is_empty(), "kinds and quiet hours still apply");
         assert!(got(&seen, &phone).is_empty(), "nothing went straight to Apple");
-        let (auth, body) = &sent[0];
-        assert_eq!(*auth, format!("Bearer {}", crate::apns::tests::RELAY_KEY));
-        // Whichever item went first (the list is newest first): its payload is the one a key would send.
-        let item = collect(&st).unwrap().iter().map(to_push).find(|i| json!(i.id) == body["payload"]["needs_you_id"]).unwrap();
-        assert!(item.id.contains("relayed-"), "{}", item.id);
-        assert_eq!(body["payload"], item_push(&item, 7).payload(), "the payload is the one Apple would get");
-        assert_eq!((&body["environment"], &body["bundle_id"], &body["priority"]), (&json!("production"), &json!("com.example.loft"), &json!(10)), "a permission is time-sensitive");
-        assert_eq!(body["collapse_id"], json!(item.id));
+        // The five go in the Needs you order (most urgent, then newest first), as with a key.
+        let items: Vec<_> = collect(&st).unwrap().iter().map(to_push).collect();
+        let ids: Vec<Value> = sent[..5].iter().map(|(_, b)| b["collapse_id"].clone()).collect();
+        assert_eq!(ids, items[..5].iter().map(|i| json!(i.id)).collect::<Vec<_>>());
+        for ((auth, body), item) in sent.iter().zip(&items[..5]) {
+            assert_eq!(*auth, format!("Bearer {}", crate::apns::tests::RELAY_KEY));
+            assert_eq!(body["payload"], item_push(item, 7).payload(), "the payload is the one Apple would get");
+            assert_eq!((&body["environment"], &body["bundle_id"], &body["priority"]), (&json!("production"), &json!("com.example.loft"), &json!(10)), "a permission is time-sensitive");
+            assert!(!body.to_string().contains("ghp_"), "names and titles only, as before");
+        }
         assert_eq!(sent[5].1["payload"]["type"], json!("summary"));
-        assert!(!body.to_string().contains("ghp_"), "names and titles only, as before");
     }
 
     #[tokio::test]

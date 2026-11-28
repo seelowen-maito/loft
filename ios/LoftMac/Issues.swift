@@ -2,7 +2,7 @@ import LoftKit
 import SwiftUI
 
 /// The Issues section, the web's single board: the Issues column first, then the specs in stage columns, with the
-/// All / Issues / Specs filter on top. A card opens its page; a spec's page has its Delivery and its tickets.
+/// standalone tickets whose Delivery started (they leave the Issues column), and the All / Issues / Specs filter on top. A card opens its page; a spec's page has its Delivery and its tickets.
 struct IssuesSection: View {
     @Environment(LoftStore.self) private var store
     @Environment(MacNav.self) private var nav
@@ -165,7 +165,8 @@ private struct IssueCard: View {
 }
 
 /// A spec's card: its title and Delivery badge, its tickets' progress, who is on which ticket, where it lives and its
-/// spec PR; below, a dot per ticket that opens the ticket list.
+/// spec PR; below, a dot per ticket that opens the ticket list. A standalone ticket's card is a ticket's: no progress
+/// and no ticket dots, its Dev while it runs.
 private struct SpecCard: View {
     @Environment(LoftStore.self) private var store
     let spec: HBTask
@@ -181,7 +182,7 @@ private struct SpecCard: View {
                         HStack(alignment: .firstTextBaseline) {
                             Text(spec.title).lineLimit(3)
                             Spacer(minLength: 4)
-                            if let d { DeliveryBadge(state: d.state) }
+                            if let d { DeliveryBadge(state: SpecViews.waitsForYou(d) ? "needs_human" : d.state) }
                         }
                         if let p = SpecViews.progress(of: spec, d, tasks: store.tasks) { ProgressRow(done: p.done, total: p.total) }
                         if let d {
@@ -189,6 +190,9 @@ private struct SpecCard: View {
                             if let line = SpecViews.waitingOnYouLine(d.waitingOnYou) { Text(line).font(.caption).foregroundStyle(Theme.attentionInk) }
                         }
                         HStack(spacing: 8) {
+                            if d?.isStandalone == true {
+                                Label("ticket", systemImage: "circle.circle").help("A standalone ticket: no spec").accessibilityIdentifier("standaloneTicket")
+                            }
                             Text(SpecViews.ref(spec))
                             if let pr = d?.pr { Label("#\(pr)", systemImage: "arrow.triangle.pull") }
                         }

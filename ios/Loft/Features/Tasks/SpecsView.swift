@@ -1,7 +1,7 @@
 import LoftKit
 import SwiftUI
 
-/// The Issues tab's Specs view: the specs it's given (already filtered), in sections by stage.
+/// The Issues tab's Specs view: the specs it's given (already filtered), with standalone tickets in Delivery, in sections by stage.
 struct SpecsView<Header: View>: View {
     @Environment(LoftStore.self) private var store
     let specs: [HBTask]
@@ -65,9 +65,9 @@ struct SpecRow: View {
         return SpecViews.onIt(d) + [SpecViews.waitingOnYouLine(d.waitingOnYou), SpecViews.waitingLine(d.waitingForLead)].compactMap { $0 }
     }
 
-    /// Truncates in the middle, so its `#n` always shows.
+    /// Truncates in the middle, so its `#n` always shows. A standalone ticket says it's one, since it has no spec.
     private var refText: some View {
-        Text(SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1).truncationMode(.middle)
+        Text((delivery?.isStandalone == true ? "Ticket · " : "") + SpecViews.ref(spec)).font(.caption).foregroundStyle(.secondary).readableLineLimit(1).truncationMode(.middle)
     }
 
     @ViewBuilder private var projectText: some View {

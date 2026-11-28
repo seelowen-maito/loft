@@ -154,6 +154,7 @@ struct ChatView: View {
                 .padding(.horizontal, 12).padding(.top, 8)
                 .accessibilityIdentifier("routeSuggestion")
             }
+            RoundBar(agentId: agent.id)
             Composer(agent: agent, text: $draft, dictated: $draftByVoice, replyingTo: $replyingTo, talk: { talking = true }) { sent in
                 route = nil
                 quickAck = nil
@@ -199,6 +200,7 @@ struct ChatView: View {
         }
         .task(id: agent.id) {
             loaded = false
+            await store.refreshGrill(agent.id)
             do { try await store.loadConversation(agent.id); loadError = nil } catch { loadError = APIError.from(error) }
             loaded = true
         }

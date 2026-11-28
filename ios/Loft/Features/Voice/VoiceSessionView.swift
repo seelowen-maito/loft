@@ -101,6 +101,12 @@ struct VoiceSessionView: View {
                 }
             }
             .accessibilityIdentifier("voiceQuestionCard")
+        } else if store.grillAsksNote(for: agentId) {
+            // After the last question: "Anything else?". What you say next is the Round note; "no" sends the round.
+            RoundNoteField(agentId: agentId) { c in Task { try? await store.sendGrillCommand(c, agentId: agentId) } }
+                .padding(.horizontal, Theme.gutter)
+                .padding(.bottom, 8)
+                .accessibilityIdentifier("voiceNoteCard")
         }
     }
 

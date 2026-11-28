@@ -332,9 +332,9 @@ struct ChatView: View {
                     .id(t)
                 }
                 ComposerView(text: $draft, recipient: agent.name, agentId: agentId, isOrchestrator: store.orchestratorId == agent.id,
-                             commands: currentQuestion == nil ? commands : [],
+                             commands: onRound ? [] : commands,
                              control: $composerControl,
-                             onDictation: currentQuestion == nil ? nil : { heardWhileGrilling($0) },
+                             onDictation: onRound ? { heardWhileGrilling($0) } : nil,
                              holdAutoSend: { grillSuggestion != nil },
                              dictateOnAppear: dictate,
                              startVoice: { Task { await voice.start(agentId: agentId) } },
@@ -342,9 +342,9 @@ struct ChatView: View {
                              tapOpensTalk: grill == nil,
                              onVoiceSent: { continueByVoice() },
                              onVoiceStop: stopByVoice,
-                             attachTask: currentQuestion == nil ? { pickingTask = true } : nil,
-                             videoAgentId: currentQuestion == nil ? agentId : nil, attachments: $attachments) { text, byVoice in
-                    if attachments.isEmpty, let action = CommandQuery.action(for: text, commands: commands), currentQuestion == nil {
+                             attachTask: onRound ? nil : { pickingTask = true },
+                             videoAgentId: onRound ? nil : agentId, attachments: $attachments) { text, byVoice in
+                    if attachments.isEmpty, let action = CommandQuery.action(for: text, commands: commands), !onRound {
                         runCommand(action, text: text)
                     } else if !attachments.isEmpty {
                         // A message with photos or a video is always plain chat.
@@ -479,6 +479,10 @@ struct ChatView: View {
             spokenQuestionId = id
             readAloud(q)
         }
+        .onChange(of: store.grillAsksNote(for: agentId)) { _, asks in
+            // The round's last question is done: "Anything else?" before it goes.
+            if asks { readNotePrompt() } else if grillSuggestion != nil, currentQuestion == nil { grillSuggestion = nil }
+        }
         .onChange(of: grill == nil) { _, closed in
             // However it ended (End, a spoken "end", a timeout, the Orchestrator), the mic goes off and stays off.
             if closed { interviewEnded() }
@@ -526,6 +530,8 @@ extension ChatView {
     }
     fileprivate var currentQuestion: GrillQuestion? { store.currentGrillQuestion(for: agentId) }
     fileprivate var currentQuestionNumber: Int? { currentQuestion.flatMap { grill?.number(of: $0.id) } }
+    /// The voice is on the open round: a question, or "Anything else?" after the last one.
+    fileprivate var onRound: Bool { store.voiceOnRound(agentId) }
 
     /// Reads a question in the chosen voice (its short `speak` text, without links or PR numbers, and its
     /// recommendation), then opens the mic when hands-free is on. With VoiceOver running, VoiceOver announces it instead.
@@ -563,6 +569,39 @@ extension ChatView {
             }
             // Still the same question, and nothing typed meanwhile.
             if handsFree, currentQuestion?.id == q.id, draft.isEmpty { composerControl = .listen }
+        }
+    }
+
+    /// "Anything else?" after the round's last question, then the mic opens when hands-free: what is said next is the
+    /// Round note, and "no" sends the round without one.
+    fileprivate func readNotePrompt() {
+        let text = RoundNote.prompt(language: grill?.language)
+        if UIAccessibility.isVoiceOverRunning {
+            VoiceLog.shared.add("anything else: announced by VoiceOver")
+            UIAccessibility.post(notification: .announcement, argument: text)
+            return
+        }
+        guard grillReadAloud else { return VoiceLog.shared.add("anything else: not read, “Read questions aloud” is off") }
+        guard !voice.readsReplies else { return VoiceLog.shared.add("anything else: left to the Talk screen") }
+        Task {
+            if draft.isEmpty {
+                composerControl = .stopListening
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            speaker.phrases = store.grillPhrases
+            VoiceLog.shared.add("anything else: reading")
+            let ended = await speaker.speak(text, messageId: store.grillRoundMessage(for: agentId)?.id, interruptible: handsFree)
+            switch ended {
+            case .skip:
+                grillCommand(.skip)
+                return
+            case .repeatIt:
+                readNotePrompt()
+                return
+            case .stop, .more, nil:
+                break
+            }
+            if handsFree, store.grillAsksNote(for: agentId), draft.isEmpty { composerControl = .listen }
         }
     }
 
@@ -667,7 +706,7 @@ extension ChatView {
 
     /// "Stop" ends the hands-free chat; during an interview the grill commands handle it instead.
     fileprivate var stopByVoice: (() -> Void)? {
-        guard currentQuestion == nil else { return nil }
+        guard !onRound else { return nil }
         return { [voiceLoop, speaker] in
             voiceLoop?.cancel()
             speaker.stop()
@@ -681,7 +720,9 @@ extension ChatView {
         commandCheck = Task {
             try? await Task.sleep(for: .seconds(1.2))
             guard !Task.isCancelled else { return }
-            let question = currentQuestion.map { $0.speak ?? $0.text } ?? ""
+            // "No" to "Anything else?" is its answer (the round goes without a note), never a command.
+            if store.grillAsksNote(for: agentId), RoundNote.declines(text) { return grillSuggestion = nil }
+            let question = currentQuestion.map { $0.speak ?? $0.text } ?? (store.grillAsksNote(for: agentId) ? RoundNote.prompt(language: grill?.language) : "")
             let m = await GrillUnderstanding.read(text, question: question, phrases: store.grillPhrases,
                                                   model: OnDeviceFeatures.grillLabel)
             // More was said while the model thought: that text gets its own check.
@@ -705,7 +746,7 @@ extension ChatView {
     fileprivate func perform(_ intent: GrillMatcher.Intent) {
         switch intent {
         case .repeatQuestion:
-            if let q = currentQuestion { readAloud(q) }
+            if let q = currentQuestion { readAloud(q) } else if store.grillAsksNote(for: agentId) { readNotePrompt() }
         case .command(let c):
             grillCommand(c)
         }

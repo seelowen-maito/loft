@@ -18,7 +18,8 @@ public protocol LoftAPI: Sendable {
     func uploadURL(agentId: String, file: String) -> URL
     /// The agent's open interview, or nil when there is none (404).
     func grillSession(agentId: String) async throws -> GrillSession?
-    func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, clientId: String) async throws -> GrillSession?
+    /// `note`, with `send`: the Round note that goes with the round.
+    func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, note: String?, clientId: String) async throws -> GrillSession?
     func grillPhrases() async throws -> GrillPhrases
     /// "Set up the team with loft" on the end-of-planning card `messageId`: the server sends its setup message
     /// once and returns the card with `sent_at` (`duplicate` when it was already sent).
@@ -315,9 +316,11 @@ public struct LiveLoftAPI: LoftAPI {
         }
     }
 
-    public func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, clientId: String) async throws -> GrillSession? {
+    public func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, note: String?, clientId: String) async throws -> GrillSession? {
         var body: [String: JSONValue] = ["command": .string(command.rawValue), "client_id": .string(clientId)]
         if let questionId { body["question_id"] = .string(questionId) }
+        // The Round note, with "send": text only from the apps (the web's can carry images too).
+        if let note { body["note"] = ["text": .string(note), "images": .array([])] }
         let data = try await send("POST", "/grill/\(sessionId)/command", body: .object(body))
         return try? Self.decodeGrillSession(data)
     }
@@ -592,7 +595,7 @@ extension LoftAPI {
         try await sendMessage(agentId: agentId, text: text, clientId: clientId)
     }
     public func grillSession(agentId: String) async throws -> GrillSession? { nil }
-    public func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, clientId: String) async throws -> GrillSession? {
+    public func grillCommand(sessionId: String, command: GrillCommand, questionId: String?, note: String?, clientId: String) async throws -> GrillSession? {
         throw APIError.unsupported("Grill mode")
     }
     public func grillPhrases() async throws -> GrillPhrases { throw APIError.unsupported("Grill mode") }

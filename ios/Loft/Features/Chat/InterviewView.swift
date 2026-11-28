@@ -45,10 +45,15 @@ struct InterviewView: View {
                               sessionId: s.sessionId, language: s.language, agent: agent, isCurrent: true,
                               command: command, roundActions: true)
                 .id(q.id)
+            // The Round note goes with the round however it is sent (the card's menu, the voice after the last question).
+            RoundNoteField(agentId: agent.id, command: command)
         } else if let s = session, s.hasOpenRound {
-            // Every question has an answer: the round goes when you send it.
+            // Past the last question ("Anything else?" by voice) or every question has an answer: the round goes when you send it.
             VStack(alignment: .leading, spacing: 12) {
-                Label("All questions answered", systemImage: "checkmark.circle").font(.title3.weight(.semibold))
+                if !store.grillAsksNote(for: agent.id) {
+                    Label("All questions answered", systemImage: "checkmark.circle").font(.title3.weight(.semibold))
+                }
+                RoundNoteField(agentId: agent.id, command: command)
                 Button { command(.send) } label: {
                     Label("Send round", systemImage: "paperplane.fill").frame(minHeight: 32)
                 }

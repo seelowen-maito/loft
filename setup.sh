@@ -57,6 +57,25 @@ spin() {
 show_log() { grep -v '^[[:space:]]*$' "$LOG" | tail -n "${1:-8}" | sed "s/^/    ${D}│${N} /"; }
 # Answers come from stdin (so they can be piped); at EOF the default is used.
 ask() { local a=""; read -r -p "  $1 " a || true; echo "${a:-$2}"; }
+# A folder question: in a terminal, readline edits the line and Tab completes paths.
+ask_path() { local a=""; if [ -t 0 ]; then read -r -e -p "  $1 " a || true; else read -r -p "  $1 " a || true; fi; echo "${a:-$2}"; }
+# An answer that isn't a path is a folder's name: find it in the home folder (scripts/find-folders.sh) and let the
+# user pick. $1 the name, $2 the test a folder must pass, $3 what it must hold. Sets PICKED; fails to ask again.
+. scripts/find-folders.sh
+pick_folder() {
+  local list=() d i=0 a
+  while IFS= read -r d; do list+=("$d"); done < <(find_folders "$1" "$2")
+  if [ ${#list[@]} -eq 0 ]; then warn "no folder named $1 with $3 in it ${D}(searched your home folder, 3 levels deep)${N}"; return 1; fi
+  if [ ${#list[@]} -eq 1 ]; then
+    [[ $(ask "Use ${list[0]/#$HOME/~}? [Y/n]" y) =~ ^[Yy] ]] && { PICKED=${list[0]}; return 0; }
+    return 1
+  fi
+  for d in "${list[@]}"; do i=$((i + 1)); printf '    %s) %s\n' "$i" "${d/#$HOME/~}"; done
+  a=$(ask "Which one? A number, or Enter to type it again:" "")
+  if [[ $a =~ ^[0-9]+$ ]] && [ $((10#$a)) -ge 1 ] && [ $((10#$a)) -le ${#list[@]} ]; then PICKED=${list[10#$a - 1]}; return 0; fi
+  [ -n "$a" ] && warn "no folder $a"
+  return 1
+}
 # A string field from settings.json (flat or nested key, first match).
 setting() { [ -f "$SETTINGS" ] && sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" "$SETTINGS" | head -1; }
 # AXe, which lets the Simulator page tap and type. Same places the backend looks (simulator.rs).
@@ -148,10 +167,10 @@ if [ $restore = 1 ]; then
     list=(); while IFS= read -r l; do [ -n "$l" ] && list+=("$l"); done < <(find_backups ${dirs[@]+"${dirs[@]}"})
     if [ ${#list[@]} -eq 0 ]; then
       ok "no backups found"
-      answer=$(ask "Folder with backups to restore from, or Enter to $skip:" "")
+      answer=$(ask_path "Folder with backups to restore from, or Enter to $skip:" "")
     else
       i=0; for l in "${list[@]}"; do i=$((i + 1)); size=${l##*|}; rest=${l%|*}; date=${rest##*|}; src=${rest%|*}; src=${src%/*}; printf '    %s) %s  %s  %s\n' "$i" "$date" "$size" "${src/#$HOME/~}"; done
-      answer=$(ask "Restore which one? A number, another folder, or Enter to $skip:" "")
+      answer=$(ask_path "Restore which one? A number, another folder, or Enter to $skip:" "")
     fi
     [ -z "$answer" ] && { ok "$skip"; break; }
     if [[ $answer =~ ^[0-9]+$ ]] && [ $((10#$answer)) -ge 1 ] && [ $((10#$answer)) -le ${#list[@]} ]; then
@@ -161,6 +180,7 @@ if [ $restore = 1 ]; then
     else
       answer=${answer/#\~/$HOME}
       if [ -d "$answer" ]; then dirs+=("$answer"); continue; fi
+      if [ -t 0 ] && [[ $answer != */* ]]; then pick_folder "$answer" has_backups "Loft backups" && dirs+=("$PICKED"); continue; fi
       warn "Not a folder: $answer"; [ -t 0 ] || break; continue
     fi
     [ -f .loft/loft.db ] && warn "your current data moves to .loft/before-restore/ (kept, not deleted)"
@@ -194,11 +214,13 @@ if [ -f "$SETTINGS" ]; then
   [ -d "$(setting projects_dir)" ] || warn "that folder isn't on this Mac: change it under Settings → Projects folder"
 else
   while :; do
-    dir=$(ask "Folder with your git repos [~/projects]:" "~/projects")
+    dir=$(ask_path "Folder with your git repos [~/projects]:" "~/projects")
     dir=${dir/#\~/$HOME}; dir=${dir%/}
     if [ -d "$dir" ]; then break; fi
+    if [ -t 0 ] && [[ $dir != */* ]]; then pick_folder "$dir" has_repos "git repos" && { dir=$PICKED; break; }; continue; fi
     warn "Not a folder: $dir"
     [ -t 0 ] || exit 1
+    tip "Type a path (Tab completes it) or just the folder's name to search your home folder for it."
   done
   dir=$(cd "$dir" && pwd)
   mkdir -p .loft

@@ -303,7 +303,8 @@ public struct GrillSession: Codable, Hashable {
 }
 
 /// Reading a round aloud one question at a time: where the voice goes after each answer, skip or "I don't know".
-/// The round is sent after its last question, with any skipped ones carried into the next round.
+/// After its last question the voice asks for the Round note, then the round is sent, with any skipped questions carried
+/// into the next round.
 public enum GrillWalk {
     public enum Step: Equatable {
         case ask(String)
@@ -315,7 +316,7 @@ public enum GrillWalk {
         questions.first { $0.state == .open }?.id
     }
 
-    /// After the question `id`: the next open question after it, else send the round.
+    /// After the question `id`: the next open question after it, else send the round (by voice, once the Round note is asked).
     public static func next(after id: String, in questions: [GrillQuestion]) -> Step {
         guard let i = questions.firstIndex(where: { $0.id == id }) else { return start(questions).map(Step.ask) ?? .send }
         return questions[(i + 1)...].first { $0.state == .open }.map { .ask($0.id) } ?? .send
@@ -326,6 +327,36 @@ public enum GrillWalk {
         guard let i = questions.firstIndex(where: { $0.id == id }), i > 0 else { return nil }
         return questions[i - 1].id
     }
+}
+
+/// The Round note ("Anything else?"): the user's own ideas or questions, beyond the round's questions, that go with
+/// the round when it is sent; the agent asks about them next round. By voice, Loft asks for it after the last question.
+public enum RoundNote {
+    /// What the voice asks after the round's last question, in the session's language.
+    public static func prompt(language: String?) -> String {
+        language?.lowercased().hasPrefix("pt") == true ? "Algo a mais?" : "Anything else?"
+    }
+
+    /// The round a note belongs to: a note written for one round never goes with the next.
+    public static func key(_ s: GrillSession) -> String? {
+        s.round.map { "\(s.sessionId):\($0)" }
+    }
+
+    /// "No" (or "nothing", "não", "só isso") to "Anything else?": the round goes without a note.
+    public static func declines(_ text: String) -> Bool {
+        var words = VoiceText.normalize(text).replacingOccurrences(of: "'", with: "").split(separator: " ").map(String.init)
+        // "No, thanks", "Não, obrigado": the thanks changes nothing ("so" isn't a filler here: "só isso" is a no).
+        while let w = words.last, ["thanks", "thank", "you", "obrigado", "obrigada", "valeu", "please"].contains(w) { words.removeLast() }
+        while let w = words.first, ["um", "uh", "hmm", "hm", "ah", "eh", "well", "ok", "okay", "bom", "entao"].contains(w) { words.removeFirst() }
+        return noPhrases.contains(words.joined(separator: " "))
+    }
+
+    private static let noPhrases: Set<String> = [
+        "no", "nope", "nah", "no no", "nothing", "nothing else", "nothing more", "no nothing", "no nothing else", "thats all",
+        "thats it", "no thats all", "no thats it", "thats all for now", "im good", "all good", "no im good", "send", "send it",
+        "nao", "nao nao", "nada", "nada mais", "nao nada", "nao nada mais", "so isso", "e isso", "e so", "e so isso", "nao so isso",
+        "nao e isso", "nao e so isso", "tudo certo", "pode mandar", "pode enviar", "manda", "envia",
+    ]
 }
 
 /// `GET /api/grill/commands`: the phrases the backend matches, so the phone's matcher uses the same list.

@@ -81,6 +81,11 @@ public final class LoftStore {
     public private(set) var grillSessions: [String: GrillSession] = [:]
     /// The question of the open round the voice is on, by agent id (see `currentGrillQuestion`).
     public private(set) var grillVoiceAt: [String: String] = [:]
+    /// The Round note written for each open round, by `RoundNote.key`: the round's footer, the full screen and the voice
+    /// share it, and it goes with the round when it is sent.
+    public private(set) var grillNotes: [String: String] = [:]
+    /// The round whose Round note the voice is asking for ("Anything else?"), by agent id (see `grillAsksNote`).
+    public private(set) var grillNoteAsked: [String: String] = [:]
     /// The server's command phrases for on-device matching; the last list seen is kept for offline use.
     public private(set) var grillPhrases: GrillPhrases? = {
         UserDefaults.standard.data(forKey: Prefs.grillPhrases).flatMap { try? JSONCoding.decoder.decode(GrillPhrases.self, from: $0) }
@@ -815,9 +820,31 @@ public final class LoftStore {
     /// The question the voice is on in the agent's open round: the one read aloud, which a spoken or typed
     /// answer in the composer goes to. It starts at the first open question and moves on as answers come in.
     public func currentGrillQuestion(for agentId: String) -> GrillQuestion? {
-        guard let s = openGrill(for: agentId), s.hasOpenRound, let qs = s.questions else { return nil }
+        guard let s = openGrill(for: agentId), s.hasOpenRound, let qs = s.questions, !grillAsksNote(for: agentId) else { return nil }
         if let id = grillVoiceAt[agentId], let q = qs.first(where: { $0.id == id }) { return q }
         return GrillWalk.start(qs).flatMap { id in qs.first { $0.id == id } }
+    }
+
+    /// After the round's last question the voice asks "Anything else?": what is said next is the round's Round note.
+    public func grillAsksNote(for agentId: String) -> Bool {
+        guard let s = openGrill(for: agentId), s.hasOpenRound, let key = RoundNote.key(s) else { return false }
+        return grillNoteAsked[agentId] == key
+    }
+
+    /// The voice is on the open round: on one of its questions, or asking for its Round note.
+    public func voiceOnRound(_ agentId: String) -> Bool {
+        currentGrillQuestion(for: agentId) != nil || grillAsksNote(for: agentId)
+    }
+
+    /// The open round's Round note as written so far ("" when none).
+    public func grillNote(for agentId: String) -> String {
+        openGrill(for: agentId).flatMap(RoundNote.key).flatMap { grillNotes[$0] } ?? ""
+    }
+
+    /// Writes the open round's Round note; it goes with the round on Send round, wherever that is pressed.
+    public func setGrillNote(_ text: String, agentId: String) {
+        guard let key = openGrill(for: agentId).flatMap(RoundNote.key) else { return }
+        grillNotes[key] = text.isEmpty ? nil : text
     }
 
     /// The chat message of the session's latest round.
@@ -860,16 +887,32 @@ public final class LoftStore {
     /// Whether what the chat composer sends answers the question the voice is on: only a voice turn does.
     /// Typed text is a chat message even while a round waits, so a side remark is never stored as an answer.
     public func composerAnswers(byVoice: Bool, agentId: String) -> Bool {
-        byVoice && currentGrillQuestion(for: agentId) != nil
+        byVoice && voiceOnRound(agentId)
     }
 
-    /// A spoken answer to the question the voice is on; then on to the next one, and after the last
-    /// the round is sent. If only the send fails, the answer is kept and the error says so.
+    /// A spoken answer to the question the voice is on; then on to the next one, and after the last "Anything else?",
+    /// whose answer sends the round. If only the send fails, the answer is kept and the error says so.
     public func answerCurrentGrill(_ text: String, agentId: String) async throws {
+        if grillAsksNote(for: agentId) { return try await answerGrillNote(text, agentId: agentId) }
         guard let q = currentGrillQuestion(for: agentId) else { return await send(text, to: agentId) }
         try await answerGrill(text, questionId: q.id, agentId: agentId)
         do {
             try await stepGrill(from: q.id, agentId: agentId)
+        } catch {
+            throw APIError.roundNotSent(APIError.from(error).title)
+        }
+    }
+
+    /// What was said to "Anything else?": "no" sends the round as it is (with a note typed on the card, if any); anything
+    /// else is its Round note, after what was typed, and the round goes with it. If the send fails, the note is kept.
+    private func answerGrillNote(_ text: String, agentId: String) async throws {
+        let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !said.isEmpty, !RoundNote.declines(said) {
+            let typed = grillNote(for: agentId).trimmingCharacters(in: .whitespacesAndNewlines)
+            setGrillNote(typed.isEmpty ? said : "\(typed)\n\n\(said)", agentId: agentId)
+        }
+        do {
+            try await sendGrillCommand(.send, agentId: agentId)
         } catch {
             throw APIError.roundNotSent(APIError.from(error).title)
         }
@@ -900,12 +943,27 @@ public final class LoftStore {
         }
     }
 
-    /// Send the round, pause, resume, end, summarize or decide (`questionId`, else the question the voice is on,
-    /// which then moves on like an answer). Skip and back move the voice through the round on the phone.
+    /// Send the round (with its Round note), pause, resume, end, summarize or decide (`questionId`, else the question the
+    /// voice is on, which then moves on like an answer). Skip and back move the voice through the round on the phone;
+    /// on "Anything else?", skip (or "I don't know") sends the round and back returns to its last question.
     public func sendGrillCommand(_ command: GrillCommand, agentId: String, questionId: String? = nil) async throws {
         let api = try requireWrite()
         guard let s = openGrill(for: agentId) else { throw APIError.unsupported("No interview in progress") }
         let current = currentGrillQuestion(for: agentId)
+        if grillAsksNote(for: agentId) {
+            switch command {
+            case .skip:
+                return try await sendGrillCommand(.send, agentId: agentId)
+            case .decide where questionId == nil:
+                return try await sendGrillCommand(.send, agentId: agentId)
+            case .back:
+                grillNoteAsked[agentId] = nil
+                grillVoiceAt[agentId] = s.questions?.last?.id
+                return
+            default:
+                break
+            }
+        }
         switch command {
         case .skip:
             if let q = current { try await stepGrill(from: q.id, agentId: agentId) }
@@ -917,26 +975,35 @@ public final class LoftStore {
             break
         }
         let target = command == .decide ? (questionId ?? current?.id) : nil
+        let key = RoundNote.key(s)
+        let note = command == .send ? key.flatMap { grillNotes[$0] }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 } : nil
         let updated: GrillSession?
         do {
-            updated = try await api.grillCommand(sessionId: s.sessionId, command: command, questionId: target, clientId: UUID().uuidString)
+            updated = try await api.grillCommand(sessionId: s.sessionId, command: command, questionId: target, note: note, clientId: UUID().uuidString)
         } catch {
             throw await grillFailure(error, agentId: agentId)
         }
         if let updated { grillSessions[agentId] = updated }
-        if command == .send { grillVoiceAt[agentId] = nil }
+        if command == .send {
+            grillVoiceAt[agentId] = nil
+            grillNoteAsked[agentId] = nil
+            if let key { grillNotes[key] = nil }
+        }
         if command == .decide, let questionId { moveVoiceOff(questionId, agentId: agentId) }
         // "I don't know" by voice: on to the next question, as after an answer.
         if command == .decide, questionId == nil, let q = current { try await stepGrill(from: q.id, agentId: agentId) }
         await catchUpGrill(agentId)
     }
 
-    /// The voice moves to the next open question after `id`, or sends the round after the last one.
+    /// The voice moves to the next open question after `id`; after the last one it asks "Anything else?", whose answer
+    /// sends the round.
     private func stepGrill(from id: String, agentId: String) async throws {
-        guard let qs = openGrill(for: agentId)?.questions else { return }
+        guard let s = openGrill(for: agentId), let qs = s.questions else { return }
         switch GrillWalk.next(after: id, in: qs) {
         case .ask(let next): grillVoiceAt[agentId] = next
-        case .send: try await sendGrillCommand(.send, agentId: agentId)
+        case .send:
+            grillVoiceAt[agentId] = nil
+            grillNoteAsked[agentId] = RoundNote.key(s)
         }
     }
 

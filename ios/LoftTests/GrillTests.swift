@@ -403,9 +403,14 @@ final class GrillStoreTests: XCTestCase {
         XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q5")
         XCTAssertEqual(api.grillCommandsSent, [.decide], "skip and back stay on the phone")
 
-        // "Yes" to the last question accepts it and sends the round.
+        // "Yes" to the last question accepts it; then "Anything else?", and "no" sends the round without a note.
         try await store.answerCurrentGrill("yes", agentId: "orch")
+        XCTAssertTrue(store.grillAsksNote(for: "orch"))
+        XCTAssertEqual(api.grillCommandsSent, [.decide], "not sent before “Anything else?”")
+        try await store.answerCurrentGrill("No", agentId: "orch")
         XCTAssertEqual(api.grillCommandsSent, [.decide, .send])
+        XCTAssertEqual(api.grillNotesSent, [nil], "“no” sends the round without a note")
+        XCTAssertFalse(store.grillAsksNote(for: "orch"))
         let sent = try XCTUnwrap(store.conversation("orch").last { $0.grill?.role == .answers })
         XCTAssertEqual(sent.grill?.round, 2)
         XCTAssertTrue(sent.content.contains("Yes (No: a 14-day trial instead)"), sent.content)
@@ -469,9 +474,11 @@ final class GrillStoreTests: XCTestCase {
         try await store.answerGrill("Both", questionId: "q3", agentId: "orch")
         try await store.answerGrill("Yes", questionId: "q4", agentId: "orch")
         XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q5")
+        try await store.answerCurrentGrill("yes", agentId: "orch")
+        XCTAssertTrue(store.grillAsksNote(for: "orch"))
         api.failNextGrillCommand = .timeout
         do {
-            try await store.answerCurrentGrill("yes", agentId: "orch")
+            try await store.answerCurrentGrill("Also check refunds", agentId: "orch")
             XCTFail("the send failed")
         } catch {
             let e = APIError.from(error)
@@ -483,10 +490,86 @@ final class GrillStoreTests: XCTestCase {
         XCTAssertTrue(s.hasOpenRound)
         XCTAssertEqual(s.questions?.last?.accepted, true, "the answer was saved")
         XCTAssertNil(store.currentGrillQuestion(for: "orch"))
-        // Send round again: it goes this time.
+        XCTAssertEqual(store.grillNote(for: "orch"), "Also check refunds", "the spoken note was kept")
+        // Send round again: it goes this time, with the note.
         try await store.sendGrillCommand(.send, agentId: "orch")
         XCTAssertEqual(store.openGrill(for: "orch")?.round, 3)
         XCTAssertEqual(api.grillCommandsSent, [.send, .send])
+        XCTAssertEqual(api.grillNotesSent, ["Also check refunds"])
+        store.deactivate()
+    }
+
+    /// The Round note written in the round's footer (or the full screen) goes with Send round: in the chat's echo of the
+    /// answers, and only with that round.
+    func testARoundNoteGoesWithTheRound() async throws {
+        let api = FixtureAPI(grill: true)
+        let store = try await store(api)
+        try await store.loadConversation("orch")
+        XCTAssertEqual(store.grillNote(for: "orch"), "")
+        store.setGrillNote("  What about refunds? See @docs/billing.md  ", agentId: "orch")
+        XCTAssertEqual(store.grillNote(for: "orch"), "  What about refunds? See @docs/billing.md  ", "kept as written while the round is open")
+        try await store.sendGrillCommand(.send, agentId: "orch")
+        XCTAssertEqual(api.grillNotesSent, ["What about refunds? See @docs/billing.md"], "trimmed")
+        let echo = try XCTUnwrap(store.conversation("orch").last { $0.grill?.role == .answers })
+        XCTAssertTrue(echo.content.hasSuffix("Anything else? What about refunds? See @docs/billing.md"), echo.content)
+        XCTAssertEqual(store.openGrill(for: "orch")?.round, 3)
+        XCTAssertEqual(store.grillNote(for: "orch"), "", "the next round starts without a note")
+        XCTAssertTrue(store.grillNotes.isEmpty, "the sent note is cleared")
+
+        // A blank note is none.
+        store.setGrillNote("   ", agentId: "orch")
+        try await store.sendGrillCommand(.send, agentId: "orch")
+        XCTAssertEqual(api.grillNotesSent, ["What about refunds? See @docs/billing.md", nil])
+        store.deactivate()
+    }
+
+    /// By voice, after the round's last question Loft asks "Anything else?": what is said is the Round note and sends the
+    /// round, after a note typed on the card; until then nothing is sent and no question is current.
+    func testTheVoiceAsksAnythingElseAndItsAnswerIsTheNote() async throws {
+        let api = FixtureAPI(grill: true)
+        let store = try await store(api)
+        try await store.loadConversation("orch")
+        try await store.answerCurrentGrill("Monthly only", agentId: "orch")
+        try await store.answerCurrentGrill("yes", agentId: "orch")
+        XCTAssertFalse(store.grillAsksNote(for: "orch"))
+        try await store.answerCurrentGrill("A 14-day trial", agentId: "orch")
+        XCTAssertTrue(store.grillAsksNote(for: "orch"), "after the last question")
+        XCTAssertNil(store.currentGrillQuestion(for: "orch"))
+        XCTAssertTrue(store.voiceOnRound("orch"))
+        XCTAssertTrue(store.composerAnswers(byVoice: true, agentId: "orch"), "a voice turn answers “Anything else?”")
+        XCTAssertFalse(store.composerAnswers(byVoice: false, agentId: "orch"), "typed text is still chat")
+        XCTAssertTrue(api.grillCommandsSent.isEmpty, "nothing sent yet")
+        XCTAssertEqual(store.openGrill(for: "orch")?.questions?.last?.answer, "A 14-day trial", "the last answer was saved")
+
+        store.setGrillNote("Typed on the card.", agentId: "orch")
+        try await store.answerCurrentGrill("What about refunds?", agentId: "orch")
+        XCTAssertEqual(api.grillCommandsSent, [.send])
+        XCTAssertEqual(api.grillNotesSent, ["Typed on the card.\n\nWhat about refunds?"])
+        XCTAssertFalse(store.grillAsksNote(for: "orch"))
+        XCTAssertEqual(store.openGrill(for: "orch")?.round, 3)
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, store.openGrill(for: "orch")?.questions?.first?.id,
+                       "the next round starts at its first question")
+        store.deactivate()
+    }
+
+    /// On "Anything else?": back returns to the last question, skip (or "I don't know") sends the round without a note.
+    func testBackAndSkipOnAnythingElse() async throws {
+        let api = FixtureAPI(grill: true)
+        let store = try await store(api)
+        try await store.sendGrillCommand(.skip, agentId: "orch")
+        try await store.sendGrillCommand(.skip, agentId: "orch")
+        try await store.sendGrillCommand(.skip, agentId: "orch")
+        XCTAssertTrue(store.grillAsksNote(for: "orch"), "skipping the last question asks too")
+        try await store.sendGrillCommand(.back, agentId: "orch")
+        XCTAssertFalse(store.grillAsksNote(for: "orch"))
+        XCTAssertEqual(store.currentGrillQuestion(for: "orch")?.id, "q5", "back to the last question")
+        try await store.sendGrillCommand(.decide, agentId: "orch")
+        XCTAssertTrue(store.grillAsksNote(for: "orch"))
+        XCTAssertEqual(api.grillCommandsSent, [.decide])
+        try await store.sendGrillCommand(.skip, agentId: "orch")
+        XCTAssertEqual(api.grillCommandsSent, [.decide, .send])
+        XCTAssertEqual(api.grillNotesSent, [nil])
+        XCTAssertEqual(store.openGrill(for: "orch")?.round, 3)
         store.deactivate()
     }
 

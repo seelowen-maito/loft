@@ -81,6 +81,10 @@ pub struct Session {
     /// (see Planning: CI mode).
     #[serde(default)]
     pub private_repos: Vec<String>,
+    /// While preparing: when the sweep last saw the agent's run alive (RFC 3339). The preparation deadline counts
+    /// from the later of this and `updated_at`, so it only runs while the agent has no run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_seen_at: Option<String>,
 }
 
 fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Published>, D::Error> {
@@ -125,6 +129,18 @@ pub struct Round {
     /// When the user sent it; None while it waits for answers.
     #[serde(default)]
     pub sent_at: Option<String>,
+    /// The Round note sent with it: the user's own ideas or questions that its questions don't cover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<RoundNote>,
+}
+
+/// A Round note: text, uploads (the agent's `uploads/` folder) or both.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoundNote {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +195,15 @@ fn locked<T>(state: &AppState, agent_id: &str, f: impl FnOnce() -> T) -> T {
 
 pub fn active(state: &AppState, agent_id: &str) -> Option<Session> {
     state.db.active_grill(agent_id).ok()?
+}
+
+/// The agent's newest grill when it expired without a first round less than a day ago: Loft woke the agent to post
+/// that round, and its `grill_round` takes the grill up again.
+fn resumable(state: &AppState, agent_id: &str) -> Option<Session> {
+    let s = state.db.list_grills(agent_id).ok()?.into_iter().next()?;
+    let ended = s.ended_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())?;
+    let recent = chrono::Utc::now().signed_duration_since(ended).num_hours() < END_AFTER_HOURS;
+    (s.status == "ended" && s.end_reason.as_deref() == Some("timeout") && s.rounds.is_empty() && recent).then_some(s)
 }
 
 /// Notes what Loft just published for this agent on its running grill, for the end-of-planning card.
@@ -343,7 +368,7 @@ fn end_card(state: &AppState, me: &Agent, s: &Session) -> Option<Value> {
             .join("; ");
         json!({
             "agent_id": crate::setup::LOFT_ID,
-            "message": format!("Set up the team for the {} group: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve.", me.team(), me.name),
+            "message": format!("Set up the team for the {team} group: it has no {roles} yet. {} just planned {plan}. Propose the agents it needs and create the ones I approve in the {team} group.", me.name, team = me.team()),
         })
     });
     // The first spec sits at the top, as cards always had it; further ones go in `more`.
@@ -422,7 +447,7 @@ fn save(state: &AppState, s: &mut Session) -> Result<(), String> {
 /// en or pt, by counting common words of each.
 fn guess_lang(text: &str) -> &'static str {
     const PT: &[&str] = &["que", "nao", "voce", "uma", "um", "para", "como", "sobre", "do", "da", "os", "as", "e", "esta", "qual", "quem", "me", "de", "o", "com", "isso", "vai"];
-    const EN: &[&str] = &["the", "what", "which", "who", "is", "are", "you", "how", "about", "should", "do", "of", "to", "a", "and", "it", "for", "with", "this", "will"];
+    const EN: &[&str] = &["the", "what", "which", "who", "is", "are", "you", "how", "about", "should", "do", "of", "to", "a", "and", "it", "for", "with", "this", "will", "me", "on"];
     let n = commands::normalize(text);
     let words: Vec<&str> = n.split(' ').collect();
     let pt = words.iter().filter(|w| PT.contains(w)).count();
@@ -478,6 +503,16 @@ fn answer_line(q: &Question) -> String {
     format!("{line}, with images: {}", paths.join(", "))
 }
 
+/// A Round note, as the agent reads it.
+fn note_line(n: &RoundNote) -> String {
+    let line = format!("\"{}\"", n.text);
+    if n.images.is_empty() {
+        return line;
+    }
+    let paths: Vec<String> = n.images.iter().map(|f| format!("uploads/{f}")).collect();
+    format!("{line}, with images: {}", paths.join(", "))
+}
+
 /// The user's answers to a round, posted in chat when it is sent. Plain text: clients show user messages as typed.
 fn answers_text(s: &Session, r: &Round) -> String {
     let mut out = format!("{} {}:\n", say(s, "Answers to round", "Respostas da rodada"), r.index);
@@ -494,6 +529,14 @@ fn answers_text(s: &Session, r: &Round) -> String {
             n => format!("{} [{n} {}]", a.trim_end(), if n == 1 { say(s, "image", "imagem") } else { say(s, "images", "imagens") }),
         };
         out += &format!("\n{}. {}", i + 1, a.trim_start());
+    }
+    if let Some(n) = &r.note {
+        let images = match n.images.len() {
+            0 => String::new(),
+            1 => format!(" [1 {}]", say(s, "image", "imagem")),
+            k => format!(" [{k} {}]", say(s, "images", "imagens")),
+        };
+        out += &format!("\n\n{} {}{images}", say(s, "Anything else?", "Algo a mais?"), n.text.trim());
     }
     out
 }
@@ -569,6 +612,7 @@ fn new_session(agent_id: &str, topic: &str, status: &str) -> Session {
         seen_commands: vec![],
         published: vec![],
         private_repos: vec![],
+        run_seen_at: None,
     }
 }
 
@@ -586,6 +630,12 @@ fn finish_with(state: &AppState, s: &mut Session, reason: &str, extra: Value) ->
     }
     let text = if reason == "superseded" {
         say(s, "Grill ended: a new one was requested", "Entrevista encerrada: uma nova foi pedida")
+    } else if reason == "timeout" && s.rounds.is_empty() {
+        say(
+            s,
+            &format!("Grill expired: no first round in {PREPARING_FOR_MINS} min. The agent was asked to post it and resume"),
+            &format!("Entrevista expirou: sem primeira rodada em {PREPARING_FOR_MINS} min. O agente foi chamado para postá-la e retomar"),
+        )
     } else {
         say(s, "Grill ended", "Entrevista encerrada")
     };
@@ -605,6 +655,9 @@ fn transcript(s: &Session) -> String {
         for q in &r.questions {
             block += &format!("\n- [{}] {}\n  Recommendation: {}\n  Answer: {}", q.id, q.text, q.recommendation, answer_line(q));
         }
+        if let Some(n) = &r.note {
+            block += &format!("\n- Round note (the user's own ideas or questions, beyond this round's questions): {}", note_line(n));
+        }
         out.push(block);
     }
     if out.is_empty() { "(no rounds yet)".into() } else { out.join("\n\n") }
@@ -622,8 +675,13 @@ fn round_prompt(s: &Session, r: &Round, context: Option<u64>) -> String {
         _ => String::new(),
     };
     let ci = if s.private_repos.is_empty() { "" } else { ", and the user's CI mode as `ci_mode` (see Planning: CI mode)" };
+    let note = if r.note.is_some() {
+        format!(" The user also sent a Round note: it answers no question, it opens new branches. Add its ideas and questions to your design tree and ask about them in round {}, as questions with recommendations like the others (look up the facts they need first).", r.index + 1)
+    } else {
+        String::new()
+    };
     format!(
-        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first, then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`{ci}), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
+        "[Grill {} on \"{}\": the user sent round {}]\n\n{}\n\n{compact}Update your design tree with these answers, and record the terms and decisions they resolved in your docs branch (see Planning: docs). Questions left to you are decided: your recommendation stands. For each question the user wants to discuss, answer their comment in the new question's text and ask again, split into smaller questions if that helps.{note} Unanswered questions are carried into the next round unchanged by Loft: don't ask them again (pass their ids in `drop` if one no longer matters). If decisions are still open, look up any facts they need with your sub-agents first (in the foreground, or wait for their reports: a text-only reply ends the run), then post every question whose prerequisites are now settled as round {} with `mcp__loft__grill_round`. When every branch is resolved, with a project repo, the last round asks whether to turn this into a spec and tickets; if the user said yes, write and publish the spec (see Planning: spec; push your docs branch first and pass it as `docs_branch`{ci}), then post the ticket breakdown as a round (\"Publish these N tickets?\") and publish the tickets once the user says yes (see Planning: tickets). Then {DOCS_PR_STEP}finish with `mcp__loft__grill_end` and a summary in the user's language. Don't write a reply: the round or the summary is what the user sees.",
         s.id,
         s.topic,
         r.index,
@@ -687,7 +745,7 @@ fn route_user_message(state: &AppState, agent: &Agent, text: &str, grill: Option
         let which = which_project(agent);
         let ci = ci_mode_note(private, agent.projects.len() > 1);
         let wake = format!(
-            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents, then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}{ci}]"
+            "{text}\n\n[Grill mode: the user wants to be grilled. Follow the grilling discipline in your instructions: read the project's existing documents as facts, look up the other facts you need with your sub-agents (in the foreground, or wait for their reports: a text-only reply ends the run), then call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in.{new_project}{which}{ci}]"
         );
         return Ok(Routed::Handled { message, wake: Some(wake) });
     }
@@ -768,6 +826,18 @@ fn resume_if_paused(state: &AppState, s: &mut Session, extra: Option<Value>) {
     }
 }
 
+/// Holds `note` on the open round, to go with it when it is sent: its images must be the agent's uploads, as an
+/// answer's are. An empty note is none.
+fn set_note(state: &AppState, s: &mut Session, note: Option<&RoundNote>) -> Result<(), ApiError> {
+    let note = note.map(|n| RoundNote { text: clip(&n.text, MAX_ANSWER), images: n.images.clone() }).filter(|n| !n.text.is_empty() || !n.images.is_empty());
+    if let Some(n) = &note {
+        crate::uploads::validate(state, &s.agent_id, &n.images)?;
+    }
+    let r = open_round_mut(s).ok_or_else(|| ApiError(StatusCode::CONFLICT, "round_closed".into()))?;
+    r.note = note;
+    Ok(())
+}
+
 /// Applies a command to the running session and saves it. Returns a prompt to wake the agent with, if any.
 /// `question_id` picks the question for `decide` (default: the first open one).
 fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Option<&str>, tagged_message_id: Option<i64>) -> Result<Option<String>, ApiError> {
@@ -798,7 +868,8 @@ fn apply_command(state: &AppState, s: &mut Session, cmd: &str, question_id: Opti
             add_msg(state, &s.agent_id, None, "user", "text", &text, meta);
             let context = state.db.get_agent(&s.agent_id).ok().flatten().and_then(|a| a.context_tokens);
             // The answers' images reach the agent as chat images do: image blocks after the prompt.
-            let images: Vec<String> = r.questions.iter().filter(|q| matches!(q.state.as_str(), "answered" | "discuss")).flat_map(|q| q.images.clone()).collect();
+            let mut images: Vec<String> = r.questions.iter().filter(|q| matches!(q.state.as_str(), "answered" | "discuss")).flat_map(|q| q.images.clone()).collect();
+            images.extend(r.note.iter().flat_map(|n| n.images.clone()));
             wake = Some(round_prompt(s, &r, context) + &crate::uploads::markers(state, &s.agent_id, &images));
         }
         "decide" => {
@@ -890,10 +961,13 @@ pub struct CommandBody {
     command: String,
     question_id: Option<String>,
     client_id: Option<String>,
+    /// With `send`: the Round note to send with the round.
+    #[serde(default)]
+    note: Option<RoundNote>,
 }
 
 /// `POST /api/grill/{id}/command`: a button or a spoken command (send the round, decide for me, pause,
-/// resume, end, summarize). A retry with the same `client_id` isn't applied twice.
+/// resume, end, summarize). `send` may carry the Round note. A retry with the same `client_id` isn't applied twice.
 pub async fn command(State(state): State<AppState>, Path(id): Path<String>, Json(b): Json<CommandBody>) -> Result<Json<Value>, ApiError> {
     if uuid::Uuid::parse_str(&id).is_err() {
         return Err(not_found());
@@ -910,6 +984,9 @@ pub async fn command(State(state): State<AppState>, Path(id): Path<String>, Json
             return Err(ApiError(StatusCode::CONFLICT, "grill_closed".into()));
         }
         let cmd = commands::COMMANDS.iter().find(|c| **c == b.command).copied().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown command {}", b.command)))?;
+        if cmd == "send" {
+            set_note(&state, &mut s, b.note.as_ref())?;
+        }
         if let Some(c) = client_id {
             s.seen_commands.push(c);
             let n = s.seen_commands.len();
@@ -968,6 +1045,9 @@ fn write_notes(state: &AppState, s: &Session, summary: &str) -> Option<String> {
             };
             out += &format!("\n### {}. {}\n\n{a}\n", i + 1, q.text);
         }
+        if let Some(n) = r.note.as_ref().filter(|n| !n.text.is_empty()) {
+            out += &format!("\n### {}\n\n{}\n", say(s, "Anything else?", "Algo a mais?"), n.text);
+        }
     }
     std::fs::write(dir.join(&name), out).ok()?;
     Some(format!("notes/grill/{name}"))
@@ -976,8 +1056,8 @@ fn write_notes(state: &AppState, s: &Session, summary: &str) -> Option<String> {
 /// No answer for this long pauses a grill; this long paused ends it.
 const PAUSE_AFTER_MINS: i64 = 30;
 const END_AFTER_HOURS: i64 = 24;
-/// A start request the agent never followed up on.
-const PREPARING_FOR_MINS: i64 = 10;
+/// A start request the agent never followed up on: this long without a run (a run held by a goal is one).
+const PREPARING_FOR_MINS: i64 = 20;
 
 /// Applies idle timeouts to every open grill. Returns the agents to wake with a summary request.
 fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, String)> {
@@ -988,11 +1068,33 @@ fn sweep(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, S
         // Read again under the lock: an answer may have just come in.
         let Some(mut s) = state.db.get_grill(&open.id).ok().flatten() else { continue };
         let Ok(at) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) else { continue };
-        let idle = now.signed_duration_since(at);
+        let mut idle = now.signed_duration_since(at);
+        if s.status == "preparing" {
+            // The agent may still be looking up facts for the first round: its run (claude's process, alive while a
+            // goal holds it or background work is pending) stops the clock, which restarts when the run ends.
+            if crate::agents::is_running(state, &s.agent_id) {
+                s.run_seen_at = Some(now.to_rfc3339());
+                let _ = state.db.save_grill(&s);
+                continue;
+            }
+            if let Some(seen) = s.run_seen_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
+                idle = idle.min(now.signed_duration_since(seen));
+            }
+        }
         match s.status.as_str() {
             "preparing" if idle.num_minutes() >= PREPARING_FOR_MINS => {
+                // No round has set the language yet: go by the user's request.
+                s.lang = guess_lang(&s.topic).into();
                 s.summarized = true;
-                let _ = finish(state, &mut s, "timeout");
+                if finish_with(state, &mut s, "timeout", json!({ "reason": "no_first_round" })).is_ok() {
+                    wakes.push((
+                        s.agent_id.clone(),
+                        format!(
+                            "[Grill {} on \"{}\" expired: no first round in {PREPARING_FOR_MINS} minutes]\n\nThe user is still waiting for it. Post the first round now: call `mcp__loft__grill_round` with the topic and the first round (every question whose prerequisites are already settled, each with a recommendation), in the language the user wrote in. It resumes this grill. If you still need facts, look them up with your sub-agents in the foreground, or wait for their reports inside this run: a text-only reply ends the run.",
+                            s.id, s.topic
+                        ),
+                    ));
+                }
             }
             "active" if idle.num_minutes() >= PAUSE_AFTER_MINS => {
                 s.status = "paused".into();
@@ -1085,9 +1187,19 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
         "grill_round" => {
             let mut qs = parse_questions(&args["questions"])?;
             let topic = args["topic"].as_str().unwrap_or("").trim();
+            let mut resumed = false;
             let mut s = match active(state, &me.id) {
                 Some(s) => s,
-                None => new_session(&me.id, topic, "preparing"),
+                None => match resumable(state, &me.id) {
+                    // The grill that expired waiting for this round: open it again, as if it never ended.
+                    Some(mut s) => {
+                        resumed = true;
+                        s.status = "preparing".into();
+                        (s.end_reason, s.ended_at, s.run_seen_at, s.summarized) = (None, None, None, false);
+                        s
+                    }
+                    None => new_session(&me.id, topic, "preparing"),
+                },
             };
             if let Some(r) = open_round(&s) {
                 return Err(format!("Round {} is still waiting for the user's answers; you're woken with them when the user sends it. End your turn with no reply text.", r.index));
@@ -1134,9 +1246,14 @@ pub fn mcp_call(state: &AppState, me: &Agent, name: &str, args: &Value) -> Optio
                 };
                 s.status = "active".into();
                 s.started_at = Some(now());
-                status_row(state, &s, &say(&s, &format!("Grill started: {}", s.topic), &format!("Entrevista iniciada: {}", s.topic)), json!({ "state": "started" }));
+                let row = if resumed {
+                    say(&s, &format!("Grill resumed: {}", s.topic), &format!("Entrevista retomada: {}", s.topic))
+                } else {
+                    say(&s, &format!("Grill started: {}", s.topic), &format!("Entrevista iniciada: {}", s.topic))
+                };
+                status_row(state, &s, &row, json!({ "state": "started", "resumed": resumed }));
             }
-            let r = Round { index: s.rounds.len() as u32 + 1, questions: qs, posted_at: now(), sent_at: None };
+            let r = Round { index: s.rounds.len() as u32 + 1, questions: qs, posted_at: now(), sent_at: None, note: None };
             post_round(state, &s, &r);
             let (n, k) = (r.index, r.questions.len());
             s.rounds.push(r);
@@ -1235,9 +1352,10 @@ The user asked to be grilled on an idea: interview them relentlessly until you s
 - Recommendations: give every question your recommended answer, and word the question so that "yes" accepts it ("Use Postgres for storage?", not "Which database?"). Give every question a `speak` version too: short and plain, no Markdown, links, ids or PR numbers, recommendation included.
 - Start from what's written: before the first round, read the project's existing documents (README, `GLOSSARY.md`, `docs/`, `docs/adr/`, `CLAUDE.md`, notes, earlier specs) and take them as facts. Never ask what they already answer.
 - Facts: never ask the user for a fact you can look up. Before each round, find facts (in the code, the docs, the project's history, the web) with your own sub-agents, several in parallel, inside the run. Don't message other agents on your team for this unless the user says so ("ask Dev").
+- Sub-agents finish inside the run: start them in the foreground (the `Agent` tool without `run_in_background`; several in one message run in parallel), or wait for each one's report before your turn ends. The report is the notification: there is no other to wait for. Don't wait with `sleep`: Claude Code blocks it. A reply with only text ends the run, and nothing wakes you again: while you prepare a round, end your turn only with `mcp__loft__grill_round`.
 - Decisions are the user's: ask for preferences, priorities and trade-offs, grounded in the facts you found.
 - Ask in the language the user used (pass it as `language` in the first round), and write the summary in it too.
-- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered (with a project repo, offer a spec first: see Planning: spec).
+- Loft holds the answers until the user sends the round, then wakes you once with all of them. Update the tree and post the next round. An answer is one of: a decision; "left to you" (your recommendation is the decision); a comment the user wants to discuss (explain what they asked in the next round's question and ask again, split up if it helps); or none. The user may also send a Round note with the round ("Anything else?"): ideas or questions the round didn't cover. It answers nothing; it opens new branches of the tree, which you ask about in the next round. Unanswered questions are carried into the next round unchanged by Loft: don't ask them again. When every branch is resolved, finish with `mcp__loft__grill_end` and a summary: decisions, open questions, what was left unanswered (with a project repo, offer a spec first: see Planning: spec).
 - What the user types in chat while a round is open is ordinary chat, not an answer: reply briefly. The round stays open; don't post another one or repeat its questions.
 - Never mention, list or repeat questions in your own replies: rounds and the summary appear in the chat by themselves. After a grill tool, end your turn with no text.
 - The user can pause, resume, stop or ask for a summary so far; Loft handles that. You only hear about it when you have something to do: a summary so far (`mcp__loft__grill_summary`) or a stopped grill (`mcp__loft__grill_end`).
@@ -1400,7 +1518,7 @@ pub fn with_brief(state: &AppState, agent_id: &str, prompt: String) -> String {
     if !fresh {
         return prompt;
     }
-    let private = active(state, agent_id).map(|s| s.private_repos).unwrap_or_default();
+    let private = active(state, agent_id).or_else(|| resumable(state, agent_id)).map(|s| s.private_repos).unwrap_or_default();
     format!("{}\n\n{prompt}", brief_for(&private, several))
 }
 
@@ -1778,6 +1896,70 @@ pub(crate) mod tests {
         assert!(active(&st, &o.id).unwrap().rounds[0].questions[0].images.is_empty());
     }
 
+    /// `POST /api/grill/{id}/command`, as the Send round buttons call it.
+    async fn command_with(st: &AppState, a: &Agent, body: Value) -> Result<Value, (StatusCode, String)> {
+        let id = active(st, &a.id).unwrap().id;
+        command(axum::extract::State(st.clone()), axum::extract::Path(id), axum::Json(serde_json::from_value(body).unwrap())).await.map(|j| j.0).map_err(|e| (e.0, e.1))
+    }
+
+    #[tokio::test]
+    async fn a_round_note_goes_with_the_round_to_the_chat_the_agent_and_grill_state() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Charge monthly?", "Offer a trial?"]).unwrap();
+        let ids = qids(&st, &o);
+        answer(&st, &o, &ids[0], "yes");
+        // Its images must be this agent's uploads, as an answer's are; a refused note leaves the round open.
+        let other = planner(&st, "Dev");
+        for images in [vec!["../../etc/passwd".to_string()], vec![upload(&st, &other)]] {
+            let e = command_with(&st, &o, json!({ "command": "send", "note": { "text": "x", "images": images } })).await.unwrap_err();
+            assert_eq!(e.0, StatusCode::BAD_REQUEST, "{images:?}");
+        }
+        assert!(open_round(&active(&st, &o.id).unwrap()).is_some());
+
+        let shot = upload(&st, &o);
+        command_with(&st, &o, json!({ "command": "send", "note": { "text": "  What about refunds? See @docs/billing.md  ", "images": [shot] } })).await.unwrap();
+        let s = active(&st, &o.id).unwrap();
+        let note = RoundNote { text: "What about refunds? See @docs/billing.md".into(), images: vec![shot.clone()] };
+        assert_eq!(s.rounds[0].note.as_ref(), Some(&note));
+        // The chat's echo of the round ends with it.
+        let echo = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().find(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert!(echo.content.ends_with("2. (no answer)\n\nAnything else? What about refunds? See @docs/billing.md [1 image]"), "{}", echo.content);
+        // The agent reads it in the transcript, with the image, and is told to ask about it next round.
+        let wake = round_prompt(&s, &s.rounds[0], None);
+        let line = format!("- Round note (the user's own ideas or questions, beyond this round's questions): \"What about refunds? See @docs/billing.md\", with images: uploads/{shot}");
+        assert!(wake.contains(&line) && wake.contains("it opens new branches") && wake.contains("ask about them in round 2"), "{wake}");
+        assert!(BRIEF.contains("Round note") && BRIEF.contains("ask about in the next round"));
+        let state_text = mcp_call(&st, &o, "grill_state", &json!({})).unwrap().unwrap();
+        assert!(state_text.contains(&line), "{state_text}");
+    }
+
+    #[test]
+    fn the_round_note_s_images_reach_the_agent_and_a_round_without_one_is_unchanged() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["Charge monthly?"]).unwrap();
+        let shot = upload(&st, &o);
+        let mut s = active(&st, &o.id).unwrap();
+        set_note(&st, &mut s, Some(&RoundNote { text: String::new(), images: vec![shot.clone()] })).unwrap();
+        let wake = apply_command(&st, &mut s, "send", None, None).unwrap().unwrap();
+        assert!(wake.contains(&format!("\"\", with images: uploads/{shot}")) && wake.contains(&format!("[loft-image:{shot}]")), "{wake}");
+
+        // An empty note is none: the round, its echo, prompt and saved form are as before.
+        round(&st, &o, &["Offer a trial?"]).unwrap();
+        let mut s = active(&st, &o.id).unwrap();
+        set_note(&st, &mut s, Some(&RoundNote { text: "   ".into(), images: vec![] })).unwrap();
+        let wake = apply_command(&st, &mut s, "send", None, None).unwrap().unwrap();
+        let s = active(&st, &o.id).unwrap();
+        assert!(s.rounds[1].note.is_none());
+        // Earlier rounds keep theirs in the transcript; this one adds none, and no instruction about one.
+        assert_eq!(wake.matches("- Round note").count(), 1, "{wake}");
+        assert!(!wake.contains("new branches"), "{wake}");
+        assert!(serde_json::to_value(&s.rounds[1]).unwrap().get("note").is_none());
+        let echo = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().rfind(|m| m.meta["grill"]["role"] == "answers").unwrap();
+        assert_eq!(echo.content, "Answers to round 2:\n\n1. (no answer)\n2. (no answer)");
+    }
+
     #[test]
     fn discuss_answers_reach_the_agent_as_comments_not_decisions() {
         let st = state();
@@ -1957,10 +2139,130 @@ pub(crate) mod tests {
         assert_eq!(wakes.len(), 1);
         assert!(wakes[0].1.contains("grill_end") && wakes[0].1.contains("A?"));
         assert!(active(&st, &o.id).is_none());
-        // A start request nobody followed up on just expires.
+        assert_eq!(rows(&st, &o).last().unwrap(), "Grill ended", "a day without answers ends it as before");
+        // A start request nobody followed up on expires, and the agent is asked for the round.
         on_user_message(&st, &o, "Grill me", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
-        assert!(sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(11)).is_empty());
+        assert_eq!(sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(21)).len(), 1);
         assert!(active(&st, &o.id).is_none());
+    }
+
+    #[test]
+    fn the_other_ends_keep_their_rows() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        round(&st, &o, &["A?"]).unwrap();
+        sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(31));
+        assert_eq!(rows(&st, &o).last().unwrap(), "Paused: no answer for 30 minutes");
+        on_user_message(&st, &o, "Grill me about onboarding", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        assert_eq!(rows(&st, &o).last().unwrap(), "Grill ended: a new one was requested");
+        // Superseded, a grill with rounds never comes back: the next round fills the new request.
+        round(&st, &o, &["B?"]).unwrap();
+        assert_eq!(st.db.list_grills(&o.id).unwrap().iter().filter(|s| s.status == "ended").count(), 1);
+    }
+
+    #[test]
+    fn an_expired_grill_says_why_wakes_the_agent_once_and_its_round_resumes_it() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Me entrevista sobre o board", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        let id = active(&st, &o.id).unwrap().id;
+        let now = chrono::Utc::now();
+        let wakes = sweep(&st, now + chrono::Duration::minutes(20));
+        assert_eq!(rows(&st, &o).last().unwrap(), "Entrevista expirou: sem primeira rodada em 20 min. O agente foi chamado para postá-la e retomar");
+        let row = st.db.list_messages(&o.id, 50, None).unwrap().into_iter().rfind(|m| m.kind == "notice").unwrap();
+        assert_eq!((row.meta["grill"]["end_reason"].clone(), row.meta["grill"]["reason"].clone()), (json!("timeout"), json!("no_first_round")));
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].0, o.id);
+        assert!(wakes[0].1.contains(&id) && wakes[0].1.contains("no first round") && wakes[0].1.contains("grill_round") && wakes[0].1.contains("resumes this grill"), "{}", wakes[0].1);
+        // Once: the grill is no longer open, so later sweeps leave it alone.
+        assert!(sweep(&st, now + chrono::Duration::minutes(45)).is_empty());
+        assert!(sweep(&st, now + chrono::Duration::hours(30)).is_empty());
+
+        // The round the agent posts takes the same grill up again.
+        mcp_call(&st, &o, "grill_round", &json!({ "topic": "board", "language": "pt", "questions": [q("Mover o card?")] })).unwrap().unwrap();
+        let s = active(&st, &o.id).expect("resumed");
+        assert_eq!((s.id.as_str(), s.status.as_str(), s.end_reason.as_deref(), s.ended_at.as_deref(), s.rounds.len()), (id.as_str(), "active", None, None, 1));
+        assert!(!s.summarized, "a resumed grill gets its summary at the end");
+        assert!(rows(&st, &o).iter().any(|r| r == "Entrevista retomada: board"), "{:?}", rows(&st, &o));
+        assert_eq!(st.db.list_grills(&o.id).unwrap().len(), 1, "no new session");
+    }
+
+    #[test]
+    fn the_timeout_row_is_in_english_too_and_only_the_newest_expired_grill_resumes() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Grill me on pricing", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(20));
+        assert_eq!(rows(&st, &o).last().unwrap(), "Grill expired: no first round in 20 min. The agent was asked to post it and resume");
+        let expired = st.db.list_grills(&o.id).unwrap()[0].id.clone();
+        // The user asked again instead: that request gets the round, and once it ends nothing comes back.
+        on_user_message(&st, &o, "Grill me on onboarding", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        round(&st, &o, &["A?"]).unwrap();
+        let s = active(&st, &o.id).unwrap();
+        assert_ne!(s.id, expired);
+        send(&st, &o).unwrap();
+        mcp_call(&st, &o, "grill_end", &json!({ "summary": "done" })).unwrap().unwrap();
+        round(&st, &o, &["B?"]).unwrap();
+        assert!(![expired.as_str(), s.id.as_str()].contains(&active(&st, &o.id).unwrap().id.as_str()));
+    }
+
+    #[test]
+    fn a_grill_that_expired_over_a_day_ago_stays_ended() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Grill me on pricing", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        sweep(&st, chrono::Utc::now() + chrono::Duration::minutes(20));
+        let mut old = st.db.list_grills(&o.id).unwrap().remove(0);
+        old.ended_at = Some((chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339());
+        st.db.save_grill(&old).unwrap();
+        round(&st, &o, &["A?"]).unwrap();
+        assert_ne!(active(&st, &o.id).unwrap().id, old.id);
+        assert_eq!(st.db.get_grill(&old.id).unwrap().unwrap().status, "ended");
+    }
+
+    #[test]
+    fn a_preparing_grill_expires_after_20_minutes_without_a_run() {
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Grill me", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        let now = chrono::Utc::now();
+        sweep(&st, now + chrono::Duration::minutes(19));
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
+        sweep(&st, now + chrono::Duration::minutes(20));
+        assert!(active(&st, &o.id).is_none());
+        assert_eq!(st.db.list_grills(&o.id).unwrap()[0].end_reason.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn a_preparing_grill_waits_while_the_agent_has_a_run() {
+        // The diagnosis (#496): a first round that took 11 minutes of a live run lost its grill to the deadline.
+        let st = state();
+        let o = planner(&st, "Lead");
+        on_user_message(&st, &o, "Grill me", Some(&json!({ "role": "start_request" })), json!({})).ok().unwrap();
+        st.rt.lock().unwrap().running.insert(o.id.clone(), std::sync::Arc::new(tokio::sync::Notify::new()));
+        let now = chrono::Utc::now();
+        for m in [10, 25, 40, 60] {
+            sweep(&st, now + chrono::Duration::minutes(m));
+            assert_eq!(active(&st, &o.id).unwrap().status, "preparing", "{m} min into a live run");
+        }
+        // The run ended without a round (a text-only reply): the clock starts from when the sweep last saw it.
+        st.rt.lock().unwrap().running.remove(&o.id);
+        sweep(&st, now + chrono::Duration::minutes(79));
+        assert_eq!(active(&st, &o.id).unwrap().status, "preparing");
+        sweep(&st, now + chrono::Duration::minutes(80));
+        assert!(active(&st, &o.id).is_none());
+    }
+
+    #[test]
+    fn the_grill_brief_says_to_wait_for_subagents_inside_the_run() {
+        let b = brief();
+        for want in ["without `run_in_background`", "The report is the notification", "`sleep`", "end your turn only with `mcp__loft__grill_round`"] {
+            assert!(b.contains(want), "{want}");
+        }
+        let st = state();
+        let o = planner(&st, "Lead");
+        let Routed::Handled { wake, .. } = on_user_message(&st, &o, "Grill me on pricing", None, json!({})).unwrap() else { panic!() };
+        assert!(wake.unwrap().contains("a text-only reply ends the run"));
     }
 
     #[test]

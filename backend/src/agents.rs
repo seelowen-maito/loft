@@ -1455,6 +1455,7 @@ fn tool_summary(name: &str, input: &Value) -> String {
             "list_agent_templates" => "Reading the agent templates".into(),
             "create_agent" => format!("Creating {}", if s("name").is_empty() { s("template") } else { s("name") }),
             "set_schedule" => "Changing its schedule".into(),
+            "set_group" => format!("Moving agents to {}", s("group")),
             "comment_issue" | "comment_task" => "Commenting on a Loft issue".into(),
             "get_issue" | "get_task" => "Reading a Loft issue".into(),
             other => other.replace('_', " "),
@@ -4009,6 +4010,36 @@ esac
         assert!(!b.see(&text("k4")));
         assert!(b.see(&feedback), "the 5th turn's feedback stops it");
         assert_eq!(b.notice(), "Stopped the run: 5 turns in a row without a tool call. A goal or Stop hook kept it going: not yet");
+    }
+
+    /// Lines as Claude Code 2.1.332 prints them while background subagents report back (#496): each hand-back is a
+    /// synthetic user line that gets a turn of its own, closed by a result, so text-only replies to them never add up.
+    #[test]
+    fn the_brake_lets_an_agent_answer_its_subagents_reports_in_text() {
+        let mut b = Brake::default();
+        let launch = [
+            json!({ "type": "assistant", "message": { "id": "m1", "content": [{ "type": "tool_use", "id": "t1", "name": "Agent", "input": { "run_in_background": true } }] } }),
+            json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "Async agent launched successfully." }] } }),
+            json!({ "type": "assistant", "message": { "id": "m2", "content": [{ "type": "text", "text": "Estou esperando os dois sub-agentes terminarem." }] } }),
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] }),
+        ];
+        for ev in &launch {
+            assert!(!b.see(ev));
+        }
+        for i in 0..8 {
+            let report = [
+                json!({ "type": "system", "subtype": "init" }),
+                json!({ "type": "user", "isSynthetic": true, "isReplay": true, "message": { "content": [{ "type": "text", "text": format!("Another Claude session sent a message: <agent-message from=\"a{i}\"> [Subagent hand-back] red") }] } }),
+                json!({ "type": "result", "subtype": "success", "num_turns": 0, "result": "" }),
+                json!({ "type": "system", "subtype": "init" }),
+                json!({ "type": "assistant", "message": { "id": format!("r{i}"), "content": [{ "type": "text", "text": "Ainda falta um sub-agente." }] } }),
+                json!({ "type": "result", "subtype": "success", "num_turns": 1, "terminal_reason": "completed", "result": "Ainda falta um sub-agente." }),
+            ];
+            for ev in &report {
+                assert!(!b.see(ev), "report {i}: {ev}");
+            }
+        }
+        assert_eq!(b.turns, 0);
     }
 
     fn fields(st: &AppState, id: &str) -> Value {
