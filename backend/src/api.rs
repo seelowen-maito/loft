@@ -1385,6 +1385,17 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_never_wakes_window_survives_a_save() {
+        let st = crate::tasks::tests::state();
+        let a = crate::tasks::tests::agent(&st, "Dev");
+        let never = serde_json::json!([{ "days": [], "start": "00:00", "end": "00:00" }]);
+        patch(&st, &a.id, serde_json::json!({ "quiet_hours": never })).await.unwrap();
+        // The Inspector sends it back unchanged with every save.
+        patch(&st, &a.id, serde_json::json!({ "quiet_hours": never, "name": "Dev 2" })).await.unwrap();
+        assert_eq!(serde_json::to_value(&st.db.get_agent(&a.id).unwrap().unwrap().quiet_hours).unwrap(), never);
+    }
+
+    #[tokio::test]
     async fn one_lead_per_group() {
         use crate::tasks::tests::{agent, state};
         let st = state();

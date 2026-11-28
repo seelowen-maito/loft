@@ -1,6 +1,6 @@
 //! `/schedule <when> <prompt>`: Loft sends the prompt to the agent once, or at each due time of a repeat.
 //! Schedules live on the agent, so they survive a restart; one that came due while Loft was down is sent once on start.
-//! Times are the Mac's local time. Quiet hours don't apply: the user named the time, unlike a `/loop`, which Loft paces.
+//! Times are the Mac's local time. Working hours don't apply: the user named the time, unlike a `/loop`, which Loft paces.
 use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc, Weekday};
@@ -212,12 +212,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn quiet_hours_do_not_hold_a_schedule() {
+    async fn working_hours_do_not_hold_a_schedule() {
         let (st, a) = agents::tests::fake_claude_state();
         let mut s = parse("tomorrow 9:30 run the tests", at(12, 10, 0)).unwrap();
         s.id = "s1".into();
         st.db.update_agent(&a.id, |x| {
-            x.quiet_hours = (0..7).map(|d| crate::db::QuietWindow { days: vec![d], start: "00:00".into(), end: "23:59".into() }).collect();
+            x.quiet_hours = vec![crate::db::QuietWindow { days: vec![0, 1, 2, 3, 4, 5, 6], start: "00:00".into(), end: "01:00".into() }];
             x.schedules.push(s);
         })
         .unwrap();

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cx } from "../lib/format";
 
-const BUBBLE = "pointer-events-none absolute top-full z-30 mt-2 flex whitespace-nowrap rounded-lg border border-line-strong bg-ink-800/95 px-2 py-1 text-left shadow-xl backdrop-blur";
+const BUBBLE = "pointer-events-none absolute z-30 flex whitespace-nowrap rounded-lg border border-line-strong bg-ink-800/95 px-2 py-1 text-left shadow-xl backdrop-blur";
 
 /** A navbar readout with a tooltip: shown at once on mouse hover, toggled by a tap on touch, closed by a tap elsewhere. */
 export function HoverTip({ tip, className, left, children }: { tip: ReactNode; className?: string; left?: boolean; children: ReactNode }) {
@@ -29,7 +29,7 @@ export function HoverTip({ tip, className, left, children }: { tip: ReactNode; c
     >
       {children}
       {open && (
-        <span role="tooltip" className={cx(BUBBLE, left ? "left-0" : "right-0", "flex-col items-start font-mono text-[11px]")}>
+        <span role="tooltip" className={cx(BUBBLE, "top-full mt-2", left ? "left-0" : "right-0", "flex-col items-start font-mono text-[11px]")}>
           {tip}
         </span>
       )}
@@ -39,7 +39,7 @@ export function HoverTip({ tip, className, left, children }: { tip: ReactNode; c
 
 /** HoverTip's bubble on an icon button or link that already acts on click: its `name`, and its shortcut `keys` (as
  *  "G A", one `<kbd>` per key). Shown on mouse hover and keyboard focus, not on touch; the control keeps its own aria-label. */
-export function Tip({ name, keys, left, off, className, children }: { name: string; keys?: string; left?: boolean; off?: boolean; className?: string; children: ReactNode }) {
+export function Tip({ name, keys, left, up, off, className, children }: { name: string; keys?: string; left?: boolean; up?: boolean; off?: boolean; className?: string; children: ReactNode }) {
   return (
     <span className={cx("group/tip relative inline-flex", className)}>
       {children}
@@ -47,6 +47,8 @@ export function Tip({ name, keys, left, off, className, children }: { name: stri
         aria-hidden
         className={cx(
           BUBBLE,
+          // `up` above the control, for one at the bottom of the screen (the chat box's buttons).
+          up ? "bottom-full mb-2" : "top-full mt-2",
           left ? "left-0" : "right-0",
           // `off` while the control's own menu is open, so the tooltip doesn't show behind it.
           off && "hidden",
